@@ -173,8 +173,11 @@ pub(crate) struct QuerySubscription {
     pub(crate) local_updates: LocalUpdates,
     /// True when this subscription observed a local write since last delivery.
     pub(crate) has_pending_local_updates: bool,
-    /// Tiers that have confirmed settlement for this query.
-    pub(crate) achieved_tiers: HashSet<DurabilityTier>,
+    /// Row ids that should use the local current version as an overlay while
+    /// waiting for a stricter settled tier.
+    pub(crate) pending_local_row_ids: HashSet<ObjectId>,
+    /// True once the initial upstream query frontier has been replayed.
+    pub(crate) query_frontier_complete: bool,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
@@ -887,10 +890,10 @@ impl QueryManager {
 
         // 7a. Process incoming QuerySettled notifications
         let settled_notifications = self.sync_manager.take_pending_query_settled();
-        for (query_id, tier) in settled_notifications {
+        for (query_id, _) in settled_notifications {
             let sub_id = QuerySubscriptionId(query_id.0);
             if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
-                sub.achieved_tiers.insert(tier);
+                sub.query_frontier_complete = true;
             }
         }
 
@@ -926,11 +929,19 @@ impl QueryManager {
 
             let delta = {
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
+                    let durability_tier = if subscription.settled_once
+                        && subscription.local_updates == LocalUpdates::Immediate
+                        && subscription.pending_local_row_ids.contains(&id)
+                    {
+                        None
+                    } else {
+                        subscription.durability_tier
+                    };
                     Self::load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
-                        subscription.durability_tier,
+                        durability_tier,
                         include_deleted,
                         &schema_context,
                         &branch_schema_map,
@@ -958,18 +969,10 @@ impl QueryManager {
                 );
             }
 
-            let tier_satisfied = match &subscription.durability_tier {
-                None => true, // No durability requirement → immediate
-                Some(required) => subscription.achieved_tiers.iter().any(|t| t >= required),
-            };
-            let allow_local_while_waiting = !tier_satisfied
-                && subscription.settled_once
-                && subscription.local_updates == LocalUpdates::Immediate
-                && subscription.has_pending_local_updates;
-
-            if !tier_satisfied && !allow_local_while_waiting {
-                // Graph state updated by settle(), but don't deliver yet
-                tracing::trace!("tier not satisfied, holding delivery");
+            if !subscription.settled_once && !subscription.query_frontier_complete {
+                // Graph state updated by settle(), but don't deliver until the
+                // initial upstream frontier has been replayed.
+                tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1017,6 +1020,7 @@ impl QueryManager {
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });
                     subscription.has_pending_local_updates = false;
+                    subscription.pending_local_row_ids.clear();
                 } else if !visible_delta.is_empty() {
                     let ordered = build_ordered_delta_with_post_ids(
                         &subscription.current_ordered_ids,
@@ -1040,6 +1044,7 @@ impl QueryManager {
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });
                     subscription.has_pending_local_updates = false;
+                    subscription.pending_local_row_ids.clear();
                 }
             } else {
                 subscription.current_visible_rows.clear();
@@ -1074,6 +1079,7 @@ impl QueryManager {
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });
                     subscription.has_pending_local_updates = false;
+                    subscription.pending_local_row_ids.clear();
                 } else if !delta.is_empty() {
                     let ordered_ids_after: Vec<ObjectId> = subscription
                         .graph
@@ -1103,6 +1109,7 @@ impl QueryManager {
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });
                     subscription.has_pending_local_updates = false;
+                    subscription.pending_local_row_ids.clear();
                 }
             }
 
@@ -1228,7 +1235,11 @@ impl QueryManager {
             } else {
                 self.mark_subscriptions_dirty(&table);
             }
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            if local_update {
+                self.mark_local_row_deleted_in_subscriptions(&table, update.object_id);
+            } else {
+                self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            }
             return;
         }
 
@@ -1300,6 +1311,11 @@ impl QueryManager {
             } else {
                 self.mark_subscriptions_dirty(&table);
             }
+            if local_update {
+                self.mark_local_row_updated_in_subscriptions(&table, update.object_id);
+            } else {
+                self.mark_row_updated_in_subscriptions(&table, update.object_id);
+            }
             return;
         }
 
@@ -1345,7 +1361,11 @@ impl QueryManager {
         } else {
             self.mark_subscriptions_dirty(&table);
         }
-        self.mark_row_updated_in_subscriptions(&table, update.object_id);
+        if local_update {
+            self.mark_local_row_updated_in_subscriptions(&table, update.object_id);
+        } else {
+            self.mark_row_updated_in_subscriptions(&table, update.object_id);
+        }
     }
 
     pub(super) fn handle_row_update(
@@ -1406,6 +1426,20 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+        for subscription in self.subscriptions.values_mut() {
+            if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_row_updated(id);
+                subscription.pending_local_row_ids.insert(id);
+            }
+        }
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_row_updated(id);
+            }
+        }
+    }
+
     /// Mark a row as deleted in all subscriptions for a table.
     /// This triggers removal delta emission during settle().
     /// Checks all tables involved in the subscription (including joined tables).
@@ -1417,6 +1451,20 @@ impl QueryManager {
             }
         }
         // Mark server subscriptions (serving downstream clients)
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_row_deleted(id);
+            }
+        }
+    }
+
+    pub(super) fn mark_local_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+        for subscription in self.subscriptions.values_mut() {
+            if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_row_deleted(id);
+                subscription.pending_local_row_ids.insert(id);
+            }
+        }
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
                 server_sub.graph.mark_row_deleted(id);

@@ -224,13 +224,11 @@ impl VisibleRowEntry {
         let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Worker);
         let worker_version_id = worker.filter(|version_id| *version_id != current_version_id);
 
-        let worker_default = worker_version_id.unwrap_or(current_version_id);
         let edge = latest_visible_version_for_tier(history_rows, DurabilityTier::EdgeServer);
-        let edge_version_id = edge.filter(|version_id| *version_id != worker_default);
+        let edge_version_id = edge.filter(|version_id| *version_id != current_version_id);
 
-        let edge_default = edge_version_id.unwrap_or(worker_default);
         let global = latest_visible_version_for_tier(history_rows, DurabilityTier::GlobalServer);
-        let global_version_id = global.filter(|version_id| *version_id != edge_default);
+        let global_version_id = global.filter(|version_id| *version_id != current_version_id);
 
         Self {
             current_row,
@@ -244,16 +242,16 @@ impl VisibleRowEntry {
         self.current_row.version_id()
     }
 
-    pub fn version_id_for_tier(&self, tier: DurabilityTier) -> CommitId {
+    pub fn version_id_for_tier(&self, tier: DurabilityTier) -> Option<CommitId> {
         let current = self.current_version_id();
-        let worker = self.worker_version_id.unwrap_or(current);
-        let edge = self.edge_version_id.unwrap_or(worker);
-        let global = self.global_version_id.unwrap_or(edge);
+        if tier_satisfies(self.current_row.confirmed_tier, tier) {
+            return Some(current);
+        }
 
         match tier {
-            DurabilityTier::Worker => worker,
-            DurabilityTier::EdgeServer => edge,
-            DurabilityTier::GlobalServer => global,
+            DurabilityTier::Worker => self.worker_version_id,
+            DurabilityTier::EdgeServer => self.edge_version_id,
+            DurabilityTier::GlobalServer => self.global_version_id,
         }
     }
 }
@@ -311,15 +309,27 @@ mod tests {
         assert_eq!(entry.global_version_id, Some(global.version_id()));
         assert_eq!(
             entry.version_id_for_tier(DurabilityTier::Worker),
-            current.version_id()
+            Some(current.version_id())
         );
         assert_eq!(
             entry.version_id_for_tier(DurabilityTier::EdgeServer),
-            edge.version_id()
+            Some(edge.version_id())
         );
         assert_eq!(
             entry.version_id_for_tier(DurabilityTier::GlobalServer),
-            global.version_id()
+            Some(global.version_id())
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_returns_none_when_no_version_meets_required_tier() {
+        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
+
+        assert_eq!(entry.version_id_for_tier(DurabilityTier::EdgeServer), None);
+        assert_eq!(
+            entry.version_id_for_tier(DurabilityTier::GlobalServer),
+            None
         );
     }
 }

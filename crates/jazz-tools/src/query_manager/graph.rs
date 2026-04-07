@@ -2186,8 +2186,10 @@ impl QueryGraph {
 
                         let mut merged = TupleDelta::new();
                         merged.added.extend(new_delta.added);
+                        merged.added.extend(update_delta.added);
                         merged.removed.extend(deleted_delta.removed);
                         merged.removed.extend(new_delta.removed);
+                        merged.removed.extend(update_delta.removed);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
 

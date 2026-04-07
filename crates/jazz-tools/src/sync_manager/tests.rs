@@ -258,6 +258,36 @@ fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
 }
 
 #[test]
+fn row_version_state_changed_enqueues_pending_row_update_for_visible_row() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let version_id = row.version_id();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    let updates = sm.take_pending_row_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].object_id, row_id);
+    assert_eq!(
+        updates[0].row.confirmed_tier,
+        Some(DurabilityTier::EdgeServer)
+    );
+}
+
+#[test]
 fn row_version_state_changed_relays_to_clients_that_received_row_version_needed() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

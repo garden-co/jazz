@@ -6,7 +6,7 @@ mod tests {
 
     use crate::commit::{Commit, CommitId, StoredState};
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
-    use crate::object::ObjectId;
+    use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::manager::LocalUpdates;
     use crate::query_manager::types::{
@@ -17,7 +17,7 @@ mod tests {
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::MemoryStorage;
+    use crate::storage::{MemoryStorage, Storage};
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -2176,7 +2176,7 @@ mod tests {
     // ========================================================================
 
     use crate::sync_manager::{
-        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, QueryId, ServerId, Source,
+        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, ServerId, Source,
         SyncPayload,
     };
 
@@ -3310,18 +3310,26 @@ mod tests {
             "Should not deliver — EdgeServer tier not achieved"
         );
 
-        // Simulate receiving QuerySettled(Worker) — insufficient
-        let query_id = QueryId(sub_id.0);
+        let visible_row = io_a
+            .scan_visible_region("items", client_a.branch_name().as_str())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("one visible row");
         let server_b_id = ServerId::new();
+
+        // Simulate per-row Worker settlement — still insufficient for EdgeServer reads.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::Worker),
                 },
             });
         client_a.process(&mut io_a);
@@ -3336,16 +3344,18 @@ mod tests {
             "Worker < EdgeServer — should still not deliver"
         );
 
-        // Simulate receiving QuerySettled(EdgeServer) — sufficient
+        // Simulate per-row EdgeServer settlement — now the row may become visible.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::EdgeServer,
-                    through_seq: 0,
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::EdgeServer),
                 },
             });
         client_a.process(&mut io_a);
@@ -3357,7 +3367,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "EdgeServer >= EdgeServer — should deliver now"
+            "EdgeServer settlement should deliver now"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(total_added, 1, "Should deliver the accumulated row");
@@ -3421,20 +3431,25 @@ mod tests {
             "Should not deliver before tier is satisfied"
         );
 
-        // Send QuerySettled(Worker)
-        let query_id = QueryId(sub_id.0);
         let server_id = ServerId::new();
-        client
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
-                },
-            });
+        for row in storage
+            .scan_visible_region("items", client.branch_name().as_str())
+            .unwrap()
+        {
+            client
+                .query_manager_mut()
+                .sync_manager_mut()
+                .push_inbox(InboxEntry {
+                    source: Source::Server(server_id),
+                    payload: SyncPayload::RowVersionStateChanged {
+                        row_id: row.row_id,
+                        branch_name: BranchName::new(&row.branch),
+                        version_id: row.version_id(),
+                        state: None,
+                        confirmed_tier: Some(DurabilityTier::Worker),
+                    },
+                });
+        }
         client.process(&mut storage);
 
         let updates = client.query_manager_mut().take_updates();
@@ -3444,7 +3459,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker)"
+            "Should deliver after rows reach Worker"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(
@@ -3505,18 +3520,24 @@ mod tests {
             "One-shot with settled_tier should not resolve on first local settle"
         );
 
-        // Send QuerySettled(Worker)
-        let query_id = QueryId(sub_id.0);
         let server_id = ServerId::new();
+        let visible_row = storage
+            .scan_visible_region("items", client.branch_name().as_str())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("one visible row");
         client
             .query_manager_mut()
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::Worker),
                 },
             });
         client.process(&mut storage);
@@ -3529,7 +3550,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker)"
+            "Should deliver after row reaches Worker"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(total_added, 1, "Should contain the one row");
@@ -3566,34 +3587,7 @@ mod tests {
             .unwrap();
         client.process(&mut storage);
 
-        // No delivery before settled tier.
-        let updates = client.query_manager_mut().take_updates();
-        let matching: Vec<_> = updates
-            .iter()
-            .filter(|u| u.subscription_id == sub_id)
-            .collect();
-        assert!(
-            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Should not resolve before QuerySettled"
-        );
-
-        // Send QuerySettled(Worker).
-        let query_id = QueryId(sub_id.0);
-        let server_id = ServerId::new();
-        client
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
-                },
-            });
-        client.process(&mut storage);
-
-        // Should resolve with an empty snapshot.
+        // With no upstream server and no rows, the empty snapshot resolves immediately.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
             .iter()
@@ -3601,7 +3595,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver empty snapshot after QuerySettled(Worker)"
+            "Should deliver empty snapshot immediately for a local empty result"
         );
         assert!(
             matching.iter().all(|u| u.delta.is_empty()),

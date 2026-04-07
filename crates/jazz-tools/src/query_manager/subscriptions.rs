@@ -118,7 +118,9 @@ impl QueryManager {
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
-        let achieved_tiers = self.sync_manager.local_durability_tiers();
+        let query_frontier_complete = durability_tier.is_none()
+            || !self.should_send_local_subscription_upstream(propagation)
+            || !self.sync_manager.has_servers();
 
         tracing::debug!(
             sub_id = id.0,
@@ -138,7 +140,8 @@ impl QueryManager {
                 durability_tier,
                 local_updates,
                 has_pending_local_updates: false,
-                achieved_tiers,
+                pending_local_row_ids: HashSet::new(),
+                query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering,
@@ -208,7 +211,8 @@ impl QueryManager {
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
                 has_pending_local_updates: false,
-                achieved_tiers: HashSet::new(),
+                pending_local_row_ids: HashSet::new(),
+                query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering: false,

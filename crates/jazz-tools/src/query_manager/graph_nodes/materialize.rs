@@ -26,6 +26,9 @@ pub struct MaterializeNode {
     rows: AHashMap<ObjectId, Row>,
     /// Current tuples (fully or partially materialized).
     current_tuples: AHashSet<Tuple>,
+    /// Current upstream tuples, including rows that are in scope but not yet
+    /// materializable at the requested durability.
+    known_tuples: AHashSet<Tuple>,
     /// IDs to check for content updates (row data may have changed).
     updated_ids: AHashSet<ObjectId>,
     /// IDs that were deleted (emit removal delta during settle).
@@ -53,6 +56,7 @@ impl MaterializeNode {
             elements_to_materialize,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
+            known_tuples: AHashSet::new(),
             updated_ids: AHashSet::new(),
             deleted_ids: AHashSet::new(),
             dirty: true,
@@ -78,9 +82,7 @@ impl MaterializeNode {
 
     /// Mark an ID for content update checking (only if we're tracking it).
     pub fn mark_updated(&mut self, id: ObjectId) {
-        if self.rows.contains_key(&id) {
-            self.updated_ids.insert(id);
-        }
+        self.updated_ids.insert(id);
     }
 
     /// Mark an ID as deleted - emit removal delta during next settle.
@@ -120,6 +122,7 @@ impl MaterializeNode {
 
         // Handle removed tuples - find the materialized version from current_tuples
         for tuple in delta.removed {
+            self.known_tuples.remove(&tuple);
             // Find the materialized tuple in current_tuples (uses ID-based equality)
             let materialized_tuple = self.current_tuples.get(&tuple).cloned();
 
@@ -143,6 +146,7 @@ impl MaterializeNode {
 
         // Handle added tuples - materialize each element
         for tuple in delta.added {
+            self.known_tuples.insert(tuple.clone());
             if let Some(materialized) = self.materialize_tuple(&tuple, &mut loader) {
                 self.current_tuples.insert(materialized.clone());
                 result.added.push(materialized);
@@ -152,6 +156,8 @@ impl MaterializeNode {
 
         // Handle updated tuples
         for (old_tuple, new_tuple) in delta.updated {
+            self.known_tuples.remove(&old_tuple);
+            self.known_tuples.insert(new_tuple.clone());
             self.current_tuples.remove(&old_tuple);
             if let Some(materialized) = self.materialize_tuple(&new_tuple, &mut loader) {
                 self.current_tuples.insert(materialized.clone());
@@ -277,77 +283,35 @@ impl MaterializeNode {
         let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
 
         for id in ids_to_check {
-            // Find tuples containing this ID
+            // Find tuples containing this ID, including rows that were previously
+            // in scope but not materializable at the requested durability.
             let affected_tuples: Vec<Tuple> = self
-                .current_tuples
+                .known_tuples
                 .iter()
                 .filter(|t| t.ids().contains(&id))
                 .cloned()
                 .collect();
 
-            for old_tuple in affected_tuples {
-                // Re-materialize the tuple
-                let new_tuple = self.rematerialize_tuple(&old_tuple, &mut loader);
+            for tuple in affected_tuples {
+                let previous_materialized = self.current_tuples.take(&tuple);
 
-                // Check if content actually changed
-                if has_content_changed(&old_tuple, &new_tuple) {
-                    self.current_tuples.remove(&old_tuple);
+                if let Some(new_tuple) = self.materialize_tuple(&tuple, &mut loader) {
                     self.current_tuples.insert(new_tuple.clone());
-                    result.updated.push((old_tuple, new_tuple));
+                    match previous_materialized {
+                        Some(old_tuple) => {
+                            if has_content_changed(&old_tuple, &new_tuple) {
+                                result.updated.push((old_tuple, new_tuple));
+                            }
+                        }
+                        None => result.added.push(new_tuple),
+                    }
+                } else if let Some(old_tuple) = previous_materialized {
+                    result.removed.push(old_tuple);
                 }
             }
         }
 
         result
-    }
-
-    /// Re-materialize a tuple, reloading row data for materialized elements.
-    fn rematerialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Tuple
-    where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
-    {
-        let mut rematerialized_provenance = if tuple.len() == 1 {
-            AHashSet::new()
-        } else {
-            tuple.provenance().clone()
-        };
-        let elements: Vec<TupleElement> = tuple
-            .iter()
-            .enumerate()
-            .map(|(elem_idx, elem)| {
-                // Only rematerialize if this element should be materialized
-                if !self.should_materialize(elem_idx) {
-                    return elem.clone();
-                }
-
-                let id = elem.id();
-                if let Some(loaded) = loader(id) {
-                    let row = Row::new(
-                        id,
-                        loaded.data.clone(),
-                        loaded.commit_id,
-                        loaded.row_provenance.clone(),
-                    );
-                    self.rows.insert(id, row);
-                    if tuple.len() == 1 {
-                        rematerialized_provenance = loaded.provenance.clone();
-                    } else {
-                        rematerialized_provenance.extend(loaded.provenance.iter().copied());
-                    }
-                    TupleElement::Row {
-                        id,
-                        content: loaded.data,
-                        commit_id: loaded.commit_id,
-                        row_provenance: loaded.row_provenance,
-                    }
-                } else {
-                    // Couldn't load - keep as-is
-                    elem.clone()
-                }
-            })
-            .collect();
-
-        Tuple::new_with_provenance(elements, rematerialized_provenance)
     }
 
     /// Get current tuples.
@@ -592,5 +556,29 @@ mod tests {
 
         // Node should have no tuples
         assert_eq!(node.current_tuples().len(), 0);
+    }
+
+    #[test]
+    fn check_update_can_add_row_that_was_previously_unavailable() {
+        let mut node = make_materialize_node();
+
+        let id1 = ObjectId::new();
+        let data1 = vec![1, 2, 3];
+        let commit1 = make_commit_id(1);
+
+        let add_delta = make_tuple_delta_add(&[id1]);
+        let dropped = node.materialize_tuples(add_delta, |_| None);
+        assert!(dropped.added.is_empty());
+        assert_eq!(node.current_tuples().len(), 0);
+
+        node.mark_updated(id1);
+
+        let update_delta =
+            node.check_updated_tuples(|_| Some(make_loaded_row(data1.clone(), commit1)));
+
+        assert_eq!(update_delta.added.len(), 1);
+        assert!(update_delta.updated.is_empty());
+        assert_eq!(update_delta.added[0].ids(), &[id1]);
+        assert_eq!(node.current_tuples().len(), 1);
     }
 }
