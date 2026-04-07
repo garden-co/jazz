@@ -636,8 +636,6 @@ async function runNativeBenchmark(benchmark, args) {
     "bench",
     "-p",
     "jazz-tools",
-    "--features",
-    "fjall",
     "--bench",
     "realistic_phase1",
     "--",

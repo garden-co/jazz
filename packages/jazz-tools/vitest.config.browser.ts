@@ -17,6 +17,9 @@ import {
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
+const realisticBenchTargeted = process.argv.some((arg) =>
+  arg.includes("tests/browser/realistic-bench.test.ts"),
+);
 
 export default defineConfig({
   define: {
@@ -67,7 +70,7 @@ export default defineConfig({
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
-    exclude: ["tests/browser/realistic-bench.test.ts"],
+    exclude: realisticBenchTargeted ? [] : ["tests/browser/realistic-bench.test.ts"],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
