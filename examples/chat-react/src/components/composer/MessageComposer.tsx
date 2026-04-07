@@ -19,6 +19,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   const userId = session?.user_id ?? null;
 
   const myProfile = useMyProfile();
+  const composerReady = !!userId && !!myProfile;
 
   const handleSend = useCallback(
     (html: string) => {
@@ -37,7 +38,9 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
 
   const handleSendAttachment = useCallback(
     async (attachment: AttachmentData) => {
-      if (!userId || !myProfile) return;
+      if (!userId || !myProfile) {
+        throw new Error("Profile is still loading. Please try again.");
+      }
 
       const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "edge" });
 
@@ -61,15 +64,15 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
 
   return (
     <div className="m-2 flex items-end gap-2">
-      <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} />
+      <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} disabled={!composerReady} />
 
-      <Editor ref={editorRef} onSend={handleSend} disabled={!userId} />
+      <Editor ref={editorRef} onSend={handleSend} disabled={!composerReady} />
 
       <Button
         variant="outline"
         size="icon-lg"
         onClick={() => editorRef.current?.send()}
-        disabled={!userId}
+        disabled={!composerReady}
       >
         <SendIcon />
       </Button>
