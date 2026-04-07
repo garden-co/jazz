@@ -19,6 +19,7 @@ export function DataExplorer() {
     <Group className={styles.layout} orientation="horizontal">
       <Panel className={styles.sidebarPanel} defaultSize="20%" minSize="14%" maxSize="30%">
         <aside className={styles.sidebar}>
+          <h2 className={styles.sidebarTitle}>Tables</h2>
           {runtime === "extension" ? (
             <label className={styles.propagationSwitch}>
               <span className={styles.propagationLabel}>Local-only</span>
