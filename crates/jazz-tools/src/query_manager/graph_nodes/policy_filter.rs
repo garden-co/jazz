@@ -443,12 +443,12 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
         TupleElement::Row {
             id,
             content,
-            commit_id,
+            version_id,
             row_provenance,
         } => Some(Row::new(
             *id,
             content.clone(),
-            *commit_id,
+            *version_id,
             row_provenance.clone(),
         )),
         TupleElement::Id(_) => None, // Not materialized

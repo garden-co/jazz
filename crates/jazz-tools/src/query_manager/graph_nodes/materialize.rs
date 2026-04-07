@@ -208,7 +208,7 @@ impl MaterializeNode {
                         let row = Row::new(
                             *id,
                             loaded.data.clone(),
-                            loaded.commit_id,
+                            loaded.version_id,
                             loaded.row_provenance.clone(),
                         );
                         self.rows.insert(*id, row);
@@ -220,7 +220,7 @@ impl MaterializeNode {
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
                             content: loaded.data,
-                            commit_id: loaded.commit_id,
+                            version_id: loaded.version_id,
                             row_provenance: loaded.row_provenance,
                         });
                     } else {
@@ -231,11 +231,11 @@ impl MaterializeNode {
                 TupleElement::Row {
                     id,
                     content,
-                    commit_id,
+                    version_id,
                     row_provenance,
                 } => {
                     // Already materialized - update our cache
-                    let row = Row::new(*id, content.clone(), *commit_id, row_provenance.clone());
+                    let row = Row::new(*id, content.clone(), *version_id, row_provenance.clone());
                     self.rows.insert(*id, row);
                     materialized_elements.push(elem.clone());
                 }
@@ -327,12 +327,12 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
             (
                 TupleElement::Row {
                     content: c1,
-                    commit_id: cid1,
+                    version_id: cid1,
                     ..
                 },
                 TupleElement::Row {
                     content: c2,
-                    commit_id: cid2,
+                    version_id: cid2,
                     ..
                 },
             ) => c1 != c2 || cid1 != cid2,
@@ -359,10 +359,10 @@ mod tests {
         CommitId([n; 32])
     }
 
-    fn make_loaded_row(data: Vec<u8>, commit_id: CommitId) -> LoadedRow {
+    fn make_loaded_row(data: Vec<u8>, version_id: CommitId) -> LoadedRow {
         LoadedRow::new(
             data,
-            commit_id,
+            version_id,
             RowProvenance::for_insert("jazz:test", 0),
             Default::default(),
         )

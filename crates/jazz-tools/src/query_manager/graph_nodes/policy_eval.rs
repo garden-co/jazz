@@ -154,7 +154,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             let source_row = Row::new(
                 source_row_id,
                 source_row.data,
-                source_row.commit_id,
+                source_row.version_id,
                 source_row.row_provenance,
             );
             if self.evaluate_row_access(
@@ -354,7 +354,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         let parent_row = Row::new(
             parent_id,
             parent_row.data,
-            parent_row.commit_id,
+            parent_row.version_id,
             parent_row.row_provenance,
         );
         self.evaluate_expr_with_context(

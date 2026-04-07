@@ -3,13 +3,13 @@ use crate::metadata::RowProvenance;
 use crate::object::ObjectId;
 use std::collections::HashMap;
 
-/// A row with its object ID, binary data, and commit reference.
+/// A row with its object ID, binary data, and version reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub id: ObjectId,
     /// Binary encoded row data.
     pub data: Vec<u8>,
-    pub commit_id: CommitId,
+    pub version_id: CommitId,
     pub provenance: RowProvenance,
 }
 
@@ -17,13 +17,13 @@ impl Row {
     pub fn new(
         id: ObjectId,
         data: Vec<u8>,
-        commit_id: CommitId,
+        version_id: CommitId,
         provenance: RowProvenance,
     ) -> Self {
         Self {
             id,
             data,
-            commit_id,
+            version_id,
             provenance,
         }
     }
@@ -150,7 +150,7 @@ pub fn build_ordered_delta_with_post_ids(
     for (old, new) in &delta.updated {
         let old_index = pre_index_by_id.get(&old.id).copied().unwrap_or(0);
         let new_index = post_index_by_id.get(&new.id).copied().unwrap_or(0);
-        let row_changed = old.data != new.data || old.commit_id != new.commit_id;
+        let row_changed = old.data != new.data || old.version_id != new.version_id;
 
         if row_changed {
             updated.push(OrderedUpdated {

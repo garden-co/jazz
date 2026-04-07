@@ -73,10 +73,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
-        let row_commit_id = result.row_commit_id;
+        let row_version_id = result.row_version_id;
         let row_values = result.row_values;
         let row_version_key =
-            RowVersionKey::new(row_id, self.schema_manager.branch_name(), row_commit_id);
+            RowVersionKey::new(row_id, self.schema_manager.branch_name(), row_version_id);
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -106,12 +106,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
-        let commit_id = self
+        let version_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_version_key =
-            RowVersionKey::new(object_id, self.schema_manager.branch_name(), commit_id);
+            RowVersionKey::new(object_id, self.schema_manager.branch_name(), version_id);
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -147,7 +147,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let row_version_key = RowVersionKey::new(
             handle.row_id,
             self.schema_manager.branch_name(),
-            handle.delete_commit_id,
+            handle.delete_version_id,
         );
 
         let (sender, receiver) = oneshot::channel();

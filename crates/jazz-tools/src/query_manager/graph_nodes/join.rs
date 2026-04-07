@@ -609,7 +609,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -628,7 +628,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -639,7 +639,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -654,7 +654,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -669,7 +669,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -680,7 +680,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
