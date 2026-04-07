@@ -1,10 +1,10 @@
 ---
 title: Server Setup
-description: Hosted and self-hosted database server configuration, app provisioning, and runtime context setup.
+description: Hosted and self-hosted database server configuration, app provisioning, and backend context setup.
 reviewedAt: "f6535a533"
 ---
 
-import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
+import { Callout } from "fumadocs-ui/components/callout";
 
 ## Hosted database server
 
@@ -40,60 +40,10 @@ Local auth defaults depend on `NODE_ENV`:
 - `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled (`--allow-anonymous` / `--allow-demo`)
 - non-production (`development`, unset, etc.): anonymous/demo are enabled by default
 
-## Context setup
+## Backend context setup
 
-Every client and backend needs an app ID and server URL, passed when creating the client.
-For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication).
-
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
-  persist
-  updateAnchor
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/App.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
-    </include>
-  </Tab>
-</Tabs>
-
-### Client config options
-
-<CreateJazzClientReference />
-
-In browser clients, omitting `jwtToken` and `localAuthToken` defaults to anonymous auth with a persisted local token.
-For React Native/Expo clients, make sure `serverUrl` points to a host your runtime can reach (for example Android emulator often uses `10.0.2.2`).
-
-### Storage driver
-
-By default, browser clients use `driver: { type: "persistent" }`, which runs a dedicated worker
-with OPFS-backed storage for offline support and local durability. Set `driver: { type: "memory" }`
-to skip the worker and OPFS entirely &hairsp;— &hairsp;the runtime keeps data in memory only and
-syncs directly with the server. `memory` mode requires `serverUrl` to be set, since there is no
-local persistence.
-
-### Backend context setup
+Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For frontend/browser context creation, see [Client Setup](/docs/context-setup/client-setup).
+For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/context-setup/client-setup).
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -108,31 +58,18 @@ local persistence.
   </Tab>
 </Tabs>
 
-### Backend identity pattern
+## Backend identity pattern
 
-On the client side, queries automatically run as the logged-in user. On a server-connected backend,
-create the context once at startup, then choose whether work should run as the backend itself or as
-the caller.
+On the client side, queries automatically run as the logged-in user. On a server-connected backend, create the context once at startup, then choose whether work should run as the backend itself or as the caller.
 
-- `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process
-  talks to a Jazz server. Writes from this handle are authored as `jazz:system` unless you add
-  explicit attribution.
-- `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made
-  the request, so permission policies apply to them rather than the process itself. Writes are also
-  attributed to that user.
+- `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process talks to a Jazz server. Writes from this handle are authored as `jazz:system` unless you add explicit attribution.
+- `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made the request, so permission policies apply to them rather than the process itself. Writes are also attributed to that user.
 - `context.forSession(session)` is the same idea when you already have a resolved Jazz session.
-- `context.withAttribution(principalId)` keeps backend permissions, but stamps new writes and
-  updates as `principalId`.
-- `context.withAttributionForSession(session)` and `context.withAttributionForRequest(req)` derive
-  that authorship from a resolved session or authenticated request without impersonating the user
-  for permission checks.
-- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth. On
-  server-connected backends, prefer `context.asBackend()` or `context.forRequest(req)`; on
-  embedded or local-only setups, `context.db()` is the right choice.
+- `context.withAttribution(principalId)` keeps backend permissions, but stamps new writes and updates as `principalId`.
+- `context.withAttributionForSession(session)` and `context.withAttributionForRequest(req)` derive that authorship from a resolved session or authenticated request without impersonating the user for permission checks.
+- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth. On server-connected backends, prefer `context.asBackend()` or `context.forRequest(req)`; on embedded or local-only setups, `context.db()` is the right choice.
 
-In TypeScript backends, create the context once with both `app` and `permissions`, then use
-`context.asBackend()` for server-owned work and `context.forRequest(req)` when you need a
-bearer-JWT-scoped high-level `Db`.
+In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
 `forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work.
 
@@ -142,11 +79,11 @@ bearer-JWT-scoped high-level `Db`.
   database directly, without permissions being evaluated.
 </Callout>
 
-#### Attribution without impersonation
+### Attribution without impersonation
 
 Use `withAttribution(...)`, `withAttributionForSession(...)`, or `withAttributionForRequest(...)` when backend code should keep backend-level access but stamp row edit metadata with a user's identity. See [Sessions &gt; Attribution without impersonation](/docs/auth/sessions#attribution-without-impersonation) for details and examples.
 
-#### Per-request user-scoped client
+### Per-request user-scoped client
 
 Pass `req` to run queries as the authenticated user, with all permission policies applied.
 

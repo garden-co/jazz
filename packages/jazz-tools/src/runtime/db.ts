@@ -13,7 +13,7 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { Session } from "./context.js";
+import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   JazzClient,
   loadWasmModule,
@@ -40,6 +40,12 @@ import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 import { normalizeBuiltQuery } from "./query-builder-shape.js";
+import {
+  appendWorkerRuntimeWasmUrl,
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+  resolveRuntimeConfigWorkerUrl,
+} from "./runtime-config.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
@@ -60,6 +66,8 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
+  /** Optional runtime source overrides for WASM and worker loading. */
+  runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -394,7 +402,7 @@ export class Db {
    * @internal Use createDb() instead.
    */
   static async create(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     return new Db(config, wasmModule);
   }
 
@@ -408,7 +416,7 @@ export class Db {
    * @internal Use createDb() instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     const db = new Db(config, wasmModule);
     const persistentDriver = resolveStorageDriver(config.driver);
     if (persistentDriver.type !== "persistent") {
@@ -442,7 +450,7 @@ export class Db {
         db.onLeaderElectionChange(snapshot);
       });
 
-      db.worker = await Db.spawnWorker();
+      db.worker = await Db.spawnWorker(config.runtimeSources);
 
       return db;
     } catch (error) {
@@ -565,6 +573,7 @@ export class Db {
       localAuthMode: this.config.localAuthMode,
       localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
+      runtimeSources: this.config.runtimeSources,
       logLevel: this.config.logLevel,
     };
   }
@@ -848,7 +857,7 @@ export class Db {
     this.bridgeReady = null;
 
     currentWorker.terminate();
-    this.worker = await Db.spawnWorker();
+    this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
     // Re-attach immediately for existing client runtime(s) so subscriptions replay.
     const first = this.clients.entries().next();
@@ -926,13 +935,23 @@ export class Db {
     return `${primaryDbName}__fallback__${snapshot.tabId}`;
   }
 
-  private static async spawnWorker(): Promise<Worker> {
-    const worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
+  private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
+    const wasmUrl = syncInitInput
+      ? null
+      : resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, runtimeSources);
+    const workerUrl = appendWorkerRuntimeWasmUrl(
+      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
+      wasmUrl,
+    );
+
+    const worker = new Worker(workerUrl, {
       type: "module",
     });
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Worker WASM load timeout")), 15000);
+      const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
       const handler = (event: MessageEvent) => {
         if (event.data.type === "ready") {
           clearTimeout(timeout);
@@ -1117,7 +1136,7 @@ export class Db {
         deleteError = error;
       }
 
-      this.worker = await Db.spawnWorker();
+      this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
       if (deleteError) {
         throw deleteError;
