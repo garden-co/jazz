@@ -11,7 +11,7 @@ fn entry_matches_app(entry: &crate::catalogue::CatalogueEntry, app_id: AppId) ->
 }
 
 /// Rehydrate server schema state from persisted catalogue rows.
-pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
+pub fn rehydrate_schema_manager_from_catalogue<S: Storage + ?Sized>(
     schema_manager: &mut SchemaManager,
     storage: &S,
     app_id: AppId,

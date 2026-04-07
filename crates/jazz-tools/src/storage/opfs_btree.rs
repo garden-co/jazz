@@ -388,13 +388,13 @@ mod tests {
         );
         metadata.insert("app".to_string(), "test".to_string());
 
-        storage.create_object(id, metadata.clone()).unwrap();
+        storage.put_metadata(id, metadata.clone()).unwrap();
 
-        let loaded = storage.load_object_metadata(id).unwrap();
+        let loaded = storage.load_metadata(id).unwrap();
         assert_eq!(loaded, Some(metadata));
 
         let other = ObjectId::new();
-        assert_eq!(storage.load_object_metadata(other).unwrap(), None);
+        assert_eq!(storage.load_metadata(other).unwrap(), None);
     }
 
     #[test]
@@ -567,7 +567,7 @@ mod tests {
 
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
-            storage.create_object(id, metadata.clone()).unwrap();
+            storage.put_metadata(id, metadata.clone()).unwrap();
             storage
                 .append_history_region_rows("users", std::slice::from_ref(&row))
                 .unwrap();
@@ -591,7 +591,7 @@ mod tests {
         {
             let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
 
-            let loaded_meta = storage.load_object_metadata(id).unwrap();
+            let loaded_meta = storage.load_metadata(id).unwrap();
             assert_eq!(loaded_meta, Some(metadata));
             assert_eq!(
                 storage

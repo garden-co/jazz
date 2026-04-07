@@ -87,40 +87,38 @@ pub(crate) fn validate_index_value_size(
     key_codec::validate_index_entry_size(table, column, branch, value)
 }
 
-pub type ObjectMetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
+pub type MetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
 pub type RawTableRows = Vec<(String, Vec<u8>)>;
 
-const OBJECT_METADATA_TABLE: &str = "__object_metadata";
+const METADATA_TABLE: &str = "__metadata";
 
-fn object_metadata_raw_key(id: ObjectId) -> String {
+fn metadata_raw_key(id: ObjectId) -> String {
     hex::encode(id.uuid().as_bytes())
 }
 
-fn decode_object_metadata_raw_key(key: &str) -> Result<ObjectId, StorageError> {
-    let bytes = hex::decode(key).map_err(|err| {
-        StorageError::IoError(format!("invalid object metadata key '{key}': {err}"))
-    })?;
-    let uuid = uuid::Uuid::from_slice(&bytes).map_err(|err| {
-        StorageError::IoError(format!("invalid object metadata uuid '{key}': {err}"))
-    })?;
+fn decode_metadata_raw_key(key: &str) -> Result<ObjectId, StorageError> {
+    let bytes = hex::decode(key)
+        .map_err(|err| StorageError::IoError(format!("invalid metadata key '{key}': {err}")))?;
+    let uuid = uuid::Uuid::from_slice(&bytes)
+        .map_err(|err| StorageError::IoError(format!("invalid metadata uuid '{key}': {err}")))?;
     Ok(ObjectId::from_uuid(uuid))
 }
 
-fn encode_object_metadata(metadata: &HashMap<String, String>) -> Result<Vec<u8>, StorageError> {
+fn encode_metadata(metadata: &HashMap<String, String>) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(metadata)
-        .map_err(|err| StorageError::IoError(format!("serialize object metadata: {err}")))
+        .map_err(|err| StorageError::IoError(format!("serialize metadata: {err}")))
 }
 
-fn decode_object_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError> {
+fn decode_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError> {
     serde_json::from_slice(bytes)
-        .map_err(|err| StorageError::IoError(format!("deserialize object metadata: {err}")))
+        .map_err(|err| StorageError::IoError(format!("deserialize metadata: {err}")))
 }
 
 // ============================================================================
 // Storage Trait
 // ============================================================================
 
-/// Synchronous storage for objects and indices.
+/// Synchronous storage for metadata, row regions, raw tables, and indices.
 ///
 /// All operations are **synchronous** - they return immediately with results.
 /// This eliminates the async response/callback pattern that permeated the
@@ -132,37 +130,31 @@ fn decode_object_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, Stora
 /// Cross-thread communication uses the sync protocol, not shared state.
 pub trait Storage {
     // ================================================================
-    // Object storage (sync - returns immediately with result)
+    // Metadata storage (sync - returns immediately with result)
     // ================================================================
 
-    /// Create a new object with the given ID and metadata.
-    fn create_object(
+    /// Upsert metadata for a logical id.
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        let bytes = encode_object_metadata(&metadata)?;
-        self.raw_table_put(OBJECT_METADATA_TABLE, &object_metadata_raw_key(id), &bytes)
+        let bytes = encode_metadata(&metadata)?;
+        self.raw_table_put(METADATA_TABLE, &metadata_raw_key(id), &bytes)
     }
 
-    /// Load object metadata. Returns None if object doesn't exist.
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.raw_table_get(OBJECT_METADATA_TABLE, &object_metadata_raw_key(id))?
-            .map(|bytes| decode_object_metadata(&bytes))
+    /// Load metadata for a logical id. Returns None if it doesn't exist.
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.raw_table_get(METADATA_TABLE, &metadata_raw_key(id))?
+            .map(|bytes| decode_metadata(&bytes))
             .transpose()
     }
 
-    /// Enumerate all persisted object metadata rows.
-    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+    /// Enumerate all persisted metadata rows.
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
         let mut rows = Vec::new();
-        for (key, bytes) in self.raw_table_scan_prefix(OBJECT_METADATA_TABLE, "")? {
-            rows.push((
-                decode_object_metadata_raw_key(&key)?,
-                decode_object_metadata(&bytes)?,
-            ));
+        for (key, bytes) in self.raw_table_scan_prefix(METADATA_TABLE, "")? {
+            rows.push((decode_metadata_raw_key(&key)?, decode_metadata(&bytes)?));
         }
         rows.sort_by_key(|(object_id, _)| *object_id);
         Ok(rows)
@@ -471,23 +463,20 @@ pub trait Storage {
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
 impl<T: Storage + ?Sized> Storage for Box<T> {
-    fn create_object(
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        (**self).create_object(id, metadata)
+        (**self).put_metadata(id, metadata)
     }
 
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        (**self).load_object_metadata(id)
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        (**self).load_metadata(id)
     }
 
-    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
-        (**self).scan_object_metadata()
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        (**self).scan_metadata()
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {

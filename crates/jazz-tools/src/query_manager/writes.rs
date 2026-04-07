@@ -178,10 +178,10 @@ impl QueryManager {
         self.sync_manager
             .object_manager
             .get(row_id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
             .or_else(|| {
                 storage
-                    .load_object_metadata(row_id)
+                    .load_metadata(row_id)
                     .ok()
                     .flatten()
                     .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
@@ -1868,7 +1868,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -1889,7 +1889,6 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)?
-            .metadata
             .get(MetadataKey::Table.as_str())?
             .clone();
         let table_name = TableName::new(&table);

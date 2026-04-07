@@ -378,11 +378,7 @@ async fn wait_for_todos_count_on_disk(
             let row_ids = storage.index_scan_all("todos", "_id", &branch);
             let mut materialized = 0usize;
             for row_id in row_ids {
-                let has_metadata = storage
-                    .load_object_metadata(row_id)
-                    .ok()
-                    .flatten()
-                    .is_some();
+                let has_metadata = storage.load_metadata(row_id).ok().flatten().is_some();
                 let has_content = storage
                     .load_branch(row_id, &branch_name)
                     .ok()

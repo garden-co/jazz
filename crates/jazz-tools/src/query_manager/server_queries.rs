@@ -632,8 +632,8 @@ impl QueryManager {
         }
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        for (object_id, object) in &object_manager.objects {
-            let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
+        for (object_id, metadata) in &object_manager.metadata_by_id {
+            let Some(table_name) = metadata.get(MetadataKey::Table.as_str()) else {
                 continue;
             };
             if !policy_tables

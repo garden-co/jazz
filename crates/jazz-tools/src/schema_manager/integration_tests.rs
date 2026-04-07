@@ -371,7 +371,7 @@ mod tests {
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
         qm.sync_manager_mut()
             .object_manager
-            .receive_object(storage, object_id, metadata);
+            .receive_metadata(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
         let version_id = commit.id();

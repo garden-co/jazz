@@ -5,7 +5,7 @@ use smolset::SmolSet;
 
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
-use crate::object::{BranchName, Object, ObjectId};
+use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
@@ -146,7 +146,7 @@ impl RowBranch {
 /// no ObjectState enum, no Loading state, no async request/response cycle.
 #[derive(Debug, Clone, Default)]
 pub struct ObjectManager {
-    pub objects: HashMap<ObjectId, Object>,
+    pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     row_branches: HashMap<(ObjectId, BranchName), RowBranch>,
     /// Outbox for visible row changes.
     pub row_objects_outbox: Vec<RowObjectUpdate>,
@@ -180,7 +180,7 @@ impl ObjectManager {
         self.next_timestamp()
     }
 
-    /// Create a new object with optional metadata, returning its id.
+    /// Create a new metadata entry with optional metadata, returning its id.
     /// Persists to storage via Storage synchronously.
     pub fn create<H: Storage>(
         &mut self,
@@ -188,18 +188,18 @@ impl ObjectManager {
         metadata: Option<HashMap<String, String>>,
     ) -> ObjectId {
         let _span = tracing::debug_span!("OM::create").entered();
-        let object = Object::new(metadata.clone());
-        let id = object.id;
+        let metadata = metadata.unwrap_or_default();
+        let id = ObjectId::new();
 
         // Sync storage - returns immediately
-        let _ = io.create_object(id, metadata.clone().unwrap_or_default());
+        let _ = io.put_metadata(id, metadata.clone());
 
-        self.objects.insert(id, object);
+        self.metadata_by_id.insert(id, metadata);
         tracing::debug!(%id, "created object");
         id
     }
 
-    /// Create an object with a specific ObjectId (for deterministic IDs).
+    /// Create a metadata entry with a specific ObjectId (for deterministic IDs).
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
     /// Used for index root nodes that have deterministic IDs based on table/column name.
@@ -210,15 +210,12 @@ impl ObjectManager {
         id: ObjectId,
         metadata: Option<HashMap<String, String>>,
     ) -> ObjectId {
-        let object = Object {
-            id,
-            metadata: metadata.clone().unwrap_or_default(),
-        };
+        let metadata = metadata.unwrap_or_default();
 
         // Sync storage - returns immediately
-        let _ = io.create_object(id, metadata.unwrap_or_default());
+        let _ = io.put_metadata(id, metadata.clone());
 
-        self.objects.insert(id, object);
+        self.metadata_by_id.insert(id, metadata);
         id
     }
 
@@ -248,7 +245,6 @@ impl ObjectManager {
         let object_metadata = self
             .get(object_id)
             .ok_or(Error::ObjectNotFound(object_id))?
-            .metadata
             .clone();
 
         debug_assert!(
@@ -405,7 +401,7 @@ impl ObjectManager {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Option<RowObjectUpdate> {
-        let metadata = self.get(object_id)?.metadata.clone();
+        let metadata = self.get(object_id)?.clone();
         let applied = self.row_branch_mut(object_id, branch_name)?.patch_state(
             version_id,
             state,
@@ -432,10 +428,9 @@ impl ObjectManager {
     ) -> Vec<(ObjectId, HashMap<String, String>, StoredRowVersion)> {
         let mut rows = Vec::new();
         for ((object_id, _branch_name), branch) in &self.row_branches {
-            let Some(object) = self.objects.get(object_id) else {
+            let Some(metadata) = self.metadata_by_id.get(object_id) else {
                 continue;
             };
-            let metadata = object.metadata.clone();
             for row in branch.versions.values() {
                 rows.push((*object_id, metadata.clone(), row.clone()));
             }
@@ -452,8 +447,8 @@ impl ObjectManager {
     }
 
     /// Get an object by id.
-    pub fn get(&self, id: ObjectId) -> Option<&Object> {
-        self.objects.get(&id)
+    pub fn get(&self, id: ObjectId) -> Option<&HashMap<String, String>> {
+        self.metadata_by_id.get(&id)
     }
 
     /// Get an object, loading from storage if not in memory (lazy cold-start load).
@@ -462,11 +457,11 @@ impl ObjectManager {
         id: ObjectId,
         storage: &dyn Storage,
         branches: &[String],
-    ) -> Option<&Object> {
+    ) -> Option<&HashMap<String, String>> {
         let _span = tracing::trace_span!("OM::get_or_load", %id).entered();
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.objects.entry(id) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.metadata_by_id.entry(id) {
             // Load metadata
-            let metadata = match storage.load_object_metadata(id) {
+            let metadata = match storage.load_metadata(id) {
                 Ok(Some(m)) => m,
                 Ok(None) => {
                     tracing::trace!(%id, "get_or_load: no metadata in storage");
@@ -478,17 +473,17 @@ impl ObjectManager {
                 }
             };
 
-            entry.insert(Object { id, metadata });
+            entry.insert(metadata);
         }
 
         let (metadata, loaded_row_versions) = {
-            let object = self.objects.get(&id)?;
-            (object.metadata.clone(), self.row_branches.len())
+            let metadata = self.metadata_by_id.get(&id)?;
+            (metadata.clone(), self.row_branches.len())
         };
 
         if Self::is_row_metadata(&metadata) {
             let Some(table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
-                return self.objects.get(&id);
+                return self.metadata_by_id.get(&id);
             };
 
             for branch_name in branches {
@@ -521,7 +516,7 @@ impl ObjectManager {
             }
         }
 
-        let object = self.objects.get(&id)?;
+        let metadata = self.metadata_by_id.get(&id)?;
         let row_branch_count = self
             .row_branches
             .keys()
@@ -540,7 +535,7 @@ impl ObjectManager {
             previous_row_branch_count = loaded_row_versions,
             "get_or_load: loaded from storage"
         );
-        Some(object)
+        Some(metadata)
     }
 
     /// Get tip IDs for a branch.
@@ -562,23 +557,20 @@ impl ObjectManager {
         Err(Error::BranchNotFound(branch_name))
     }
 
-    /// Receive an object from a remote source (with specified ID).
+    /// Receive metadata from a remote source (with specified ID).
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
     /// Used by sync layer to receive objects from peers.
     /// Persists to storage via Storage synchronously.
-    pub fn receive_object<H: Storage>(
+    pub fn receive_metadata<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
     ) {
         // Sync storage - returns immediately
-        let _ = io.create_object(object_id, metadata.clone());
-        self.objects.entry(object_id).or_insert(Object {
-            id: object_id,
-            metadata,
-        });
+        let _ = io.put_metadata(object_id, metadata.clone());
+        self.metadata_by_id.entry(object_id).or_insert(metadata);
     }
 
     /// Take all pending visible row updates.
@@ -615,10 +607,9 @@ impl ObjectManager {
         let mut row_objects = 0usize;
         let mut index_objects = 0usize;
 
-        for obj in self.objects.values() {
-            let obj_size = self.estimate_object_size(obj);
-            let is_index = obj
-                .metadata
+        for metadata in self.metadata_by_id.values() {
+            let obj_size = self.estimate_object_size(metadata);
+            let is_index = metadata
                 .get(crate::metadata::MetadataKey::Type.as_str())
                 .is_some_and(|t| t == crate::metadata::ObjectType::Index.as_str());
             // Add HashMap entry overhead: ~48 bytes per entry
@@ -637,12 +628,11 @@ impl ObjectManager {
         (row_objects, index_objects, subscriptions, other, total)
     }
 
-    /// Estimate memory size of an Object.
-    fn estimate_object_size(&self, obj: &Object) -> usize {
-        let mut size = std::mem::size_of::<Object>();
+    /// Estimate memory size of an object's metadata map.
+    fn estimate_object_size(&self, metadata: &HashMap<String, String>) -> usize {
+        let mut size = std::mem::size_of::<HashMap<String, String>>();
 
-        // Metadata HashMap
-        for (k, v) in &obj.metadata {
+        for (k, v) in metadata {
             size += k.len() + v.len() + 48; // String overhead + HashMap entry
         }
 

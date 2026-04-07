@@ -33,7 +33,7 @@ use jazz_tools::query_manager::types::{
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::manager::PermissionsHeadSummary;
-use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
 use jazz_tools::storage::RocksDBStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
@@ -1860,7 +1860,7 @@ impl AppRuntime {
         let storage = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 
-        rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
+        rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id)?;
 
         let sync_tx_clone = sync_broadcast.clone();
         let send_seq_by_client_clone = send_seq_by_client.clone();

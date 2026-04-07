@@ -1519,7 +1519,7 @@ fn synced_update_updates_column_indices() {
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+        .receive_metadata(&mut storage, row_id, metadata);
 
     // Encode the initial row data (name="Alice", score=100)
     let descriptor = RowDescriptor::new(vec![
@@ -1651,7 +1651,7 @@ fn synced_insert_materializes_visible_and_history_row_regions() {
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+        .receive_metadata(&mut storage, row_id, metadata);
 
     let row_data = encode_row(
         &descriptor,
@@ -1722,7 +1722,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+        .receive_metadata(&mut storage, row_id, metadata);
 
     let live_data = encode_row(
         &live_descriptor,
@@ -1775,7 +1775,7 @@ fn synced_insert_appears_in_subscription_delta() {
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+        .receive_metadata(&mut storage, row_id, metadata);
 
     // Subscribe before the synced row arrives.
     let query = qm.query("users").build();
@@ -1958,7 +1958,7 @@ fn synced_row_visible_in_filtered_subscription() {
     metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id_1, metadata_1);
+        .receive_metadata(&mut storage, row_id_1, metadata_1);
 
     let data_1 = encode_row(
         &descriptor,
@@ -1999,7 +1999,7 @@ fn synced_row_visible_in_filtered_subscription() {
     metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id_2, metadata_2);
+        .receive_metadata(&mut storage, row_id_2, metadata_2);
 
     let data_2 = encode_row(
         &descriptor,
@@ -2616,7 +2616,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(server_id),
         payload: SyncPayload::RowVersionCreated {
-            metadata: Some(crate::sync_manager::ObjectMetadata {
+            metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata: obj_metadata,
             }),
@@ -2785,8 +2785,7 @@ fn two_peer_sync_insert_reaches_subscription() {
         .sync_manager()
         .object_manager
         .get(row_id)
-        .expect("Object should be available")
-        .metadata
+        .expect("row metadata should be available")
         .clone();
     let row = peer_a
         .sync_manager()
@@ -2798,7 +2797,7 @@ fn two_peer_sync_insert_reaches_subscription() {
     peer_b.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(peer_a_as_server),
         payload: SyncPayload::RowVersionCreated {
-            metadata: Some(crate::sync_manager::ObjectMetadata {
+            metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata,
             }),
@@ -7666,7 +7665,7 @@ fn handle_object_update_respects_branch() {
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+        .receive_metadata(&mut storage, row_id, metadata);
 
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("name", ColumnType::Text),
@@ -7699,7 +7698,7 @@ fn handle_object_update_respects_branch() {
     metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(&mut storage, row_id2, metadata2);
+        .receive_metadata(&mut storage, row_id2, metadata2);
 
     let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
     receive_row_commit(&mut qm, &mut storage, row_id2, &schema_branch, commit2);
@@ -9109,7 +9108,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     use crate::object::ObjectId;
     use crate::sync_manager::{
-        ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
+        ClientId, Destination, InboxEntry, RowMetadata, ServerId, Source, SyncPayload,
     };
     use uuid::Uuid;
 
@@ -9190,7 +9189,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(upstream_id),
         payload: SyncPayload::RowVersionCreated {
-            metadata: Some(ObjectMetadata {
+            metadata: Some(RowMetadata {
                 id: handle.row_id,
                 metadata: [("table".to_string(), "users".to_string())]
                     .into_iter()
@@ -10426,7 +10425,7 @@ fn remove_client_cleans_active_policy_checks() {
         id: PendingUpdateId(id),
         client_id,
         payload: SyncPayload::RowVersionCreated {
-            metadata: Some(crate::sync_manager::ObjectMetadata {
+            metadata: Some(crate::sync_manager::RowMetadata {
                 id: obj_id,
                 metadata: HashMap::from([(MetadataKey::Table.to_string(), "users".to_string())]),
             }),

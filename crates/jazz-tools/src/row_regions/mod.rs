@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::commit::{Commit, CommitId, compute_commit_id};
+#[cfg(test)]
+use crate::commit::Commit;
+use crate::commit::{CommitId, compute_commit_id};
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
@@ -122,6 +124,7 @@ impl StoredRowVersion {
         }
     }
 
+    #[cfg(test)]
     pub fn from_commit(
         row_id: ObjectId,
         branch: impl Into<String>,

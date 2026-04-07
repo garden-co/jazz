@@ -1425,7 +1425,7 @@ impl QueryManager {
         branches: &[String],
     ) -> Option<(String, StoredRowVersion)> {
         let table = storage
-            .load_object_metadata(row_id)
+            .load_metadata(row_id)
             .ok()
             .flatten()?
             .get(MetadataKey::Table.as_str())?

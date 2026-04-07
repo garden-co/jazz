@@ -12,7 +12,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
-use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
 use crate::storage::FjallStorage;
 #[cfg(feature = "rocksdb")]
@@ -81,7 +81,7 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     )
     .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
 
-    rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, context.app_id)
+    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
         .map_err(JazzError::Storage)?;
 
     Ok(schema_manager)

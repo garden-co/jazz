@@ -44,22 +44,14 @@ pub fn test_object_create_and_load_metadata(factory: &dyn Fn() -> Box<dyn Storag
         ("role".to_string(), "admin".to_string()),
     ]);
 
-    storage.create_object(object_id, metadata.clone()).unwrap();
+    storage.put_metadata(object_id, metadata.clone()).unwrap();
 
-    assert_eq!(
-        storage.load_object_metadata(object_id).unwrap().unwrap(),
-        metadata
-    );
+    assert_eq!(storage.load_metadata(object_id).unwrap().unwrap(), metadata);
 }
 
 pub fn test_object_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
     let storage = factory();
-    assert!(
-        storage
-            .load_object_metadata(ObjectId::new())
-            .unwrap()
-            .is_none()
-    );
+    assert!(storage.load_metadata(ObjectId::new()).unwrap().is_none());
 }
 
 pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -68,26 +60,23 @@ pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let bob = ObjectId::new();
 
     storage
-        .create_object(
+        .put_metadata(
             alice,
             HashMap::from([("owner".to_string(), "alice".to_string())]),
         )
         .unwrap();
     storage
-        .create_object(
+        .put_metadata(
             bob,
             HashMap::from([("owner".to_string(), "bob".to_string())]),
         )
         .unwrap();
 
     assert_eq!(
-        storage.load_object_metadata(alice).unwrap().unwrap()["owner"],
+        storage.load_metadata(alice).unwrap().unwrap()["owner"],
         "alice"
     );
-    assert_eq!(
-        storage.load_object_metadata(bob).unwrap().unwrap()["owner"],
-        "bob"
-    );
+    assert_eq!(storage.load_metadata(bob).unwrap().unwrap()["owner"], "bob");
 }
 
 // ============================================================================
@@ -462,7 +451,7 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     {
         let mut storage = factory(path);
         storage
-            .create_object(
+            .put_metadata(
                 object_id,
                 HashMap::from([("owner".to_string(), "alice".to_string())]),
             )
@@ -490,7 +479,7 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     {
         let storage = factory(path);
         assert_eq!(
-            storage.load_object_metadata(object_id).unwrap().unwrap()["owner"],
+            storage.load_metadata(object_id).unwrap().unwrap()["owner"],
             "alice"
         );
         assert_eq!(

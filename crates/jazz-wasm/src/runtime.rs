@@ -69,7 +69,7 @@ use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, Sy
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::schema_manager::rehydrate_schema_manager_from_manifest;
+use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
@@ -1336,7 +1336,7 @@ impl WasmRuntime {
                 .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
         );
         if let Err(error) =
-            rehydrate_schema_manager_from_manifest(&mut schema_manager, storage.as_ref(), app_id)
+            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
         {
             warn!(
                 %app_id,

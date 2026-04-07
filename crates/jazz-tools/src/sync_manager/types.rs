@@ -150,7 +150,7 @@ pub struct ServerState {
     /// What we've pushed to this server for row-region sync:
     /// (row object, branch) -> set of known row-version ids.
     pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
-    /// Object IDs for which we've sent metadata.
+    /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
 
@@ -175,7 +175,7 @@ pub struct ClientState {
     /// What we've sent to this client for row-region sync:
     /// (row object, branch) -> set of known row-version ids.
     pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
-    /// Object IDs for which we've sent metadata.
+    /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
 
@@ -227,9 +227,9 @@ pub enum SyncError {
 // Message Protocol
 // ============================================================================
 
-/// Object metadata sent once per destination.
+/// Row metadata sent once per destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectMetadata {
+pub struct RowMetadata {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
 }
@@ -242,13 +242,13 @@ pub enum SyncPayload {
 
     /// Upstream replication of a newly created or newly learned row version.
     RowVersionCreated {
-        metadata: Option<ObjectMetadata>,
+        metadata: Option<RowMetadata>,
         row: StoredRowVersion,
     },
 
     /// Downstream delivery of a row version that is needed for a subscriber's scope.
     RowVersionNeeded {
-        metadata: Option<ObjectMetadata>,
+        metadata: Option<RowMetadata>,
         row: StoredRowVersion,
     },
 
