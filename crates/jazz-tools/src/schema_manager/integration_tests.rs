@@ -13,10 +13,11 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
+    use crate::row_regions::{RowState, StoredRowVersion};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::{MemoryStorage, Storage};
+    use crate::storage::MemoryStorage;
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -373,9 +374,17 @@ mod tests {
             .receive_object(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
+        let version_id = commit.id();
+        let row = StoredRowVersion::from_commit(
+            object_id,
+            branch,
+            version_id,
+            &commit,
+            RowState::VisibleDirect,
+        );
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(storage, object_id, branch, commit)
+            .add_row_version(storage, object_id, branch, row)
             .unwrap();
     }
 
@@ -690,7 +699,7 @@ mod tests {
             &[Value::Uuid(row_id), Value::Text("Alice".to_string())],
         )
         .unwrap();
-        let original_commit =
+        let _original_commit =
             stored_row_commit(original_content.clone(), 1_000, row_id.to_string());
 
         ingest_remote_row(
@@ -703,14 +712,6 @@ mod tests {
             1_000,
         );
         writer.process(&mut storage);
-
-        storage
-            .delete_commit(
-                row_id,
-                &crate::object::BranchName::new(&v1_branch),
-                original_commit.id(),
-            )
-            .unwrap();
 
         let mut reader =
             SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
@@ -2772,15 +2773,17 @@ mod tests {
         // Transfer to server
         let outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
         for entry in &outbox {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload
-                && *object_id == schema_obj_id
+            if let SyncPayload::CatalogueEntryUpdated { entry } = &entry.payload
+                && entry.object_id == schema_obj_id
             {
                 server
                     .query_manager_mut()
                     .sync_manager_mut()
                     .push_inbox(InboxEntry {
                         source: Source::Client(client_id),
-                        payload: entry.payload.clone(),
+                        payload: SyncPayload::CatalogueEntryUpdated {
+                            entry: entry.clone(),
+                        },
                     });
             }
         }

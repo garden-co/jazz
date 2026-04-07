@@ -1610,15 +1610,27 @@ mod tests {
             .with_state(state)
     }
 
-    /// A minimal valid `SyncPayload::ObjectUpdated` as a `serde_json::Value`,
+    /// A minimal valid `SyncPayload::RowVersionCreated` as a `serde_json::Value`,
     /// suitable for embedding in batch request bodies.
-    fn object_updated_payload(object_id: &str) -> Value {
+    fn row_version_created_payload(object_id: &str) -> Value {
         serde_json::json!({
-            "ObjectUpdated": {
-                "object_id": object_id,
+            "RowVersionCreated": {
                 "metadata": null,
-                "branch_name": "main",
-                "commits": []
+                "row": {
+                    "row_id": object_id,
+                    "branch": "main",
+                    "parents": [],
+                    "updated_at": 1000,
+                    "created_by": object_id,
+                    "created_at": 1000,
+                    "updated_by": object_id,
+                    "batch_id": uuid::Uuid::nil(),
+                    "state": "VisibleDirect",
+                    "confirmed_tier": null,
+                    "is_deleted": false,
+                    "data": [97,108,105,99,101],
+                    "metadata": {}
+                }
             }
         })
     }
@@ -1657,8 +1669,8 @@ mod tests {
 
         let body = serde_json::json!({
             "payloads": [
-                object_updated_payload("00000000-0000-0000-0000-000000000001"),
-                object_updated_payload("00000000-0000-0000-0000-000000000002"),
+                row_version_created_payload("00000000-0000-0000-0000-000000000001"),
+                row_version_created_payload("00000000-0000-0000-0000-000000000002"),
             ],
             "client_id": client_id,
         });
@@ -1695,7 +1707,7 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
 
         let body = serde_json::json!({
-            "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
+            "payloads": [row_version_created_payload("00000000-0000-0000-0000-000000000001")],
             "client_id": ClientId::new(),
         });
 
@@ -1723,7 +1735,7 @@ mod tests {
         let client_id = ClientId::new();
 
         let payloads: Vec<Value> = (0..60)
-            .map(|i| object_updated_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
+            .map(|i| row_version_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
             .collect();
 
         let body = serde_json::json!({
