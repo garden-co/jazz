@@ -214,7 +214,7 @@ impl Storage for FjallStorage {
             append_history_region_rows_core(
                 table,
                 rows,
-                |key, bytes| Self::read_get(&*tx.borrow(), &inner.keyspace, key),
+                |key| Self::read_get(&*tx.borrow(), &inner.keyspace, key),
                 |prefix| Self::scan_prefix(&*tx.borrow(), &inner.keyspace, prefix),
                 |key, bytes| Self::set_on_cell(&tx, &inner.keyspace, key, bytes),
             )?;
