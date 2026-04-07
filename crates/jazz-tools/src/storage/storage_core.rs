@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::object::ObjectId;
-use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_regions::{
+    BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_stored_row_version,
+    decode_visible_row_entry, encode_stored_row_version, encode_visible_row_entry,
+};
 use crate::sync_manager::DurabilityTier;
 
 use super::key_codec::{
@@ -13,24 +14,28 @@ use super::key_codec::{
 };
 use super::{RawTableRows, StorageError};
 
-pub(super) fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
-    serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
+fn storage_codec_error(action: &str, label: &str, err: impl std::fmt::Display) -> StorageError {
+    StorageError::IoError(format!("{action} {label}: {err}"))
 }
 
-pub(super) fn decode_json<T: DeserializeOwned>(
-    bytes: &[u8],
-    label: &str,
-) -> Result<T, StorageError> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
+fn encode_history_row(row: &StoredRowVersion) -> Result<Vec<u8>, StorageError> {
+    encode_stored_row_version(row)
+        .map_err(|err| storage_codec_error("encode", "stored row version", err))
 }
 
 fn encode_visible_entry(entry: &VisibleRowEntry) -> Result<Vec<u8>, StorageError> {
-    encode_json(entry, "visible row entry")
+    encode_visible_row_entry(entry)
+        .map_err(|err| storage_codec_error("encode", "visible row entry", err))
 }
 
 fn decode_visible_entry(bytes: &[u8]) -> Result<VisibleRowEntry, StorageError> {
-    decode_json(bytes, "visible row entry")
+    decode_visible_row_entry(bytes)
+        .map_err(|err| storage_codec_error("decode", "visible row entry", err))
+}
+
+fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
+    decode_stored_row_version(bytes)
+        .map_err(|err| storage_codec_error("decode", "stored row version", err))
 }
 
 fn history_rows_for_visible_entry(
@@ -42,7 +47,7 @@ fn history_rows_for_visible_entry(
     let prefix = history_row_versions_prefix(table, branch, row_id);
     scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .map(|(_, bytes)| decode_history_row(&bytes))
         .collect()
 }
 
@@ -137,8 +142,8 @@ pub(super) fn append_history_region_rows_core(
     let mut affected_visible_rows = HashSet::new();
     for row in rows {
         let key = history_row_key(table, &row.branch, row.row_id, row.updated_at);
-        let json = encode_json(row, "stored row version")?;
-        set(&key, &json)?;
+        let encoded = encode_history_row(row)?;
+        set(&key, &encoded)?;
         affected_visible_rows.insert((row.branch.clone(), row.row_id));
     }
 
@@ -150,8 +155,8 @@ pub(super) fn append_history_region_rows_core(
         let current_row = decode_visible_entry(&bytes)?.current_row;
         let visible_entry =
             rebuild_visible_entry(table, current_row, |prefix| scan_prefix(prefix))?;
-        let json = encode_visible_entry(&visible_entry)?;
-        set(&visible_key, &json)?;
+        let encoded = encode_visible_entry(&visible_entry)?;
+        set(&visible_key, &encoded)?;
     }
     Ok(())
 }
@@ -166,8 +171,8 @@ pub(super) fn upsert_visible_region_rows_core(
     for row in rows {
         let key = visible_row_key(table, &row.branch, row.row_id);
         let entry = rebuild_visible_entry(table, row.clone(), |prefix| scan_prefix(prefix))?;
-        let json = encode_visible_entry(&entry)?;
-        set(&key, &json)?;
+        let encoded = encode_visible_entry(&entry)?;
+        set(&key, &encoded)?;
     }
     Ok(())
 }
@@ -186,7 +191,7 @@ pub(super) fn patch_row_region_rows_by_batch_core(
     let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowVersion>>::new();
 
     for (key, bytes) in history_entries {
-        let mut row: StoredRowVersion = decode_json(&bytes, "stored row version")?;
+        let mut row = decode_history_row(&bytes)?;
         if row.batch_id == batch_id {
             if let Some(state) = state {
                 row.state = state;
@@ -196,8 +201,8 @@ pub(super) fn patch_row_region_rows_by_batch_core(
                 (Some(existing), None) => Some(existing),
                 (None, incoming) => incoming,
             };
-            let json = encode_json(&row, "stored row version")?;
-            set(&key, &json)?;
+            let encoded = encode_history_row(&row)?;
+            set(&key, &encoded)?;
             affected_visible_rows.insert((row.branch.clone(), row.row_id));
         }
         history_by_visible_row
@@ -240,8 +245,8 @@ pub(super) fn patch_row_region_rows_by_batch_core(
             history_rows.push(current_row.clone());
         }
         let rebuilt = VisibleRowEntry::rebuild(current_row, &history_rows);
-        let json = encode_visible_entry(&rebuilt)?;
-        set(&visible_row_key(table, &branch, row_id), &json)?;
+        let encoded = encode_visible_entry(&rebuilt)?;
+        set(&visible_row_key(table, &branch, row_id), &encoded)?;
     }
 
     Ok(())
@@ -303,7 +308,7 @@ pub(super) fn scan_history_row_versions_core(
     let prefix = history_table_prefix(table);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_json::<StoredRowVersion>(&bytes, "stored row version"))
+        .map(|(_, bytes)| decode_history_row(&bytes))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|row| row.row_id == row_id)
@@ -326,7 +331,7 @@ pub(super) fn scan_history_region_core(
 
     let scanned: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .map(|(_, bytes)| decode_history_row(&bytes))
         .collect::<Result<_, _>>()?;
 
     let mut rows = match scan {

@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! "raw:{table}:{local_key}"                               → raw table entry
-//! "row:{table}:0:{branch}:{row_uuid}"                     → JSON StoredRowVersion
-//! "row:{table}:1:{branch}:{row_uuid}:{updated_at}"        → JSON StoredRowVersion
+//! "row:{table}:0:{branch}:{row_uuid}"                     → encoded VisibleRowEntry
+//! "row:{table}:1:{branch}:{row_uuid}:{updated_at}"        → encoded StoredRowVersion
 //! ```
 
 use std::cell::RefCell;
