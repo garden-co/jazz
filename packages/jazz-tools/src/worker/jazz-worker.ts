@@ -470,9 +470,9 @@ async function connectStream(): Promise<void> {
             "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
           );
         }
-        detachServer();
-        scheduleReconnect();
       }
+      detachServer();
+      scheduleReconnect();
       return;
     }
     console.error("[worker] Stream connect error:", e);
