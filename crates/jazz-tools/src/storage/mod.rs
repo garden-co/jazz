@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalogue::CatalogueEntry;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -660,8 +660,45 @@ type RawTableEntries = BTreeMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Default)]
 struct TableRowRegions {
-    visible: BTreeMap<(String, ObjectId), StoredRowVersion>,
+    visible: BTreeMap<(String, ObjectId), VisibleRowEntry>,
     history: BTreeMap<(String, ObjectId, u64), StoredRowVersion>,
+}
+
+impl TableRowRegions {
+    fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowVersion> {
+        let mut rows: Vec<_> = self
+            .history
+            .iter()
+            .filter(|((history_branch, history_row_id, _), _)| {
+                history_branch == branch && *history_row_id == row_id
+            })
+            .map(|(_, row)| row.clone())
+            .collect();
+        rows.sort_by_key(|row| (row.updated_at, row.version_id()));
+        rows
+    }
+
+    fn rebuild_visible_entry(&mut self, branch: &str, row_id: ObjectId) {
+        let key = (branch.to_string(), row_id);
+        let Some(current_row) = self
+            .visible
+            .get(&key)
+            .map(|entry| entry.current_row.clone())
+        else {
+            return;
+        };
+
+        let mut history_rows = self.history_rows_for(branch, row_id);
+        if !history_rows
+            .iter()
+            .any(|row| row.version_id() == current_row.version_id())
+        {
+            history_rows.push(current_row.clone());
+        }
+
+        self.visible
+            .insert(key, VisibleRowEntry::rebuild(current_row, &history_rows));
+    }
 }
 
 /// In-memory Storage for testing and main-thread use.
@@ -865,11 +902,17 @@ impl Storage for MemoryStorage {
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
+        let mut affected_visible_rows = HashSet::new();
         for row in rows {
             regions.history.insert(
                 (row.branch.clone(), row.row_id, row.updated_at),
                 row.clone(),
             );
+            affected_visible_rows.insert((row.branch.clone(), row.row_id));
+        }
+
+        for (branch, row_id) in affected_visible_rows {
+            regions.rebuild_visible_entry(&branch, row_id);
         }
         Ok(())
     }
@@ -881,9 +924,11 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
         for row in rows {
-            regions
-                .visible
-                .insert((row.branch.clone(), row.row_id), row.clone());
+            regions.visible.insert(
+                (row.branch.clone(), row.row_id),
+                VisibleRowEntry::new(row.clone()),
+            );
+            regions.rebuild_visible_entry(&row.branch, row.row_id);
         }
         Ok(())
     }
@@ -899,6 +944,7 @@ impl Storage for MemoryStorage {
             return Ok(());
         };
 
+        let mut affected_visible_rows = HashSet::new();
         for row in regions.history.values_mut() {
             if row.batch_id == batch_id {
                 if let Some(state) = state {
@@ -909,10 +955,12 @@ impl Storage for MemoryStorage {
                     (Some(existing), None) => Some(existing),
                     (None, incoming) => incoming,
                 };
+                affected_visible_rows.insert((row.branch.clone(), row.row_id));
             }
         }
 
-        for row in regions.visible.values_mut() {
+        for entry in regions.visible.values_mut() {
+            let row = &mut entry.current_row;
             if row.batch_id == batch_id {
                 if let Some(state) = state {
                     row.state = state;
@@ -922,7 +970,12 @@ impl Storage for MemoryStorage {
                     (Some(existing), None) => Some(existing),
                     (None, incoming) => incoming,
                 };
+                affected_visible_rows.insert((row.branch.clone(), row.row_id));
             }
+        }
+
+        for (branch, row_id) in affected_visible_rows {
+            regions.rebuild_visible_entry(&branch, row_id);
         }
 
         Ok(())
@@ -941,7 +994,7 @@ impl Storage for MemoryStorage {
             .visible
             .iter()
             .filter(|((row_branch, _), _)| row_branch == branch)
-            .map(|(_, row)| row.clone())
+            .map(|(_, entry)| entry.current_row.clone())
             .collect())
     }
 
@@ -951,10 +1004,12 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
-        Ok(self
-            .row_regions
-            .get(table)
-            .and_then(|regions| regions.visible.get(&(branch.to_string(), row_id)).cloned()))
+        Ok(self.row_regions.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(&(branch.to_string(), row_id))
+                .map(|entry| entry.current_row.clone())
+        }))
     }
 
     fn scan_visible_region_row_versions(
@@ -970,7 +1025,7 @@ impl Storage for MemoryStorage {
             .visible
             .iter()
             .filter(|((_, visible_row_id), _)| *visible_row_id == row_id)
-            .map(|(_, row)| row.clone())
+            .map(|(_, entry)| entry.current_row.clone())
             .collect();
         rows.sort_by_key(|row| row.branch.clone());
         Ok(rows)
@@ -1296,6 +1351,71 @@ mod tests {
         assert_eq!(visible, vec![version.clone()]);
         assert_eq!(history_by_row, vec![version.clone()]);
         assert_eq!(history, vec![version]);
+    }
+
+    #[test]
+    fn memory_storage_visible_entries_track_older_tier_winners() {
+        use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+
+        let globally_confirmed = StoredRowVersion {
+            row_id,
+            branch: "dev/main".to_string(),
+            parents: Vec::new(),
+            updated_at: 10,
+            created_by: "alice".to_string(),
+            created_at: 10,
+            updated_by: "alice".to_string(),
+            batch_id: BatchId::new(),
+            state: RowState::VisibleDirect,
+            confirmed_tier: Some(DurabilityTier::GlobalServer),
+            is_deleted: false,
+            data: b"v1".to_vec(),
+            metadata: HashMap::new(),
+        };
+        let current_worker = StoredRowVersion {
+            row_id,
+            branch: "dev/main".to_string(),
+            parents: vec![globally_confirmed.version_id()],
+            updated_at: 20,
+            created_by: "alice".to_string(),
+            created_at: 10,
+            updated_by: "alice".to_string(),
+            batch_id: BatchId::new(),
+            state: RowState::VisibleDirect,
+            confirmed_tier: Some(DurabilityTier::Worker),
+            is_deleted: false,
+            data: b"v2".to_vec(),
+            metadata: HashMap::new(),
+        };
+
+        storage
+            .append_history_region_rows(
+                "users",
+                &[globally_confirmed.clone(), current_worker.clone()],
+            )
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("users", std::slice::from_ref(&current_worker))
+            .unwrap();
+
+        let visible = storage
+            .load_visible_region_row("users", "dev/main", row_id)
+            .unwrap();
+        let entry = storage
+            .row_regions
+            .get("users")
+            .and_then(|regions| regions.visible.get(&("dev/main".to_string(), row_id)))
+            .cloned()
+            .expect("visible entry");
+
+        assert_eq!(visible, Some(current_worker.clone()));
+        assert_eq!(entry.current_row, current_worker);
+        assert_eq!(entry.worker_version_id, None);
+        assert_eq!(entry.edge_version_id, Some(globally_confirmed.version_id()));
+        assert_eq!(entry.global_version_id, None);
     }
 
     mod memory_conformance {

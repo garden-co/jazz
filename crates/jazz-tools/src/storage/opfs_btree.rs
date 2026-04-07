@@ -254,7 +254,13 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
-        append_history_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        append_history_region_rows_core(
+            table,
+            rows,
+            |key| self.tree_read(key),
+            |prefix| self.tree_scan_prefix(prefix),
+            |key, bytes| self.tree_insert(key, bytes),
+        )
     }
 
     fn upsert_visible_region_rows(
@@ -262,7 +268,12 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
-        upsert_visible_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        upsert_visible_region_rows_core(
+            table,
+            rows,
+            |prefix| self.tree_scan_prefix(prefix),
+            |key, bytes| self.tree_insert(key, bytes),
+        )
     }
 
     fn patch_row_region_rows_by_batch(

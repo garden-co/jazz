@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::object::ObjectId;
-use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 use super::key_codec::{
@@ -23,6 +23,45 @@ pub(super) fn decode_json<T: DeserializeOwned>(
 ) -> Result<T, StorageError> {
     serde_json::from_slice(bytes)
         .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
+}
+
+fn encode_visible_entry(entry: &VisibleRowEntry) -> Result<Vec<u8>, StorageError> {
+    encode_json(entry, "visible row entry")
+}
+
+fn decode_visible_entry(bytes: &[u8]) -> Result<VisibleRowEntry, StorageError> {
+    decode_json(bytes, "visible row entry")
+}
+
+fn history_rows_for_visible_entry(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<StoredRowVersion>, StorageError> {
+    let prefix = history_row_versions_prefix(table, branch, row_id);
+    scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .collect()
+}
+
+fn rebuild_visible_entry(
+    table: &str,
+    current_row: StoredRowVersion,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<VisibleRowEntry, StorageError> {
+    let mut history_rows =
+        history_rows_for_visible_entry(table, &current_row.branch, current_row.row_id, |prefix| {
+            scan_prefix(prefix)
+        })?;
+    if !history_rows
+        .iter()
+        .any(|row| row.version_id() == current_row.version_id())
+    {
+        history_rows.push(current_row.clone());
+    }
+    Ok(VisibleRowEntry::rebuild(current_row, &history_rows))
 }
 
 pub(super) fn raw_table_put_core(
@@ -91,12 +130,28 @@ pub(super) fn raw_table_scan_range_core(
 pub(super) fn append_history_region_rows_core(
     table: &str,
     rows: &[StoredRowVersion],
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
+    let mut affected_visible_rows = HashSet::new();
     for row in rows {
         let key = history_row_key(table, &row.branch, row.row_id, row.updated_at);
         let json = encode_json(row, "stored row version")?;
         set(&key, &json)?;
+        affected_visible_rows.insert((row.branch.clone(), row.row_id));
+    }
+
+    for (branch, row_id) in affected_visible_rows {
+        let visible_key = visible_row_key(table, &branch, row_id);
+        let Some(bytes) = get(&visible_key)? else {
+            continue;
+        };
+        let current_row = decode_visible_entry(&bytes)?.current_row;
+        let visible_entry =
+            rebuild_visible_entry(table, current_row, |prefix| scan_prefix(prefix))?;
+        let json = encode_visible_entry(&visible_entry)?;
+        set(&visible_key, &json)?;
     }
     Ok(())
 }
@@ -105,11 +160,13 @@ pub(super) fn append_history_region_rows_core(
 pub(super) fn upsert_visible_region_rows_core(
     table: &str,
     rows: &[StoredRowVersion],
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
         let key = visible_row_key(table, &row.branch, row.row_id);
-        let json = encode_json(row, "stored row version")?;
+        let entry = rebuild_visible_entry(table, row.clone(), |prefix| scan_prefix(prefix))?;
+        let json = encode_visible_entry(&entry)?;
         set(&key, &json)?;
     }
     Ok(())
@@ -124,14 +181,13 @@ pub(super) fn patch_row_region_rows_by_batch_core(
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    for prefix in [history_table_prefix(table), visible_table_prefix(table)] {
-        let entries = scan_prefix(&prefix)?;
-        for (key, bytes) in entries {
-            let mut row: StoredRowVersion = decode_json(&bytes, "stored row version")?;
-            if row.batch_id != batch_id {
-                continue;
-            }
+    let mut affected_visible_rows = HashSet::new();
+    let history_entries = scan_prefix(&history_table_prefix(table))?;
+    let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowVersion>>::new();
 
+    for (key, bytes) in history_entries {
+        let mut row: StoredRowVersion = decode_json(&bytes, "stored row version")?;
+        if row.batch_id == batch_id {
             if let Some(state) = state {
                 row.state = state;
             }
@@ -140,10 +196,52 @@ pub(super) fn patch_row_region_rows_by_batch_core(
                 (Some(existing), None) => Some(existing),
                 (None, incoming) => incoming,
             };
-
             let json = encode_json(&row, "stored row version")?;
             set(&key, &json)?;
+            affected_visible_rows.insert((row.branch.clone(), row.row_id));
         }
+        history_by_visible_row
+            .entry((row.branch.clone(), row.row_id))
+            .or_default()
+            .push(row);
+    }
+
+    let visible_entries = scan_prefix(&visible_table_prefix(table))?;
+    let mut visible_by_key = HashMap::<(String, ObjectId), VisibleRowEntry>::new();
+    for (_, bytes) in visible_entries {
+        let mut entry = decode_visible_entry(&bytes)?;
+        let row = &mut entry.current_row;
+        if row.batch_id == batch_id {
+            if let Some(state) = state {
+                row.state = state;
+            }
+            row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (Some(existing), None) => Some(existing),
+                (None, incoming) => incoming,
+            };
+            affected_visible_rows.insert((row.branch.clone(), row.row_id));
+        }
+        visible_by_key.insert((row.branch.clone(), row.row_id), entry);
+    }
+
+    for (branch, row_id) in affected_visible_rows {
+        let Some(entry) = visible_by_key.get(&(branch.clone(), row_id)).cloned() else {
+            continue;
+        };
+        let current_row = entry.current_row;
+        let mut history_rows = history_by_visible_row
+            .remove(&(branch.clone(), row_id))
+            .unwrap_or_default();
+        if !history_rows
+            .iter()
+            .any(|row| row.version_id() == current_row.version_id())
+        {
+            history_rows.push(current_row.clone());
+        }
+        let rebuilt = VisibleRowEntry::rebuild(current_row, &history_rows);
+        let json = encode_visible_entry(&rebuilt)?;
+        set(&visible_row_key(table, &branch, row_id), &json)?;
     }
 
     Ok(())
@@ -158,7 +256,7 @@ pub(super) fn scan_visible_region_core(
     let prefix = visible_row_prefix(table, branch);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .map(|(_, bytes)| decode_visible_entry(&bytes).map(|entry| entry.current_row))
         .collect::<Result<_, _>>()?;
     rows.sort_by_key(|row| (row.branch.clone(), row.row_id));
     Ok(rows)
@@ -173,7 +271,7 @@ pub(super) fn load_visible_region_row_core(
 ) -> Result<Option<StoredRowVersion>, StorageError> {
     let key = visible_row_key(table, branch, row_id);
     match get(&key)? {
-        Some(bytes) => Ok(Some(decode_json(&bytes, "stored row version")?)),
+        Some(bytes) => Ok(Some(decode_visible_entry(&bytes)?.current_row)),
         None => Ok(None),
     }
 }
@@ -187,7 +285,7 @@ pub(super) fn scan_visible_region_row_versions_core(
     let prefix = visible_table_prefix(table);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_json::<StoredRowVersion>(&bytes, "stored row version"))
+        .map(|(_, bytes)| decode_visible_entry(&bytes).map(|entry| entry.current_row))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|row| row.row_id == row_id)
