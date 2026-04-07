@@ -939,9 +939,17 @@ impl NapiRuntime {
         message_json: String,
         sequence: Option<f64>,
     ) -> napi::Result<()> {
-        let payload: SyncPayload = serde_json::from_str(&message_json)
+        let mut payload: SyncPayload = serde_json::from_str(&message_json)
             .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
         let sequence = parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
         let server_id = (*self
             .upstream_server_id
             .lock()
