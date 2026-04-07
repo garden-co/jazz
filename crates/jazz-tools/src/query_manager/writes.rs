@@ -459,9 +459,6 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, branches)?;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let (table, row) = self.load_best_visible_row_version(
             storage,
@@ -1322,12 +1319,6 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
-
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
@@ -1454,12 +1445,6 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
-
         // Check for hard delete first
         if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
