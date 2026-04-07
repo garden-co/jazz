@@ -113,7 +113,7 @@ function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
   console.warn(
     `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
       `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
-      `\`npx jazz-tools migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
+      `\`npx jazz-tools@alpha migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
   );
 }
 

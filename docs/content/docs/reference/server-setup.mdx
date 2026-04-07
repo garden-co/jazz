@@ -1,7 +1,7 @@
 ---
 title: Server Setup
 description: Hosted and self-hosted database server configuration, app provisioning, and runtime context setup.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
@@ -23,17 +23,17 @@ App IDs are provisioned on request. Ask in the `jazz2-adopters` Discord channel 
 
 `jazz-tools server <APP_ID>` currently supports:
 
-| Option                              | Purpose                                                                     | Environment variable   | Default                   |
-| ----------------------------------- | --------------------------------------------------------------------------- | ---------------------- | ------------------------- |
-| `<APP_ID>` (positional)             | App namespace identifier (required)                                         | -                      | -                         |
-| `-p, --port <PORT>`                 | Listen port                                                                 | -                      | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                                | -                      | `./data`                  |
-| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits | -                      | off                       |
-| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                                   | `JAZZ_JWKS_URL`        | unset                     |
-| `--allow-anonymous`                 | Allow local anonymous auth (`X-Jazz-Local-Mode: anonymous`)                 | `JAZZ_ALLOW_ANONYMOUS` | see `NODE_ENV` note below |
-| `--allow-demo`                      | Allow local demo auth (`X-Jazz-Local-Mode: demo`)                           | `JAZZ_ALLOW_DEMO`      | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                        | `JAZZ_BACKEND_SECRET`  | unset                     |
-| `--admin-secret <ADMIN_SECRET>`     | Enable admin operations (schema/policy sync)                                | `JAZZ_ADMIN_SECRET`    | unset                     |
+| Option                              | Purpose                                                                                                                                            | Environment variable   | Default                   |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------------------- |
+| `<APP_ID>` (positional)             | App namespace identifier (required)                                                                                                                | -                      | -                         |
+| `-p, --port <PORT>`                 | Listen port                                                                                                                                        | -                      | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                                                                                                       | -                      | `./data`                  |
+| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                                        | -                      | off                       |
+| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                                                                                                          | `JAZZ_JWKS_URL`        | unset                     |
+| `--allow-anonymous`                 | Allow local anonymous auth (`X-Jazz-Local-Mode: anonymous`)                                                                                        | `JAZZ_ALLOW_ANONYMOUS` | see `NODE_ENV` note below |
+| `--allow-demo`                      | Allow local demo auth (`X-Jazz-Local-Mode: demo`)                                                                                                  | `JAZZ_ALLOW_DEMO`      | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                                                                                               | `JAZZ_BACKEND_SECRET`  | unset                     |
+| `--admin-secret <ADMIN_SECRET>`     | Required for `permissions push`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`    | unset                     |
 
 Local auth defaults depend on `NODE_ENV`:
 
@@ -82,8 +82,16 @@ For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentica
 
 <CreateJazzClientReference />
 
-In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+In browser clients, omitting `jwtToken` and `localAuthToken` defaults to anonymous auth with a persisted local token.
 For React Native/Expo clients, make sure `serverUrl` points to a host your runtime can reach (for example Android emulator often uses `10.0.2.2`).
+
+### Storage driver
+
+By default, browser clients use `driver: { type: "persistent" }`, which runs a dedicated worker
+with OPFS-backed storage for offline support and local durability. Set `driver: { type: "memory" }`
+to skip the worker and OPFS entirely &hairsp;— &hairsp;the runtime keeps data in memory only and
+syncs directly with the server. `memory` mode requires `serverUrl` to be set, since there is no
+local persistence.
 
 ### Backend context setup
 

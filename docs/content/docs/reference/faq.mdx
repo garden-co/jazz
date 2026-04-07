@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Frequently asked questions about Jazz.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -28,7 +28,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array — empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
 
 </Accordion>
 
@@ -47,6 +47,24 @@ Yes. Link the local identity to an external one when the user signs in. See [Upg
 <Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
 
 No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+
+</Accordion>
+
+<Accordion id="common-errors" title="What do the sync error messages mean?">
+
+Jazz may return the following errors when a client's request is rejected by the server:
+
+- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
+  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
+  that operation on the row.
+- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
+  Make sure the client is using a valid auth mode (anonymous, demo, or external JWT).
+- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
+  catalogue object without the required admin secret. In production, catalogue writes require
+  `--admin-secret`.
+- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
+  server, typically because the query references a table or schema the server doesn't know about.
+  This can happen if the schema hasn't synced yet or if there's a version mismatch.
 
 </Accordion>
 
