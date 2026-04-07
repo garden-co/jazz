@@ -7,18 +7,6 @@ use std::collections::HashMap;
 type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowVersion);
 
 impl SyncManager {
-    fn sorted_catalogue_entries(&self) -> Vec<CatalogueEntry> {
-        let mut entries: Vec<_> = self.catalogue_entries.values().cloned().collect();
-        entries.sort_by_key(|entry| entry.object_id);
-        entries
-    }
-
-    pub(super) fn queue_catalogue_sync_to_server(&mut self, server_id: ServerId) {
-        for entry in self.sorted_catalogue_entries() {
-            self.queue_catalogue_entry_to_server(server_id, entry);
-        }
-    }
-
     pub(super) fn queue_catalogue_sync_to_server_from_storage<H: Storage>(
         &mut self,
         server_id: ServerId,
@@ -31,17 +19,6 @@ impl SyncManager {
             self.catalogue_entries
                 .insert(entry.object_id, entry.clone());
             self.queue_catalogue_entry_to_server(server_id, entry);
-        }
-    }
-
-    /// Queue all existing objects to sync to a new server.
-    pub(super) fn queue_full_sync_to_server(&mut self, server_id: ServerId) {
-        let _span = tracing::debug_span!("queue_full_sync_to_server", %server_id).entered();
-        for (object_id, metadata, row) in self.object_manager.row_versions_for_sync() {
-            if matches!(row.state, RowState::StagingPending) {
-                continue;
-            }
-            self.queue_row_to_server(server_id, object_id, metadata, row);
         }
     }
 
@@ -78,13 +55,6 @@ impl SyncManager {
 
         for (object_id, metadata, row) in row_sync {
             self.queue_row_to_server(server_id, object_id, metadata, row);
-        }
-    }
-
-    /// Queue all existing catalogue objects to sync to a new client.
-    pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
-        for entry in self.sorted_catalogue_entries() {
-            self.queue_catalogue_entry_to_client(client_id, entry);
         }
     }
 
@@ -251,22 +221,6 @@ impl SyncManager {
         if let Some(row) =
             self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
         {
-            self.queue_row_to_client(client_id, object_id, metadata, row);
-        }
-    }
-
-    /// Queue initial sync to a client for a newly visible object/branch.
-    pub(super) fn queue_initial_sync_to_client(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        branch_name: BranchName,
-    ) {
-        // Get current tips from object manager
-        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
-            return;
-        };
-        if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
             self.queue_row_to_client(client_id, object_id, metadata, row);
         }
     }

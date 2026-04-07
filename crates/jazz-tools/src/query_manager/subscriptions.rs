@@ -318,26 +318,6 @@ impl QueryManager {
         Ok(sub_id)
     }
 
-    /// Add an upstream server and replay all active query subscriptions.
-    ///
-    /// This ensures subscriptions that became active before the server connection
-    /// are forwarded once the server is available.
-    pub fn add_server(&mut self, server_id: ServerId) {
-        self.add_server_with_catalogue_match(server_id, false);
-    }
-
-    /// Add an upstream server and optionally skip replaying catalogue objects
-    /// when the remote side already has the same catalogue state.
-    pub fn add_server_with_catalogue_match(
-        &mut self,
-        server_id: ServerId,
-        skip_catalogue_sync: bool,
-    ) {
-        self.sync_manager
-            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
-        self.replay_active_query_subscriptions_to_server(server_id);
-    }
-
     pub fn add_server_with_storage<H: Storage>(
         &mut self,
         storage: &H,

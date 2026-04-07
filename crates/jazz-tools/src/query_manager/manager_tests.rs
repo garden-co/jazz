@@ -93,6 +93,32 @@ fn get_branch_for_user_branch(qm: &QueryManager, user_branch: &str) -> String {
     .to_string()
 }
 
+fn connect_server(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    server_id: crate::sync_manager::ServerId,
+) {
+    qm.sync_manager_mut()
+        .add_server_with_storage(server_id, false, storage);
+}
+
+fn connect_client(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    client_id: crate::sync_manager::ClientId,
+) {
+    qm.sync_manager_mut()
+        .add_client_with_storage(storage, client_id);
+}
+
+fn connect_query_manager_upstream(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    server_id: crate::sync_manager::ServerId,
+) {
+    qm.add_server_with_storage(storage, server_id, false);
+}
+
 fn stored_row_commit(
     parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
     content: Vec<u8>,
@@ -2361,7 +2387,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
 
     // Add a "server" that we'll receive updates from
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut qm, &storage, server_id);
 
     // Subscribe to users table
     let query = qm.query("users").build();
@@ -2451,7 +2477,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
 
     // Add a "server"
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut qm, &storage, server_id);
     // Insert a row locally first
     let handle = qm
         .insert(
@@ -2552,7 +2578,7 @@ fn two_peer_sync_insert_reaches_subscription() {
 
     // Peer B adds a "server" (representing Peer A)
     let peer_a_as_server = ServerId::new();
-    peer_b.sync_manager_mut().add_server(peer_a_as_server);
+    connect_server(&mut peer_b, &storage_b, peer_a_as_server);
 
     // Process both to initialize
     peer_a.process(&mut storage_a);
@@ -3185,7 +3211,7 @@ fn undelete_syncs_row_version_created_to_server() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut qm, &storage, server_id);
     let _ = qm.sync_manager_mut().take_outbox();
 
     let handle = qm
@@ -3265,7 +3291,7 @@ fn hard_delete_syncs_row_version_created_to_server() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut qm, &storage, server_id);
     let _ = qm.sync_manager_mut().take_outbox();
 
     let handle = qm
@@ -7195,7 +7221,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     );
 
     let client_id = ClientId::new();
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
     let session = PolicySession::new("alice");
     server_qm
         .sync_manager_mut()
@@ -7925,7 +7951,7 @@ fn server_builds_query_graph_on_subscription() {
 
     // Add a client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     // Client sends QuerySubscription for score > 50
     let query = server_qm
@@ -7989,7 +8015,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
 
     let (mut server_qm, _) = create_query_manager(SyncManager::new(), schema);
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let query = server_qm
         .query("users")
@@ -8078,7 +8104,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     // Query references a table that does not exist in schema.
     let invalid_query = QueryBuilder::new("no_such_table").build();
@@ -8128,11 +8154,11 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut server_qm, &storage, upstream_id);
     let _ = server_qm.sync_manager_mut().take_outbox();
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let valid_query = server_qm.query("users").build();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -8227,7 +8253,7 @@ fn server_pushes_new_matches() {
 
     // Add client and subscribe
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let query = server_qm
         .query("users")
@@ -8304,7 +8330,7 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
     let client_b = ClientId::new();
     let client_c = ClientId::new();
     for client_id in [client_a, client_b, client_c] {
-        server_qm.sync_manager_mut().add_client(client_id);
+        connect_client(&mut server_qm, &storage, client_id);
     }
 
     for (client_id, query_id, query, propagation) in [
@@ -8389,7 +8415,7 @@ fn server_does_not_push_non_matching() {
 
     // Add client and subscribe to score > 50
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let query = server_qm
         .query("users")
@@ -8450,7 +8476,7 @@ fn subscribe_with_sync_sends_to_servers() {
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
 
     // Clear initial outbox (full sync to server)
     let _ = client_qm.sync_manager_mut().take_outbox();
@@ -8490,7 +8516,7 @@ fn subscribe_with_sync_local_only_sends_to_connected_tier() {
     let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
     let _ = client_qm.sync_manager_mut().take_outbox();
 
     let query = client_qm
@@ -8527,7 +8553,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    worker_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut worker_qm, &_storage, server_id);
     let _ = worker_qm.sync_manager_mut().take_outbox();
 
     let query = worker_qm
@@ -8578,7 +8604,7 @@ fn add_server_replays_existing_local_query_subscriptions() {
     );
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.add_server(server_id);
+    connect_query_manager_upstream(&mut client_qm, &_storage, server_id);
 
     let outbox = client_qm.sync_manager_mut().take_outbox();
     let replayed: Vec<_> = outbox
@@ -8620,7 +8646,7 @@ fn add_server_replays_local_only_query_subscriptions() {
         .unwrap();
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.add_server(server_id);
+    connect_query_manager_upstream(&mut client_qm, &_storage, server_id);
     let outbox = client_qm.sync_manager_mut().take_outbox();
 
     let replayed: Vec<_> = outbox
@@ -8647,7 +8673,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
 
     // Subscribe with sync
     let query = client_qm
@@ -8696,11 +8722,11 @@ fn mid_tier_forwards_query_subscription_upstream() {
 
     // Add upstream server
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
 
     // Add downstream client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // Clear the outbox (add_server queues full sync)
     let _ = mid_tier.sync_manager_mut().take_outbox();
@@ -8750,10 +8776,10 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
     let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_client(&mut mid_tier, &storage, client_id);
     let _ = mid_tier.sync_manager_mut().take_outbox();
 
     let query = mid_tier
@@ -8796,7 +8822,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
     let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
 
     let downstream_client = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(downstream_client);
+    connect_client(&mut mid_tier, &storage, downstream_client);
 
     let query = mid_tier
         .query("users")
@@ -8816,7 +8842,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
     let _ = mid_tier.sync_manager_mut().take_outbox();
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.add_server(upstream_id);
+    connect_query_manager_upstream(&mut mid_tier, &storage, upstream_id);
 
     let outbox = mid_tier.sync_manager_mut().take_outbox();
     let replayed: Vec<_> = outbox
@@ -8846,8 +8872,8 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // First, establish subscription
     let query = mid_tier
@@ -8911,8 +8937,8 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // Insert a matching row locally first (so it's in scope)
     let handle = mid_tier
@@ -9185,8 +9211,8 @@ fn e2e_client_receives_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
 
     // Clear initial sync messages (we want query-driven sync)
     let _ = client.sync_manager_mut().take_outbox();
@@ -9258,8 +9284,8 @@ fn e2e_client_receives_paginated_server_data_on_cold_offset_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9317,8 +9343,8 @@ fn e2e_client_receives_paginated_server_data_on_cold_offset_only_subscription() 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client.query("users").order_by("score").offset(2).build();
@@ -9391,8 +9417,8 @@ fn e2e_client_receives_array_subquery_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9467,8 +9493,8 @@ fn e2e_client_receives_recursive_hop_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9531,8 +9557,8 @@ fn e2e_client_receives_new_matching_row() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes to users with score > 50
@@ -9603,8 +9629,8 @@ fn e2e_client_does_not_receive_non_matching_row() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes to users with score > 50
@@ -9704,8 +9730,8 @@ fn e2e_permissions_prevent_sync() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes as Alice (user_id = "alice")
@@ -9772,8 +9798,8 @@ fn e2e_permissions_prevent_new_row_sync() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes as Alice
@@ -9927,12 +9953,12 @@ fn e2e_three_tier_policy_dependencies_must_sync_downstream() {
 
     client
         .sync_manager_mut()
-        .add_server(edge_server_id_for_client);
-    edge.sync_manager_mut().add_client(client_id_on_edge);
+        .add_server_with_storage(edge_server_id_for_client, false, &client_io);
+    connect_client(&mut edge, &edge_io, client_id_on_edge);
     edge.sync_manager_mut()
         .set_client_role(client_id_on_edge, ClientRole::Peer);
-    edge.sync_manager_mut().add_server(core_server_id_for_edge);
-    core.sync_manager_mut().add_client(edge_id_on_core);
+    connect_server(&mut edge, &edge_io, core_server_id_for_edge);
+    connect_client(&mut core, &core_io, edge_id_on_core);
     core.sync_manager_mut()
         .set_client_role(edge_id_on_core, ClientRole::Peer);
 
@@ -10042,10 +10068,10 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
 
     client
         .sync_manager_mut()
-        .add_server(edge_server_id_for_client);
-    edge.sync_manager_mut().add_client(client_id_on_edge);
-    edge.sync_manager_mut().add_server(core_server_id_for_edge);
-    core.sync_manager_mut().add_client(edge_id_on_core);
+        .add_server_with_storage(edge_server_id_for_client, false, &client_io);
+    connect_client(&mut edge, &edge_io, client_id_on_edge);
+    connect_server(&mut edge, &edge_io, core_server_id_for_edge);
+    connect_client(&mut core, &core_io, edge_id_on_core);
 
     let _ = client.sync_manager_mut().take_outbox();
     let _ = edge.sync_manager_mut().take_outbox();
@@ -10116,7 +10142,7 @@ fn remove_client_cleans_up_server_subscriptions() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
+    connect_client(&mut server_qm, &storage, alice);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query.clone());
@@ -10164,8 +10190,8 @@ fn remove_client_preserves_other_clients_subscriptions() {
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
-    server_qm.sync_manager_mut().add_client(bob);
+    connect_client(&mut server_qm, &storage, alice);
+    connect_client(&mut server_qm, &storage, bob);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query.clone());
@@ -10208,8 +10234,8 @@ fn remove_client_cleans_active_policy_checks() {
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
-    server_qm.sync_manager_mut().add_client(bob);
+    connect_client(&mut server_qm, &_storage, alice);
+    connect_client(&mut server_qm, &_storage, bob);
 
     let obj_id = crate::object::ObjectId::new();
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
@@ -10292,7 +10318,7 @@ fn remove_client_is_idempotent() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
+    connect_client(&mut server_qm, &storage, alice);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query);

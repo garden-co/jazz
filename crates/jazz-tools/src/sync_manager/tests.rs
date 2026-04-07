@@ -50,6 +50,25 @@ fn seed_visible_row(
         .remember_remote_row_version(row.row_id, BranchName::new(&row.branch), row);
 }
 
+fn add_client(sm: &mut SyncManager, io: &MemoryStorage, client_id: ClientId) {
+    sm.add_client_with_storage(io, client_id);
+}
+
+fn add_server(sm: &mut SyncManager, io: &MemoryStorage, server_id: ServerId) {
+    sm.add_server_with_storage(server_id, false, io);
+}
+
+fn set_client_query_scope(
+    sm: &mut SyncManager,
+    io: &MemoryStorage,
+    client_id: ClientId,
+    query_id: QueryId,
+    scope: HashSet<(ObjectId, BranchName)>,
+    session: Option<crate::query_manager::session::Session>,
+) {
+    sm.set_client_query_scope_with_storage(io, client_id, query_id, scope, session);
+}
+
 #[test]
 fn can_create_sync_manager() {
     let sm = SyncManager::new();
@@ -60,11 +79,14 @@ fn can_create_sync_manager() {
 #[test]
 fn set_query_scope_stores_session() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
 
-    sm.add_client(client_id);
-    sm.set_client_query_scope(
+    add_client(&mut sm, &io, client_id);
+    set_client_query_scope(
+        &mut sm,
+        &io,
         client_id,
         QueryId(1),
         HashSet::from([(row_id, BranchName::new("main"))]),
@@ -90,8 +112,9 @@ fn set_query_scope_stores_session() {
 #[test]
 fn send_query_subscription_includes_session() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let server_id = ServerId::new();
-    sm.add_server(server_id);
+    add_server(&mut sm, &io, server_id);
     sm.take_outbox();
 
     let query = QueryBuilder::new("users").branch("main").build();
@@ -139,7 +162,7 @@ fn schema_warning_from_server_relays_to_interested_clients() {
     let server_id = ServerId::new();
     let query_id = QueryId(42);
 
-    sm.add_client(client_id);
+    add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     sm.query_origin
         .entry(query_id)
@@ -347,11 +370,12 @@ fn row_version_state_changed_relays_to_clients_that_received_row_version_needed(
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
     let version_id = row.version_id();
 
-    sm.add_client(client_id);
+    add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
 
-    sm.set_client_query_scope_with_storage(
+    set_client_query_scope(
+        &mut sm,
         &io,
         client_id,
         QueryId(1),
@@ -403,11 +427,12 @@ fn row_version_state_changed_stops_relaying_after_scope_removal() {
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
 
-    sm.add_client(client_id);
+    add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
 
-    sm.set_client_query_scope_with_storage(
+    set_client_query_scope(
+        &mut sm,
         &io,
         client_id,
         QueryId(1),
@@ -416,7 +441,7 @@ fn row_version_state_changed_stops_relaying_after_scope_removal() {
     );
     let _ = sm.take_outbox();
 
-    sm.set_client_query_scope_with_storage(&io, client_id, QueryId(1), HashSet::new(), None);
+    set_client_query_scope(&mut sm, &io, client_id, QueryId(1), HashSet::new(), None);
     sm.process_from_server(
         &mut io,
         ServerId::new(),
@@ -446,9 +471,9 @@ fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row
     let server_id = ServerId::new();
     let row_id = ObjectId::new();
 
-    sm.add_client(client_id);
+    add_client(&mut sm, &io, client_id);
     sm.set_client_role(client_id, ClientRole::Peer);
-    sm.add_server(server_id);
+    add_server(&mut sm, &io, server_id);
 
     let newer = visible_row(row_id, "main", Vec::new(), 2_000, b"newer");
     seed_visible_row(&mut sm, &mut io, "users", newer.clone());
@@ -489,7 +514,7 @@ fn forward_update_to_servers_with_storage_replays_row_history_without_visible_re
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"history-only");
 
-    sm.add_server(server_id);
+    add_server(&mut sm, &io, server_id);
     sm.take_outbox();
     sm.object_manager
         .create_with_id(&mut io, row_id, Some(row_metadata("users")));
@@ -570,8 +595,9 @@ fn push_query_subscription(
 #[test]
 fn query_subscription_falls_back_to_client_session_when_payload_omits_it() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let client_id = ClientId::new();
-    sm.add_client(client_id);
+    add_client(&mut sm, &io, client_id);
     sm.set_client_session(
         client_id,
         crate::query_manager::session::Session::new("alice"),
@@ -591,10 +617,11 @@ fn query_subscription_falls_back_to_client_session_when_payload_omits_it() {
 #[test]
 fn remove_client_cleans_pending_query_subscriptions() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let alice = ClientId::new();
     let bob = ClientId::new();
-    sm.add_client(alice);
-    sm.add_client(bob);
+    add_client(&mut sm, &io, alice);
+    add_client(&mut sm, &io, bob);
 
     let query = QueryBuilder::new("users").build();
     sm.pending_query_subscriptions
@@ -623,10 +650,11 @@ fn remove_client_cleans_pending_query_subscriptions() {
 #[test]
 fn remove_client_cleans_outbox_entries() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let alice = ClientId::new();
     let bob = ClientId::new();
-    sm.add_client(alice);
-    sm.add_client(bob);
+    add_client(&mut sm, &io, alice);
+    add_client(&mut sm, &io, bob);
 
     let row = visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice");
     sm.outbox.push(OutboxEntry {
@@ -664,8 +692,9 @@ fn remove_client_cleans_outbox_entries() {
 #[test]
 fn remove_client_skips_when_inbox_entries_exist() {
     let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
     let alice = ClientId::new();
-    sm.add_client(alice);
+    add_client(&mut sm, &io, alice);
 
     sm.push_inbox(InboxEntry {
         source: Source::Client(alice),
