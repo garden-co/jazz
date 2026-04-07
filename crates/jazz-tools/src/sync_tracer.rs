@@ -102,15 +102,19 @@ impl SyncMessage {
     pub fn is_object_updated(&self) -> bool {
         matches!(
             self.payload,
-            SyncPayload::ObjectUpdated { .. }
-                | SyncPayload::RowVersionCreated { .. }
-                | SyncPayload::RowVersionNeeded { .. }
+            SyncPayload::RowVersionCreated { .. } | SyncPayload::RowVersionNeeded { .. }
         )
     }
 
-    /// True if this is a `PersistenceAck` payload.
+    /// True if this is a durability-state payload.
     pub fn is_persistence_ack(&self) -> bool {
-        matches!(self.payload, SyncPayload::PersistenceAck { .. })
+        matches!(
+            self.payload,
+            SyncPayload::RowVersionStateChanged {
+                confirmed_tier: Some(_),
+                ..
+            }
+        )
     }
 
     /// True if this is a `QuerySubscription` payload.
@@ -131,12 +135,9 @@ impl SyncMessage {
     /// Extract object_id from payloads that carry one.
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
             SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
-            SyncPayload::ObjectTruncated { object_id, .. } => Some(*object_id),
-            SyncPayload::PersistenceAck { object_id, .. } => Some(*object_id),
             _ => None,
         }
     }
@@ -154,17 +155,9 @@ impl SyncMessage {
     /// Extract commit IDs from update or durability payloads.
     pub fn commit_ids(&self) -> Vec<CommitId> {
         match &self.payload {
-            SyncPayload::ObjectUpdated { commits, .. } => commits.iter().map(|c| c.id()).collect(),
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => vec![row.version_id()],
             SyncPayload::RowVersionStateChanged { version_id, .. } => vec![*version_id],
-            SyncPayload::PersistenceAck {
-                confirmed_commits, ..
-            } => {
-                let mut ids: Vec<_> = confirmed_commits.iter().copied().collect();
-                ids.sort();
-                ids
-            }
             _ => vec![],
         }
     }
@@ -865,21 +858,6 @@ impl<'a> Normalizer<'a> {
 
     fn format_payload(&mut self, payload: &SyncPayload) -> String {
         match payload {
-            SyncPayload::ObjectUpdated {
-                object_id,
-                branch_name,
-                commits,
-                ..
-            } => {
-                let commit_ids: Vec<String> =
-                    commits.iter().map(|c| self.commit(&c.id())).collect();
-                format!(
-                    "obj:{} branch:{} commits:[{}]",
-                    self.object(object_id),
-                    self.branch(branch_name),
-                    commit_ids.join(","),
-                )
-            }
             SyncPayload::RowVersionCreated { row, .. } => {
                 format!(
                     "created row:{} branch:{} version:{}",
@@ -915,39 +893,6 @@ impl<'a> Normalizer<'a> {
                     "catalogue obj:{} type:{}",
                     self.object(&entry.object_id),
                     entry.object_type().unwrap_or("unknown"),
-                )
-            }
-            SyncPayload::ObjectTruncated {
-                object_id,
-                branch_name,
-                tails,
-            } => {
-                let mut sorted_tails: Vec<_> = tails.iter().collect();
-                sorted_tails.sort();
-                let tail_ids: Vec<String> = sorted_tails.iter().map(|id| self.commit(id)).collect();
-                format!(
-                    "obj:{} branch:{} tails:[{}]",
-                    self.object(object_id),
-                    self.branch(branch_name),
-                    tail_ids.join(","),
-                )
-            }
-            SyncPayload::PersistenceAck {
-                object_id,
-                branch_name,
-                confirmed_commits,
-                tier,
-            } => {
-                let mut sorted_commits: Vec<_> = confirmed_commits.iter().collect();
-                sorted_commits.sort();
-                let commit_ids: Vec<String> =
-                    sorted_commits.iter().map(|id| self.commit(id)).collect();
-                format!(
-                    "obj:{} branch:{} confirmed:[{}] tier:{:?}",
-                    self.object(object_id),
-                    self.branch(branch_name),
-                    commit_ids.join(","),
-                    tier,
                 )
             }
             SyncPayload::QuerySubscription { query_id, .. } => {
@@ -1017,20 +962,6 @@ fn format_message(msg: &SyncMessage, names: &Names<'_>) -> String {
 
 fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     match payload {
-        SyncPayload::ObjectUpdated {
-            object_id,
-            branch_name,
-            commits,
-            ..
-        } => {
-            let commit_ids: Vec<String> = commits.iter().map(|c| names.commit(&c.id())).collect();
-            format!(
-                "obj:{} branch:{} commits:[{}]",
-                names.object(object_id),
-                branch_name,
-                commit_ids.join(","),
-            )
-        }
         SyncPayload::RowVersionCreated { row, .. } => {
             format!(
                 "created row:{} branch:{} version:{}",
@@ -1066,39 +997,6 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 names.object(row_id),
                 branch_name,
                 names.commit(version_id),
-            )
-        }
-        SyncPayload::ObjectTruncated {
-            object_id,
-            branch_name,
-            tails,
-        } => {
-            let mut tail_ids: Vec<String> = tails.iter().map(|id| names.commit(id)).collect();
-            tail_ids.sort();
-            format!(
-                "obj:{} branch:{} tails:[{}]",
-                names.object(object_id),
-                branch_name,
-                tail_ids.join(","),
-            )
-        }
-        SyncPayload::PersistenceAck {
-            object_id,
-            branch_name,
-            confirmed_commits,
-            tier,
-        } => {
-            let mut commit_ids: Vec<String> = confirmed_commits
-                .iter()
-                .map(|id| names.commit(id))
-                .collect();
-            commit_ids.sort();
-            format!(
-                "obj:{} branch:{} confirmed:[{}] tier:{:?}",
-                names.object(object_id),
-                branch_name,
-                commit_ids.join(","),
-                tier,
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {

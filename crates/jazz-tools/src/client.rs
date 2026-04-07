@@ -1065,8 +1065,7 @@ fn parse_delay_ms(raw: &str) -> Option<Duration> {
 fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
     if !matches!(
         payload,
-        SyncPayload::ObjectUpdated { .. }
-            | SyncPayload::RowVersionCreated { .. }
+        SyncPayload::RowVersionCreated { .. }
             | SyncPayload::RowVersionNeeded { .. }
             | SyncPayload::RowVersionStateChanged { .. }
     ) {

@@ -5,7 +5,7 @@
 //! pattern as FjallStorage, delegating all logic to `storage_core` callbacks.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use rocksdb::{
@@ -13,17 +13,13 @@ use rocksdb::{
     TransactionDBOptions,
 };
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::sync_manager::DurabilityTier;
+use crate::object::ObjectId;
 
 use super::{
-    LoadedBranch, Storage, StorageError,
+    Storage, StorageError,
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
-        load_object_metadata_core, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
-        raw_table_scan_prefix_core, raw_table_scan_range_core, set_branch_tails_core,
-        store_ack_tier_core,
+        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
     },
 };
 
@@ -140,21 +136,6 @@ impl RocksDBStorage {
 
     // ---- transaction helpers ----
 
-    fn get_from_txn<'a>(
-        txn: &Transaction<'a, TransactionDB>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        txn.get(key.as_bytes())
-            .map_err(|e| StorageError::IoError(format!("rocksdb txn get: {e}")))
-    }
-
-    fn get_from_txn_cell<'a>(
-        txn: &RefCell<Transaction<'a, TransactionDB>>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        Self::get_from_txn(&txn.borrow(), key)
-    }
-
     fn put_on_txn<'a>(
         txn: &Transaction<'a, TransactionDB>,
         key: &str,
@@ -214,96 +195,6 @@ impl Storage for RocksDBStorage {
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
         self.with_inner(|inner| {
             load_object_metadata_core(id, |key| Self::get_from_db(&inner.db, key))
-        })
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.with_inner(|inner| {
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::get_from_db(&inner.db, key),
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-            )
-        })
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            append_commit_core(
-                object_id,
-                branch,
-                commit,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            delete_commit_core(
-                object_id,
-                branch,
-                commit_id,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-                |key| Self::delete_on_txn_cell(&txn, key),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            set_branch_tails_core(
-                object_id,
-                branch,
-                tails,
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-                |key| Self::delete_on_txn_cell(&txn, key),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            store_ack_tier_core(
-                commit_id,
-                tier,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
         })
     }
 

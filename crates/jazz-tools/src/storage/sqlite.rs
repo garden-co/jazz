@@ -7,20 +7,16 @@
 //! semantics for individual operations. Targets React Native / mobile.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::sync_manager::DurabilityTier;
+use crate::object::ObjectId;
 
 use super::{
-    LoadedBranch, Storage, StorageError,
+    Storage, StorageError,
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
-        load_object_metadata_core, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
-        raw_table_scan_prefix_core, raw_table_scan_range_core, set_branch_tails_core,
-        store_ack_tier_core,
+        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
     },
 };
 
@@ -245,93 +241,6 @@ impl Storage for SqliteStorage {
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
         self.with_inner(|inner| load_object_metadata_core(id, |key| Self::get(&inner.conn, key)))
-    }
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.with_inner(|inner| {
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::get(&inner.conn, key),
-                |prefix| Self::scan_prefix(&inner.conn, prefix),
-            )
-        })
-    }
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                append_commit_core(
-                    object_id,
-                    branch,
-                    commit,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
-            })
-        })
-    }
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                delete_commit_core(
-                    object_id,
-                    branch,
-                    commit_id,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                    |key| Self::delete(&inner.conn, key),
-                )
-            })
-        })
-    }
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            set_branch_tails_core(
-                object_id,
-                branch,
-                tails,
-                |key, value| Self::set(&inner.conn, key, value),
-                |key| Self::delete(&inner.conn, key),
-            )
-        })
-    }
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                store_ack_tier_core(
-                    commit_id,
-                    tier,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
-            })
-        })
     }
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {

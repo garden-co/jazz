@@ -1834,18 +1834,6 @@ impl QueryManager {
             .add_row_version(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        // Truncate branch: set tails = [delete_commit_id], removing all history
-        // (In ObjectManager, this would be done via set_tails or similar)
-        // For now, we just record the hard delete tombstone
-        let mut tail_ids = std::collections::HashSet::new();
-        tail_ids.insert(delete_commit_id);
-        let _ = self.sync_manager.object_manager.truncate_branch(
-            storage,
-            id,
-            self.current_branch(),
-            tail_ids,
-        );
-
         let _ = old_data;
         let _ = descriptor;
         let _ = self.apply_local_row_version(
@@ -1961,15 +1949,11 @@ impl QueryManager {
     /// With sync storage, commits are stored immediately.
     /// Used by `InsertResult::is_complete()` to check durability.
     pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
-        if let Some(obj) = self.sync_manager.object_manager.get(object_id) {
-            // Check all branches for the commit
-            for branch in obj.branches.values() {
-                if let Some(commit) = branch.commits.get(commit_id) {
-                    return matches!(commit.stored_state, crate::commit::StoredState::Stored);
-                }
-            }
-        }
-        false
+        self.sync_manager.object_manager.row_version_exists(
+            object_id,
+            &BranchName::new(self.current_branch()),
+            *commit_id,
+        )
     }
 }
 

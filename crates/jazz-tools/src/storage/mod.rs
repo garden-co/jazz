@@ -34,8 +34,7 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 
 use crate::catalogue::CatalogueEntry;
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
@@ -88,17 +87,6 @@ pub(crate) fn validate_index_value_size(
     key_codec::validate_index_entry_size(table, column, branch, value)
 }
 
-// ============================================================================
-// LoadedBranch - Branch data returned from storage
-// ============================================================================
-
-/// Branch data loaded from storage.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LoadedBranch {
-    pub commits: Vec<Commit>,
-    pub tails: HashSet<CommitId>,
-}
-
 pub type ObjectMetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
 pub type RawTableRows = Vec<(String, Vec<u8>)>;
 
@@ -140,48 +128,6 @@ pub trait Storage {
             "object metadata scans are not implemented for this backend yet".to_string(),
         ))
     }
-
-    /// Load a branch's commits and tails. Returns None if branch doesn't exist.
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError>;
-
-    /// Append a commit to a branch.
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError>;
-
-    /// Delete a commit from a branch.
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError>;
-
-    /// Set or clear the branch truncation tails.
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError>;
-
-    // ================================================================
-    // Persistence ack storage
-    // ================================================================
-
-    /// Record that a commit was persisted at the given tier.
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError>;
 
     // ================================================================
     // Ordered raw-table storage
@@ -505,49 +451,6 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).scan_object_metadata()
     }
 
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        (**self).load_branch(object_id, branch)
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        (**self).append_commit(object_id, branch, commit)
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        (**self).delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        (**self).set_branch_tails(object_id, branch, tails)
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        (**self).store_ack_tier(commit_id, tier)
-    }
-
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         (**self).raw_table_put(table, key, value)
     }
@@ -747,9 +650,6 @@ pub struct MemoryStorage {
 
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
-
-    /// Persistence ack tiers per commit.
-    ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Row-region storage keyed by table.
     row_regions: HashMap<String, TableRowRegions>,
 }
@@ -758,14 +658,6 @@ pub struct MemoryStorage {
 #[derive(Debug, Clone, Default)]
 struct ObjectData {
     metadata: HashMap<String, String>,
-    branches: HashMap<BranchName, BranchData>,
-}
-
-/// Internal branch storage structure.
-#[derive(Debug, Clone, Default)]
-struct BranchData {
-    commits: Vec<Commit>,
-    tails: HashSet<CommitId>,
 }
 
 impl MemoryStorage {
@@ -886,13 +778,7 @@ impl Storage for MemoryStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.objects.insert(
-            id,
-            ObjectData {
-                metadata,
-                branches: HashMap::new(),
-            },
-        );
+        self.objects.insert(id, ObjectData { metadata });
         Ok(())
     }
 
@@ -911,98 +797,6 @@ impl Storage for MemoryStorage {
             .collect();
         objects.sort_by_key(|(object_id, _)| *object_id);
         Ok(objects)
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        let Some(obj) = self.objects.get(&object_id) else {
-            return Ok(None);
-        };
-        let Some(branch_data) = obj.branches.get(branch) else {
-            return Ok(None);
-        };
-        let mut commits = branch_data.commits.clone();
-        for commit in &mut commits {
-            if let Some(tiers) = self.ack_tiers.get(&commit.id()) {
-                commit.ack_state.confirmed_tiers = tiers.clone();
-            }
-        }
-        Ok(Some(LoadedBranch {
-            commits,
-            tails: branch_data.tails.clone(),
-        }))
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        let obj = self.objects.entry(object_id).or_default();
-        let branch_data = obj.branches.entry(*branch).or_default();
-
-        let commit_id = commit.id();
-
-        // Remove parents from tips
-        for parent in &commit.parents {
-            branch_data.tails.remove(parent);
-        }
-
-        // Add this commit as a tip
-        branch_data.tails.insert(commit_id);
-        branch_data.commits.push(commit);
-
-        Ok(())
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.commits.retain(|c| c.id() != commit_id);
-            branch_data.tails.remove(&commit_id);
-        }
-        Ok(())
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.tails = tails.unwrap_or_default();
-        }
-        Ok(())
-    }
-
-    // ================================================================
-    // Persistence ack storage
-    // ================================================================
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.ack_tiers.entry(commit_id).or_default().insert(tier);
-        Ok(())
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
