@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { loadWasmModule } from "./runtime/client.js";
 import {
   createMigration,
@@ -688,12 +688,14 @@ describe("cli migrations", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const filePath = await createMigration({
+      schemaDir: root,
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
       fromHash: fromShortHash,
       toHash: toShortHash,
     });
+    assert(filePath);
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
@@ -751,12 +753,14 @@ describe("cli migrations", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const filePath = await createMigration({
+      schemaDir: root,
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
       fromHash: fromShortHash,
       toHash: toShortHash,
     });
+    assert(filePath);
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain("renameTables: {");
@@ -814,12 +818,14 @@ describe("cli migrations", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const filePath = await createMigration({
+      schemaDir: root,
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
       fromHash: fromShortHash,
       toHash: toShortHash,
     });
+    assert(filePath);
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).not.toContain("renameTables: {");
