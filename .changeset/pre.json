@@ -63,7 +63,6 @@
     "fix-subscription-callback-race",
     "fix-sync-soft-delete-permissions",
     "fix-timestamp-lens-default",
-    "fjall-native-storage",
     "flat-spoons-film",
     "green-humans-divide",
     "jwks-rotation-self-hosted",
