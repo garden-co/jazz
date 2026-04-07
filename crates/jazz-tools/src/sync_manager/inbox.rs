@@ -18,7 +18,7 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
         row_count = warning.row_count,
         from_hash = %warning.from_hash,
         to_hash = %warning.to_hash,
-        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools@alpha migrations create {} {}`",
         warning.row_count,
         warning.table_name,
         short_hash(&warning.from_hash),

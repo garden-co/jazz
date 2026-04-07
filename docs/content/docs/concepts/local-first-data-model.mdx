@@ -1,7 +1,7 @@
 ---
 title: Local-First Data Model
 description: An overview of how Jazz manages versions, history, conflicts, and avoids loading states.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 Jazz embeds a database on each device and syncs to the server in the background.
@@ -23,7 +23,11 @@ Devices can't show data they don't have. On the very first load from the server,
 
 ## Versioned objects
 
-Every update or change made to a row in Jazz is recorded as a **commit**, and each commit results in a new, immutable version of the row it affects. Under the hood, each row's history is an append-only log of commits. The full history of each row is available, allowing you to view a row as it looked at any point in history, including intermediate, conflicting states.
+Under the hood, every row in Jazz is a standalone versioned object. Each row has its own identity (a UUIDv7, which is the `id` column) and can sync independently.
+
+Every change to a row&hairsp;—&hairsp;an insert, update, or delete&hairsp;—&hairsp;is recorded as a **commit**. Each commit is immutable and produces a new version of the row it affects. Because commits are content-addressed, two clients that independently make the same change will produce identical commits, and sync can deduplicate them automatically.
+
+The full history of each row is preserved, so you can view a row as it looked at any point in time, including intermediate or conflicting states.
 
 Each version links back to its parent, forming a chain.
 
