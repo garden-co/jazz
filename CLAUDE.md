@@ -1,6 +1,6 @@
 # Jazz
 
-Distributed, local-first relational database. Rust core (`crates/groove`), TypeScript client layers, WASM + NAPI bindings. SQL is available (subset, custom dialect) but most consumers use higher-level DSLs — what matters is relational semantics.
+Distributed, local-first relational database. Rust core, TypeScript client layers, WASM + NAPI bindings. SQL is available (subset, custom dialect) but most consumers use higher-level DSLs — what matters is relational semantics.
 
 ## Specs
 
@@ -14,35 +14,9 @@ Communicate tersely without losing precision or warmth.
 
 **TDD: red then green.** Write the test first, watch it fail, then make it pass. Broken tests are valuable — they document what doesn't work yet. When writing tests, mentally black-box the thing under test: consider only type signatures and spec'd contracts, not implementation details. The less you peek at internals, the less likely you are to write tests that pass for the wrong reasons.
 
-**E2E over unit tests.** Prefer high-level integration tests (SchemaManager, RuntimeCore) over internal-helper tests. Exception: tiny unit tests for isolated pure functions.
-
-**Tests should read like real usage.** Prefer realistic fixtures (domain-shaped objects/metadata) and human actor names (`alice`, `bob`, etc.) over generic placeholders (`obj1`, `client1`, `a`, `b`) unless the test is specifically about abstract graph mechanics.
-
-**Use ASCII flow sketches when valuable.** For tests with non-trivial causal flow (multi-client sync, branching/merging, permission pipelines), include a short ASCII-art graph/sequence comment showing the scenario being asserted.
+**E2E over unit tests.** Prefer high-level integration tests over internal-helper tests. Exception: tiny unit tests for isolated pure functions.
 
 **Builds:** `pnpm build` (everything), `pnpm test` (everything), via turbo.
-
-## Completion bias
-
-Your agentic harness and training heavily bias you toward completion. You may feel like time is running out. It isn't. We are doing complex work across multiple sessions and team members. Going slow is expected.
-
-Priorities, in order:
-
-1. **Correctness and design fidelity** — implement the design, not a shortcut that compiles
-2. **Honesty** — surface what's broken, what you don't understand, what doesn't match your expectations
-3. **Clarity** — leave clear TODOs, clear red tests, clear summaries of where things stand
-4. Completion (eventually, as a natural consequence of the above)
-
-Concretely:
-
-- Intermediate breakage during complex work is fine. Don't add shims or workarounds to make each micro-step compile.
-- Never weaken assertions, add `#[cfg(test)]` backdoors, or explain away failures to reach "done." If a test fails, that's information — investigate or leave it red.
-- Ask before moving to the next phase. "It compiles" is not "it works."
-- It's OK to stop mid-plan with a clear summary. Don't rush to a false finish.
-
-## After hard problems
-
-When something was harder than expected, pause and reflect 5-whys-style: where did the difficulty actually come from? Was it a wrong assumption, a missing spec, an architectural gap? Write it down (in memory or as a spec update) so we don't repeat it.
 
 ## Skills
 
@@ -50,50 +24,34 @@ Repo-local skills live in `.agents/skills/`. Check them proactively.
 
 ## Quick Capture: Ideas & Issues
 
-Low-friction capture only — no shaping, no implementation. Use what's in the prompt; don't re-ask what's already stated. After every write to `todo/`, run `bash scripts/update-todo.sh`.
+Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `todo/`, run `bash scripts/update-todo.sh`.
 
 ### Ideas → `todo/ideas/{priority}/{idea-name}.md`
 
-Priority buckets: `1_mvp/` (must-have for first adopters), `2_launch/` (needed for public launch), `3_later/` (post-launch). Default to `1_mvp/` unless the user specifies otherwise.
+Use `1_mvp/`, `2_launch/`, or `3_later/`. Default to `1_mvp/`.
 
-Template (all fields optional, `unknown` always valid):
+Template:
 
 ```markdown
 # {Idea Title}
 
 ## What
 
-## Why
-
-## Rough appetite
-
-[small / medium / big / unknown]
-
 ## Notes
 ```
 
-After saving, list all ideas grouped by bucket with their `What` line. If mature enough, suggest: _"Run `/project` to shape this into a spec."_
-
-Rules: no gates, no refinement loops, no code, in plain english. Ideas are uncommitted — capturing one is not a decision to build it.
+After saving, list ideas by bucket with their `What` line. Plain English only. Ideas are uncommitted.
 
 ### Issues → `todo/issues/{issue-name}.md`
 
-For bugs and focused problems — not feature ideas. Kebab-case filename from description. Prefix `test_` for test-related issues.
+For bugs and focused problems, not feature ideas. Use kebab-case filenames. Prefix `test_` for test-related issues.
 
-Template (`What` required, rest optional — use `unknown`/`N/A`):
+Template:
 
 ```markdown
 # {Issue Title}
 
 ## What
-
-## Where
-
-## Steps to reproduce
-
-## Expected
-
-## Actual
 
 ## Priority
 
@@ -102,4 +60,4 @@ Template (`What` required, rest optional — use `unknown`/`N/A`):
 ## Notes
 ```
 
-After saving, list all issues with their `What` line. Do not investigate or fix — capture only. If it sounds like a feature, route to Idea or Spec workflow instead.
+After saving, list issues with their `What` line. Do not investigate or fix.
