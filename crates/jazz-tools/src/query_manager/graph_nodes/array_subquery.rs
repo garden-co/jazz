@@ -397,7 +397,7 @@ impl ArraySubqueryNode {
         let element = outer_tuple.get(0)?;
         let outer_id = element.id();
         let outer_content = element.content()?;
-        let commit_id = element.commit_id()?;
+        let version_id = element.version_id()?;
         let row_provenance = element.row_provenance()?.clone();
 
         // Decode outer values
@@ -417,7 +417,7 @@ impl ArraySubqueryNode {
             vec![TupleElement::Row {
                 id: outer_id,
                 content: output_content,
-                commit_id,
+                version_id,
                 row_provenance,
             }],
             provenance,
@@ -690,7 +690,7 @@ mod tests {
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
             content: user_data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
@@ -733,7 +733,7 @@ mod tests {
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,
             content: user_data,
-            commit_id: CommitId([0; 32]),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 

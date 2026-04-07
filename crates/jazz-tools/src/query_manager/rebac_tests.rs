@@ -553,7 +553,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     .unwrap();
 
     let update_commit = stored_row_commit(
-        smallvec![grand_handle.row_commit_id],
+        smallvec![grand_handle.row_version_id],
         update_content,
         4200,
         ObjectId::new().to_string(),
@@ -2459,7 +2459,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         )
         .unwrap();
     let protected_obj = protected_handle.row_id;
-    let initial_commit = protected_handle.row_commit_id;
+    let initial_commit = protected_handle.row_version_id;
 
     // Get object metadata for later use in update payloads
     let protected_metadata = qm
@@ -3266,7 +3266,7 @@ fn synced_soft_delete_should_use_delete_policy() {
     let delete_content =
         encode_row(&protected_descriptor, &[Value::Text("initial".into())]).unwrap();
     let delete_commit = stored_row_commit(
-        smallvec![protected.row_commit_id],
+        smallvec![protected.row_version_id],
         delete_content,
         2000,
         ObjectId::new().to_string(),

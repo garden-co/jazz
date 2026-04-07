@@ -785,7 +785,7 @@ fn column_count_mismatch_error() {
 }
 
 #[test]
-fn insert_returns_handle_with_commit_id() {
+fn insert_returns_handle_with_version_id() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -809,7 +809,7 @@ fn insert_returns_handle_with_commit_id() {
     assert_eq!(inserted.1[1], Value::Integer(100));
 
     // Handle should have a valid row commit ID
-    assert!(handle.row_commit_id.0 != [0; 32]);
+    assert!(handle.row_version_id.0 != [0; 32]);
 }
 
 #[test]
@@ -1630,7 +1630,7 @@ fn synced_update_is_visible_in_query() {
         )
         .unwrap();
     let row_id = insert_handle.row_id;
-    let first_commit_id = insert_handle.row_commit_id;
+    let first_commit_id = insert_handle.row_version_id;
 
     // Process to settle the initial insert
     qm.process(&mut storage);
@@ -1947,7 +1947,7 @@ fn synced_update_emits_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
+    let first_commit_id = handle.row_version_id;
 
     // Subscribe to all users
     let query = qm.query("users").build();
@@ -2461,7 +2461,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
+    let first_commit_id = handle.row_version_id;
 
     // Subscribe to users
     let query = qm.query("users").build();
@@ -2864,7 +2864,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
 
     assert_eq!(
         delete_row.version_id(),
-        delete_handle.delete_commit_id,
+        delete_handle.delete_version_id,
         "visible row should be the delete version"
     );
     assert_eq!(
@@ -3217,7 +3217,7 @@ fn undelete_syncs_row_version_created_to_server() {
     match &forwarded.payload {
         SyncPayload::RowVersionCreated { row, .. } => {
             assert_eq!(row.row_id, handle.row_id);
-            assert_eq!(row.version_id(), undeleted.row_commit_id);
+            assert_eq!(row.version_id(), undeleted.row_version_id);
             assert!(!row.is_deleted);
             assert!(!row.is_soft_deleted());
             assert!(!row.is_hard_deleted());
@@ -3288,7 +3288,7 @@ fn hard_delete_syncs_row_version_created_to_server() {
     match &forwarded.payload {
         SyncPayload::RowVersionCreated { row, .. } => {
             assert_eq!(row.row_id, handle.row_id);
-            assert_eq!(row.version_id(), hard_delete.delete_commit_id);
+            assert_eq!(row.version_id(), hard_delete.delete_version_id);
             assert!(row.is_deleted);
             assert!(row.is_hard_deleted());
             assert_eq!(row.data, Vec::<u8>::new());
@@ -8964,7 +8964,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         .expect("row should be visible before upstream update")
         .updated_at;
     let commit = stored_row_commit(
-        smallvec![handle.row_commit_id],
+        smallvec![handle.row_version_id],
         row_data,
         base_timestamp + 1,
         author.to_string(),

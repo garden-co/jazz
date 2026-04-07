@@ -27,7 +27,7 @@ enum WriteSchemaResolution {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
-    pub commit_id: CommitId,
+    pub version_id: CommitId,
     pub content: Vec<u8>,
 }
 
@@ -229,7 +229,7 @@ impl QueryManager {
         &self,
         table: &str,
         content: &[u8],
-        commit_id: CommitId,
+        version_id: CommitId,
         branch_name: BranchName,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
@@ -257,7 +257,7 @@ impl QueryManager {
 
         let transformer = LensTransformer::new(auth_context, table);
         transformer
-            .transform(content, commit_id, source_hash)
+            .transform(content, version_id, source_hash)
             .ok()
             .map(|result| result.data)
     }
@@ -573,7 +573,7 @@ impl QueryManager {
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
-        commit_id: CommitId,
+        version_id: CommitId,
         branch_name: BranchName,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
@@ -583,11 +583,11 @@ impl QueryManager {
             && source_hash != context.schema_context.current_hash
         {
             let transformer = LensTransformer::new(context.schema_context, context.table);
-            match transformer.transform(&content, commit_id, source_hash) {
+            match transformer.transform(&content, version_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
-                        commit_id,
+                        version_id,
                         content: result.data,
                     });
                 }
@@ -613,7 +613,7 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
-            commit_id,
+            version_id,
             content,
         })
     }

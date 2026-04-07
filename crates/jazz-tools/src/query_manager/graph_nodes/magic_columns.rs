@@ -23,12 +23,12 @@ fn tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
             (
                 TupleElement::Row {
                     content: old_content,
-                    commit_id: old_commit,
+                    version_id: old_commit,
                     ..
                 },
                 TupleElement::Row {
                     content: new_content,
-                    commit_id: new_commit,
+                    version_id: new_commit,
                     ..
                 },
             ) => old_content != new_content || old_commit != new_commit,
@@ -353,7 +353,7 @@ impl MagicColumnsNode {
             *element = TupleElement::Row {
                 id: row.id,
                 content: new_content,
-                commit_id: row.commit_id,
+                version_id: row.version_id,
                 row_provenance: row.provenance,
             };
         }

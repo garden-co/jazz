@@ -485,7 +485,7 @@ impl QueryManager {
                 table,
                 resolved.branch_name.as_str().to_string(),
                 resolved.content,
-                resolved.commit_id,
+                resolved.version_id,
                 row.row_provenance(),
             )
         })
@@ -614,19 +614,20 @@ impl QueryManager {
             &provenance,
             None,
         );
-        let row_commit_id = self
+        let row_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, object_id, &branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        tracing::trace!(%object_id, ?row_commit_id, "apply local row insert");
-        let _ = self.apply_local_row_version(storage, object_id, branch.as_str(), row_commit_id)?;
+        tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
+        let _ =
+            self.apply_local_row_version(storage, object_id, branch.as_str(), row_version_id)?;
 
-        tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
+        tracing::debug!(%object_id, ?row_version_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
             row_id: object_id,
-            row_commit_id,
+            row_version_id,
             row_values: values.to_vec(),
         })
     }
@@ -749,17 +750,17 @@ impl QueryManager {
         // Add commit with row data to specified branch
         let row =
             self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
-        let row_commit_id = self
+        let row_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, object_id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        let _ = self.apply_local_row_version(storage, object_id, branch, row_commit_id)?;
+        let _ = self.apply_local_row_version(storage, object_id, branch, row_version_id)?;
 
         Ok(InsertResult {
             row_id: object_id,
-            row_commit_id,
+            row_version_id,
             row_values: values.to_vec(),
         })
     }
@@ -1343,7 +1344,7 @@ impl QueryManager {
             write_context,
             &new_provenance,
         )?;
-        let commit_id = self.commit_prepared_update_write(
+        let version_id = self.commit_prepared_update_write(
             storage,
             branch.as_str(),
             id,
@@ -1352,7 +1353,7 @@ impl QueryManager {
             &new_provenance,
         )?;
 
-        Ok(commit_id)
+        Ok(version_id)
     }
 
     pub fn update_with_session<H: Storage>(
@@ -1395,7 +1396,7 @@ impl QueryManager {
             .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
         let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
-        let commit_id = self.commit_prepared_update_write(
+        let version_id = self.commit_prepared_update_write(
             storage,
             branch,
             id,
@@ -1407,7 +1408,7 @@ impl QueryManager {
         let _ = existing_branch_data;
         let _ = was_soft_deleted;
 
-        Ok(commit_id)
+        Ok(version_id)
     }
 
     pub fn write_existing_row_on_branch_with_session<H: Storage>(
@@ -1566,19 +1567,19 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
-        let delete_commit_id = self
+        let delete_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         let branch = self.current_branch();
-        tracing::trace!(%id, ?delete_commit_id, "apply local soft delete");
-        let _ = self.apply_local_row_version(storage, id, branch.as_str(), delete_commit_id)?;
+        tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
+        let _ = self.apply_local_row_version(storage, id, branch.as_str(), delete_version_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            delete_version_id,
         })
     }
 
@@ -1704,7 +1705,7 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
-        let delete_commit_id = self
+        let delete_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, id, branch, delete_row)
@@ -1712,11 +1713,11 @@ impl QueryManager {
 
         let _ = old_branch_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, branch, delete_commit_id)?;
+        let _ = self.apply_local_row_version(storage, id, branch, delete_version_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            delete_version_id,
         })
     }
 
@@ -1808,7 +1809,7 @@ impl QueryManager {
             &row_provenance,
             None,
         );
-        let row_commit_id = self
+        let row_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, id, self.current_branch(), row)
@@ -1818,12 +1819,12 @@ impl QueryManager {
             storage,
             id,
             self.current_branch().as_str(),
-            row_commit_id,
+            row_version_id,
         )?;
 
         Ok(InsertResult {
             row_id: id,
-            row_commit_id,
+            row_version_id,
             row_values: values.to_vec(),
         })
     }
@@ -1889,7 +1890,7 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Hard),
         );
-        let delete_commit_id = self
+        let delete_version_id = self
             .sync_manager
             .object_manager
             .add_row_version(storage, id, self.current_branch(), delete_row)
@@ -1901,12 +1902,12 @@ impl QueryManager {
             storage,
             id,
             self.current_branch().as_str(),
-            delete_commit_id,
+            delete_version_id,
         )?;
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            delete_version_id,
         })
     }
 
@@ -2008,11 +2009,11 @@ impl QueryManager {
     ///
     /// With sync storage, commits are stored immediately.
     /// Used by `InsertResult::is_complete()` to check durability.
-    pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
+    pub fn is_version_stored(&self, object_id: ObjectId, version_id: &CommitId) -> bool {
         self.sync_manager
             .object_manager
             .visible_row(object_id, BranchName::new(self.current_branch()))
-            .is_some_and(|row| row.version_id() == *commit_id)
+            .is_some_and(|row| row.version_id() == *version_id)
     }
 }
 

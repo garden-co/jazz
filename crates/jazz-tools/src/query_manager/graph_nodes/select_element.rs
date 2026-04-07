@@ -51,7 +51,7 @@ impl SelectElementNode {
     fn tuple_content_changed(old_tuple: &Tuple, new_tuple: &Tuple) -> bool {
         match (old_tuple.to_single_row(), new_tuple.to_single_row()) {
             (Some(old_row), Some(new_row)) => {
-                old_row.data != new_row.data || old_row.commit_id != new_row.commit_id
+                old_row.data != new_row.data || old_row.version_id != new_row.version_id
             }
             _ => false,
         }
@@ -185,13 +185,13 @@ mod tests {
             TupleElement::Row {
                 id: left_id,
                 content: left_data,
-                commit_id: CommitId([0; 32]),
+                version_id: CommitId([0; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: right_id,
                 content: right_data,
-                commit_id: CommitId([0; 32]),
+                version_id: CommitId([0; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ])

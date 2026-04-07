@@ -2005,7 +2005,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
         .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
-    let row_commit_id =
+    let row_version_id =
         *s.a.schema_manager()
             .query_manager()
             .sync_manager()
@@ -2021,7 +2021,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
         payload: SyncPayload::RowVersionStateChanged {
             row_id: ObjectId::new(),
             branch_name,
-            version_id: row_commit_id,
+            version_id: row_version_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },

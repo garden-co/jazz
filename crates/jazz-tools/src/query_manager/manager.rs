@@ -123,8 +123,8 @@ pub struct QueryHandle(pub u64);
 pub struct InsertResult {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// CommitId of the row data.
-    pub row_commit_id: CommitId,
+    /// Version ID of the row data.
+    pub row_version_id: CommitId,
     /// Inserted row values in table column order.
     pub row_values: Vec<Value>,
 }
@@ -134,8 +134,8 @@ pub struct InsertResult {
 pub struct DeleteHandle {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// CommitId of the delete tombstone commit.
-    pub delete_commit_id: CommitId,
+    /// Version ID of the delete tombstone row.
+    pub delete_version_id: CommitId,
 }
 
 impl InsertResult {
@@ -143,7 +143,7 @@ impl InsertResult {
     ///
     /// Must call `QueryManager::process()` between checks to drive storage operations.
     pub fn is_complete(&self, qm: &QueryManager) -> bool {
-        qm.is_commit_stored(self.row_id, &self.row_commit_id)
+        qm.is_version_stored(self.row_id, &self.row_version_id)
     }
 
     /// Check if the row is indexed (appears in the _id index).
@@ -1665,7 +1665,7 @@ impl QueryManager {
                 Ok(result) => {
                     return Some(LoadedRow::new(
                         result.data,
-                        result.commit_id,
+                        result.version_id,
                         row_provenance,
                         [(row_id, BranchName::new(&source_branch))]
                             .into_iter()
@@ -1744,7 +1744,7 @@ impl QueryManager {
             .iter()
             .filter_map(|row| {
                 previous_rows.get(&row.id).and_then(|previous| {
-                    (previous.data != row.data || previous.commit_id != row.commit_id)
+                    (previous.data != row.data || previous.version_id != row.version_id)
                         .then(|| (previous.clone(), row.clone()))
                 })
             })
@@ -1756,7 +1756,7 @@ impl QueryManager {
                     && previous_rows
                         .get(&row.id)
                         .map(|previous| {
-                            previous.data == row.data && previous.commit_id == row.commit_id
+                            previous.data == row.data && previous.version_id == row.version_id
                         })
                         .unwrap_or(false)
                     && previous_indices.get(&row.id) != next_indices.get(&row.id)
