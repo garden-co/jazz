@@ -96,8 +96,8 @@ jobs:
       - name: Build native benchmark binaries
         run: |
           set -euo pipefail
-          cargo build --release -p jazz-tools --features client --example realistic_bench
-          cargo bench -p jazz-tools --bench realistic_phase1 --no-run
+          cargo build --release -p jazz-tools --features client,rocksdb --example realistic_bench
+          cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run
 
       - name: Run native benchmark suite
         run: |
