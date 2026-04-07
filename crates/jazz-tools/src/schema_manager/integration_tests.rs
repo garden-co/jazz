@@ -1314,6 +1314,97 @@ mod tests {
         );
     }
 
+    /// Existing old-schema subscriptions must recompile when a renamed future branch
+    /// becomes live, so new-table writes remain visible through the old table name.
+    #[test]
+    fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
+        // v1 current: users(id, email) -- subscribe(users on v1 branch)
+        //                                |
+        //                                | add live schema v2 + RenameTable users -> people
+        //                                v
+        // v2 live:    people(id, email) -- ingest people row on v2 branch
+        //
+        // The original `users` subscription should be recompiled to read both branches
+        // and surface the v2 row through the rename lens.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v1.clone(), "dev", "main");
+        let mut storage = MemoryStorage::new();
+
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens);
+
+        let v2_table = v2.get(&TableName::new("people")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v2_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "people",
+            v2_hash,
+            row_id,
+            &v2_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
+    /// Rows from renamed tables are migrated on write (in both updates and deletes).
     #[test]
     fn table_rename_update_and_delete_copy_on_write() {
         let v1 = SchemaBuilder::new()
