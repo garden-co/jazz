@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
   benchmarksForSuite,
   DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
@@ -440,28 +441,53 @@ function stripAnsi(value) {
   return String(value ?? "").replace(/\x1B\[[0-9;]*m/g, "");
 }
 
+export const NATIVE_EXAMPLE_FEATURES = "client,rocksdb";
+export const NATIVE_CRITERION_FEATURES = "rocksdb";
+
+export function buildNativeExampleBaseCommand(benchmark, args) {
+  const profilePath =
+    benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+
+  return [
+    "cargo",
+    "run",
+    "--release",
+    "-p",
+    "jazz-tools",
+    "--features",
+    NATIVE_EXAMPLE_FEATURES,
+    "--example",
+    "realistic_bench",
+    "--",
+    "--profile",
+    profilePath,
+    "--scenario",
+    benchmark.scenario_path,
+  ];
+}
+
+export function buildNativeCriterionCommand(benchmark) {
+  return [
+    "cargo",
+    "bench",
+    "-p",
+    "jazz-tools",
+    "--features",
+    NATIVE_CRITERION_FEATURES,
+    "--bench",
+    "realistic_phase1",
+    "--",
+    benchmark.criterion_filter,
+  ];
+}
+
 async function runNativeBenchmark(benchmark, args) {
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
+    const env = { ...process.env, ...(benchmark.env ?? {}) };
     const profilePath =
       benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
-    const env = { ...process.env, ...(benchmark.env ?? {}) };
-    const baseCommand = [
-      "cargo",
-      "run",
-      "--release",
-      "-p",
-      "jazz-tools",
-      "--features",
-      "client",
-      "--example",
-      "realistic_bench",
-      "--",
-      "--profile",
-      profilePath,
-      "--scenario",
-      benchmark.scenario_path,
-    ];
+    const baseCommand = buildNativeExampleBaseCommand(benchmark, args);
     const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
     const attempts = [];
     const scenarios = [];
@@ -631,18 +657,7 @@ async function runNativeBenchmark(benchmark, args) {
 
   const logFile = path.resolve(args.outDir, benchmark.log_path);
 
-  const command = [
-    "cargo",
-    "bench",
-    "-p",
-    "jazz-tools",
-    "--features",
-    "fjall",
-    "--bench",
-    "realistic_phase1",
-    "--",
-    benchmark.criterion_filter,
-  ];
+  const command = buildNativeCriterionCommand(benchmark);
 
   console.log(`\n==> ${benchmark.label}`);
   console.log(shellQuote(command));
@@ -896,7 +911,9 @@ async function main() {
   console.log(fs.readFileSync(summaryFile, "utf8"));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    process.exit(1);
+  });
+}
