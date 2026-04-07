@@ -76,3 +76,12 @@ test("benchmark workflow prebuilds the RocksDB-backed native binaries", () => {
     /cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run/,
   );
 });
+
+test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/benchmarks.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflow, /pnpm --filter jazz-napi build/);
+});
