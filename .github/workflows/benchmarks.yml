@@ -251,6 +251,9 @@ jobs:
       - name: Build jazz-tools server binary
         run: cargo build -p jazz-tools --features cli
 
+      - name: Build jazz-napi package
+        run: pnpm --dir crates/jazz-napi run build
+
       - name: Build jazz-wasm package
         run: pnpm --dir crates/jazz-wasm run build
 
