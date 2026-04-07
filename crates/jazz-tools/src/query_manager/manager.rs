@@ -8,7 +8,10 @@ use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
-use crate::schema_manager::{LensTransformer, SchemaContext};
+use crate::schema_manager::{
+    LensTransformer, SchemaContext, origin_schema_hash_from_metadata, resolve_current_table_name,
+    translate_table_name_to_schema,
+};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
@@ -911,7 +914,6 @@ impl QueryManager {
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = subscription.branches.clone();
-            let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
 
@@ -973,11 +975,19 @@ impl QueryManager {
 
                     let (_, commit_id, content, source_branch, is_soft_deleted, row_provenance) =
                         best.filter(|(_, _, content, _, _, _)| !content.is_empty())?;
+                    let obj_table_name: &str = obj.original_table_name();
+                    let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
+                    let current_table = resolve_current_table_name(
+                        &schema_context,
+                        obj_table_name,
+                        origin_schema_hash.as_ref(),
+                    )
+                    .unwrap_or(obj_table_name.to_string());
 
                     if let Some(&source_hash) = branch_schema_map.get(&source_branch)
                         && source_hash != schema_context.current_hash
                     {
-                        let transformer = LensTransformer::new(&schema_context, &table);
+                        let transformer = LensTransformer::new(&schema_context, &current_table);
                         match transformer.transform(&content, commit_id, source_hash) {
                             Ok(result) => {
                                 if is_soft_deleted && !include_deleted {
@@ -994,14 +1004,14 @@ impl QueryManager {
                             }
                             Err(err) => {
                                 schema_warnings.record(
-                                    &table,
+                                    &current_table,
                                     source_hash,
                                     schema_context.current_hash,
                                 );
                                 tracing::debug!(
                                     sub_id = sub_id.0,
                                     row_id = %id,
-                                    table = %table,
+                                    table = %current_table,
                                     source_branch = %source_branch,
                                     source_schema = %source_hash.short(),
                                     target_schema = %schema_context.current_hash.short(),
@@ -1237,16 +1247,6 @@ impl QueryManager {
             .map(|(content, _)| content)
     }
 
-    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
-        let bytes = hex::decode(hex_str).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(SchemaHash::from_bytes(arr))
-    }
-
     fn catalogue_manifest_append(
         metadata: &HashMap<String, String>,
         object_id: ObjectId,
@@ -1259,7 +1259,7 @@ impl QueryManager {
         let op = match type_str.as_str() {
             t if t == ObjectType::CatalogueSchema.as_str() => {
                 let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                let schema_hash = SchemaHash::from_hex(schema_hash_hex)?;
                 CatalogueManifestOp::SchemaSeen {
                     object_id,
                     schema_hash,
@@ -1267,7 +1267,7 @@ impl QueryManager {
             }
             t if t == ObjectType::CataloguePermissions.as_str() => {
                 let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                let schema_hash = SchemaHash::from_hex(schema_hash_hex)?;
                 CatalogueManifestOp::PermissionsSeen {
                     object_id,
                     schema_hash,
@@ -1276,8 +1276,8 @@ impl QueryManager {
             t if t == ObjectType::CatalogueLens.as_str() => {
                 let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
                 let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
-                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
-                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
+                let source_hash = SchemaHash::from_hex(source_hex)?;
+                let target_hash = SchemaHash::from_hex(target_hex)?;
                 CatalogueManifestOp::LensSeen {
                     object_id,
                     source_hash,
@@ -1325,12 +1325,11 @@ impl QueryManager {
         }
 
         // Check if this is a row object
-        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
+        let original_table_name = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => t.clone(),
             None => return,
         };
-
-        let table_name = TableName::new(&table);
+        let origin_schema_hash = origin_schema_hash_from_metadata(&update.metadata);
         let branch = update.branch_name.as_str();
 
         // Look up the correct schema for this branch
@@ -1369,6 +1368,20 @@ impl QueryManager {
                 }
             }
         };
+
+        let current_table = resolve_current_table_name(
+            &self.schema_context,
+            &original_table_name,
+            origin_schema_hash.as_ref(),
+        )
+        .unwrap_or_else(|| original_table_name.clone());
+        let branch_table = if schema_hash == self.schema_context.current_hash {
+            current_table.clone()
+        } else {
+            translate_table_name_to_schema(&self.schema_context, &current_table, &schema_hash)
+                .unwrap_or_else(|| original_table_name.clone())
+        };
+        let table_name = TableName::new(&branch_table);
 
         // Get the correct schema for this branch
         let table_schema = if schema_hash == self.schema_context.current_hash {
@@ -1417,7 +1430,7 @@ impl QueryManager {
                     panic!(
                         "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                         update.object_id,
-                        table,
+                        branch_table,
                         branch,
                         update.previous_commit_ids.len(),
                         update.commit_ids.len(),
@@ -1429,14 +1442,14 @@ impl QueryManager {
             // Apply hard delete unconditionally
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 old_data,
                 &descriptor,
             );
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            self.mark_subscriptions_dirty(&branch_table);
+            self.mark_row_deleted_in_subscriptions(&branch_table, update.object_id);
             return;
         }
 
@@ -1447,7 +1460,7 @@ impl QueryManager {
                     panic!(
                         "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                         update.object_id,
-                        table,
+                        branch_table,
                         branch,
                         update.previous_commit_ids.len(),
                         update.commit_ids.len(),
@@ -1461,7 +1474,7 @@ impl QueryManager {
             if let Some(old_data) = old_data {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
-                    &table,
+                    &branch_table,
                     branch,
                     update.object_id,
                     old_data,
@@ -1470,21 +1483,21 @@ impl QueryManager {
             } else {
                 // No old content - just remove from _id and add to _id_deleted
                 let _ = storage.index_remove(
-                    &table,
+                    &branch_table,
                     "_id",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
                 if let Err(error) = storage.index_insert(
-                    &table,
+                    &branch_table,
                     "_id_deleted",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 ) {
                     tracing::error!(
-                        table,
+                        table = branch_table,
                         branch,
                         object_id = %update.object_id,
                         %error,
@@ -1492,14 +1505,14 @@ impl QueryManager {
                     );
                 }
             }
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            self.mark_subscriptions_dirty(&branch_table);
+            self.mark_row_deleted_in_subscriptions(&branch_table, update.object_id);
             return;
         }
 
         // Check if this is an undelete (non-empty content for previously soft-deleted row)
         let was_soft_deleted =
-            self.row_is_deleted_on_branch(storage, &table, branch, update.object_id);
+            self.row_is_deleted_on_branch(storage, &branch_table, branch, update.object_id);
 
         // Extract current (new) data from the object on this branch
         let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
@@ -1511,21 +1524,21 @@ impl QueryManager {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
             if let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
                     "failed to update indices for synced undelete"
                 );
             }
-            self.mark_subscriptions_dirty(&table);
+            self.mark_subscriptions_dirty(&branch_table);
             return;
         }
 
@@ -1534,14 +1547,14 @@ impl QueryManager {
             // First commit on branch (new object or synced first commit) - insert into all indices
             if let Err(error) = Self::update_indices_for_insert_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1553,7 +1566,7 @@ impl QueryManager {
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
             if let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &old_data,
@@ -1561,7 +1574,7 @@ impl QueryManager {
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1572,15 +1585,15 @@ impl QueryManager {
             panic!(
                 "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                 update.object_id,
-                table,
+                branch_table,
                 branch,
                 update.previous_commit_ids.len(),
                 update.commit_ids.len(),
             );
         }
 
-        self.mark_subscriptions_dirty(&table);
-        self.mark_row_updated_in_subscriptions(&table, update.object_id);
+        self.mark_subscriptions_dirty(&branch_table);
+        self.mark_row_updated_in_subscriptions(&branch_table, update.object_id);
     }
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {

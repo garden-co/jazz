@@ -76,6 +76,204 @@ describe("typed migration object syntax", () => {
     ]);
   });
 
+  it("serializes table renames", () => {
+    const migration = s.defineMigration({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      from: {
+        users: s.table({
+          email: s.string(),
+        }),
+      },
+      to: {
+        people: s.table({
+          emailAddress: s.string(),
+          nickname: s.string().optional(),
+        }),
+      },
+      renameTables: {
+        people: s.renameTableFrom("users"),
+      },
+      migrate: {
+        people: {
+          emailAddress: s.renameFrom("email"),
+          nickname: s.add.string({ default: null }),
+        },
+      },
+    });
+
+    expect(migration.forward).toEqual([
+      {
+        table: "people",
+        renamedFrom: "users",
+        operations: [
+          {
+            type: "rename",
+            column: "email",
+            value: "emailAddress",
+          },
+          {
+            type: "introduce",
+            column: "nickname",
+            sqlType: "TEXT",
+            value: null,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("serializes table additions and removals", () => {
+    const migration = s.defineMigration({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      from: {
+        users: s.table({
+          email: s.string(),
+        }),
+        legacyProfiles: s.table({
+          bio: s.string().optional(),
+        }),
+      },
+      to: {
+        users: s.table({
+          email: s.string(),
+        }),
+        profiles: s.table({
+          bio: s.string().optional(),
+        }),
+      },
+      createTables: {
+        profiles: true,
+      },
+      dropTables: {
+        legacyProfiles: true,
+      },
+    });
+
+    expect(migration.forward).toEqual([
+      {
+        table: "profiles",
+        added: true,
+        operations: [],
+      },
+      {
+        table: "legacyProfiles",
+        removed: true,
+        operations: [],
+      },
+    ]);
+  });
+
+  it("allows combining table renames with column migrations", () => {
+    const migration = s.defineMigration({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      from: {
+        users: s.table({
+          email: s.string(),
+        }),
+      },
+      to: {
+        people: s.table({
+          emailAddress: s.string(),
+          age: s.int(),
+        }),
+      },
+      renameTables: {
+        people: s.renameTableFrom("users"),
+      },
+      migrate: {
+        people: {
+          emailAddress: s.renameFrom("email"),
+          age: s.add.int({ default: 18 }),
+        },
+      },
+    });
+
+    expect(migration.forward).toEqual([
+      {
+        table: "people",
+        renamedFrom: "users",
+        operations: [
+          {
+            type: "rename",
+            column: "email",
+            value: "emailAddress",
+          },
+          {
+            type: "introduce",
+            column: "age",
+            sqlType: "INTEGER",
+            value: 18,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("cannot combine createTables/dropTables with column migrations", () => {
+    expect(() => {
+      // @ts-expect-error cannot combine createTables/dropTables with column migrations
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+        to: {
+          people: s.table({
+            emailAddress: s.string(),
+          }),
+        },
+        createTables: {
+          people: true,
+        },
+        dropTables: {
+          users: true,
+        },
+        migrate: {
+          people: {
+            emailAddress: s.renameFrom("email"),
+          },
+        },
+      });
+    }).toThrow(/cannot have column operations when declared in createTables or dropTables/);
+  });
+
+  it("rejects explicit table renames that still do not match after applying column migrations", () => {
+    expect(() => {
+      // @ts-expect-error explicit table renames that still do not match after column migrations
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+        to: {
+          people: s.table({
+            emailAddress: s.string(),
+            age: s.int(),
+          }),
+        },
+        renameTables: {
+          people: s.renameTableFrom("users"),
+        },
+        migrate: {
+          people: {
+            emailAddress: s.renameFrom("email"),
+          },
+        },
+      });
+    }).toThrow(
+      "Table rename users -> people does not match the target table after applying its column migrations.",
+    );
+  });
+
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       s.defineMigration({
@@ -156,6 +354,63 @@ describe("typed migration object syntax", () => {
           users: s.table({}),
         },
         migrate: {},
+      });
+
+      // @ts-expect-error target-only tables must be declared in createTables
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+        to: {
+          users: s.table({
+            email: s.string(),
+          }),
+          profiles: s.table({
+            bio: s.string().optional(),
+          }),
+        },
+      });
+
+      // @ts-expect-error source-only tables must be declared in dropTables
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+          legacyProfiles: s.table({
+            bio: s.string().optional(),
+          }),
+        },
+        to: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+      });
+
+      // @ts-expect-error s.renameTableFrom(...) must point at a removed table with the same shape
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          legacyUsers: s.table({
+            email: s.json(),
+          }),
+        },
+        to: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+        renameTables: {
+          users: s.renameTableFrom("legacyUsers"),
+        },
       });
 
       // @ts-expect-error s.renameFrom(...) must point at a removed column with the same type

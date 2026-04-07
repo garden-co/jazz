@@ -9,6 +9,8 @@ use std::fmt;
 pub enum MetadataKey {
     /// Table name — set on row objects.
     Table,
+    /// Origin schema hash - set on row objects.
+    OriginSchemaHash,
     /// Object type — catalogue_schema, catalogue_lens, index, etc.
     Type,
     /// Commit delete marker — soft or hard.
@@ -33,6 +35,7 @@ impl MetadataKey {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Table => "table",
+            Self::OriginSchemaHash => "origin_schema_hash",
             Self::Type => "type",
             Self::Delete => "delete",
             Self::CreatedBy => "created_by",
