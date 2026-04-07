@@ -1,5 +1,13 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.26
+
+### Patch Changes
+
+- a1cb9d5: Switch the mobile persistent storage engine to SQLite.
+
+  **WARNING:** Existing local data stored with the previous Fjall-based engine is not compatible with SQLite. On-device data will be lost on upgrade — users will need to re-sync from the server.
+
 ## 2.0.0-alpha.25
 
 ## 2.0.0-alpha.24
