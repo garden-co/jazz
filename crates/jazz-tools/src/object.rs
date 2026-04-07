@@ -5,7 +5,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smolset::SmolSet;
 use uuid::Uuid;
 
-use crate::commit::{Commit, CommitId};
+use crate::{
+    commit::{Commit, CommitId},
+    metadata::MetadataKey,
+};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -156,6 +159,12 @@ impl Object {
             metadata: metadata.unwrap_or_default(),
             branches: HashMap::new(),
         }
+    }
+
+    pub fn original_table_name(&self) -> &str {
+        self.metadata
+            .get(MetadataKey::Table.as_str())
+            .expect("unexpected object with no table name")
     }
 }
 

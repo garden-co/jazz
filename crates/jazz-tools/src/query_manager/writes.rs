@@ -4,7 +4,8 @@ use crate::commit::CommitId;
 use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, Object, ObjectId};
+use crate::schema_manager::{origin_schema_hash_from_metadata, resolve_current_table_name};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -14,7 +15,9 @@ use super::manager::{
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{Session, WriteContext};
-use super::types::{ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Value};
+use super::types::{
+    ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName, Value,
+};
 
 pub struct RowBranchWrite<'a> {
     pub table: &'a str,
@@ -37,6 +40,16 @@ pub struct RowBranchDelete<'a> {
     pub id: ObjectId,
     pub old_data_for_policy: &'a [u8],
     pub old_provenance_for_policy: &'a RowProvenance,
+}
+
+fn resolve_table_name_for_context(
+    schema_context: &crate::schema_manager::SchemaContext,
+    original_table: &str,
+    origin_schema_hash: Option<&crate::query_manager::types::SchemaHash>,
+) -> TableName {
+    resolve_current_table_name(schema_context, original_table, origin_schema_hash)
+        .map(|name| TableName::new(&name))
+        .unwrap_or_else(|| TableName::new(original_table))
 }
 
 impl QueryManager {
@@ -78,6 +91,40 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        if branch == self.current_branch() {
+            return Some(self.schema_context.current_hash);
+        }
+
+        let composed = ComposedBranchName::parse(&BranchName::new(branch))?;
+        if composed.schema_hash.short() == self.schema_context.current_hash.short() {
+            return Some(self.schema_context.current_hash);
+        }
+
+        if let Some(hash) = self
+            .schema_context
+            .live_schemas
+            .keys()
+            .copied()
+            .find(|hash| hash.short() == composed.schema_hash.short())
+        {
+            return Some(hash);
+        }
+
+        self.find_schema_by_short_hash(&composed.schema_hash)
+    }
+
+    fn row_object_metadata_for_branch(&self, table: &str, branch: &str) -> HashMap<String, String> {
+        let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), table.to_string())]);
+        if let Some(origin_schema_hash) = self.origin_schema_hash_for_branch(branch) {
+            metadata.insert(
+                MetadataKey::OriginSchemaHash.to_string(),
+                origin_schema_hash.to_string(),
+            );
+        }
+        metadata
+    }
+
     fn load_row_tip_on_branch(
         &self,
         row_id: ObjectId,
@@ -104,6 +151,15 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let (commit, _) = self.load_row_tip_on_branch(row_id, branch_name)?;
         commit.row_provenance()
+    }
+
+    fn resolve_current_table_name_from_object(&self, object: &Object) -> Option<String> {
+        let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
+        resolve_current_table_name(
+            &self.schema_context,
+            object.original_table_name(),
+            origin_schema_hash.as_ref(),
+        )
     }
 
     fn prepare_update_write<H: Storage>(
@@ -151,7 +207,13 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
+                let auth_table_name = resolve_table_name_for_context(
+                    &auth_context,
+                    table,
+                    origin_schema_hash.as_ref(),
+                );
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Update,
@@ -163,7 +225,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
@@ -184,7 +246,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         &new_data,
                         new_provenance,
@@ -303,17 +365,25 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let schema_context = &self.schema_context;
+        let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
         let obj = self
             .sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
-        let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+        let original_table = obj.original_table_name();
+        let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
+        let current_table = resolve_table_name_for_context(
+            schema_context,
+            original_table,
+            origin_schema_hash.as_ref(),
+        )
+        .as_str()
+        .to_string();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
-            table: &table,
             branch_schema_map: &branch_schema_map,
-            schema_context: &self.schema_context,
+            schema_context,
             schema_warnings: &mut schema_warnings,
         };
         Self::resolve_latest_row_with_schema_transform(id, obj, branches, &mut transform_context)
@@ -323,7 +393,7 @@ impl QueryManager {
                     .get(&resolved.branch_name)
                     .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
                 Some((
-                    table,
+                    current_table,
                     resolved.branch_name.as_str().to_string(),
                     resolved.content,
                     resolved.commit_id,
@@ -387,21 +457,29 @@ impl QueryManager {
         let object_id = ObjectId::new();
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
+        let branch = self.current_branch();
 
         // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) = self
                 .local_write_authorization_context(self.current_branch().as_str(), Some(session))
             {
+                let origin_schema_hash =
+                    self.origin_schema_hash_for_branch(self.current_branch().as_str());
+                let auth_table_name = resolve_table_name_for_context(
+                    &auth_context,
+                    table,
+                    origin_schema_hash.as_ref(),
+                );
                 let allowed = auth_schema
-                    .get(&table_name)
+                    .get(&auth_table_name)
                     .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
                             self.current_branch().as_str(),
-                            table_name,
+                            auth_table_name,
                             policy,
                             &data,
                             &provenance,
@@ -411,7 +489,7 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -438,8 +516,7 @@ impl QueryManager {
         }
 
         // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        let metadata = self.row_object_metadata_for_branch(table, &branch);
 
         let object_id =
             self.sync_manager
@@ -447,7 +524,6 @@ impl QueryManager {
                 .create_with_id(storage, object_id, Some(metadata));
 
         // Add commit with row data
-        let branch = self.current_branch();
         let row_commit_id = self
             .sync_manager
             .object_manager
@@ -547,15 +623,21 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
+                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
+                let auth_table_name = resolve_table_name_for_context(
+                    &auth_context,
+                    table,
+                    origin_schema_hash.as_ref(),
+                );
                 let allowed = auth_schema
-                    .get(&table_name)
+                    .get(&auth_table_name)
                     .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
                             branch,
-                            table_name,
+                            auth_table_name,
                             policy,
                             &data,
                             &provenance,
@@ -565,7 +647,7 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -592,8 +674,7 @@ impl QueryManager {
         }
 
         // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        let metadata = self.row_object_metadata_for_branch(table, branch);
 
         let object_id =
             self.sync_manager
@@ -1190,7 +1271,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Get old data from ObjectManager
@@ -1380,7 +1461,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1417,7 +1498,13 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(&current_branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let origin_schema_hash = self.origin_schema_hash_for_branch(&current_branch);
+                let auth_table_name = resolve_table_name_for_context(
+                    &auth_context,
+                    &table,
+                    origin_schema_hash.as_ref(),
+                );
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
@@ -1429,7 +1516,7 @@ impl QueryManager {
                         storage,
                         id,
                         &current_branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         &old_data,
                         &old_provenance,
@@ -1572,7 +1659,13 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
+                let auth_table_name = resolve_table_name_for_context(
+                    &auth_context,
+                    table,
+                    origin_schema_hash.as_ref(),
+                );
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
@@ -1584,7 +1677,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
@@ -1706,7 +1799,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1808,7 +1901,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1905,7 +1998,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -1921,14 +2014,11 @@ impl QueryManager {
     ///
     /// Returns decoded values and the table name if the row exists.
     pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
-        // Get table name from object metadata
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)?
-            .metadata
-            .get(MetadataKey::Table.as_str())?
-            .clone();
+        let object = self.sync_manager.object_manager.get(id)?;
+        let table = object.original_table_name();
+        let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
+        let table =
+            resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())?;
         let table_name = TableName::new(&table);
 
         // Get row data from ObjectManager

@@ -8,7 +8,7 @@ mod tests {
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::manager::LocalUpdates;
+    use crate::query_manager::manager::{LocalUpdates, QueryError};
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -361,6 +361,7 @@ mod tests {
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
         table: &str,
+        schema_hash: SchemaHash,
         object_id: ObjectId,
         branch: &str,
         content: Vec<u8>,
@@ -368,6 +369,10 @@ mod tests {
     ) {
         let mut metadata = HashMap::new();
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        metadata.insert(
+            MetadataKey::OriginSchemaHash.to_string(),
+            schema_hash.to_string(),
+        );
         qm.sync_manager_mut()
             .object_manager
             .receive_object(storage, object_id, metadata);
@@ -577,6 +582,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             old_row_id,
             &v1_branch,
             old_row_data,
@@ -724,6 +730,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row1_id,
             &v1_branch,
             row1_data,
@@ -743,6 +750,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v2_hash,
             row2_id,
             &v2_branch,
             row2_data,
@@ -829,6 +837,118 @@ mod tests {
         assert_eq!(charlie_row.1[3], Value::Text("admin".to_string()));
     }
 
+    #[test]
+    fn removed_table_then_readded_does_not_resurface_old_rows() {
+        // Branch story:
+        //
+        // v1: users(id, name)   <- alice lives here
+        // v2: <users dropped>
+        // v3: users(id, name)   <- bob lives here
+        //
+        // A v3 query for `users` must only see the v3 table. The v1 `users`
+        // rows belong to a removed table lineage and must not be treated as
+        // the same logical table just because the name appears again in v3.
+
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new().build();
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let lens_v1_v2 = generate_lens(&v1, &v2);
+        let lens_v2_v3 = generate_lens(&v2, &v3);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v3.clone(), "dev", "main");
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens_v2_v3);
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens_v1_v2);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v3_branch = format!("dev-{}-main", v3_hash.short());
+
+        let lens_path = qm.schema_context().lens_path(&v1_hash).unwrap();
+        assert_eq!(lens_path.len(), 2, "expected v1 -> v2 -> v3 lens path");
+
+        assert_eq!(
+            crate::schema_manager::translate_table_name_to_schema(
+                qm.schema_context(),
+                "users",
+                &v1_hash,
+            ),
+            None,
+            "the re-added v3 users table must not translate back into the removed v1 table",
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let alice_id = ObjectId::new();
+        let alice_row = vec![Value::Uuid(alice_id), Value::Text("Alice".to_string())];
+        let alice_data = encode_row(&v1_table.columns, &alice_row).unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            alice_id,
+            &v1_branch,
+            alice_data,
+            1_000,
+        );
+
+        let bob_id = ObjectId::new();
+        qm.insert(
+            &mut storage,
+            "users",
+            &[
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let query = QueryBuilder::new("users")
+            .branches(&[&v1_branch, &v2_branch, &v3_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe_with_sync(sub_id);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "v1 rows from the dropped table lineage must not appear under the re-added v3 table",
+        );
+        assert_eq!(
+            results[0].1,
+            vec![
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ]
+        );
+    }
+
     /// Test multi-hop with chained column renames across versions.
     #[test]
     fn end_to_end_multi_hop_chained_renames() {
@@ -912,6 +1032,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -998,6 +1119,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1021,6 +1143,817 @@ mod tests {
         assert_eq!(row.len(), 2);
         assert_eq!(row[0], Value::Uuid(row_id));
         assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
+    }
+
+    /// End-to-end test with table rename: query uses new table name,
+    /// lens translates old-branch scans and row decoding through the rename.
+    #[test]
+    fn end_to_end_table_rename_translation() {
+        // v1 branch: users(id, email)
+        //            |
+        //            | RenameTable users -> people
+        //            v
+        // v2 branch: people(id, email)
+        //
+        // Querying `people` across both branches should still find the v1 row.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0], Value::Uuid(row_id));
+        assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
+    }
+
+    /// Table renames must also keep existing subscriptions reactive when old-schema
+    /// rows arrive after the query graph has already been compiled.
+    #[test]
+    fn table_rename_subscription_reacts_to_old_branch_updates() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
+    /// Existing old-schema subscriptions must recompile when a renamed future branch
+    /// becomes live, so new-table writes remain visible through the old table name.
+    #[test]
+    fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
+        // v1 current: users(id, email) -- subscribe(users on v1 branch)
+        //                                |
+        //                                | add live schema v2 + RenameTable users -> people
+        //                                v
+        // v2 live:    people(id, email) -- ingest people row on v2 branch
+        //
+        // The original `users` subscription should be recompiled to read both branches
+        // and surface the v2 row through the rename lens.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v1.clone(), "dev", "main");
+        let mut storage = MemoryStorage::new();
+
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens);
+
+        let v2_table = v2.get(&TableName::new("people")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v2_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "people",
+            v2_hash,
+            row_id,
+            &v2_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
+    /// Rows from renamed tables are migrated on write (in both updates and deletes).
+    #[test]
+    fn table_rename_update_and_delete_copy_on_write() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_data = encode_row(
+            &v1_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        manager
+            .update_with_session(
+                &mut storage,
+                row_id,
+                &[(
+                    "email".to_string(),
+                    Value::Text("alice+updated@example.com".to_string()),
+                )],
+                None,
+            )
+            .expect("rename-aware copy-on-write update should succeed");
+
+        assert!(
+            manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "updated row should be indexed on the renamed table in the current branch"
+        );
+        assert!(
+            !manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "users",
+                &current_branch,
+                row_id
+            ),
+            "current-branch indices should use the renamed table name"
+        );
+
+        let current_results = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert_eq!(current_results.len(), 1);
+        assert_eq!(current_results[0].0, row_id);
+        assert!(
+            current_results[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice+updated@example.com".to_string())),
+            "updated row should carry the new email in its current-branch projection"
+        );
+
+        manager
+            .delete(&mut storage, row_id, None)
+            .expect("rename-aware copy-on-write delete should succeed");
+
+        assert!(
+            manager.query_manager().row_is_deleted_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "soft delete should be indexed under the renamed current-branch table"
+        );
+
+        let visible_after_delete = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert!(
+            visible_after_delete.is_empty(),
+            "soft-deleted row should no longer appear in current-branch people queries"
+        );
+    }
+
+    #[test]
+    fn table_rename_join_query_translates_join_target_on_old_branch() {
+        // v1 branch: posts.author_id -> users.id
+        //                            |
+        //                            | RenameTable users -> people
+        //                            v
+        // v2 query: posts JOIN people ON posts.author_id = people.id
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "users")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "people")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let author_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let user_data = encode_row(
+            &v1_users.columns,
+            &[Value::Uuid(author_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            author_id,
+            &v1_branch,
+            user_data,
+            1_000,
+        );
+
+        let post_id = ObjectId::new();
+        let v1_posts = v1.get(&TableName::new("posts")).unwrap();
+        let post_data = encode_row(
+            &v1_posts.columns,
+            &[
+                Value::Uuid(post_id),
+                Value::Uuid(author_id),
+                Value::Text("Hello from v1".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "posts",
+            v1_hash,
+            post_id,
+            &v1_branch,
+            post_data,
+            1_100,
+        );
+
+        let query = QueryBuilder::new("posts")
+            .branches(&[&v1_branch, &v2_branch])
+            .join("people")
+            .on("posts.author_id", "people.id")
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row.len(), 5);
+        assert_eq!(row[0], Value::Uuid(post_id));
+        assert_eq!(row[1], Value::Uuid(author_id));
+        assert_eq!(row[2], Value::Text("Hello from v1".to_string()));
+        assert_eq!(row[3], Value::Uuid(author_id));
+        assert_eq!(row[4], Value::Text("Alice".to_string()));
+    }
+
+    #[test]
+    fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
+        // v1 branch: users <- posts.author_id
+        //            |
+        //            | RenameTable users -> people
+        //            v
+        // v2 query: people.with_array(posts where posts.author_id = people.id)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "users")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "people")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let author_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let user_data = encode_row(
+            &v1_users.columns,
+            &[Value::Uuid(author_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            author_id,
+            &v1_branch,
+            user_data,
+            1_000,
+        );
+
+        let post_id = ObjectId::new();
+        let v1_posts = v1.get(&TableName::new("posts")).unwrap();
+        let post_data = encode_row(
+            &v1_posts.columns,
+            &[
+                Value::Uuid(post_id),
+                Value::Uuid(author_id),
+                Value::Text("Alice post".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "posts",
+            v1_hash,
+            post_id,
+            &v1_branch,
+            post_data,
+            1_100,
+        );
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "people.id")
+            })
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row[0], Value::Uuid(author_id));
+        assert_eq!(row[1], Value::Text("Alice".to_string()));
+
+        let posts = row[2]
+            .as_array()
+            .expect("third column should be posts array");
+        assert_eq!(posts.len(), 1);
+        let first_post = posts[0]
+            .as_row()
+            .expect("post array element should be a row");
+        assert_eq!(first_post[0], Value::Uuid(post_id));
+        assert_eq!(first_post[1], Value::Uuid(author_id));
+        assert_eq!(first_post[2], Value::Text("Alice post".to_string()));
+    }
+
+    #[test]
+    fn multi_hop_table_renames_and_column_rename() {
+        // v1: users(id, email)
+        //      |
+        //      | RenameTable users -> people
+        //      v
+        // v2: people(id, email)
+        //      |
+        //      | RenameTable people -> members
+        //      | RenameColumn email -> email_address
+        //      v
+        // v3: members(id, email_address)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("members")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let mut transform_v1_v2 = LensTransform::new();
+        transform_v1_v2.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens_v1_v2 = Lens::new(v1_hash, v2_hash, transform_v1_v2);
+
+        let mut transform_v2_v3 = LensTransform::new();
+        transform_v2_v3.push(
+            LensOp::RenameTable {
+                old_name: "people".to_string(),
+                new_name: "members".to_string(),
+            },
+            false,
+        );
+        transform_v2_v3.push(
+            LensOp::RenameColumn {
+                table: "members".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens_v2_v3 = Lens::new(v2_hash, v3_hash, transform_v2_v3);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v3.clone(), "dev", "main");
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens_v2_v3);
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens_v1_v2);
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v3_branch = format!("dev-{}-main", v3_hash.short());
+        let mut storage = MemoryStorage::new();
+
+        let alice_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let alice_data = encode_row(
+            &v1_users.columns,
+            &[
+                Value::Uuid(alice_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            alice_id,
+            &v1_branch,
+            alice_data,
+            1_000,
+        );
+
+        let bob_id = ObjectId::new();
+        let v2_people = v2.get(&TableName::new("people")).unwrap();
+        let bob_data = encode_row(
+            &v2_people.columns,
+            &[
+                Value::Uuid(bob_id),
+                Value::Text("bob@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "people",
+            v2_hash,
+            bob_id,
+            &v2_branch,
+            bob_data,
+            1_100,
+        );
+
+        let carol_id = ObjectId::new();
+        let v3_members = v3.get(&TableName::new("members")).unwrap();
+        let carol_data = encode_row(
+            &v3_members.columns,
+            &[
+                Value::Uuid(carol_id),
+                Value::Text("carol@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "members",
+            v3_hash,
+            carol_id,
+            &v3_branch,
+            carol_data,
+            1_200,
+        );
+
+        let query = QueryBuilder::new("members")
+            .branches(&[&v1_branch, &v2_branch, &v3_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 3);
+
+        for (_, row) in &results {
+            assert_eq!(row.len(), 2);
+        }
+
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(alice_id)
+                && row[1] == Value::Text("alice@example.com".to_string())
+        }));
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(bob_id) && row[1] == Value::Text("bob@example.com".to_string())
+        }));
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(carol_id)
+                && row[1] == Value::Text("carol@example.com".to_string())
+        }));
     }
 
     // ========================================================================
@@ -2837,6 +3770,7 @@ mod tests {
             client.query_manager_mut(),
             &mut storage,
             "users",
+            v2_hash,
             row_id,
             &v2_branch,
             row_data,
