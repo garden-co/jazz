@@ -40,10 +40,9 @@ impl SyncManager {
             tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
         }
 
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
             return;
         };
-        let metadata = object.metadata.clone();
 
         if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
             for server_id in server_ids {
@@ -64,13 +63,12 @@ impl SyncManager {
             tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
         }
 
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
             return;
         };
         if let Some(row) =
-            self.load_current_row_from_storage(storage, object_id, &branch_name, &object.metadata)
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
         {
-            let metadata = object.metadata.clone();
             for server_id in server_ids {
                 self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
             }
@@ -129,13 +127,12 @@ impl SyncManager {
 
         let _span = tracing::debug_span!("forward_update_to_clients", %object_id, %branch_name, client_count = client_ids.len()).entered();
 
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
             return;
         };
         if let Some(row) =
-            self.load_current_row_from_storage(storage, object_id, &branch_name, &object.metadata)
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
         {
-            let metadata = object.metadata.clone();
             for client_id in &client_ids {
                 tracing::trace!(%client_id, "queuing row update to client");
                 self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());

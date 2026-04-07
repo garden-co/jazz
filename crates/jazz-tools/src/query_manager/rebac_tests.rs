@@ -15,7 +15,7 @@ use crate::metadata::{
 use crate::object::{BranchName, ObjectId};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
-    ClientId, Destination, InboxEntry, ObjectMetadata, QueryId, Source, SyncError, SyncManager,
+    ClientId, Destination, InboxEntry, QueryId, RowMetadata, Source, SyncError, SyncManager,
     SyncPayload,
 };
 
@@ -72,7 +72,7 @@ fn stored_row_commit(
 fn row_version_created_payload(
     object_id: ObjectId,
     branch: &str,
-    metadata: Option<ObjectMetadata>,
+    metadata: Option<RowMetadata>,
     commit: &Commit,
 ) -> SyncPayload {
     SyncPayload::RowVersionCreated {
@@ -454,7 +454,7 @@ fn enqueue_inherited_insert(
         payload: row_version_created_payload(
             doc_id,
             branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: doc_id,
                 metadata: document_metadata(),
             }),
@@ -549,7 +549,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         .sync_manager()
         .object_manager
         .get(grand_id)
-        .map(|obj| obj.metadata.clone())
+        .cloned()
         .unwrap_or_default();
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -557,7 +557,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         payload: row_version_created_payload(
             grand_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: grand_id,
                 metadata: object_metadata,
             }),
@@ -632,7 +632,7 @@ fn rebac_insert_allowed_by_simple_policy() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
@@ -699,7 +699,7 @@ fn rebac_insert_denied_by_simple_policy() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
@@ -796,7 +796,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         payload: row_version_created_payload(
             obj_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -870,7 +870,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
         payload: row_version_created_payload(
             obj_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -1251,7 +1251,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
         payload: row_version_created_payload(
             obj_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata: metadata.clone(),
             }),
@@ -1340,7 +1340,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
         payload: row_version_created_payload(
             obj_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata: metadata.clone(),
             }),
@@ -1424,7 +1424,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -1507,7 +1507,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -1594,7 +1594,7 @@ fn rebac_table_without_policy_allows_all_writes() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -1686,7 +1686,7 @@ fn rebac_two_clients_different_sessions() {
         payload: row_version_created_payload(
             obj1,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj1,
                 metadata: document_metadata(),
             }),
@@ -1699,7 +1699,7 @@ fn rebac_two_clients_different_sessions() {
         payload: row_version_created_payload(
             obj2,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj2,
                 metadata: document_metadata(),
             }),
@@ -1806,7 +1806,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -1951,7 +1951,7 @@ fn rebac_update_denied_by_using_policy() {
         payload: row_version_created_payload(
             obj_id,
             "main",
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: obj_id,
                 metadata,
             }),
@@ -2444,7 +2444,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         .sync_manager()
         .object_manager
         .get(protected_obj)
-        .map(|obj| obj.metadata.clone())
+        .cloned()
         .unwrap_or_default();
 
     // ---- Bob (non-admin) tries to update ----
@@ -2480,7 +2480,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         payload: row_version_created_payload(
             protected_obj,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
@@ -2553,7 +2553,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         payload: row_version_created_payload(
             protected_obj,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
@@ -3219,7 +3219,7 @@ fn synced_soft_delete_should_use_delete_policy() {
         .sync_manager()
         .object_manager
         .get(protected.row_id)
-        .map(|obj| obj.metadata.clone())
+        .cloned()
         .expect("protected row metadata");
 
     let bob_client = ClientId::new();
@@ -3248,7 +3248,7 @@ fn synced_soft_delete_should_use_delete_policy() {
         payload: row_version_created_payload(
             protected.row_id,
             &branch,
-            Some(ObjectMetadata {
+            Some(RowMetadata {
                 id: protected.row_id,
                 metadata: protected_metadata,
             }),

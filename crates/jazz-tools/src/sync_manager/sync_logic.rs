@@ -54,7 +54,7 @@ impl SyncManager {
     ) {
         let _span =
             tracing::debug_span!("queue_full_sync_to_server_from_storage", %server_id).entered();
-        let Ok(objects) = storage.scan_object_metadata() else {
+        let Ok(objects) = storage.scan_metadata() else {
             return;
         };
 
@@ -229,7 +229,7 @@ impl SyncManager {
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::RowVersionCreated {
-                metadata: include_metadata.then_some(ObjectMetadata {
+                metadata: include_metadata.then_some(RowMetadata {
                     id: object_id,
                     metadata,
                 }),
@@ -245,10 +245,9 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: BranchName,
     ) {
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
             return;
         };
-        let metadata = object.metadata.clone();
         if let Some(row) =
             self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
         {
@@ -264,10 +263,9 @@ impl SyncManager {
         branch_name: BranchName,
     ) {
         // Get current tips from object manager
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
             return;
         };
-        let metadata = object.metadata.clone();
         if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
             self.queue_row_to_client(client_id, object_id, metadata, row);
         }
@@ -332,7 +330,7 @@ impl SyncManager {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::RowVersionNeeded {
-                metadata: include_metadata.then_some(ObjectMetadata {
+                metadata: include_metadata.then_some(RowMetadata {
                     id: object_id,
                     metadata,
                 }),

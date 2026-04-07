@@ -1,7 +1,7 @@
 use super::*;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
-use crate::object::{BranchName, Object, ObjectId};
+use crate::object::{BranchName, ObjectId};
 use crate::object_manager::RowObjectUpdate;
 use crate::query_manager::policy::Operation;
 use crate::row_regions::{BatchId, RowState, StoredRowVersion};
@@ -44,29 +44,20 @@ impl SyncManager {
         metadata: HashMap<String, String>,
     ) {
         if self.object_manager.get(object_id).is_none() {
-            if storage
-                .load_object_metadata(object_id)
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                let _ = storage.create_object(object_id, metadata.clone());
+            if storage.load_metadata(object_id).ok().flatten().is_none() {
+                let _ = storage.put_metadata(object_id, metadata.clone());
             }
 
-            self.object_manager.objects.insert(
-                object_id,
-                Object {
-                    id: object_id,
-                    metadata,
-                },
-            );
+            self.object_manager
+                .metadata_by_id
+                .insert(object_id, metadata);
             return;
         }
 
-        if let Some(object) = self.object_manager.objects.get_mut(&object_id)
+        if let Some(object_metadata) = self.object_manager.metadata_by_id.get_mut(&object_id)
             && !metadata.is_empty()
         {
-            object.metadata = metadata;
+            *object_metadata = metadata;
         }
     }
 
@@ -74,7 +65,7 @@ impl SyncManager {
         &self,
         storage: &H,
         row: &StoredRowVersion,
-        metadata: Option<&ObjectMetadata>,
+        metadata: Option<&RowMetadata>,
     ) -> Option<HashMap<String, String>> {
         if let Some(metadata) = metadata {
             return Some(metadata.metadata.clone());
@@ -82,8 +73,8 @@ impl SyncManager {
 
         self.object_manager
             .get(row.row_id)
-            .map(|object| object.metadata.clone())
-            .or_else(|| storage.load_object_metadata(row.row_id).ok().flatten())
+            .cloned()
+            .or_else(|| storage.load_metadata(row.row_id).ok().flatten())
     }
 
     fn row_version_wins(incoming: &StoredRowVersion, current: &StoredRowVersion) -> bool {
@@ -93,7 +84,7 @@ impl SyncManager {
     fn apply_row_updated<H: Storage>(
         &mut self,
         storage: &mut H,
-        metadata: Option<ObjectMetadata>,
+        metadata: Option<RowMetadata>,
         row: StoredRowVersion,
     ) -> Option<AppliedRowVersion> {
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
@@ -104,11 +95,7 @@ impl SyncManager {
             .ok()
             .flatten();
         let is_new_object = self.object_manager.get(row.row_id).is_none()
-            && storage
-                .load_object_metadata(row.row_id)
-                .ok()
-                .flatten()
-                .is_none();
+            && storage.load_metadata(row.row_id).ok().flatten().is_none();
 
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
 
@@ -157,10 +144,10 @@ impl SyncManager {
     fn table_for_object_id<H: Storage>(&self, storage: &H, object_id: ObjectId) -> Option<String> {
         self.object_manager
             .get(object_id)
-            .and_then(|object| object.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
             .or_else(|| {
                 storage
-                    .load_object_metadata(object_id)
+                    .load_metadata(object_id)
                     .ok()
                     .flatten()
                     .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())

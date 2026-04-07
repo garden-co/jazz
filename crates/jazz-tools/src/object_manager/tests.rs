@@ -44,9 +44,9 @@ fn create_object_with_metadata() {
 
     let id = manager.create(&mut io, Some(row_metadata("users")));
 
-    let object = manager.get(id).expect("object should exist");
+    let object = manager.get(id).expect("object metadata should exist");
     assert_eq!(
-        object.metadata.get(MetadataKey::Table.as_str()),
+        object.get(MetadataKey::Table.as_str()),
         Some(&"users".to_string())
     );
 }
@@ -251,7 +251,7 @@ fn get_or_load_hydrates_visible_and_history_rows_from_storage() {
         .expect("row object should load from storage");
 
     assert_eq!(
-        loaded.metadata.get(MetadataKey::Table.as_str()),
+        loaded.get(MetadataKey::Table.as_str()),
         Some(&"users".to_string())
     );
     assert_eq!(

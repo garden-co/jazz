@@ -178,7 +178,7 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
         &mut io,
         server_id,
         SyncPayload::RowVersionCreated {
-            metadata: Some(ObjectMetadata {
+            metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
@@ -377,7 +377,7 @@ fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row
         &mut io,
         client_id,
         SyncPayload::RowVersionCreated {
-            metadata: Some(ObjectMetadata {
+            metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
@@ -433,7 +433,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     let older = visible_row(row_id, "main", Vec::new(), 1_000, b"older");
     let newer = visible_row(row_id, "main", vec![older.version_id()], 2_000, b"newer");
 
-    io.create_object(row_id, row_metadata("users")).unwrap();
+    io.put_metadata(row_id, row_metadata("users")).unwrap();
     io.append_history_region_rows("users", &[older.clone(), newer.clone()])
         .unwrap();
     io.upsert_visible_region_rows("users", std::slice::from_ref(&newer))

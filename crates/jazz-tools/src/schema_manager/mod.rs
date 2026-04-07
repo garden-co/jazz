@@ -62,7 +62,7 @@ pub use encoding::{
 };
 pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
-pub use rehydrate::rehydrate_schema_manager_from_manifest;
+pub use rehydrate::rehydrate_schema_manager_from_catalogue;
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
 };

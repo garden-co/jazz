@@ -6,7 +6,7 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
-use crate::storage::{MemoryStorage, ObjectMetadataRows, RawTableRows, Storage, StorageError};
+use crate::storage::{MemoryStorage, MetadataRows, RawTableRows, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
@@ -47,23 +47,20 @@ impl LegacyPersistenceObservingStorage {
 }
 
 impl Storage for RowRegionReadFailingStorage {
-    fn create_object(
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.inner.create_object(id, metadata)
+        self.inner.put_metadata(id, metadata)
     }
 
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_object_metadata(id)
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
     }
 
-    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
-        self.inner.scan_object_metadata()
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -231,23 +228,20 @@ impl Storage for RowRegionReadFailingStorage {
 }
 
 impl Storage for LegacyPersistenceObservingStorage {
-    fn create_object(
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.inner.create_object(id, metadata)
+        self.inner.put_metadata(id, metadata)
     }
 
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_object_metadata(id)
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
     }
 
-    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
-        self.inner.scan_object_metadata()
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {

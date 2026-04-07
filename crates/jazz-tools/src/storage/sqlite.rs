@@ -331,7 +331,7 @@ mod tests {
             let id = ObjectId::new();
             let mut meta = HashMap::new();
             meta.insert("k".to_string(), "v".to_string());
-            storage.create_object(id, meta).unwrap();
+            storage.put_metadata(id, meta).unwrap();
         }
 
         // flush() should not panic or return an error (it returns ())
@@ -349,10 +349,10 @@ mod tests {
 
         // Storage is closed but NOT yet dropped.
         // A real close() takes the inner; the next call must return Err, not succeed or panic.
-        let result = storage.load_object_metadata(ObjectId::new());
+        let result = storage.load_metadata(ObjectId::new());
         assert!(
             result.is_err(),
-            "load_object_metadata should return Err after close, got Ok"
+            "load_metadata should return Err after close, got Ok"
         );
     }
 

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -112,22 +110,6 @@ impl<T: Into<String>> From<T> for BranchName {
 impl std::fmt::Display for BranchName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
-    }
-}
-
-/// An object with metadata only.
-#[derive(Debug, Clone)]
-pub struct Object {
-    pub id: ObjectId,
-    pub metadata: HashMap<String, String>,
-}
-
-impl Object {
-    pub fn new(metadata: Option<HashMap<String, String>>) -> Self {
-        Self {
-            id: ObjectId::new(),
-            metadata: metadata.unwrap_or_default(),
-        }
     }
 }
 
