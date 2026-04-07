@@ -1,0 +1,156 @@
+---
+title: Observability
+description: OpenTelemetry metrics and tracing for Jazz servers — setup, environment variables, and metric catalog.
+---
+
+Jazz servers can export OpenTelemetry traces and metrics. This is behind the `otel` Cargo feature flag and a runtime environment variable, so it adds zero overhead when disabled.
+
+## Enabling OpenTelemetry
+
+Two things must be true for OTel export to activate:
+
+1. The server binary is built with `--features otel`
+2. The `JAZZ_OTEL=1` environment variable is set at runtime
+
+When `JAZZ_OTEL` is unset or `0`, no OTel provider is initialized and no metrics or traces are emitted.
+
+### Export destination
+
+- If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, traces and metrics are pushed over **gRPC** to that OTLP collector (e.g. Grafana Agent, OpenTelemetry Collector, Datadog Agent).
+- If the endpoint is **not** set, both fall back to **stdout** — useful for local development and debugging.
+
+### Single-app server
+
+```bash
+JAZZ_OTEL=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+cargo run -p jazz-tools --features otel -- server <APP_ID>
+```
+
+### Cloud server
+
+```bash
+JAZZ_OTEL=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+cargo run -p jazz-cloud-server --features otel -- \
+  --internal-api-secret <SECRET> \
+  --secret-hash-key <KEY> \
+  --worker-threads 2
+```
+
+## Environment variables
+
+| Variable                      | Purpose                                | Default         |
+| ----------------------------- | -------------------------------------- | --------------- |
+| `JAZZ_OTEL`                   | Enable the OTel layer (`1` to enable)  | off             |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint (gRPC)         | stdout fallback |
+| `OTEL_SERVICE_NAME`           | Service name in traces and metrics     | `jazz-server`   |
+| `OTEL_SERVICE_INSTANCE_ID`    | Unique instance identifier             | random UUID     |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in milliseconds | `60000`         |
+
+## Metric catalog
+
+### Connection metrics
+
+| Metric                         | Type          | Description                                                               | Dimensions                |
+| ------------------------------ | ------------- | ------------------------------------------------------------------------- | ------------------------- |
+| `jazz.sync.connections.active` | UpDownCounter | Currently open event streams. Decremented via Drop guard on stream close. | `app_id`, `env`, `worker` |
+| `jazz.sync.connections.total`  | Counter       | Cumulative connections opened.                                            | `app_id`, `env`, `worker` |
+
+### Message throughput
+
+| Metric                        | Type    | Description                                                                              | Dimensions                                            |
+| ----------------------------- | ------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `jazz.sync.messages.received` | Counter | Inbound sync payloads received via `POST /sync`. One increment per payload in the batch. | `app_id`, `env`, `payload_type`, `direction=inbound`  |
+| `jazz.sync.messages.sent`     | Counter | Outbound frames sent on event streams.                                                   | `app_id`, `env`, `payload_type`, `direction=outbound` |
+
+`payload_type` values: `ObjectUpdated`, `ObjectTruncated`, `QuerySubscription`, `QueryUnsubscription`, `PersistenceAck`, `QuerySettled`, `SchemaWarning`, `Error`.
+
+### Message size
+
+| Metric                         | Type      | Description                                                                                                                    | Dimensions                                                   |
+| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| `jazz.sync.message.size_bytes` | Histogram | Inbound: `Content-Length` of the sync batch request (once per batch). Outbound: wire frame size (4-byte length prefix + JSON). | `app_id`, `env`, `payload_type` (outbound only), `direction` |
+
+### Sync handler latency
+
+| Metric                          | Type      | Description                                                                                  | Dimensions      |
+| ------------------------------- | --------- | -------------------------------------------------------------------------------------------- | --------------- |
+| `jazz.sync.handler.duration_ms` | Histogram | End-to-end time for a `POST /sync` batch, including worker dispatch and response collection. | `app_id`, `env` |
+
+### Worker command latency
+
+| Metric                            | Type      | Description                              | Dimensions                         |
+| --------------------------------- | --------- | ---------------------------------------- | ---------------------------------- |
+| `jazz.worker.command.duration_ms` | Histogram | Time to process a single worker command. | `app_id`, `command_type`, `worker` |
+
+`command_type` values: `CreateRuntime`, `EnsureClientWithSession`, `EnsureClientAsBackend`, `SyncAsSession`, `SyncAsBackend`, `SyncAsAdmin`, `GetCatalogueSchema`, `PublishSchema`, `PublishPermissions`, `GetPermissionsHead`, `GetSchemaHashes`, `GetCatalogueStateHash`.
+
+### HTTP server metrics
+
+| Metric                         | Type          | Description                                                  | Dimensions                                                       |
+| ------------------------------ | ------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `http.server.request.duration` | Histogram     | HTTP request duration in seconds (OTel semantic convention). | `http.request.method`, `http.route`, `http.response.status_code` |
+| `http.server.active_requests`  | UpDownCounter | Concurrent in-flight HTTP requests.                          | `http.request.method`, `http.route`                              |
+
+`http.route` is the matched path (e.g. `/apps/:app_id/sync`). Falls back to `unknown` for unmatched routes.
+
+### Query subscription metrics
+
+| Metric                          | Type    | Description                       | Dimensions      |
+| ------------------------------- | ------- | --------------------------------- | --------------- |
+| `jazz.sync.subscriptions.total` | Counter | Cumulative subscriptions created. | `app_id`, `env` |
+
+### Persistence and durability metrics
+
+| Metric                             | Type    | Description                                     | Dimensions              |
+| ---------------------------------- | ------- | ----------------------------------------------- | ----------------------- |
+| `jazz.sync.persistence_acks.total` | Counter | Persistence acknowledgements sent to clients.   | `app_id`, `env`, `tier` |
+| `jazz.sync.query_settled.total`    | Counter | Query settlement notifications sent to clients. | `app_id`, `env`, `tier` |
+
+`tier` values: `EdgeServer`, `GlobalServer`.
+
+### Error and warning metrics
+
+| Metric                            | Type    | Description                                 | Dimensions                   |
+| --------------------------------- | ------- | ------------------------------------------- | ---------------------------- |
+| `jazz.sync.errors.total`          | Counter | Sync error payloads (inbound and outbound). | `app_id`, `env`, `direction` |
+| `jazz.sync.schema_warnings.total` | Counter | Schema warning events.                      | `app_id`, `env`              |
+
+### Broadcast metrics
+
+| Metric                           | Type    | Description                                                                 | Dimensions         |
+| -------------------------------- | ------- | --------------------------------------------------------------------------- | ------------------ |
+| `jazz.sync.broadcast.lag_events` | Counter | Times a connection lagged behind the broadcast channel and missed messages. | `app_id`, `worker` |
+
+### Worker metrics
+
+| Metric                       | Type          | Description                                                     | Dimensions               |
+| ---------------------------- | ------------- | --------------------------------------------------------------- | ------------------------ |
+| `jazz.worker.commands.total` | Counter       | Cumulative commands processed per worker.                       | `command_type`, `worker` |
+| `jazz.worker.apps.active`    | UpDownCounter | Active app runtimes per worker.                                 | `worker`                 |
+| `jazz.worker.queue.depth`    | Gauge         | Pending commands in the worker queue, sampled after each batch. | `worker`                 |
+
+### App lifecycle metrics
+
+| Metric                     | Type    | Description              | Dimensions         |
+| -------------------------- | ------- | ------------------------ | ------------------ |
+| `jazz.app.runtime.created` | Counter | Runtime creation events. | `app_id`, `worker` |
+
+### Storage metrics
+
+| Metric                           | Type      | Description                    | Dimensions |
+| -------------------------------- | --------- | ------------------------------ | ---------- |
+| `jazz.storage.flush.total`       | Counter   | Number of storage flush calls. | --         |
+| `jazz.storage.flush.duration_ms` | Histogram | Time taken for each flush.     | --         |
+
+## Local observability stack
+
+The repo includes a Docker Compose setup under `dev/observability/` that runs an OTel Collector, Prometheus, Tempo, Loki, and Grafana with a pre-built dashboard.
+
+```bash
+cd dev/observability
+docker compose up -d
+```
+
+Then run your server with `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` and open Grafana at [http://localhost:3000](http://localhost:3000).

@@ -22,6 +22,9 @@ pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
 pub use runtime_tokio as jazz_tokio;
 
+#[cfg(feature = "otel")]
+pub mod otel;
+
 #[cfg(feature = "transport")]
 pub mod transport_protocol;
 #[cfg(feature = "transport")]

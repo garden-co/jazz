@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: Jazz
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

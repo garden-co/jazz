@@ -816,6 +816,36 @@ impl WorkerCommand {
     }
 }
 
+#[cfg(feature = "otel")]
+fn worker_command_meta(cmd: &WorkerCommand) -> (&'static str, String) {
+    match cmd {
+        WorkerCommand::CreateRuntime { app_id, .. } => ("CreateRuntime", app_id.to_string()),
+        WorkerCommand::EnsureClientWithSession { app_id, .. } => {
+            ("EnsureClientWithSession", app_id.to_string())
+        }
+        WorkerCommand::EnsureClientAsBackend { app_id, .. } => {
+            ("EnsureClientAsBackend", app_id.to_string())
+        }
+        WorkerCommand::SyncAsSession { app_id, .. } => ("SyncAsSession", app_id.to_string()),
+        WorkerCommand::SyncAsBackend { app_id, .. } => ("SyncAsBackend", app_id.to_string()),
+        WorkerCommand::SyncAsAdmin { app_id, .. } => ("SyncAsAdmin", app_id.to_string()),
+        WorkerCommand::GetCatalogueSchema { app_id, .. } => {
+            ("GetCatalogueSchema", app_id.to_string())
+        }
+        WorkerCommand::PublishSchema { app_id, .. } => ("PublishSchema", app_id.to_string()),
+        WorkerCommand::PublishPermissions { app_id, .. } => {
+            ("PublishPermissions", app_id.to_string())
+        }
+        WorkerCommand::GetPermissionsHead { app_id, .. } => {
+            ("GetPermissionsHead", app_id.to_string())
+        }
+        WorkerCommand::GetSchemaHashes { app_id, .. } => ("GetSchemaHashes", app_id.to_string()),
+        WorkerCommand::GetCatalogueStateHash { app_id, .. } => {
+            ("GetCatalogueStateHash", app_id.to_string())
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FairAppQueue<T> {
     pending_by_app: HashMap<AppId, VecDeque<T>>,
@@ -882,13 +912,18 @@ impl<T> FairAppQueue<T> {
 }
 
 impl WorkerPool {
-    fn new(workers: usize) -> Self {
+    fn new(
+        workers: usize,
+        #[cfg(feature = "otel")] metrics: std::sync::Arc<crate::metrics::SyncMetrics>,
+    ) -> Self {
         let worker_count = workers.max(1);
         let mut handles = Vec::with_capacity(worker_count);
 
         for worker_idx in 0..worker_count {
             let (ingress_tx, ingress_rx) =
                 tokio::sync::mpsc::channel::<WorkerCommand>(WORKER_SYNC_QUEUE_CAPACITY);
+            #[cfg(feature = "otel")]
+            let metrics = metrics.clone();
             let thread_name = format!("jazz-multi-worker-{worker_idx}");
             let join = std::thread::Builder::new()
                 .name(thread_name)
@@ -897,7 +932,12 @@ impl WorkerPool {
                         .enable_all()
                         .build()
                         .expect("failed to build worker tokio runtime");
-                    runtime.block_on(run_worker_loop(worker_idx, ingress_rx));
+                    runtime.block_on(run_worker_loop(
+                        worker_idx,
+                        ingress_rx,
+                        #[cfg(feature = "otel")]
+                        metrics,
+                    ));
                 })
                 .expect("failed to spawn worker thread");
 
@@ -1926,6 +1966,7 @@ impl AppEntry {
 async fn run_worker_loop(
     worker: usize,
     mut ingress_rx: tokio::sync::mpsc::Receiver<WorkerCommand>,
+    #[cfg(feature = "otel")] metrics: std::sync::Arc<crate::metrics::SyncMetrics>,
 ) {
     let mut fair_queue = FairAppQueue::<WorkerCommand>::default();
     let mut app_runtimes = HashMap::<AppId, AppRuntime>::new();
@@ -1950,6 +1991,12 @@ async fn run_worker_loop(
         };
 
         for command in batch {
+            #[cfg(feature = "otel")]
+            let cmd_start = std::time::Instant::now();
+
+            #[cfg(feature = "otel")]
+            let (cmd_type, cmd_app_id) = worker_command_meta(&command);
+
             match command {
                 WorkerCommand::CreateRuntime {
                     app_id,
@@ -1969,6 +2016,21 @@ async fn run_worker_loop(
                     } else {
                         Err(format!("app runtime already exists for {app_id}"))
                     };
+
+                    #[cfg(feature = "otel")]
+                    if result.is_ok() {
+                        metrics.app_runtime_created.add(
+                            1,
+                            &[
+                                opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+                                opentelemetry::KeyValue::new("worker", worker as i64),
+                            ],
+                        );
+                        metrics
+                            .worker_apps_active
+                            .add(1, &[opentelemetry::KeyValue::new("worker", worker as i64)]);
+                    }
+
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "create runtime response receiver dropped");
                     }
@@ -2234,6 +2296,34 @@ async fn run_worker_loop(
                     }
                 }
             }
+
+            #[cfg(feature = "otel")]
+            {
+                let elapsed = cmd_start.elapsed().as_secs_f64() * 1000.0;
+                metrics.worker_command_duration_ms.record(
+                    elapsed,
+                    &[
+                        opentelemetry::KeyValue::new("command_type", cmd_type),
+                        opentelemetry::KeyValue::new("app_id", cmd_app_id),
+                        opentelemetry::KeyValue::new("worker", worker as i64),
+                    ],
+                );
+                metrics.worker_commands_total.add(
+                    1,
+                    &[
+                        opentelemetry::KeyValue::new("command_type", cmd_type),
+                        opentelemetry::KeyValue::new("worker", worker as i64),
+                    ],
+                );
+            }
+        }
+
+        #[cfg(feature = "otel")]
+        {
+            metrics.worker_queue_depth.record(
+                fair_queue.pending_total as i64,
+                &[opentelemetry::KeyValue::new("worker", worker as i64)],
+            );
         }
 
         tokio::task::yield_now().await;
@@ -2249,6 +2339,8 @@ struct ServerState {
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
     http_client: reqwest::Client,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    #[cfg(feature = "otel")]
+    metrics: std::sync::Arc<crate::metrics::SyncMetrics>,
 }
 
 impl ServerState {
@@ -2428,7 +2520,13 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
             .map_err(|e| format!("failed to initialize meta store: {e}"))?,
     );
 
-    let workers = WorkerPool::new(config.worker_threads);
+    #[cfg(feature = "otel")]
+    let metrics = std::sync::Arc::new(crate::metrics::SyncMetrics::new());
+    let workers = WorkerPool::new(
+        config.worker_threads,
+        #[cfg(feature = "otel")]
+        metrics.clone(),
+    );
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -2484,6 +2582,8 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
         http_client,
         shutdown_tx: shutdown_tx.clone(),
+        #[cfg(feature = "otel")]
+        metrics,
     });
 
     info!(
@@ -2541,8 +2641,42 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
     info!("shutdown signal received");
 }
 
+#[cfg(feature = "otel")]
+async fn otel_http_metrics(
+    axum::Extension(metrics): axum::Extension<std::sync::Arc<crate::metrics::SyncMetrics>>,
+    matched_path: Option<axum::extract::MatchedPath>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().to_string();
+    let route = matched_path
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let active_attrs = vec![
+        opentelemetry::KeyValue::new("http.request.method", method.clone()),
+        opentelemetry::KeyValue::new("http.route", route.clone()),
+    ];
+    metrics.http_active_requests.add(1, &active_attrs);
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+    let attrs = vec![
+        opentelemetry::KeyValue::new("http.request.method", method),
+        opentelemetry::KeyValue::new("http.route", route),
+        opentelemetry::KeyValue::new("http.response.status_code", status),
+    ];
+    metrics.http_request_duration.record(elapsed, &attrs);
+    metrics.http_active_requests.add(-1, &active_attrs);
+
+    response
+}
+
 fn create_router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
         .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
@@ -2589,7 +2723,14 @@ fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/manage/api/apps/:app_id/admin-secret/rotate",
             post(manage_rotate_admin_secret_handler),
-        )
+        );
+
+    #[cfg(feature = "otel")]
+    let router = router
+        .layer(axum::Extension(state.metrics.clone()))
+        .layer(axum::middleware::from_fn(otel_http_metrics));
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -3659,13 +3800,44 @@ async fn events_handler(
         "events stream connected"
     );
 
+    #[cfg(feature = "otel")]
+    {
+        let attrs = vec![
+            opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+            opentelemetry::KeyValue::new("env", "prod".to_string()),
+            opentelemetry::KeyValue::new("worker", worker as i64),
+        ];
+        state.metrics.connections_active.add(1, &attrs);
+        state.metrics.connections_total.add(1, &attrs);
+    }
+
+    #[cfg(feature = "otel")]
+    let connect_attrs = vec![
+        opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+        opentelemetry::KeyValue::new("env", "prod".to_string()),
+        opentelemetry::KeyValue::new("worker", worker as i64),
+    ];
+
+    #[cfg(feature = "otel")]
+    let otel_metrics = state.metrics.clone();
     let mut sync_rx = app.sync_broadcast.subscribe();
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
     let next_sync_seq = 1u64;
-
+    #[cfg(feature = "otel")]
+    let otel_env = "prod".to_string();
+    #[cfg(feature = "otel")]
+    let otel_app_id = app_id.to_string();
     let stream = async_stream::stream! {
+        // Guard lives inside the stream — dropped when the stream is dropped
+        // (client disconnect), ensuring the active counter always decrements.
+        #[cfg(feature = "otel")]
+        let _conn_guard = crate::metrics::ConnectionMetricsGuard {
+            metrics: otel_metrics.clone(),
+            attrs: connect_attrs.clone(),
+        };
+
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
@@ -3682,15 +3854,69 @@ async fn events_handler(
                     match result {
                         Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
+                                #[cfg(feature = "otel")]
+                                {
+                                    match &payload {
+                                        SyncPayload::PersistenceAck { tier, .. } => {
+                                            otel_metrics.persistence_acks_total.add(1, &[
+                                                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                                opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                                opentelemetry::KeyValue::new("tier", tier.as_str()),
+                                            ]);
+                                        }
+                                        SyncPayload::QuerySettled { tier, .. } => {
+                                            otel_metrics.query_settled_total.add(1, &[
+                                                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                                opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                                opentelemetry::KeyValue::new("tier", tier.as_str()),
+                                            ]);
+                                        }
+                                        SyncPayload::Error(_err) => {
+                                            otel_metrics.errors_total.add(1, &[
+                                                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                                opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                                opentelemetry::KeyValue::new("direction", "outbound"),
+                                            ]);
+                                        }
+                                        SyncPayload::SchemaWarning(_) => {
+                                            otel_metrics.schema_warnings_total.add(1, &[
+                                                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                                opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                            ]);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                #[cfg(feature = "otel")]
+                                let pt = payload_type_name(&payload);
                                 let event = ServerEvent::SyncUpdate {
                                     seq: Some(seq),
                                     payload: Box::new(payload),
                                 };
-                                yield Ok(encode_frame(&event));
+                                let frame = encode_frame(&event);
+                                #[cfg(feature = "otel")]
+                                {
+                                    let attrs = [
+                                        opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                        opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                        opentelemetry::KeyValue::new("payload_type", pt),
+                                        opentelemetry::KeyValue::new("direction", "outbound"),
+                                    ];
+                                    otel_metrics.messages_sent.add(1, &attrs);
+                                    otel_metrics.message_size_bytes.record(frame.len() as f64, &attrs);
+                                }
+                                yield Ok(frame);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             warn!(app_id = %app_id, connection_id, "events stream lagged");
+                            #[cfg(feature = "otel")]
+                            {
+                                otel_metrics.broadcast_lag_events.add(1, &[
+                                    opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                                    opentelemetry::KeyValue::new("worker", worker as i64),
+                                ]);
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             break;
@@ -3710,6 +3936,7 @@ async fn events_handler(
 
         let mut connections = app_cleanup.connections.write().await;
         connections.remove(&connection_id);
+        // Note: active connection decrement is handled by ConnectionMetricsGuard (Drop)
     };
 
     Ok(axum::response::Response::builder()
@@ -3718,6 +3945,21 @@ async fn events_handler(
         .header("Cache-Control", "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
+}
+
+#[cfg(feature = "otel")]
+fn payload_type_name(payload: &jazz_tools::sync_manager::SyncPayload) -> &'static str {
+    use jazz_tools::sync_manager::SyncPayload;
+    match payload {
+        SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
+        SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
+        SyncPayload::QuerySubscription { .. } => "QuerySubscription",
+        SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+        SyncPayload::PersistenceAck { .. } => "PersistenceAck",
+        SyncPayload::QuerySettled { .. } => "QuerySettled",
+        SyncPayload::SchemaWarning(_) => "SchemaWarning",
+        SyncPayload::Error(_) => "Error",
+    }
 }
 
 async fn sync_handler(
@@ -3793,7 +4035,76 @@ async fn sync_handler(
 
     // Apply each payload in order, collecting per-payload results.
     let mut results = Vec::with_capacity(request.payloads.len());
+
+    #[cfg(feature = "otel")]
+    let handler_start = std::time::Instant::now();
+    #[cfg(feature = "otel")]
+    let otel_app_id = app_id.to_string();
+
+    #[cfg(feature = "otel")]
+    if let Some(content_length) = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        state.metrics.message_size_bytes.record(
+            content_length,
+            &[
+                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                opentelemetry::KeyValue::new("env", "prod"),
+                opentelemetry::KeyValue::new("direction", "inbound"),
+            ],
+        );
+    }
+
     for payload in request.payloads {
+        #[cfg(feature = "otel")]
+        {
+            match &payload {
+                SyncPayload::QuerySubscription { .. } => {
+                    state.metrics.subscriptions_total.add(
+                        1,
+                        &[
+                            opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                            opentelemetry::KeyValue::new("env", "prod"),
+                        ],
+                    );
+                }
+                SyncPayload::Error(_err) => {
+                    state.metrics.errors_total.add(
+                        1,
+                        &[
+                            opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                            opentelemetry::KeyValue::new("env", "prod"),
+                            opentelemetry::KeyValue::new("direction", "inbound"),
+                        ],
+                    );
+                }
+                SyncPayload::SchemaWarning(_) => {
+                    state.metrics.schema_warnings_total.add(
+                        1,
+                        &[
+                            opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                            opentelemetry::KeyValue::new("env", "prod"),
+                        ],
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        #[cfg(feature = "otel")]
+        {
+            let pt = payload_type_name(&payload);
+            let attrs = [
+                opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
+                opentelemetry::KeyValue::new("env", "prod"),
+                opentelemetry::KeyValue::new("payload_type", pt),
+                opentelemetry::KeyValue::new("direction", "inbound"),
+            ];
+            state.metrics.messages_received.add(1, &attrs);
+        }
+
         let dispatch_result = if is_admin {
             state
                 .workers
@@ -3829,6 +4140,18 @@ async fn sync_handler(
                 });
             }
         }
+    }
+
+    #[cfg(feature = "otel")]
+    {
+        let elapsed = handler_start.elapsed().as_secs_f64() * 1000.0;
+        state.metrics.handler_duration_ms.record(
+            elapsed,
+            &[
+                opentelemetry::KeyValue::new("app_id", otel_app_id),
+                opentelemetry::KeyValue::new("env", "prod"),
+            ],
+        );
     }
 
     Json(SyncBatchResponse { results }).into_response()

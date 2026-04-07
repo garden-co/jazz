@@ -1733,6 +1733,8 @@ dependencies = [
  "hmac",
  "jazz-tools",
  "jsonwebtoken",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "reqwest",
  "serde",
  "serde_json",
@@ -1741,6 +1743,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]

@@ -180,6 +180,22 @@ impl FjallStorage {
         let mut tx = tx.borrow_mut();
         Self::delete_on_tx(&mut tx, keyspace, key)
     }
+
+    /// Returns the disk space used by the database in bytes.
+    pub fn disk_space(&self) -> Result<u64, StorageError> {
+        self.with_inner(|inner| {
+            inner
+                .db
+                .disk_space()
+                .map_err(|e| StorageError::IoError(format!("fjall disk_space: {e}")))
+        })
+    }
+
+    /// Returns the number of journal (WAL) files.
+    pub fn journal_count(&self) -> usize {
+        self.with_inner(|inner| Ok(inner.db.journal_count()))
+            .unwrap_or(0)
+    }
 }
 
 impl Storage for FjallStorage {
@@ -428,7 +444,28 @@ impl Storage for FjallStorage {
 
     fn flush(&self) {
         if let Some(inner) = self.inner.borrow().as_ref() {
+            #[cfg(feature = "otel")]
+            let start = std::time::Instant::now();
+
             let _ = inner.db.persist(PersistMode::SyncData);
+
+            #[cfg(feature = "otel")]
+            {
+                use opentelemetry::metrics::{Counter, Histogram};
+                static INSTRUMENTS: std::sync::OnceLock<(Counter<u64>, Histogram<f64>)> =
+                    std::sync::OnceLock::new();
+                let (flush_counter, flush_duration) = INSTRUMENTS.get_or_init(|| {
+                    let meter = opentelemetry::global::meter("jazz-storage");
+                    (
+                        meter.u64_counter("jazz.storage.flush.total").build(),
+                        meter
+                            .f64_histogram("jazz.storage.flush.duration_ms")
+                            .build(),
+                    )
+                });
+                flush_counter.add(1, &[]);
+                flush_duration.record(start.elapsed().as_secs_f64() * 1000.0, &[]);
+            }
         }
     }
 
@@ -463,6 +500,32 @@ mod tests {
 
         let reopened = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         reopened.close().unwrap();
+    }
+
+    #[test]
+    fn disk_space_and_journal_count_are_readable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.fjall");
+        let mut storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+
+        // Write something so disk_space > 0
+        use crate::object::ObjectId;
+        use crate::storage::Storage;
+        storage
+            .create_object(ObjectId::new(), std::collections::HashMap::new())
+            .unwrap();
+        storage.flush();
+
+        let disk_space = storage.disk_space().unwrap();
+        assert!(
+            disk_space > 0,
+            "disk_space should be > 0 after writing data"
+        );
+
+        // journal_count is informational, just verify it doesn't panic
+        let _journal_count = storage.journal_count();
+
+        storage.close().unwrap();
     }
 
     mod fjall_conformance {

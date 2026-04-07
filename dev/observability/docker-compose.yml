@@ -12,5 +12,8 @@ services:
     image: grafana/otel-lgtm:latest
     ports:
       - "3000:3000" # Grafana UI
+    volumes:
+      - ./grafana/dashboards.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/dashboards.yml:ro
+      - ./grafana:/etc/grafana/dashboards:ro
     # OTLP ports intentionally not exposed to host —
     # only the collector talks to lgtm via the docker network.

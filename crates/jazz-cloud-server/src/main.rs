@@ -1,3 +1,4 @@
+mod metrics;
 mod server;
 
 use clap::Parser;
@@ -37,15 +38,69 @@ struct Cli {
     catalogue_authority: CatalogueAuthorityArg,
 }
 
+fn make_env_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("jazz_cloud_server=info".parse().unwrap())
+        .add_directive("tower_http=debug".parse().unwrap())
+}
+
+#[cfg(feature = "otel")]
+static OTEL_TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "otel")]
+static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
+    std::sync::OnceLock::new();
+
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[cfg(feature = "otel")]
+    {
+        if std::env::var("JAZZ_OTEL").map_or(false, |v| v == "1") {
+            let tracer_provider = jazz_tools::otel::init_tracer_provider();
+            let otel_layer = jazz_tools::otel::layer(&tracer_provider);
+            let _ = OTEL_TRACER_PROVIDER.set(tracer_provider);
+
+            let meter_provider = jazz_tools::otel::init_meter_provider();
+            opentelemetry::global::set_meter_provider(meter_provider.clone());
+            let _ = OTEL_METER_PROVIDER.set(meter_provider);
+
+            tracing_subscriber::registry()
+                .with(make_env_filter())
+                .with(tracing_subscriber::fmt::layer())
+                .with(otel_layer)
+                .init();
+            return;
+        }
+    }
+
+    tracing_subscriber::registry()
+        .with(make_env_filter())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
+
+fn shutdown_otel() {
+    #[cfg(feature = "otel")]
+    {
+        if let Some(provider) = OTEL_TRACER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("OTel tracer shutdown error: {e}");
+            }
+        }
+        if let Some(provider) = OTEL_METER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("OTel meter shutdown error: {e}");
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz_cloud_server=info".parse().unwrap())
-                .add_directive("tower_http=debug".parse().unwrap()),
-        )
-        .init();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -86,8 +141,10 @@ async fn main() {
 
     if let Err(err) = server::run(config).await {
         eprintln!("Server error: {err}");
+        shutdown_otel();
         std::process::exit(1);
     }
+    shutdown_otel();
 }
 
 #[cfg(test)]

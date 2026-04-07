@@ -4,6 +4,10 @@ receivers:
       grpc:
         endpoint: 0.0.0.0:4317
 
+processors:
+  batch:
+    timeout: 5s
+
 exporters:
   otlp/lgtm:
     endpoint: lgtm:4317
@@ -14,4 +18,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/lgtm]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/lgtm]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
       exporters: [otlp/lgtm]
