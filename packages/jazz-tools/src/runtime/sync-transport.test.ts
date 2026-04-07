@@ -350,9 +350,9 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
-    expect(onConnected).toHaveBeenCalledWith("catalogue-1");
+    expect(onConnected).toHaveBeenCalledWith("catalogue-1", null);
     await vi.waitFor(() =>
-      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), null),
     );
     expect(clientId).toBe("server-client-1");
     await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
@@ -539,6 +539,7 @@ describe("sync-transport", () => {
           toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         },
       }),
+      null,
     );
   });
 
@@ -574,9 +575,12 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
-    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3");
+    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3", null);
     await vi.waitFor(() =>
-      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(
+        JSON.stringify({ Ping: {} }),
+        null,
+      ),
     );
     expect(clientId).toBe("server-client-3");
     await vi.waitFor(() => expect(runtime.removeServer).toHaveBeenCalledTimes(1));

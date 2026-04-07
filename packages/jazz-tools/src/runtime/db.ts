@@ -533,11 +533,22 @@ export class Db {
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
    */
-  private async ensureBridgeReady(): Promise<void> {
+  protected async ensureBridgeReady(): Promise<void> {
     await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
+  }
+
+  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl) {
+      return;
+    }
+    if (!options?.tier || options.tier === "worker") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -552,7 +563,11 @@ export class Db {
     });
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     this.workerBridge = bridge;
-    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+    const bridgeReady = bridge
+      .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => undefined);
+    bridgeReady.catch(() => undefined);
+    this.bridgeReady = bridgeReady;
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -1168,6 +1183,7 @@ export class Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
@@ -1519,6 +1535,7 @@ class ClientBackedDb extends Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,

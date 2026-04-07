@@ -428,21 +428,19 @@ async function sendToServer(
   );
 }
 
-function attachServer(): void {
+function attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
   if (!runtime) return;
-  // Re-attach every time the stream reconnects so query subscriptions replay.
-  if (streamAttached) {
-    runtime.removeServer();
-  }
-  runtime.addServer();
+  runtime.addServer(catalogueStateHash ?? null, nextSyncSeq ?? null);
   streamAttached = true;
   reconnectAttempt = 0;
+  post({ type: "upstream-connected" });
 }
 
 function detachServer(): void {
   if (!runtime || !streamAttached) return;
   runtime.removeServer();
   streamAttached = false;
+  post({ type: "upstream-disconnected" });
 }
 
 function scheduleReconnect(): void {
@@ -515,13 +513,13 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
-        onConnected: (clientId) => {
-          console.log("[worker] Stream connected", { clientId });
+        onSyncMessage: (payload, seq) => runtime?.onSyncMessageReceived(payload, seq ?? null),
+        onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
+          console.log("[worker] Stream connected", { clientId, nextSyncSeq });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
-            attachServer();
+            attachServer(catalogueStateHash, nextSyncSeq);
           }
         },
       },
@@ -538,9 +536,9 @@ async function connectStream(): Promise<void> {
             "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
           );
         }
-        detachServer();
-        scheduleReconnect();
       }
+      detachServer();
+      scheduleReconnect();
       return;
     }
     console.error("[worker] Stream connect error:", e);
