@@ -6,6 +6,7 @@
     "durability-tiers",
     "framework-patterns",
     "mcp",
+    "internals",
     "faq"
   ]
 }
