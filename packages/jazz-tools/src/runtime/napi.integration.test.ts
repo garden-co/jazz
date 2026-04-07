@@ -402,6 +402,84 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+function formatDiagnostics(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function snapshotDbClientState(db: Db): Record<string, unknown> {
+  const client = (db as any).runtimeClient;
+  const streamController = client?.streamController;
+
+  return {
+    serverClientId: client?.serverClientId ?? null,
+    useBackendSyncAuth: client?.useBackendSyncAuth ?? null,
+    resolvedSessionUserId: client?.resolvedSession?.user_id ?? null,
+    stream: streamController
+      ? {
+          streamAttached: streamController.streamAttached ?? null,
+          streamConnecting: streamController.streamConnecting ?? null,
+          reconnectAttempt: streamController.reconnectAttempt ?? null,
+          hasReconnectTimer: Boolean(streamController.reconnectTimer),
+          hasAbortController: Boolean(streamController.streamAbortController),
+          activeServerUrl: streamController.activeServerUrl ?? null,
+          activeServerPathPrefix: streamController.activeServerPathPrefix ?? null,
+          stopped: streamController.stopped ?? null,
+        }
+      : null,
+  };
+}
+
+async function fetchHealthSnapshot(serverUrl: string): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1_000);
+  try {
+    const response = await fetch(`${serverUrl}/health`, {
+      signal: controller.signal,
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function withTimeoutDiagnostics<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  diagnostics: () => Promise<Record<string, unknown>>,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(async () => {
+          const snapshot = await diagnostics().catch((error) => ({
+            diagnosticsError: error instanceof Error ? error.message : String(error),
+          }));
+          reject(new Error(`${label} after ${timeoutMs}ms\n${formatDiagnostics(snapshot)}`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 function base64Url(input: Buffer | string): string {
   const encoded = (input instanceof Buffer ? input : Buffer.from(input)).toString("base64");
   return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -1116,6 +1194,11 @@ describe("NAPI integration", () => {
       forRequest(request: { headers: Record<string, string> }): Db;
       shutdown(): Promise<void>;
     } | null = null;
+    const operationTimeoutMs = 20_000;
+    const timeline: string[] = [];
+    const mark = (label: string) => {
+      timeline.push(`${Date.now()}: ${label}`);
+    };
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
@@ -1128,7 +1211,9 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
+      mark("schema catalogue pushed");
       const todoServerSchema = await loadTodoServerWasmSchema();
+      mark("server schema loaded");
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
       const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
 
@@ -1165,6 +1250,7 @@ describe("NAPI integration", () => {
         userBranch: "main",
         tier: "worker",
       });
+      mark("writer contexts created");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
@@ -1181,6 +1267,18 @@ describe("NAPI integration", () => {
       const carolWriter = carolContext.db();
       const aliceWriter = aliceContext.db();
       const readerBackend = readerContext.asBackend();
+      const collectDiagnostics = async () => ({
+        timeline,
+        serverUrl: server.url,
+        serverHealth: await fetchHealthSnapshot(server.url),
+        writers: {
+          bob: snapshotDbClientState(bobWriter),
+          carol: snapshotDbClientState(carolWriter),
+          alice: snapshotDbClientState(aliceWriter),
+        },
+        readerBackend: snapshotDbClientState(readerBackend),
+      });
+      mark("db handles acquired");
 
       // Warm the lazy NAPI contexts via real edge reads so the assertions below
       // measure session-scoped sync visibility instead of first-use startup time.
@@ -1190,8 +1288,10 @@ describe("NAPI integration", () => {
         waitForQueryRows(aliceWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
         waitForQueryRows(readerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
       ]);
+      mark("warm edge reads resolved");
 
-      await withTimeout(
+      mark("starting bob durable insert");
+      await withTimeoutDiagnostics(
         bobWriter.insertDurable(
           policyTodosTable,
           {
@@ -1202,10 +1302,13 @@ describe("NAPI integration", () => {
           },
           { tier: "edge" },
         ),
-        10_000,
+        operationTimeoutMs,
         "bob writer create timed out",
+        collectDiagnostics,
       );
-      await withTimeout(
+      mark("bob durable insert resolved");
+      mark("starting carol durable insert");
+      await withTimeoutDiagnostics(
         carolWriter.insertDurable(
           policyTodosTable,
           {
@@ -1216,10 +1319,13 @@ describe("NAPI integration", () => {
           },
           { tier: "edge" },
         ),
-        10_000,
+        operationTimeoutMs,
         "carol writer create timed out",
+        collectDiagnostics,
       );
-      await withTimeout(
+      mark("carol durable insert resolved");
+      mark("starting alice durable insert");
+      await withTimeoutDiagnostics(
         aliceWriter.insertDurable(
           policyTodosTable,
           {
@@ -1230,9 +1336,11 @@ describe("NAPI integration", () => {
           },
           { tier: "edge" },
         ),
-        10_000,
+        operationTimeoutMs,
         "alice writer create timed out",
+        collectDiagnostics,
       );
+      mark("alice durable insert resolved");
 
       const aliceSessionDb = readerContext.forSession({
         user_id: "alice",
@@ -1248,10 +1356,11 @@ describe("NAPI integration", () => {
         async () => {
           expect(
             rowTitles(
-              await withTimeout(
+              await withTimeoutDiagnostics(
                 readerBackend.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
+                operationTimeoutMs,
                 "backend reader query timed out",
+                collectDiagnostics,
               ),
             ),
           ).toEqual(["alice-item", "bob-item", "carol-item"]);
@@ -1263,10 +1372,11 @@ describe("NAPI integration", () => {
         async () => {
           expect(
             rowTitles(
-              await withTimeout(
+              await withTimeoutDiagnostics(
                 aliceSessionDb.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
+                operationTimeoutMs,
                 "alice session query timed out",
+                collectDiagnostics,
               ),
             ),
           ).toEqual(["alice-item"]);
@@ -1278,10 +1388,11 @@ describe("NAPI integration", () => {
         async () => {
           expect(
             rowTitles(
-              await withTimeout(
+              await withTimeoutDiagnostics(
                 aliceRequestDb.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
+                operationTimeoutMs,
                 "alice request query timed out",
+                collectDiagnostics,
               ),
             ),
           ).toEqual(["alice-item"]);
