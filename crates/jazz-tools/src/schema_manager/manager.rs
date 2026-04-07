@@ -2077,7 +2077,7 @@ mod tests {
         manager.process(&mut storage);
         let stored = manager
             .query_manager_mut()
-            .get_row(handle.row_id)
+            .get_row(&storage, handle.row_id)
             .expect("inserted row should be readable")
             .1;
 

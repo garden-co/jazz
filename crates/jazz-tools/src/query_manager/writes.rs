@@ -216,7 +216,7 @@ impl QueryManager {
         metadata
     }
 
-    fn load_row_table_name<H: Storage>(&self, storage: &H, row_id: ObjectId) -> Option<String> {
+    fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
         let metadata = self
             .sync_manager
             .object_manager
@@ -229,9 +229,9 @@ impl QueryManager {
             .or_else(|| Some(table.clone()))
     }
 
-    fn load_visible_row_on_branch<H: Storage>(
+    fn load_visible_row_on_branch(
         &self,
-        storage: &H,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<(String, StoredRowVersion)> {
@@ -246,9 +246,9 @@ impl QueryManager {
         )
     }
 
-    fn load_row_provenance_on_branch<H: Storage>(
+    fn load_row_provenance_on_branch(
         &self,
-        storage: &H,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<RowProvenance> {
@@ -256,9 +256,9 @@ impl QueryManager {
         Some(row.row_provenance())
     }
 
-    fn load_branch_tip_ids<H: Storage>(
+    fn load_branch_tip_ids(
         &self,
-        storage: &H,
+        storage: &dyn Storage,
         table: &str,
         row_id: ObjectId,
         branch: &str,
@@ -1285,9 +1285,9 @@ impl QueryManager {
         Some(row.data)
     }
 
-    fn visible_row_is_hard_deleted<H: Storage>(
+    pub(super) fn visible_row_is_hard_deleted(
         &self,
-        storage: &H,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch: &str,
     ) -> bool {
@@ -1925,7 +1925,7 @@ impl QueryManager {
     /// Get a row by ID if loaded in ObjectManager.
     ///
     /// Returns decoded values and the table name if the row exists.
-    pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
+    pub fn get_row(&self, storage: &dyn Storage, id: ObjectId) -> Option<(String, Vec<Value>)> {
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -1935,8 +1935,12 @@ impl QueryManager {
             .clone();
         let table_name = TableName::new(&table);
 
-        // Get row data from ObjectManager
-        let (data, _) = self.load_row_from_object(id)?;
+        let (data, _) = self
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+            .map(|(_, row)| {
+                let version_id = row.version_id();
+                (row.data, version_id)
+            })?;
 
         let table_schema = self.schema.get(&table_name)?;
         let values = decode_row(&table_schema.columns, &data).ok()?;
@@ -1977,23 +1981,27 @@ impl QueryManager {
         self.row_is_deleted_on_branch(storage, table, &self.current_branch(), row_id)
     }
 
-    /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
-    pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        self.sync_manager
-            .object_manager
-            .visible_row(id, BranchName::new(self.current_branch()))
-            .is_some_and(|row| row.data.is_empty() && row.is_hard_deleted())
-    }
-
     /// Check if a commit has been stored to disk.
     ///
     /// With sync storage, commits are stored immediately.
     /// Used by `InsertResult::is_complete()` to check durability.
-    pub fn is_version_stored(&self, object_id: ObjectId, version_id: &CommitId) -> bool {
-        self.sync_manager
-            .object_manager
-            .visible_row(object_id, BranchName::new(self.current_branch()))
-            .is_some_and(|row| row.version_id() == *version_id)
+    pub fn is_version_stored(
+        &self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        version_id: &CommitId,
+    ) -> bool {
+        let Some(table) = self.load_row_table_name(storage, object_id) else {
+            return false;
+        };
+        storage
+            .row_version_exists(
+                &table,
+                self.current_branch().as_str(),
+                object_id,
+                *version_id,
+            )
+            .unwrap_or(false)
     }
 }
 
