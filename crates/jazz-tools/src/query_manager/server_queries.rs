@@ -72,7 +72,15 @@ impl QueryManager {
         branch_name: BranchName,
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (_, row) = Self::load_best_visible_row_version(storage, object_id, &branches, None)?;
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let (_, row) = Self::load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
+            &self.schema_context,
+            &branch_schema_map,
+        )?;
         Some(row.row_provenance())
     }
 
@@ -263,8 +271,14 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, row) =
-            Self::load_best_visible_row_version(storage, object_id, &branches, None)?;
+        let (table, row) = Self::load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
+            auth_context,
+            source_branch_schema_map,
+        )?;
         if row.is_hard_deleted() {
             return None;
         }
@@ -366,8 +380,14 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) =
-            Self::load_best_visible_row_version(storage, object_id, &branches, None)
+        let Some((table, row)) = Self::load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
+            auth_context,
+            source_branch_schema_map,
+        )
         else {
             return false;
         };
@@ -1565,8 +1585,16 @@ impl QueryManager {
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
+            let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version(storage, id, &branches, None)?;
+                let (_, row) = Self::load_best_visible_row_version(
+                    storage,
+                    id,
+                    &branches,
+                    None,
+                    &self.schema_context,
+                    &branch_schema_map,
+                )?;
                 if row.is_hard_deleted() {
                     return None;
                 }

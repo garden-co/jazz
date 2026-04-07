@@ -10,7 +10,8 @@
 //! - Table added → `AddTable`
 //! - Table removed → `RemoveTable`
 //! - Column type change → Marked as ambiguity (requires manual review)
-//! - Possible rename (same type, one added + one removed) → `RenameColumn` marked as draft
+//! - Possible column rename (same type, one added + one removed) → `RenameColumn` marked as draft
+//! - Possible table rename (same structure) → `RenameTable` marked as draft
 
 use crate::query_manager::types::{ColumnType, Schema, TableSchema, Value};
 
@@ -28,6 +29,11 @@ pub struct DiffResult {
 /// An ambiguity detected during schema diffing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ambiguity {
+    /// A table might be a rename.
+    PossibleTableRename {
+        old_table: String,
+        new_table: String,
+    },
     /// A column might be a rename (same type, one added + one removed).
     PossibleRename {
         table: String,
@@ -46,6 +52,16 @@ pub enum Ambiguity {
 impl std::fmt::Display for Ambiguity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Ambiguity::PossibleTableRename {
+                old_table,
+                new_table,
+            } => {
+                write!(
+                    f,
+                    "Possible table rename: {} -> {} (same structure)",
+                    old_table, new_table
+                )
+            }
             Ambiguity::PossibleRename {
                 table,
                 old_col,
@@ -84,31 +100,62 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
     // Collect all table names
     let old_tables: std::collections::HashSet<_> = old.keys().collect();
     let new_tables: std::collections::HashSet<_> = new.keys().collect();
+    let mut removed_tables: Vec<_> = old_tables.difference(&new_tables).copied().collect();
+    let mut added_tables: Vec<_> = new_tables.difference(&old_tables).copied().collect();
 
-    // Tables only in old (removed)
-    for table_name in old_tables.difference(&new_tables) {
-        let table_schema = old[*table_name].clone();
+    removed_tables.sort_by_key(|table_name| table_name.as_str());
+    added_tables.sort_by_key(|table_name| table_name.as_str());
+
+    let rename_pairs = detect_possible_table_renames(old, new, &removed_tables, &added_tables);
+    let matched_removed: std::collections::HashSet<_> = rename_pairs
+        .iter()
+        .map(|(removed_idx, _)| *removed_idx)
+        .collect();
+    let matched_added: std::collections::HashSet<_> = rename_pairs
+        .iter()
+        .map(|(_, added_idx)| *added_idx)
+        .collect();
+
+    for (removed_idx, added_idx) in rename_pairs {
+        let old_table = removed_tables[removed_idx].as_str().to_string();
+        let new_table = added_tables[added_idx].as_str().to_string();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: old_table.clone(),
+                new_name: new_table.clone(),
+            },
+            true,
+        );
+        ambiguities.push(Ambiguity::PossibleTableRename {
+            old_table: old_table.clone(),
+            new_table: new_table.clone(),
+        });
+    }
+
+    for (idx, table_name) in removed_tables.iter().enumerate() {
+        if matched_removed.contains(&idx) {
+            continue;
+        }
         transform.push(
             LensOp::RemoveTable {
                 table: table_name.as_str().to_string(),
-                schema: table_schema,
-            },
-            false, // We have the schema, so not draft
-        );
-    }
-
-    // Tables only in new (added)
-    for table_name in new_tables.difference(&old_tables) {
-        let table_schema = new[*table_name].clone();
-        transform.push(
-            LensOp::AddTable {
-                table: table_name.as_str().to_string(),
-                schema: table_schema,
+                schema: old[*table_name].clone(),
             },
             false,
         );
     }
-
+    for (idx, table_name) in added_tables.iter().enumerate() {
+        if matched_added.contains(&idx) {
+            continue;
+        }
+        transform.push(
+            LensOp::AddTable {
+                table: table_name.as_str().to_string(),
+                schema: new[*table_name].clone(),
+            },
+            false,
+        );
+    }
     // Tables in both (need to diff columns)
     for table_name in old_tables.intersection(&new_tables) {
         let old_table = &old[*table_name];
@@ -126,6 +173,52 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
         transform,
         ambiguities,
     }
+}
+
+fn detect_possible_table_renames(
+    old: &Schema,
+    new: &Schema,
+    removed_tables: &[&crate::query_manager::types::TableName],
+    added_tables: &[&crate::query_manager::types::TableName],
+) -> Vec<(usize, usize)> {
+    let removed_candidates: Vec<Vec<usize>> = removed_tables
+        .iter()
+        .map(|old_table_name| {
+            added_tables
+                .iter()
+                .enumerate()
+                .filter_map(|(added_idx, new_table_name)| {
+                    (old[*old_table_name] == new[*new_table_name]).then_some(added_idx)
+                })
+                .collect()
+        })
+        .collect();
+    let added_candidates: Vec<Vec<usize>> = added_tables
+        .iter()
+        .map(|new_table_name| {
+            removed_tables
+                .iter()
+                .enumerate()
+                .filter_map(|(removed_idx, old_table_name)| {
+                    (new[*new_table_name] == old[*old_table_name]).then_some(removed_idx)
+                })
+                .collect()
+        })
+        .collect();
+
+    removed_candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(removed_idx, candidate_added_tables)| {
+            let &[added_idx] = candidate_added_tables.as_slice() else {
+                return None;
+            };
+            let &[candidate_removed_idx] = added_candidates[added_idx].as_slice() else {
+                return None;
+            };
+            (candidate_removed_idx == removed_idx).then_some((removed_idx, added_idx))
+        })
+        .collect()
 }
 
 /// Diff two table schemas and add operations to the transform.
@@ -484,6 +577,110 @@ mod tests {
             }
             _ => panic!("Expected PossibleRename"),
         }
+    }
+
+    #[test]
+    fn diff_possible_table_rename() {
+        let old = make_schema(vec![("users", vec![("email", ColumnType::Text)])]);
+        let new = make_schema(vec![("people", vec![("email", ColumnType::Text)])]);
+
+        let result = diff_schemas(&old, &new);
+
+        assert_eq!(
+            result.transform.ops,
+            vec![LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            }]
+        );
+        assert!(result.transform.has_drafts());
+        assert_eq!(
+            result.ambiguities,
+            vec![Ambiguity::PossibleTableRename {
+                old_table: "users".to_string(),
+                new_table: "people".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_pairs_multiple_unique_table_renames() {
+        let old = make_schema(vec![
+            ("orgs", vec![("name", ColumnType::Text)]),
+            ("users", vec![("email", ColumnType::Text)]),
+        ]);
+        let new = make_schema(vec![
+            ("companies", vec![("name", ColumnType::Text)]),
+            ("people", vec![("email", ColumnType::Text)]),
+        ]);
+
+        let result = diff_schemas(&old, &new);
+
+        assert_eq!(
+            result.transform.ops,
+            vec![
+                LensOp::RenameTable {
+                    old_name: "orgs".to_string(),
+                    new_name: "companies".to_string(),
+                },
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "people".to_string(),
+                },
+            ]
+        );
+        assert!(result.transform.has_drafts());
+        assert_eq!(
+            result.ambiguities,
+            vec![
+                Ambiguity::PossibleTableRename {
+                    old_table: "orgs".to_string(),
+                    new_table: "companies".to_string(),
+                },
+                Ambiguity::PossibleTableRename {
+                    old_table: "users".to_string(),
+                    new_table: "people".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_leaves_duplicate_table_shapes_unpaired() {
+        let old = make_schema(vec![
+            ("admins", vec![("email", ColumnType::Text)]),
+            ("users", vec![("email", ColumnType::Text)]),
+        ]);
+        let new = make_schema(vec![
+            ("members", vec![("email", ColumnType::Text)]),
+            ("people", vec![("email", ColumnType::Text)]),
+        ]);
+
+        let result = diff_schemas(&old, &new);
+
+        assert_eq!(
+            result.transform.ops,
+            vec![
+                LensOp::RemoveTable {
+                    table: "admins".to_string(),
+                    schema: old[&TableName::new("admins")].clone(),
+                },
+                LensOp::RemoveTable {
+                    table: "users".to_string(),
+                    schema: old[&TableName::new("users")].clone(),
+                },
+                LensOp::AddTable {
+                    table: "members".to_string(),
+                    schema: new[&TableName::new("members")].clone(),
+                },
+                LensOp::AddTable {
+                    table: "people".to_string(),
+                    schema: new[&TableName::new("people")].clone(),
+                },
+            ],
+            "ambiguous same-shape tables should not be auto-paired, but should still emit explicit add/remove table ops"
+        );
+        assert!(result.ambiguities.is_empty());
     }
 
     #[test]

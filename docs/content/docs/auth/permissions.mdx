@@ -1,7 +1,7 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -111,6 +111,19 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 </Accordion>
 </Accordions>
 
+### Update policies: old row vs new row
+
+Update policies can check both the row **before** the update (`.whereOld(...)`) and the row
+**after** the update (`.whereNew(...)`). This is useful when you need to verify that the user had
+permission to modify the original row and that the result is also valid.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-whereold-wherenew-ts
+</include>
+
+If you only use `.whereOld(...)`, the same condition is applied to both the old and new row. The
+same applies if you only use `.whereNew(...)`. Use both when the old-row and new-row checks differ.
+
 ## Policy enforcement and request context
 
 Every policy is evaluated against a session. On the frontend, this is the authenticated user's session. In a backend handler, create a scoped session per request so queries run with the right identity.
@@ -119,7 +132,7 @@ Every policy is evaluated against a session. On the frontend, this is the authen
   ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
 </include>
 
-See [Setup](/docs/reference/server-setup) for context setup details.
+See [Server Setup](/docs/context-setup/server-setup#backend-context-setup) for backend context setup details.
 
 <Callout type="info">
   Policies are enforced on the sync server, not on the client. A client can write any data locally,

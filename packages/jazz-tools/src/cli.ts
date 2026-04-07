@@ -279,6 +279,40 @@ function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string
   );
 }
 
+type TableRenameSuggestion = {
+  oldTableName: string;
+  newTableName: string;
+};
+
+function detectPossibleTableRenames(
+  fromSchema: WasmSchema,
+  toSchema: WasmSchema,
+): TableRenameSuggestion[] {
+  const removedTables = Object.keys(fromSchema)
+    .filter((tableName) => !toSchema[tableName])
+    .sort();
+  const addedTables = Object.keys(toSchema)
+    .filter((tableName) => !fromSchema[tableName])
+    .sort();
+  const matches = removedTables
+    .map((oldTableName) => {
+      const candidateAddedTables = addedTables.filter((newTableName) =>
+        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]),
+      );
+      return candidateAddedTables.length === 1
+        ? ([oldTableName, candidateAddedTables[0]!] as const)
+        : undefined;
+    })
+    .filter((match) => match !== undefined);
+
+  return matches.flatMap(([oldTableName, newTableName], i) => {
+    const isDuplicateNewTableMatch = matches.some(([_, otherNewTableName], j) => {
+      return i !== j && newTableName === otherNewTableName;
+    });
+    return !isDuplicateNewTableMatch ? [{ oldTableName, newTableName }] : [];
+  });
+}
+
 function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaProject & {
   permissions: NonNullable<LoadedSchemaProject["permissions"]>;
   permissionsFile: string;
@@ -319,8 +353,9 @@ async function resolveStoredStructuralSchemaHash(
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
+  const uniqueTableNames = [...new Set(tableNames)];
   return Object.fromEntries(
-    tableNames
+    uniqueTableNames
       .filter((tableName) => schema[tableName])
       .map((tableName) => [tableName, schema[tableName]!]),
   );
@@ -414,6 +449,9 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
 function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
   return forward.map((tableLens) => ({
     table: tableLens.table,
+    added: tableLens.added,
+    removed: tableLens.removed,
+    renamedFrom: tableLens.renamedFrom,
     operations: tableLens.operations.map((op) => {
       if (op.type === "rename") {
         return op;
@@ -597,13 +635,39 @@ function inferTableSuggestions(
 function renderMigrationBody(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
-): { body: string; witnessFrom: WasmSchema; witnessTo: WasmSchema } {
+): {
+  migrateBody?: string;
+  renameTablesBody?: string;
+  createTablesBody?: string;
+  dropTablesBody?: string;
+  witnessFrom: WasmSchema;
+  witnessTo: WasmSchema;
+} {
+  const renameSuggestions = detectPossibleTableRenames(fromSchema, toSchema);
+  const renamedOldTables = new Set(renameSuggestions.map((suggestion) => suggestion.oldTableName));
+  const renamedNewTables = new Set(renameSuggestions.map((suggestion) => suggestion.newTableName));
+  const addedTables = Object.keys(toSchema)
+    .filter((tableName) => !fromSchema[tableName])
+    .sort();
+  const removedTables = Object.keys(fromSchema)
+    .filter((tableName) => !toSchema[tableName])
+    .sort();
+  const explicitAddedTables = addedTables.filter((tableName) => !renamedNewTables.has(tableName));
+  const explicitRemovedTables = removedTables.filter(
+    (tableName) => !renamedOldTables.has(tableName),
+  );
   const changedTables = changedTableNames(fromSchema, toSchema);
   const migratableTables = changedTables.filter(
     (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
   );
-  const witnessFrom = pickWitnessSchema(fromSchema, migratableTables);
-  const witnessTo = pickWitnessSchema(toSchema, migratableTables);
+  const witnessFromTables = [...migratableTables, ...explicitRemovedTables];
+  const witnessToTables = [...migratableTables, ...explicitAddedTables];
+  for (const renameSuggestion of renameSuggestions) {
+    witnessFromTables.push(renameSuggestion.oldTableName);
+    witnessToTables.push(renameSuggestion.newTableName);
+  }
+  const witnessFrom = pickWitnessSchema(fromSchema, witnessFromTables);
+  const witnessTo = pickWitnessSchema(toSchema, witnessToTables);
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {
@@ -626,15 +690,38 @@ function renderMigrationBody(
   }
 
   if (lines.length === 0) {
-    lines.push(
-      changedTables.length === 0
-        ? "// TODO: No schema differences were detected."
-        : "// TODO: No column-level migration steps were required for the detected schema changes.",
-    );
+    if (
+      renameSuggestions.length === 0 &&
+      explicitAddedTables.length === 0 &&
+      explicitRemovedTables.length === 0
+    ) {
+      lines.push(
+        changedTables.length === 0
+          ? "// TODO: No schema differences were detected."
+          : "// TODO: No column-level migration steps were required for the detected schema changes.",
+      );
+    }
   }
 
   return {
-    body: lines.join("\n").trimEnd(),
+    migrateBody: lines.length > 0 ? lines.join("\n").trimEnd() : undefined,
+    createTablesBody:
+      explicitAddedTables.length > 0
+        ? explicitAddedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
+        : undefined,
+    dropTablesBody:
+      explicitRemovedTables.length > 0
+        ? explicitRemovedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
+        : undefined,
+    renameTablesBody:
+      renameSuggestions.length > 0
+        ? renameSuggestions
+            .map(
+              (renameSuggestion) =>
+                `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
+            )
+            .join("\n")
+        : undefined,
     witnessFrom,
     witnessTo,
   };
@@ -668,16 +755,33 @@ function renderMigrationStub(input: {
   toSchema: WasmSchema;
 }): string {
   const rendered = renderMigrationBody(input.fromSchema, input.toSchema);
+  const sections: string[] = [];
+
+  if (rendered.renameTablesBody) {
+    sections.push(`  renameTables: {\n${indentBlock(rendered.renameTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.createTablesBody) {
+    sections.push(`  createTables: {\n${indentBlock(rendered.createTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.dropTablesBody) {
+    sections.push(`  dropTables: {\n${indentBlock(rendered.dropTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.migrateBody) {
+    sections.push(`  migrate: {\n${indentBlock(rendered.migrateBody, 4)}\n  },`);
+  }
+
+  sections.push(`  fromHash: ${JSON.stringify(shortSchemaHash(input.fromHash))},`);
+  sections.push(`  toHash: ${JSON.stringify(shortSchemaHash(input.toHash))},`);
+  sections.push(`  from: ${renderSchemaWitness(rendered.witnessFrom)},`);
+  sections.push(`  to: ${renderSchemaWitness(rendered.witnessTo)},`);
+
   return `import { schema as s } from "jazz-tools";
 
 export default s.defineMigration({
-  migrate: {
-${indentBlock(rendered.body, 4)}
-  },
-  fromHash: ${JSON.stringify(shortSchemaHash(input.fromHash))},
-  toHash: ${JSON.stringify(shortSchemaHash(input.toHash))},
-  from: ${renderSchemaWitness(rendered.witnessFrom)},
-  to: ${renderSchemaWitness(rendered.witnessTo)},
+${sections.join("\n")}
 });
 `;
 }

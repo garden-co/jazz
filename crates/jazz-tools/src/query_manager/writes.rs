@@ -6,6 +6,7 @@ use crate::metadata::{
 };
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{RowState, StoredRowVersion};
+use crate::schema_manager::{origin_schema_hash_from_metadata, resolve_current_table_name};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -15,7 +16,10 @@ use super::manager::{
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{Session, WriteContext};
-use super::types::{ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Value};
+use super::types::{
+    ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName,
+    Value,
+};
 
 pub struct RowBranchWrite<'a> {
     pub table: &'a str,
@@ -179,18 +183,56 @@ impl QueryManager {
         Ok(row)
     }
 
+    fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        if branch == self.current_branch() {
+            return Some(self.schema_context.current_hash);
+        }
+
+        let composed = ComposedBranchName::parse(&BranchName::new(branch))?;
+        if composed.schema_hash.short() == self.schema_context.current_hash.short() {
+            return Some(self.schema_context.current_hash);
+        }
+
+        if let Some(hash) = self
+            .schema_context
+            .live_schemas
+            .keys()
+            .copied()
+            .find(|hash| hash.short() == composed.schema_hash.short())
+        {
+            return Some(hash);
+        }
+
+        self.find_schema_by_short_hash(&composed.schema_hash)
+    }
+
+    fn row_object_metadata_for_branch(&self, table: &str, branch: &str) -> HashMap<String, String> {
+        let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), table.to_string())]);
+        if let Some(origin_schema_hash) = self.origin_schema_hash_for_branch(branch) {
+            metadata.insert(
+                MetadataKey::OriginSchemaHash.to_string(),
+                origin_schema_hash.to_string(),
+            );
+        }
+        metadata
+    }
+
     fn load_row_table_name<H: Storage>(&self, storage: &H, row_id: ObjectId) -> Option<String> {
-        self.sync_manager
+        let metadata = self
+            .sync_manager
             .object_manager
             .get(row_id)
-            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            .cloned()
             .or_else(|| {
                 storage
                     .load_metadata(row_id)
                     .ok()
                     .flatten()
-                    .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
-            })
+            })?;
+        let table = metadata.get(MetadataKey::Table.as_str())?;
+        let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
+        resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())
+            .or_else(|| Some(table.clone()))
     }
 
     fn load_visible_row_on_branch<H: Storage>(
@@ -199,7 +241,15 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<(String, StoredRowVersion)> {
-        Self::load_best_visible_row_version(storage, row_id, &[branch_name.to_string()], None)
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        Self::load_best_visible_row_version(
+            storage,
+            row_id,
+            &[branch_name.to_string()],
+            None,
+            &self.schema_context,
+            &branch_schema_map,
+        )
     }
 
     fn load_row_provenance_on_branch<H: Storage>(
@@ -410,7 +460,14 @@ impl QueryManager {
             .object_manager
             .get_or_load(id, storage, branches)?;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (table, row) = Self::load_best_visible_row_version(storage, id, branches, None)?;
+        let (table, row) = Self::load_best_visible_row_version(
+            storage,
+            id,
+            branches,
+            None,
+            &self.schema_context,
+            &branch_schema_map,
+        )?;
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
@@ -546,8 +603,7 @@ impl QueryManager {
         }
 
         // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        let metadata = self.row_object_metadata_for_branch(table, self.current_branch().as_str());
 
         let object_id =
             self.sync_manager
@@ -689,8 +745,7 @@ impl QueryManager {
         }
 
         // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        let metadata = self.row_object_metadata_for_branch(table, branch);
 
         let object_id =
             self.sync_manager
@@ -1002,9 +1057,16 @@ impl QueryManager {
         }
 
         let storage_ref: &dyn Storage = storage;
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let (_, row) =
-                Self::load_best_visible_row_version(storage_ref, id, &[branch.to_string()], None)?;
+            let (_, row) = Self::load_best_visible_row_version(
+                storage_ref,
+                id,
+                &[branch.to_string()],
+                None,
+                &self.schema_context,
+                &branch_schema_map,
+            )?;
             if row.is_hard_deleted() {
                 return None;
             }

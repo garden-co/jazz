@@ -15,7 +15,6 @@
 - [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
 - [**lens-transform-silent-degradation**](todo/issues/lens-transform-silent-degradation.md) — Failed lens transforms fall back to original data and continue, silently propagating schema mismatches.
 - [**test_client-storage-opfs**](todo/issues/test_client-storage-opfs.md) — Missing integration tests for the OPFS B-tree storage backend in client/browser context.
-- [**test_server-storage-fjall**](todo/issues/test_server-storage-fjall.md) — Missing integration tests for the fjall storage backend in server context.
 
 ## Ideas
 

@@ -129,7 +129,7 @@ async fn rocksdb_server_storage() {
 /// correct, unique titles.
 ///
 /// ```text
-/// alice ──create 200 todos──► server (fjall)
+/// alice ──create 200 todos──► server (rocksdb)
 ///                                 │
 ///                  bob connects and queries
 ///                                 │
@@ -200,7 +200,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
 /// surviving, updated state.
 ///
 /// ```text
-/// alice ──create 5──► update 3 titles──► delete 2──► server (fjall)
+/// alice ──create 5──► update 3 titles──► delete 2──► server (rocksdb)
 ///                                                        │
 ///                                         bob connects and queries
 ///                                                        │
@@ -309,7 +309,7 @@ async fn update_and_delete(server: &TestingServer) {
 /// latest value.
 ///
 /// ```text
-/// alice ──create + update ×200──► server (fjall)
+/// alice ──create + update ×200──► server (rocksdb)
 ///                                     │
 ///                      bob connects and queries
 ///                                     │
@@ -390,7 +390,7 @@ async fn deep_update_history(server: &TestingServer) {
 /// into "notes" and vice versa.
 ///
 /// ```text
-/// alice ──create 5 todos + 3 notes──► server (fjall)
+/// alice ──create 5 todos + 3 notes──► server (rocksdb)
 ///                                         │
 ///                          bob queries each table separately
 ///                                         │
@@ -517,7 +517,7 @@ async fn multi_table_isolation(server: &TestingServer) {
 /// filter_eq and filter_gt return correct results through the server.
 ///
 /// ```text
-/// alice ──create 20 products──► server (fjall)
+/// alice ──create 20 products──► server (rocksdb)
 ///                                   │
 ///                    bob queries with filters
 ///                                   │
@@ -632,7 +632,7 @@ async fn index_queries(server: &TestingServer) {
 /// data. Alice then creates more rows and Bob sees the combined set.
 ///
 /// ```text
-/// alice ──create 10──► server₁ (fjall, data_dir)
+/// alice ──create 10──► server₁ (rocksdb, data_dir)
 ///                          │
 ///                      server₁ stops
 ///                          │
@@ -786,7 +786,7 @@ async fn restart_preserves_data() {
 /// server needing to re-discover the schema.
 ///
 /// ```text
-/// alice ──create + query──► server₁ (fjall, data_dir)
+/// alice ──create + query──► server₁ (rocksdb, data_dir)
 ///                               │
 ///                           server₁ stops
 ///                               │
