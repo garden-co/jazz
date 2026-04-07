@@ -680,7 +680,12 @@ fn parse_test_delay_ms(raw: &str) -> Option<Duration> {
 }
 
 fn test_delay_server_send_object_updated(payload: &SyncPayload) -> Option<Duration> {
-    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+    if !matches!(
+        payload,
+        SyncPayload::RowVersionCreated { .. }
+            | SyncPayload::RowVersionNeeded { .. }
+            | SyncPayload::RowVersionStateChanged { .. }
+    ) {
         return None;
     }
 

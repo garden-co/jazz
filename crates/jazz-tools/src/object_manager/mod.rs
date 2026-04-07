@@ -1,14 +1,13 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use web_time::{SystemTime, UNIX_EPOCH};
 
-use smallvec::smallvec;
 use smolset::SmolSet;
 
-use crate::commit::{Commit, CommitId, StoredState};
+use crate::commit::{Commit, CommitId};
 use crate::metadata::MetadataKey;
-use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
+use crate::object::{Branch, BranchName, Object, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
-use crate::storage::{LoadedBranch, Storage, StorageError};
+use crate::storage::{Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
 /// Unique identifier for a subscription.
@@ -310,46 +309,6 @@ impl ObjectManager {
         id
     }
 
-    fn branch_from_loaded(loaded: LoadedBranch) -> Branch {
-        let mut commits = HashMap::new();
-        // Compute tips correctly: a tip is a commit not referenced
-        // as a parent by any other commit in the branch.
-        let mut all_ids: HashSet<CommitId> = HashSet::new();
-        let mut parent_ids: HashSet<CommitId> = HashSet::new();
-        for commit in &loaded.commits {
-            all_ids.insert(commit.id());
-            for parent in &commit.parents {
-                parent_ids.insert(*parent);
-            }
-        }
-        let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
-        for cid in &all_ids {
-            if !parent_ids.contains(cid) {
-                tips.insert(*cid);
-            }
-        }
-        for commit in loaded.commits {
-            commits.insert(commit.id(), commit);
-        }
-        Branch {
-            commits,
-            tips,
-            tails: if loaded.tails.is_empty() {
-                None
-            } else {
-                Some(loaded.tails.into_iter().collect())
-            },
-            loaded_state: BranchLoadedState::AllCommits,
-        }
-    }
-
-    fn winning_tip_for_branch(branch: &Branch) -> Option<(CommitId, &Commit)> {
-        let mut tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-        let tip_id = tips.pop()?;
-        let commit = branch.commits.get(&tip_id)?;
-        Some((tip_id, commit))
-    }
-
     fn is_row_metadata(metadata: &HashMap<String, String>) -> bool {
         metadata.contains_key(MetadataKey::Table.as_str())
     }
@@ -364,21 +323,6 @@ impl ObjectManager {
         branch_name: &BranchName,
     ) -> Option<&mut RowBranch> {
         self.row_branches.get_mut(&(object_id, *branch_name))
-    }
-
-    fn row_version_from_commit(
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        commit_id: CommitId,
-        commit: &Commit,
-    ) -> StoredRowVersion {
-        StoredRowVersion::from_commit(
-            object_id,
-            branch_name.as_str().to_string(),
-            commit_id,
-            commit,
-            RowState::VisibleDirect,
-        )
     }
 
     fn apply_row_version<H: Storage>(
@@ -571,6 +515,30 @@ impl ObjectManager {
         })
     }
 
+    pub fn row_versions_for_sync(
+        &self,
+    ) -> Vec<(ObjectId, HashMap<String, String>, StoredRowVersion)> {
+        let mut rows = Vec::new();
+        for ((object_id, _branch_name), branch) in &self.row_branches {
+            let Some(object) = self.objects.get(object_id) else {
+                continue;
+            };
+            let metadata = object.metadata.clone();
+            for row in branch.versions.values() {
+                rows.push((*object_id, metadata.clone(), row.clone()));
+            }
+        }
+        rows.sort_by_key(|(object_id, _, row)| {
+            (
+                *object_id,
+                row.branch.clone(),
+                row.updated_at,
+                row.version_id(),
+            )
+        });
+        rows
+    }
+
     /// Get an object by id.
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(&id)
@@ -605,13 +573,9 @@ impl ObjectManager {
             });
         }
 
-        let (metadata, loaded_branch_count, loaded_row_versions) = {
+        let (metadata, loaded_row_versions) = {
             let object = self.objects.get(&id)?;
-            (
-                object.metadata.clone(),
-                object.branches.len(),
-                self.row_branches.len(),
-            )
+            (object.metadata.clone(), self.row_branches.len())
         };
 
         if Self::is_row_metadata(&metadata) {
@@ -647,32 +611,9 @@ impl ObjectManager {
                     self.remember_remote_row_version(id, bn, row);
                 }
             }
-        } else {
-            let object = self.objects.get_mut(&id)?;
-            for branch_name in branches {
-                let bn = BranchName::new(branch_name);
-                if object.branches.contains_key(&bn) {
-                    continue;
-                }
-                match storage.load_branch(id, &bn) {
-                    Ok(Some(loaded)) => {
-                        object.branches.insert(bn, Self::branch_from_loaded(loaded));
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(
-                            %id,
-                            branch = %bn,
-                            error = ?err,
-                            "get_or_load: failed to hydrate requested branch"
-                        );
-                    }
-                }
-            }
         }
 
         let object = self.objects.get(&id)?;
-        let branch_count = object.branches.len();
         let row_branch_count = self
             .row_branches
             .keys()
@@ -684,284 +625,14 @@ impl ObjectManager {
             .filter(|((object_id, _), _)| *object_id == id)
             .map(|(_, branch)| branch.versions.len())
             .sum();
-        let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(
             %id,
-            branch_count,
-            commit_count,
             row_branch_count,
             row_version_count,
-            previous_branch_count = loaded_branch_count,
             previous_row_branch_count = loaded_row_versions,
             "get_or_load: loaded from storage"
         );
         Some(object)
-    }
-
-    /// Get mutable object by id.
-    fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
-        self.objects.get_mut(&id)
-    }
-
-    /// Get a mutable reference to a specific commit.
-    pub fn get_commit_mut(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        commit_id: CommitId,
-    ) -> Option<&mut Commit> {
-        self.objects
-            .get_mut(&object_id)?
-            .branches
-            .get_mut(branch_name)?
-            .commits
-            .get_mut(&commit_id)
-    }
-
-    /// Add a commit to an object's branch.
-    ///
-    /// - Creates the branch automatically if parents is empty
-    /// - Rejects if object doesn't exist
-    /// - Rejects if parents are specified but branch doesn't exist
-    /// - Rejects if any parent doesn't exist in the branch
-    /// - Updates tips: removes parents from tips, adds new commit as tip
-    /// - Persists to storage via Storage synchronously
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_commit<H: Storage, A: ToString>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        parents: Vec<CommitId>,
-        content: Vec<u8>,
-        author: A,
-        metadata: Option<BTreeMap<String, String>>,
-    ) -> Result<CommitId, Error> {
-        let timestamp = self.next_timestamp();
-        self.add_commit_with_timestamp(
-            io,
-            object_id,
-            branch_name,
-            parents,
-            content,
-            timestamp,
-            author,
-            metadata,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_commit_with_timestamp<H: Storage, A: ToString>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        parents: Vec<CommitId>,
-        content: Vec<u8>,
-        timestamp: u64,
-        author: A,
-        metadata: Option<BTreeMap<String, String>>,
-    ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
-        let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
-        let author = author.to_string();
-        let commit_metadata = metadata.clone();
-
-        // Capture previous state BEFORE mutation for AllObjectUpdate
-        // (previous_commit_ids, old_content)
-        let (_object_metadata, previous_commit_ids, old_content, _previous_row, is_row_object) = {
-            let object = self
-                .get(object_id)
-                .ok_or(Error::ObjectNotFound(object_id))?;
-            let object_metadata = object.metadata.clone();
-            let is_row_object = Self::is_row_metadata(&object_metadata);
-
-            if is_row_object {
-                if !parents.is_empty() {
-                    let branch = self
-                        .row_branch(object_id, &branch_name)
-                        .ok_or(Error::BranchNotFound(branch_name))?;
-                    for parent in &parents {
-                        if !branch.contains(*parent) {
-                            return Err(Error::ParentNotFound(*parent));
-                        }
-                    }
-                }
-                let previous_row = self.visible_row(object_id, branch_name);
-                let previous_commit_ids = self
-                    .row_branch(object_id, &branch_name)
-                    .map(RowBranch::tip_ids_by_timestamp)
-                    .unwrap_or_default();
-                let old_content = previous_row.as_ref().map(|row| row.data.clone());
-                (
-                    object_metadata,
-                    previous_commit_ids,
-                    old_content,
-                    previous_row,
-                    true,
-                )
-            } else {
-                // If parents is non-empty, branch must exist and contain all parents
-                if !parents.is_empty() {
-                    let branch = object
-                        .branches
-                        .get(&branch_name)
-                        .ok_or(Error::BranchNotFound(branch_name))?;
-
-                    for parent in &parents {
-                        if !branch.commits.contains_key(parent) {
-                            return Err(Error::ParentNotFound(*parent));
-                        }
-                    }
-
-                    // After truncation, reject commits whose parents are before tails
-                    if let Some(tails) = &branch.tails {
-                        for parent in &parents {
-                            if !Self::is_descendant_of_any(&branch.commits, *parent, tails) {
-                                return Err(Error::ParentNotFound(*parent));
-                            }
-                        }
-                    }
-                }
-
-                // Capture previous tips and "winning" tip content before mutation
-                if let Some(branch) = object.branches.get(&branch_name) {
-                    let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-                    let old_content = prev_tips
-                        .last()
-                        .and_then(|tip_id| branch.commits.get(tip_id))
-                        .map(|commit| commit.content.clone());
-                    let previous_row =
-                        Self::winning_tip_for_branch(branch).map(|(commit_id, commit)| {
-                            Self::row_version_from_commit(
-                                object_id,
-                                &branch_name,
-                                commit_id,
-                                commit,
-                            )
-                        });
-                    (object_metadata, prev_tips, old_content, previous_row, false)
-                } else {
-                    (object_metadata, vec![], None, None, false)
-                }
-            }
-        };
-
-        let mut commit = Commit {
-            parents: parents.clone().into(),
-            content,
-            timestamp,
-            author: author.clone(),
-            metadata: commit_metadata,
-            stored_state: StoredState::Pending,
-            ack_state: Default::default(),
-        };
-
-        let commit_id = commit.id();
-
-        if is_row_object {
-            let history_row =
-                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
-            return self.apply_row_version(io, object_id, branch_name, history_row);
-        }
-
-        // Sync storage - returns immediately
-        if io
-            .append_commit(object_id, &branch_name, commit.clone())
-            .is_ok()
-        {
-            commit.stored_state = StoredState::Stored;
-        }
-
-        if !is_row_object {
-            // Now mutably borrow and update
-            let object = self
-                .get_mut(object_id)
-                .expect("object existence already validated");
-
-            let branch = object
-                .branches
-                .entry(branch_name)
-                .or_insert_with(|| Branch {
-                    loaded_state: BranchLoadedState::AllCommits,
-                    ..Default::default()
-                });
-
-            for parent in &parents {
-                branch.tips.remove(parent);
-            }
-            branch.tips.insert(commit_id);
-
-            branch.commits.insert(commit_id, commit);
-
-            tracing::trace!(?commit_id, "commit applied");
-
-            self.notify_subscribers_of_commit(object_id, branch_name);
-            self.notify_all_object_subscribers(
-                object_id,
-                branch_name,
-                false,
-                previous_commit_ids,
-                old_content,
-            );
-        }
-
-        Ok(commit_id)
-    }
-
-    /// Replace all content on a branch with a single new commit, discarding history.
-    ///
-    /// This is useful for indices and other derived data that don't need history.
-    /// Unlike `add_commit`, this method:
-    /// - Removes all existing commits from memory immediately
-    /// - Creates a new commit with no parents
-    /// - Does NOT call Storage (caller should handle persistence if needed)
-    ///
-    /// Returns the new commit ID.
-    pub fn replace_content<A: ToString>(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        content: Vec<u8>,
-        author: A,
-    ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
-
-        let object = self
-            .get_mut(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?;
-
-        let branch = object
-            .branches
-            .get_mut(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
-
-        // Clear all existing commits and tips
-        branch.commits.clear();
-        branch.tips.clear();
-        branch.tails = None;
-
-        // Create new commit with no parents
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-
-        let commit = Commit {
-            parents: smallvec![],
-            content,
-            timestamp,
-            author: author.to_string(),
-            metadata: None,
-            stored_state: StoredState::Pending,
-            ack_state: Default::default(),
-        };
-
-        let commit_id = commit.id();
-        branch.tips.insert(commit_id);
-        branch.commits.insert(commit_id, commit);
-
-        Ok(commit_id)
     }
 
     /// Get tip IDs for a branch.
@@ -976,62 +647,11 @@ impl ObjectManager {
             return Ok(&branch.tips);
         }
 
-        let object = self
-            .get(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?;
+        if self.get(object_id).is_none() {
+            return Err(Error::ObjectNotFound(object_id));
+        }
 
-        let branch = object
-            .branches
-            .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
-
-        Ok(&branch.tips)
-    }
-
-    /// Get the tips (frontier commits) as full Commit structs for a branch.
-    pub fn get_tips(
-        &self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-    ) -> Result<HashMap<CommitId, &Commit>, Error> {
-        let branch_name = branch_name.into();
-
-        let object = self
-            .get(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?;
-
-        let branch = object
-            .branches
-            .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
-
-        let tips: HashMap<CommitId, &Commit> = branch
-            .tips
-            .iter()
-            .filter_map(|id| branch.commits.get(id).map(|c| (*id, c)))
-            .collect();
-
-        Ok(tips)
-    }
-
-    /// Get all commits in a branch.
-    pub fn get_commits(
-        &self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-    ) -> Result<&HashMap<CommitId, Commit>, Error> {
-        let branch_name = branch_name.into();
-
-        let object = self
-            .get(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?;
-
-        let branch = object
-            .branches
-            .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
-
-        Ok(&branch.commits)
+        Err(Error::BranchNotFound(branch_name))
     }
 
     /// Receive an object from a remote source (with specified ID).
@@ -1052,121 +672,6 @@ impl ObjectManager {
             metadata,
             branches: HashMap::new(),
         });
-    }
-
-    /// Receive a commit from a remote source.
-    ///
-    /// Unlike `add_commit`, this accepts a pre-built Commit (with existing timestamp/id).
-    /// Validates parent references but doesn't require parents to be tips.
-    /// Persists to storage via Storage synchronously.
-    pub fn receive_commit<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        commit: Commit,
-    ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
-        let commit_id = commit.id();
-        let metadata = self
-            .get(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?
-            .metadata
-            .clone();
-        let is_row_object = Self::is_row_metadata(&metadata);
-
-        // Capture previous state BEFORE mutation for AllObjectUpdate
-        let (previous_commit_ids, old_content, _previous_row, already_exists) = {
-            if is_row_object {
-                if self.row_version_exists(object_id, &branch_name, commit_id) {
-                    (vec![], None, None, true)
-                } else {
-                    let previous_row = self.visible_row(object_id, branch_name);
-                    let previous_commit_ids = self
-                        .row_branch(object_id, &branch_name)
-                        .map(RowBranch::tip_ids_by_timestamp)
-                        .unwrap_or_default();
-                    let old_content = previous_row.as_ref().map(|row| row.data.clone());
-                    (previous_commit_ids, old_content, previous_row, false)
-                }
-            } else {
-                let object = self
-                    .get(object_id)
-                    .ok_or(Error::ObjectNotFound(object_id))?;
-
-                if let Some(branch) = object.branches.get(&branch_name) {
-                    if branch.commits.contains_key(&commit_id) {
-                        (vec![], None, None, true)
-                    } else {
-                        let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-                        let old_content = prev_tips
-                            .last()
-                            .and_then(|tip_id| branch.commits.get(tip_id))
-                            .map(|commit| commit.content.clone());
-                        let previous_row =
-                            Self::winning_tip_for_branch(branch).map(|(tip_id, commit)| {
-                                Self::row_version_from_commit(
-                                    object_id,
-                                    &branch_name,
-                                    tip_id,
-                                    commit,
-                                )
-                            });
-                        (prev_tips, old_content, previous_row, false)
-                    }
-                } else {
-                    (vec![], None, None, false)
-                }
-            }
-        };
-
-        // Skip notification and mutation for duplicate commits
-        if already_exists {
-            return Ok(commit_id);
-        }
-
-        if is_row_object {
-            let history_row =
-                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
-            return self.apply_row_version(io, object_id, branch_name, history_row);
-        }
-
-        // Sync storage - returns immediately
-        let mut commit = commit;
-        if io
-            .append_commit(object_id, &branch_name, commit.clone())
-            .is_ok()
-        {
-            commit.stored_state = StoredState::Stored;
-        }
-
-        let object = self.get_mut(object_id).expect("validated above");
-
-        let branch = object
-            .branches
-            .entry(branch_name)
-            .or_insert_with(|| Branch {
-                loaded_state: BranchLoadedState::AllCommits,
-                ..Default::default()
-            });
-
-        for parent in &commit.parents {
-            branch.tips.remove(parent);
-        }
-        branch.tips.insert(commit_id);
-
-        branch.commits.insert(commit_id, commit);
-
-        self.notify_subscribers_of_commit(object_id, branch_name);
-        self.notify_all_object_subscribers(
-            object_id,
-            branch_name,
-            false,
-            previous_commit_ids,
-            old_content,
-        );
-
-        Ok(commit_id)
     }
 
     /// Subscribe to updates on a branch.
@@ -1278,43 +783,6 @@ impl ObjectManager {
         Some(self.row_objects_outbox.remove(index))
     }
 
-    /// Emit an update to all global subscribers.
-    fn notify_all_object_subscribers(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: BranchName,
-        is_new_object: bool,
-        previous_commit_ids: Vec<CommitId>,
-        old_content: Option<Vec<u8>>,
-    ) {
-        if self.all_object_subscriptions.is_empty() {
-            return;
-        }
-
-        let (metadata, commit_ids) = if let Some(object) = self.get(object_id) {
-            let commit_ids = if let Some(branch) = self.row_branch(object_id, &branch_name) {
-                branch.tip_ids_by_timestamp()
-            } else if let Some(branch) = object.branches.get(&branch_name) {
-                Self::tips_by_timestamp(&branch.commits, &branch.tips)
-            } else {
-                vec![]
-            };
-            (object.metadata.clone(), commit_ids)
-        } else {
-            (HashMap::new(), vec![])
-        };
-
-        self.all_objects_outbox.push(AllObjectUpdate {
-            object_id,
-            metadata,
-            branch_name,
-            commit_ids,
-            is_new_object,
-            previous_commit_ids,
-            old_content,
-        });
-    }
-
     /// Get the current frontier (tips) sorted by timestamp (oldest first).
     fn tips_by_timestamp(
         commits: &HashMap<CommitId, Commit>,
@@ -1351,159 +819,6 @@ impl ObjectManager {
                 });
             }
         }
-    }
-
-    /// Truncate a branch by removing commits topologically earlier than the specified tails.
-    ///
-    /// All tips must be descendants of (or equal to) some tail. Commits before the tails
-    /// are deleted. Operations are persisted synchronously via Storage.
-    pub fn truncate_branch<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        tail_ids: HashSet<CommitId>,
-    ) -> TruncateResult {
-        let branch_name = branch_name.into();
-
-        // Validate object exists
-        let object = match self.get(object_id) {
-            Some(obj) => obj,
-            None => {
-                return TruncateResult::PermanentError(TruncateError::ObjectNotFound(object_id));
-            }
-        };
-
-        // Validate branch exists
-        let branch = match object.branches.get(&branch_name) {
-            Some(b) => b,
-            None => {
-                return TruncateResult::PermanentError(TruncateError::BranchNotFound(branch_name));
-            }
-        };
-
-        // Validate all tail_ids exist in branch
-        for tail_id in &tail_ids {
-            if !branch.commits.contains_key(tail_id) {
-                return TruncateResult::PermanentError(TruncateError::TailNotFound(*tail_id));
-            }
-        }
-
-        // Convert to SmolSet for use in Branch
-        let tail_smolset: SmolSet<[CommitId; 2]> = tail_ids.iter().copied().collect();
-
-        // Check invariant: all tips must be descendants of (or equal to) some tail
-        for tip in &branch.tips {
-            if !Self::is_descendant_of_any(&branch.commits, *tip, &tail_smolset) {
-                return TruncateResult::PermanentError(TruncateError::TipBeforeTail(*tip));
-            }
-        }
-
-        // Find all commits to delete (ancestors of tails, not including tails themselves)
-        let commits_to_delete = Self::find_ancestors(&branch.commits, &tail_ids);
-
-        // If nothing to delete and tails already set to same value, return success immediately
-        if commits_to_delete.is_empty() && branch.tails.as_ref() == Some(&tail_smolset) {
-            return TruncateResult::Success { deleted_commits: 0 };
-        }
-
-        // Sync storage: set branch tails
-        let _ = io.set_branch_tails(object_id, &branch_name, Some(tail_ids));
-
-        // Sync storage: delete commits
-        for commit_id in &commits_to_delete {
-            let _ = io.delete_commit(object_id, &branch_name, *commit_id);
-        }
-
-        // Update in-memory state
-        let object = self
-            .get_mut(object_id)
-            .expect("object existence already validated");
-        let branch = object.branches.get_mut(&branch_name).unwrap();
-
-        // Set tails
-        branch.tails = Some(tail_smolset);
-
-        // Remove deleted commits from memory
-        for commit_id in &commits_to_delete {
-            branch.commits.remove(commit_id);
-        }
-
-        TruncateResult::Success {
-            deleted_commits: commits_to_delete.len(),
-        }
-    }
-
-    /// Check if `commit_id` is a descendant of any commit in `ancestors` (or is in ancestors itself).
-    fn is_descendant_of_any(
-        commits: &HashMap<CommitId, Commit>,
-        commit_id: CommitId,
-        ancestors: &SmolSet<[CommitId; 2]>,
-    ) -> bool {
-        if ancestors.contains(&commit_id) {
-            return true;
-        }
-
-        // BFS from commit_id backwards through parents
-        let mut visited = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(commit_id);
-
-        while let Some(current) = queue.pop_front() {
-            if !visited.insert(current) {
-                continue;
-            }
-
-            if let Some(commit) = commits.get(&current) {
-                for parent in &commit.parents {
-                    if ancestors.contains(parent) {
-                        return true;
-                    }
-                    queue.push_back(*parent);
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Find all ancestors of the given commits (not including the commits themselves).
-    /// Only returns commits that actually exist in the commits map.
-    fn find_ancestors(
-        commits: &HashMap<CommitId, Commit>,
-        starting_points: &HashSet<CommitId>,
-    ) -> HashSet<CommitId> {
-        let mut ancestors = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        // Start from parents of the starting points
-        for start in starting_points {
-            if let Some(commit) = commits.get(start) {
-                for parent in &commit.parents {
-                    // Only consider parents that exist in the commits map
-                    if commits.contains_key(parent) {
-                        queue.push_back(*parent);
-                    }
-                }
-            }
-        }
-
-        while let Some(current) = queue.pop_front() {
-            if !ancestors.insert(current) {
-                continue;
-            }
-
-            if let Some(commit) = commits.get(&current) {
-                for parent in &commit.parents {
-                    // Only consider parents that exist in the commits map
-                    if commits.contains_key(parent) {
-                        queue.push_back(*parent);
-                    }
-                }
-            }
-        }
-
-        ancestors
     }
 
     // ========================================================================

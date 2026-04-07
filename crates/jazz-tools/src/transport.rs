@@ -192,18 +192,5 @@ fn normalize_route_prefix(path: &str) -> String {
 
 /// Check if a sync payload is for a catalogue object.
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
-    match payload {
-        SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
-        SyncPayload::ObjectUpdated { metadata, .. } => {
-            if let Some(meta) = metadata
-                && let Some(type_str) = meta
-                    .metadata
-                    .get(crate::metadata::MetadataKey::Type.as_str())
-            {
-                return crate::metadata::ObjectType::is_catalogue_type_str(type_str);
-            }
-            false
-        }
-        _ => false,
-    }
+    matches!(payload, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
 }

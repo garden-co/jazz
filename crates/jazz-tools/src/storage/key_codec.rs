@@ -1,7 +1,6 @@
 use std::ops::Bound;
 
-use crate::commit::CommitId;
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 
 use super::{StorageError, encode_value};
@@ -155,27 +154,6 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
 
 pub(super) fn obj_meta_prefix() -> &'static str {
     "obj:"
-}
-
-pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
-}
-
-pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
-    format!(
-        "obj:{}:br:{}:c:{}",
-        format_uuid(object_id),
-        branch,
-        hex::encode(commit_id.0)
-    )
-}
-
-pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
-}
-
-pub(super) fn ack_key(commit_id: CommitId) -> String {
-    format!("ack:{}", hex::encode(commit_id.0))
 }
 
 #[allow(dead_code)]

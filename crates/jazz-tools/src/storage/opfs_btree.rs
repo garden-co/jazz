@@ -16,7 +16,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
@@ -26,18 +26,14 @@ use opfs_btree::OpfsFile;
 use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::sync_manager::DurabilityTier;
+use crate::object::ObjectId;
 
 use super::{
-    LoadedBranch, Storage, StorageError,
+    Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
-        load_object_metadata_core, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
-        raw_table_scan_prefix_core, raw_table_scan_range_core, set_branch_tails_core,
-        store_ack_tier_core,
+        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
     },
 };
 
@@ -231,78 +227,6 @@ impl Storage for OpfsBTreeStorage {
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
         load_object_metadata_core(id, |key| self.tree_read(key))
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        load_branch_core(
-            object_id,
-            branch,
-            |key| self.tree_read(key),
-            |prefix| self.tree_scan_prefix(prefix),
-        )
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        append_commit_core(
-            object_id,
-            branch,
-            commit,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        delete_commit_core(
-            object_id,
-            branch,
-            commit_id,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-            |key| self.tree_delete(key),
-        )
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        set_branch_tails_core(
-            object_id,
-            branch,
-            tails,
-            |key, value| self.tree_insert(key, value),
-            |key| self.tree_delete(key),
-        )
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        store_ack_tier_core(
-            commit_id,
-            tier,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {

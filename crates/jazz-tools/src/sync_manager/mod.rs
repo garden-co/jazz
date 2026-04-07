@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{ObjectManager, RowObjectUpdate};
 use crate::query_manager::query::Query;
@@ -56,8 +55,6 @@ pub struct SyncManager {
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in legacy commit durability acks.
-    pub(super) object_commit_interest: HashMap<CommitId, HashSet<ClientId>>,
     /// Tracks which clients are interested in row-version state updates.
     pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
 
@@ -96,7 +93,6 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("object_commit_interest", &self.object_commit_interest)
             .field("row_version_interest", &self.row_version_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
@@ -133,7 +129,6 @@ impl SyncManager {
             pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            object_commit_interest: HashMap::new(),
             row_version_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
@@ -257,10 +252,6 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.object_commit_interest.retain(|_, clients| {
-            clients.remove(&client_id);
-            !clients.is_empty()
-        });
         self.row_version_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
@@ -506,10 +497,6 @@ impl SyncManager {
         };
 
         for &(object_id, branch_name) in removed_scope {
-            client
-                .sent_branch_frontiers
-                .remove(&(object_id, branch_name));
-
             if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
                 removed_row_versions.extend(
                     version_ids
