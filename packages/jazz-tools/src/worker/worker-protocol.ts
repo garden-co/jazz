@@ -136,6 +136,16 @@ export interface InitOkMessage {
   clientId: string;
 }
 
+/** Worker runtime attached or re-attached its upstream server connection. */
+export interface UpstreamConnectedMessage {
+  type: "upstream-connected";
+}
+
+/** Worker runtime detached its upstream server connection. */
+export interface UpstreamDisconnectedMessage {
+  type: "upstream-disconnected";
+}
+
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
@@ -188,6 +198,8 @@ export interface DebugSeedLiveSchemaOkMessage {
 export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
+  | UpstreamConnectedMessage
+  | UpstreamDisconnectedMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
   | ErrorMessage

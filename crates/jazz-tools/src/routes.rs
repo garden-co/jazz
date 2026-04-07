@@ -387,6 +387,9 @@ async fn events_handler(
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (next_sync_seq, mut sync_rx) = state
+        .connection_event_hub
+        .register_connection(connection_id, client_id);
     {
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
@@ -402,9 +405,6 @@ async fn events_handler(
         }
     }
 
-    // Subscribe to broadcast channel for this client's events
-    let mut sync_rx = state.sync_broadcast.subscribe();
-
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
     let connection_id_cleanup = connection_id;
@@ -419,6 +419,9 @@ async fn events_handler(
             let conn = connections.remove(&connection_id_cleanup);
             conn.map(|c| c.client_id)
         };
+        state_cleanup
+            .connection_event_hub
+            .unregister_connection(connection_id_cleanup);
         if let Some(closed_client_id) = closed_client_id {
             state_cleanup.on_connection_closed(closed_client_id).await;
             tracing::debug!(
@@ -437,7 +440,7 @@ async fn events_handler(
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
-            next_sync_seq: None,
+            next_sync_seq: Some(next_sync_seq),
             catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
@@ -450,24 +453,15 @@ async fn events_handler(
                 // Check for sync updates for this client
                 result = sync_rx.recv() => {
                     match result {
-                        Ok((target_client_id, payload)) => {
-                            // Only emit if this is for our client
-                            if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate {
-                                    seq: None,
-                                    payload: Box::new(payload),
-                                };
-                                yield Ok(encode_frame(&event));
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            // We fell behind, continue
-                            tracing::warn!("Stream client {} lagged behind on sync updates", connection_id);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Some(update) => {
                             // Channel closed, exit
-                            break;
+                            let event = ServerEvent::SyncUpdate {
+                                seq: Some(update.seq),
+                                payload: Box::new(update.payload),
+                            };
+                            yield Ok(encode_frame(&event));
                         }
+                        None => break,
                     }
                 }
                 // Send periodic heartbeat

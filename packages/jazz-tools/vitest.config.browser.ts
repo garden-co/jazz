@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import {
   blockTestingServerNetwork,
+  debugTestingServerNetwork,
   testingServerInfo,
   testingServerJwtForUser,
   unblockTestingServerNetwork,
@@ -57,6 +58,8 @@ export default defineConfig({
           blockTestingServerNetwork(context, serverUrl),
         testingServerUnblockNetwork: async ({ context }, serverUrl) =>
           unblockTestingServerNetwork(context, serverUrl),
+        testingServerNetworkDebug: async ({ context }, serverUrl) =>
+          debugTestingServerNetwork(context, serverUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>

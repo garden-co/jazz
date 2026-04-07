@@ -90,28 +90,27 @@ End-to-end path:
 
 1. Local `subscribe_with_sync_and_propagation(query, session, durability_tier, propagation)` creates a local subscription and conditionally forwards `QuerySubscription` upstream.
 2. Upstream/server `QueryManager` compiles + settles a server-side graph and computes scope.
-3. On first server-side settle, it emits exactly one `QuerySettled { query_id, tier }`.
-4. Any intermediate sync node relays that payload to original downstream clients via `query_origin`.
-5. Receiver stores `(query_id, tier)` in `pending_query_settled`.
-6. In local `QueryManager::process()`, pending `QuerySettled` is consumed before local subscription settle/delivery.
-7. Delivery gate checks `achieved_tiers >= durability_tier`; if satisfied, first delivery is full snapshot, else delivery is held.
-8. With `local_updates = Immediate`, local write deltas can bypass tier waiting only after that first delivery (`settled_once = true`). Initial delivery never bypasses tier gating.
+3. When the server emits sync updates to a client connection, each outgoing `SyncUpdate` gets a monotonically increasing connection-local `seq`.
+4. If the payload is `QuerySettled`, the transport stamps it with `through_seq = seq - 1`, meaning "this settlement is only valid after the client has applied every earlier sync update on this connection."
+5. Any intermediate sync node relays that payload to original downstream clients via `query_origin`, preserving the watermark.
+6. Receiver stores `PendingQuerySettled { server_id, query_id, tier, through_seq }` instead of immediately raising the query's achieved tier.
+7. In local `RuntimeCore::immediate_tick()`, pending settlements are released only after the runtime has applied all sync updates through `through_seq` for that upstream server.
+8. Only then does `QueryManager` mark `achieved_tiers >= tier`; if the subscription was already waiting on that tier, first delivery can proceed in the same tick.
+9. With `local_updates = Immediate`, local write deltas can bypass tier waiting only after that first delivery (`settled_once = true`). Initial delivery never bypasses tier gating.
 
-> [`query_manager/subscriptions.rs:160`](../../crates/jazz-tools/src/query_manager/subscriptions.rs#L160)
-> [`query_manager/server_queries.rs:23`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L23)
-> [`query_manager/server_queries.rs:246`](../../crates/jazz-tools/src/query_manager/server_queries.rs#L246)
-> [`sync_manager/mod.rs:393`](../../crates/jazz-tools/src/sync_manager/mod.rs#L393)
-> [`sync_manager/inbox.rs:119`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L119)
-> [`sync_manager/inbox.rs:116`](../../crates/jazz-tools/src/sync_manager/inbox.rs#L116)
-> [`query_manager/manager.rs:528`](../../crates/jazz-tools/src/query_manager/manager.rs#L528)
-> [`query_manager/manager.rs:537`](../../crates/jazz-tools/src/query_manager/manager.rs#L537)
-> [`query_manager/manager.rs:640`](../../crates/jazz-tools/src/query_manager/manager.rs#L640)
-> [`query_manager/manager.rs:651`](../../crates/jazz-tools/src/query_manager/manager.rs#L651)
+> [`server/mod.rs`](../../crates/jazz-tools/src/server/mod.rs)
+> [`routes.rs`](../../crates/jazz-tools/src/routes.rs)
+> [`sync_manager/inbox.rs`](../../crates/jazz-tools/src/sync_manager/inbox.rs)
+> [`sync_manager/mod.rs`](../../crates/jazz-tools/src/sync_manager/mod.rs)
+> [`runtime_core/ticks.rs`](../../crates/jazz-tools/src/runtime_core/ticks.rs)
+> [`query_manager/manager.rs`](../../crates/jazz-tools/src/query_manager/manager.rs)
+> [`runtime/sync-transport.ts`](../../packages/jazz-tools/src/runtime/sync-transport.ts)
 
 Why this ordering matters:
 
 - `ObjectUpdated` may arrive in the same batch as `QuerySettled`.
-- Because `QuerySettled` is applied before local delivery checks, first delivery can unblock in the same tick once both data and tier condition are true.
+- `QuerySettled` can arrive before some earlier `ObjectUpdated` frames on the wire; `through_seq` prevents first delivery from treating that settlement as complete too early.
+- Once the watermark is satisfied, first delivery can still unblock in the same tick as the release.
 - If tier is not satisfied, query state still settles locally; only delivery is deferred.
 - `local_updates = Immediate` changes post-initial behavior only: later local writes can still notify immediately while waiting on higher-tier confirmation.
 

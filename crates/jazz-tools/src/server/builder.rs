@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
@@ -13,16 +13,18 @@ use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
+use crate::server::{
+    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ExternalIdentityStore, ServerState,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
+use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
 
+#[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
-const SYNC_BROADCAST_CAPACITY: usize = 256;
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -141,7 +143,7 @@ impl ServerBuilder {
         let jwks_cache = build_jwks_cache(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
-        let (runtime, sync_broadcast) = self.build_runtime()?;
+        let (runtime, connection_event_hub) = self.build_runtime()?;
         let external_identity_store = Arc::new(self.build_external_identity_store()?);
         let http_client = reqwest::Client::builder()
             .build()
@@ -161,7 +163,7 @@ impl ServerBuilder {
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast,
+            connection_event_hub,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
             jwks_cache,
@@ -197,17 +199,9 @@ impl ServerBuilder {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_runtime(
-        &self,
-    ) -> Result<
-        (
-            TokioRuntime<DynStorage>,
-            broadcast::Sender<(ClientId, SyncPayload)>,
-        ),
-        String,
-    > {
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(SYNC_BROADCAST_CAPACITY);
-        let sync_tx_clone = sync_tx.clone();
+    fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
+        let connection_event_hub = Arc::new(ConnectionEventHub::default());
+        let dispatch_hub = Arc::clone(&connection_event_hub);
         let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
@@ -218,11 +212,11 @@ impl ServerBuilder {
                 if let Some(ref tracer) = tracer_for_outgoing {
                     tracer.record_outgoing("server", &entry.destination, &entry.payload);
                 }
-                let _ = sync_tx_clone.send((client_id, entry.payload));
+                dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
 
-        Ok((runtime, sync_tx))
+        Ok((runtime, connection_event_hub))
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
