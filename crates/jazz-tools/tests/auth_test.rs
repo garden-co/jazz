@@ -96,11 +96,23 @@ fn sync_body() -> String {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "RowVersionCreated": {
                 "metadata": null,
-                "branch_name": "main",
-                "commits": []
+                "row": {
+                    "row_id": "01234567-89ab-cdef-0123-456789abcdef",
+                    "branch": "main",
+                    "parents": [],
+                    "updated_at": 1000,
+                    "created_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "created_at": 1000,
+                    "updated_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "batch_id": uuid::Uuid::nil(),
+                    "state": "VisibleDirect",
+                    "confirmed_tier": null,
+                    "is_deleted": false,
+                    "data": [97,108,105,99,101],
+                    "metadata": {}
+                }
             }
         }]
     })
@@ -348,14 +360,12 @@ mod integration_tests {
         json!({
             "client_id": "01234567-89ab-cdef-0123-456789abcdef",
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "metadata": {
-                        "id": "01234567-89ab-cdef-0123-456789abcdef",
-                        "metadata": {"type": "catalogue_schema"}
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "metadata": {"type": "catalogue_schema"},
+                        "content": []
                     },
-                    "branch_name": "main",
-                    "commits": []
                 }
             }]
         })
@@ -736,22 +746,12 @@ mod integration_tests {
         let sync_payload = json!({
             "client_id": Uuid::new_v4().to_string(),
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": object_id,
-                    "metadata": {
-                        "id": object_id,
-                        "metadata": metadata
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": object_id,
+                        "metadata": metadata,
+                        "content": encoded_schema
                     },
-                    "branch_name": "main",
-                    "commits": [
-                        {
-                            "parents": [],
-                            "content": encoded_schema,
-                            "timestamp": 1,
-                            "author": Uuid::new_v4().to_string(),
-                            "metadata": null
-                        }
-                    ]
                 }
             }]
         });

@@ -539,6 +539,13 @@ async function postSyncBatch(
 function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
   try {
     const parsed = JSON.parse(payloadJson) as {
+      CatalogueEntryUpdated?: {
+        entry?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
       ObjectUpdated?: {
         metadata?: {
           metadata?: {
@@ -547,7 +554,9 @@ function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null 
         };
       };
     };
-    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    const kind =
+      parsed.CatalogueEntryUpdated?.entry?.metadata?.type ??
+      parsed.ObjectUpdated?.metadata?.metadata?.type;
     return typeof kind === "string" ? kind : null;
   } catch {
     return null;

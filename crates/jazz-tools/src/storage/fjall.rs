@@ -4,8 +4,10 @@
 //! UTF-8 key encoding scheme as the other native backends.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::Path;
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 use fjall::{
     KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
@@ -134,15 +136,6 @@ impl FjallStorage {
         Ok(())
     }
 
-    fn read_get_cell(
-        tx: &RefCell<SingleWriterWriteTx<'_>>,
-        keyspace: &SingleWriterTxKeyspace,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        let tx = tx.borrow();
-        Self::read_get(&*tx, keyspace, key)
-    }
-
     fn set_on_cell(
         tx: &RefCell<SingleWriterWriteTx<'_>>,
         keyspace: &SingleWriterTxKeyspace,
@@ -151,15 +144,6 @@ impl FjallStorage {
     ) -> Result<(), StorageError> {
         let mut tx = tx.borrow_mut();
         Self::set_on_tx(&mut tx, keyspace, key, value)
-    }
-
-    fn delete_on_cell(
-        tx: &RefCell<SingleWriterWriteTx<'_>>,
-        keyspace: &SingleWriterTxKeyspace,
-        key: &str,
-    ) -> Result<(), StorageError> {
-        let mut tx = tx.borrow_mut();
-        Self::delete_on_tx(&mut tx, keyspace, key)
     }
 }
 

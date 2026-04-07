@@ -106,7 +106,7 @@ impl ServerProcess {
         }
 
         let process = cmd.spawn().expect("spawn jazz-tools server");
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             client: reqwest::Client::new(),
@@ -119,9 +119,12 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..80 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!("jazz-tools server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -129,7 +132,7 @@ impl ServerProcess {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("jazz-tools server did not become ready in time");
+        panic!("jazz-tools server did not become ready within 20 seconds");
     }
 }
 

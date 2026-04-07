@@ -1341,10 +1341,9 @@ impl WasmRuntime {
             warn!(
                 %app_id,
                 ?error,
-                "failed to rehydrate schema manager from catalogue manifest"
+                "failed to rehydrate schema manager from catalogue storage"
             );
         }
-        schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new(use_binary_encoding);

@@ -679,7 +679,7 @@ describe("NAPI integration", () => {
               isNestedOutboxCall(call) &&
               call[1][0] === "client" &&
               call[1][1] === clientId &&
-              hasPayloadKind(call[1][2], "ObjectUpdated"),
+              hasPayloadKind(call[1][2], "RowVersionNeeded"),
           ),
         ).toBe(true);
       },
