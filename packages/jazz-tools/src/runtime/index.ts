@@ -17,7 +17,7 @@ export {
   type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";
-export type { AppContext, LocalAuthMode, Session } from "./context.js";
+export type { AppContext, LocalAuthMode, RuntimeConfig, Session } from "./context.js";
 export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
 export {
   createDb,

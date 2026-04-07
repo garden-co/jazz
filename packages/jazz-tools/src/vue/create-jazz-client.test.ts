@@ -164,4 +164,25 @@ describe("vue/create-jazz-client unit", () => {
     expect(mocks.orchestratorInstances).toHaveLength(1);
     expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
+
+  it("VU-U05: forwards runtime through framework client creation", async () => {
+    const config: DbConfig = {
+      appId: "vue-client-unit-5",
+      runtime: {
+        baseUrl: "/assets/jazz/",
+        wasmUrl: "/assets/jazz/custom.wasm",
+        workerUrl: "/assets/jazz/custom-worker.js",
+      },
+    };
+    const db = createMockDb();
+
+    mocks.resolveLocalAuthDefaults.mockReturnValue(config);
+    mocks.createDb.mockResolvedValue(db);
+    mocks.resolveClientSession.mockResolvedValue(null);
+
+    await createJazzClient(config);
+
+    expect(mocks.createDb).toHaveBeenCalledWith(config);
+    expect(mocks.resolveClientSession).toHaveBeenCalledWith(config);
+  });
 });
