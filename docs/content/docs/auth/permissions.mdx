@@ -189,5 +189,11 @@ shorthand for the same `$createdBy === session.user_id` condition. You can still
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
 </include>
 
+When you want to reuse the same check inside a larger rule, compose `isCreator` directly:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-combinator-ts
+</include>
+
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
 encoding extra meaning into authorship alone.
