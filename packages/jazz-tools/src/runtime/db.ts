@@ -13,7 +13,7 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { RuntimeConfig, Session } from "./context.js";
+import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   JazzClient,
   loadWasmModule,
@@ -66,8 +66,8 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
-  /** Optional runtime configuration overrides for WASM and worker loading. */
-  runtime?: RuntimeConfig;
+  /** Optional runtime source overrides for WASM and worker loading. */
+  runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -402,7 +402,7 @@ export class Db {
    * @internal Use createDb() instead.
    */
   static async create(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule(config.runtime);
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     return new Db(config, wasmModule);
   }
 
@@ -416,7 +416,7 @@ export class Db {
    * @internal Use createDb() instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule(config.runtime);
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     const db = new Db(config, wasmModule);
     const persistentDriver = resolveStorageDriver(config.driver);
     if (persistentDriver.type !== "persistent") {
@@ -450,7 +450,7 @@ export class Db {
         db.onLeaderElectionChange(snapshot);
       });
 
-      db.worker = await Db.spawnWorker(config.runtime);
+      db.worker = await Db.spawnWorker(config.runtimeSources);
 
       return db;
     } catch (error) {
@@ -573,7 +573,7 @@ export class Db {
       localAuthMode: this.config.localAuthMode,
       localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
-      runtime: this.config.runtime,
+      runtimeSources: this.config.runtimeSources,
       logLevel: this.config.logLevel,
     };
   }
@@ -857,7 +857,7 @@ export class Db {
     this.bridgeReady = null;
 
     currentWorker.terminate();
-    this.worker = await Db.spawnWorker(this.config.runtime);
+    this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
     // Re-attach immediately for existing client runtime(s) so subscriptions replay.
     const first = this.clients.entries().next();
@@ -935,14 +935,14 @@ export class Db {
     return `${primaryDbName}__fallback__${snapshot.tabId}`;
   }
 
-  private static async spawnWorker(runtime?: RuntimeConfig): Promise<Worker> {
+  private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
     const locationHref = typeof location !== "undefined" ? location.href : undefined;
-    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
+    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
     const wasmUrl = syncInitInput
       ? null
-      : resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, runtime);
+      : resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, runtimeSources);
     const workerUrl = appendWorkerRuntimeWasmUrl(
-      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtime),
+      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
       wasmUrl,
     );
 
@@ -1136,7 +1136,7 @@ export class Db {
         deleteError = error;
       }
 
-      this.worker = await Db.spawnWorker(this.config.runtime);
+      this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
       if (deleteError) {
         throw deleteError;

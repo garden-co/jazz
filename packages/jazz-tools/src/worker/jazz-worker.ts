@@ -136,13 +136,13 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
 
 async function ensureWorkerWasmInitialized(
   wasmModule: any,
-  msg: Pick<InitMessage, "runtime"> | undefined,
+  msg: Pick<InitMessage, "runtimeSources"> | undefined,
 ): Promise<void> {
   if (wasmInitialized) {
     return;
   }
 
-  const syncInitInput = resolveRuntimeConfigSyncInitInput(msg?.runtime);
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(msg?.runtimeSources);
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
     wasmInitialized = true;
@@ -156,7 +156,7 @@ async function ensureWorkerWasmInitialized(
 
   const locationHref = self.location?.href;
   const wasmUrl =
-    resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, msg?.runtime) ??
+    resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, msg?.runtimeSources) ??
     readWorkerRuntimeWasmUrl(locationHref);
 
   if (wasmUrl) {
@@ -218,7 +218,7 @@ async function startup(): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
     // Eager init only when the worker URL already carries an explicit wasm URL.
-    // Otherwise wait for init so runtime.wasmSource/wasmModule can win.
+    // Otherwise wait for init so runtimeSources.wasmSource/wasmModule can win.
     if (readWorkerRuntimeWasmUrl(self.location?.href)) {
       await ensureWorkerWasmInitialized(wasmModule, undefined);
     }

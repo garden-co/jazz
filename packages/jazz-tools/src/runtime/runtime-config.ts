@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from "./context.js";
+import type { RuntimeSourcesConfig } from "./context.js";
 
 function isHttpModuleUrl(moduleUrl: string): boolean {
   const protocol = new URL(moduleUrl).protocol;
@@ -29,7 +29,7 @@ function resolveConfiguredBaseUrl(
 }
 
 export function resolveRuntimeConfigSyncInitInput(
-  runtime?: RuntimeConfig,
+  runtime?: RuntimeSourcesConfig,
 ): { module: BufferSource | WebAssembly.Module } | null {
   if (runtime?.wasmModule) {
     return { module: runtime.wasmModule };
@@ -45,7 +45,7 @@ export function resolveRuntimeConfigSyncInitInput(
 export function resolveRuntimeConfigWasmUrl(
   runtimeModuleUrl: string,
   locationHref: string | undefined,
-  runtime?: RuntimeConfig,
+  runtime?: RuntimeSourcesConfig,
 ): string | null {
   if (runtime?.wasmUrl) {
     return resolveConfiguredUrl(runtime.wasmUrl, locationHref);
@@ -68,7 +68,7 @@ export function resolveRuntimeConfigWasmUrl(
 export function resolveRuntimeConfigWorkerUrl(
   runtimeModuleUrl: string,
   locationHref: string | undefined,
-  runtime?: RuntimeConfig,
+  runtime?: RuntimeSourcesConfig,
 ): string {
   if (runtime?.workerUrl) {
     return resolveConfiguredUrl(runtime.workerUrl, locationHref);

@@ -38,8 +38,8 @@ afterEach(() => {
   }
 });
 
-describe("loadWasmModule runtime bootstrap", () => {
-  it("prefers runtime.wasmModule over URL-based init", async () => {
+describe("loadWasmModule runtimeSources bootstrap", () => {
+  it("prefers runtimeSources.wasmModule over URL-based init", async () => {
     setBrowserLikeProcess();
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",
@@ -55,7 +55,7 @@ describe("loadWasmModule runtime bootstrap", () => {
     expect(wasmDefaultInit).not.toHaveBeenCalled();
   });
 
-  it("prefers runtime.wasmSource over URL-based init when wasmModule is absent", async () => {
+  it("prefers runtimeSources.wasmSource over URL-based init when wasmModule is absent", async () => {
     setBrowserLikeProcess();
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",
@@ -71,7 +71,7 @@ describe("loadWasmModule runtime bootstrap", () => {
     expect(wasmDefaultInit).not.toHaveBeenCalled();
   });
 
-  it("prefers an explicit runtime.wasmUrl over the root-relative fallback", async () => {
+  it("prefers an explicit runtimeSources.wasmUrl over the root-relative fallback", async () => {
     setBrowserLikeProcess();
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",
@@ -88,7 +88,7 @@ describe("loadWasmModule runtime bootstrap", () => {
     });
   });
 
-  it("derives the wasm URL from runtime.baseUrl when wasmUrl is omitted", async () => {
+  it("derives the wasm URL from runtimeSources.baseUrl when wasmUrl is omitted", async () => {
     setBrowserLikeProcess();
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/app/",

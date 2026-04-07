@@ -161,10 +161,10 @@ describe("svelte/createJazzClient", () => {
     expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
 
-  it("SV-U04: forwards runtime through framework client creation", async () => {
+  it("SV-U04: forwards runtimeSources through framework client creation", async () => {
     const config: DbConfig = {
       appId: "svelte-unit-4",
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmUrl: "/assets/jazz/custom.wasm",
         workerUrl: "/assets/jazz/custom-worker.js",
