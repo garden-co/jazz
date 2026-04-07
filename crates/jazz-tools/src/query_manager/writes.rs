@@ -106,27 +106,30 @@ impl QueryManager {
     #[cfg(test)]
     fn stored_row_version_for_tip(
         &self,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<StoredRowVersion> {
-        self.sync_manager
-            .object_manager
-            .visible_row(row_id, BranchName::new(branch_name))
+        let table = self.load_row_table_name(storage, row_id)?;
+        storage
+            .load_visible_region_row(&table, branch_name, row_id)
+            .ok()
+            .flatten()
     }
 
     #[cfg(test)]
-    pub(super) fn persist_row_region_tip<H: Storage + ?Sized>(
+    pub(super) fn persist_row_region_tip<H: Storage>(
         &self,
         storage: &mut H,
         table: &str,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<StoredRowVersion> {
-        let version = self.stored_row_version_for_tip(row_id, branch_name)?;
-        let visible_entry = self
-            .sync_manager
-            .object_manager
-            .visible_row_entry(row_id, BranchName::new(branch_name))?;
+        let version = self.stored_row_version_for_tip(storage, row_id, branch_name)?;
+        let visible_entry = storage
+            .load_visible_region_entry(table, branch_name, row_id)
+            .ok()
+            .flatten()?;
 
         if let Err(error) =
             storage.append_history_region_rows(table, std::slice::from_ref(&version))

@@ -1,7 +1,7 @@
 use super::*;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::query::QueryBuilder;
-use crate::row_regions::VisibleRowEntry;
+use crate::row_regions::{StoredRowVersion, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
 use std::collections::{HashMap, HashSet};
 
@@ -46,8 +46,6 @@ fn seed_visible_row(
         )),
     )
     .unwrap();
-    sm.object_manager
-        .remember_remote_row_version(row.row_id, BranchName::new(&row.branch), row);
 }
 
 fn add_client(sm: &mut SyncManager, io: &MemoryStorage, client_id: ClientId) {
@@ -67,6 +65,18 @@ fn set_client_query_scope(
     session: Option<crate::query_manager::session::Session>,
 ) {
     sm.set_client_query_scope_with_storage(io, client_id, query_id, scope, session);
+}
+
+fn load_visible_row(
+    storage: &MemoryStorage,
+    table: &str,
+    row_id: ObjectId,
+    branch: &str,
+) -> StoredRowVersion {
+    storage
+        .load_visible_region_row(table, branch, row_id)
+        .unwrap()
+        .expect("visible row should exist")
 }
 
 #[test]
@@ -277,10 +287,7 @@ fn row_version_created_stamps_local_durability_into_storage() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
     assert_eq!(
-        sm.object_manager
-            .visible_row(row_id, BranchName::new("main"))
-            .expect("in-memory visible row")
-            .confirmed_tier,
+        load_visible_row(&io, "users", row_id, "main").confirmed_tier,
         Some(DurabilityTier::EdgeServer)
     );
 }
@@ -491,10 +498,7 @@ fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row
         },
     );
 
-    let visible = sm
-        .object_manager
-        .visible_row(row_id, BranchName::new("main"))
-        .expect("visible row should remain present");
+    let visible = load_visible_row(&io, "users", row_id, "main");
     assert_eq!(visible.version_id(), newer.version_id());
 
     assert!(sm.take_outbox().into_iter().any(|entry| matches!(

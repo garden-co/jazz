@@ -119,6 +119,20 @@ fn connect_query_manager_upstream(
     qm.add_server_with_storage(storage, server_id, false);
 }
 
+fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowVersion {
+    let metadata = storage
+        .load_metadata(row_id)
+        .unwrap()
+        .expect("row metadata should exist");
+    let table = metadata
+        .get(MetadataKey::Table.as_str())
+        .expect("row metadata should include table");
+    storage
+        .load_visible_region_row(table, branch, row_id)
+        .unwrap()
+        .expect("visible row should exist")
+}
+
 fn stored_row_commit(
     parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
     content: Vec<u8>,
@@ -1660,12 +1674,7 @@ fn synced_update_is_visible_in_query() {
 
     // Process to settle the initial insert
     qm.process(&mut storage);
-    let base_timestamp = qm
-        .sync_manager()
-        .object_manager
-        .visible_row(row_id, crate::object::BranchName::new(&branch))
-        .expect("inserted row should be visible")
-        .updated_at;
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Verify initial data is queryable
     let query = qm
@@ -1983,12 +1992,7 @@ fn synced_update_emits_subscription_delta() {
     qm.process(&mut storage);
     let _updates = qm.take_updates(); // Clear initial add
     let branch = get_branch(&qm);
-    let base_timestamp = qm
-        .sync_manager()
-        .object_manager
-        .visible_row(row_id, crate::object::BranchName::new(&branch))
-        .expect("inserted row should be visible")
-        .updated_at;
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Now simulate a synced update
     let descriptor = RowDescriptor::new(vec![
@@ -2496,12 +2500,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     // Process to get initial state
     qm.process(&mut storage);
     let _ = qm.take_updates(); // Clear initial delta
-    let base_timestamp = qm
-        .sync_manager()
-        .object_manager
-        .visible_row(row_id, crate::object::BranchName::new(&branch))
-        .expect("inserted row should be visible")
-        .updated_at;
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Now simulate receiving an update from sync (as if another peer modified the row)
     let descriptor = RowDescriptor::new(vec![
@@ -2604,11 +2603,7 @@ fn two_peer_sync_insert_reaches_subscription() {
         .get(row_id)
         .expect("row metadata should be available")
         .clone();
-    let row = peer_a
-        .sync_manager()
-        .object_manager
-        .visible_row(row_id, crate::object::BranchName::new(&branch_name))
-        .expect("row should be available in visible row memory");
+    let row = load_visible_row(&storage_a, row_id, &branch_name);
 
     // Send to Peer B via SyncManager inbox
     peer_b.sync_manager_mut().push_inbox(InboxEntry {
@@ -2812,12 +2807,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .unwrap()
         .columns
         .clone();
-    let base_timestamp = qm
-        .sync_manager()
-        .object_manager
-        .visible_row(handle.row_id, crate::object::BranchName::new(&branch))
-        .expect("base row should be visible")
-        .updated_at;
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
 
     // Commit A: lower timestamp, content "TipA"
     let content_a = encode_row(
@@ -2882,11 +2872,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
 
     // Get the delete commit and verify its content
-    let delete_row = qm
-        .sync_manager()
-        .object_manager
-        .visible_row(handle.row_id, branch_name)
-        .expect("soft delete row should be visible");
+    let delete_row = load_visible_row(&storage, handle.row_id, branch_name.as_str());
 
     assert_eq!(
         delete_row.version_id(),
@@ -8983,12 +8969,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     .unwrap();
 
     let author = ObjectId::new();
-    let base_timestamp = mid_tier
-        .sync_manager()
-        .object_manager
-        .visible_row(handle.row_id, crate::object::BranchName::new(&branch_str))
-        .expect("row should be visible before upstream update")
-        .updated_at;
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch_str).updated_at;
     let commit = stored_row_commit(
         smallvec![handle.row_version_id],
         row_data,
