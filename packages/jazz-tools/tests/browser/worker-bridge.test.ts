@@ -438,6 +438,39 @@ describe("Worker Bridge with OPFS", () => {
     expect(persistedRows.length).toEqual(0);
   });
 
+  it("query rejects if bridge fails to init", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("query-bridge-init-failure") },
+      }),
+    );
+
+    // @ts-expect-error - worker is private
+    const worker = db.worker as Worker;
+    const originalPostMessage = worker.postMessage.bind(worker);
+    worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
+      const typed = message as { type?: string } | undefined;
+      if (typed?.type === "init") {
+        queueMicrotask(() => {
+          worker.dispatchEvent(
+            new MessageEvent("message", {
+              data: { type: "error", message: "forced bridge init failure for query test" },
+            }),
+          );
+        });
+        return;
+      }
+      return originalPostMessage(message, { transfer });
+    }) as Worker["postMessage"];
+
+    await expect(db.all(allTodos, { tier: "worker" })).rejects.toThrow(
+      "Worker init failed: forced bridge init failure for query test",
+    );
+
+    worker.postMessage = originalPostMessage;
+  });
+
   // -------------------------------------------------------------------------
   // 3. Update + delete through worker bridge
   // -------------------------------------------------------------------------
