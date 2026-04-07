@@ -528,10 +528,10 @@ pub async fn load_file_bytes(
                 Some(DurabilityTier::EdgeServer),
             )
             .await?;
-        if let Some((_, row)) = parts.first() {
-            if let Value::Bytea(chunk) = &row[0] {
-                data.extend_from_slice(chunk);
-            }
+        if let Some((_, row)) = parts.first()
+            && let Value::Bytea(chunk) = &row[0]
+        {
+            data.extend_from_slice(chunk);
         }
     }
 
