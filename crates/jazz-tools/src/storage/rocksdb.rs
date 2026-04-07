@@ -5,7 +5,6 @@
 //! pattern as FjallStorage, delegating all logic to `storage_core` callbacks.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::Path;
 
 use rocksdb::{
@@ -13,13 +12,11 @@ use rocksdb::{
     TransactionDBOptions,
 };
 
-use crate::object::ObjectId;
-
 use super::{
     Storage, StorageError,
     storage_core::{
-        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_range_core,
     },
 };
 
@@ -175,29 +172,6 @@ impl RocksDBStorage {
 }
 
 impl Storage for RocksDBStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            create_object_core(id, metadata, |key, value| {
-                Self::put_on_txn(&txn, key, value)
-            })?;
-            Self::commit_txn(txn)
-        })
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.with_inner(|inner| {
-            load_object_metadata_core(id, |key| Self::get_from_db(&inner.db, key))
-        })
-    }
-
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());

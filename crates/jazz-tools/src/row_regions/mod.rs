@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::commit::{Commit, CommitAckState, CommitId, StoredState};
+use crate::commit::{Commit, CommitId, compute_commit_id};
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
@@ -66,6 +66,15 @@ pub struct StoredRowVersion {
 }
 
 impl StoredRowVersion {
+    fn commit_metadata(&self) -> Option<BTreeMap<String, String>> {
+        (!self.metadata.is_empty()).then(|| {
+            self.metadata
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         row_id: ObjectId,
@@ -82,27 +91,19 @@ impl StoredRowVersion {
             .is_some_and(|value| {
                 value == DeleteKind::Soft.as_str() || value == DeleteKind::Hard.as_str()
             });
-
-        let mut ack_state = CommitAckState::default();
-        if let Some(tier) = confirmed_tier {
-            ack_state.confirmed_tiers.insert(tier);
-        }
-
-        let commit = Commit {
-            parents: parents.iter().copied().collect(),
-            content: data.clone(),
-            timestamp: provenance.updated_at,
-            author: provenance.updated_by.clone(),
-            metadata: (!metadata.is_empty()).then(|| {
-                metadata
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            }),
-            stored_state: StoredState::Stored,
-            ack_state,
-        };
-        let version_id = commit.id();
+        let metadata_btree = (!metadata.is_empty()).then(|| {
+            metadata
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>()
+        });
+        let version_id = compute_commit_id(
+            &parents,
+            &data,
+            provenance.updated_at,
+            &provenance.updated_by,
+            metadata_btree.as_ref(),
+        );
 
         Self {
             row_id,
@@ -168,7 +169,13 @@ impl StoredRowVersion {
     }
 
     pub fn version_id(&self) -> CommitId {
-        self.to_commit().id()
+        compute_commit_id(
+            &self.parents,
+            &self.data,
+            self.updated_at,
+            &self.updated_by,
+            self.commit_metadata().as_ref(),
+        )
     }
 
     pub fn is_soft_deleted(&self) -> bool {
@@ -184,27 +191,5 @@ impl StoredRowVersion {
             .map(|value| value == DeleteKind::Hard.as_str())
             .unwrap_or(false)
             || (self.is_deleted && self.data.is_empty())
-    }
-
-    pub fn to_commit(&self) -> Commit {
-        let mut ack_state = CommitAckState::default();
-        if let Some(tier) = self.confirmed_tier {
-            ack_state.confirmed_tiers.insert(tier);
-        }
-
-        Commit {
-            parents: self.parents.iter().copied().collect(),
-            content: self.data.clone(),
-            timestamp: self.updated_at,
-            author: self.updated_by.clone(),
-            metadata: (!self.metadata.is_empty()).then(|| {
-                self.metadata
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            }),
-            stored_state: StoredState::Stored,
-            ack_state,
-        }
     }
 }

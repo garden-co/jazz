@@ -2572,9 +2572,6 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     let server_id = ServerId::new();
     qm.sync_manager_mut().add_server(server_id);
 
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
     // Subscribe to users table
     let query = qm.query("users").build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -2664,8 +2661,6 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     // Add a "server"
     let server_id = ServerId::new();
     qm.sync_manager_mut().add_server(server_id);
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
     // Insert a row locally first
     let handle = qm
         .insert(
@@ -2760,8 +2755,7 @@ fn two_peer_sync_insert_reaches_subscription() {
     let (mut peer_a, mut storage_a) = create_query_manager(sync_manager_a, schema.clone());
     let (mut peer_b, mut storage_b) = create_query_manager(sync_manager_b, schema);
 
-    // Peer B subscribes to all objects and sets up query subscription
-    peer_b.sync_manager_mut().object_manager.subscribe_all();
+    // Peer B sets up query subscription
     let query = peer_b.query("users").build();
     let sub_id = peer_b.subscribe(query).unwrap();
 
@@ -7664,9 +7658,6 @@ fn handle_object_update_respects_branch() {
 
     // Get the actual schema branch
     let schema_branch = get_branch(&qm);
-
-    // Subscribe to all objects
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     let row_id = crate::object::ObjectId::new();
     let author = row_id;

@@ -148,14 +148,6 @@ pub(super) fn format_uuid(id: ObjectId) -> String {
     hex::encode(id.uuid().as_bytes())
 }
 
-pub(super) fn obj_meta_key(id: ObjectId) -> String {
-    format!("obj:{}:meta", format_uuid(id))
-}
-
-pub(super) fn obj_meta_prefix() -> &'static str {
-    "obj:"
-}
-
 #[allow(dead_code)]
 pub(super) fn visible_row_key(table: &str, branch: &str, row_id: ObjectId) -> String {
     format!("row:{table}:0:{branch}:{}", format_uuid(row_id))

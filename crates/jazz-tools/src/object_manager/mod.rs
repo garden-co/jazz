@@ -1,62 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use smolset::SmolSet;
 
-use crate::commit::{Commit, CommitId};
+use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
-use crate::object::{Branch, BranchName, Object, ObjectId};
+use crate::object::{BranchName, Object, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
-
-/// Unique identifier for a subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SubscriptionId(pub u64);
-
-/// Unique identifier for a global (all-objects) subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AllObjectsSubscriptionId(pub u64);
-
-/// Internal tracking of a subscription.
-#[derive(Debug, Clone)]
-struct Subscription {
-    object_id: ObjectId,
-    branch_name: BranchName,
-}
-
-/// Update sent to subscribers when commits are added or loaded.
-///
-/// Contains the current frontier (tips) sorted by timestamp (oldest first).
-/// When twigs diverge, you'll see multiple commits in the frontier.
-/// When they merge, the frontier consolidates back to one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubscriptionUpdate {
-    pub subscription_id: SubscriptionId,
-    pub object_id: ObjectId,
-    pub branch_name: BranchName,
-    /// Current frontier commit IDs, sorted by timestamp (oldest first).
-    pub commit_ids: Vec<CommitId>,
-}
-
-/// Update sent to global (all-objects) subscribers when any object changes.
-///
-/// Fires on: create(), receive_object(), add_commit(), receive_commit()
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AllObjectUpdate {
-    pub object_id: ObjectId,
-    pub metadata: HashMap<String, String>,
-    pub branch_name: BranchName,
-    /// Current frontier commit IDs for this branch, sorted by timestamp.
-    pub commit_ids: Vec<CommitId>,
-    /// True if this is a newly created/received object, false if existing object.
-    pub is_new_object: bool,
-    /// Previous tip commit IDs before this update (empty for new objects).
-    pub previous_commit_ids: Vec<CommitId>,
-    /// Content of previous "winning" tip (newest by timestamp). None if new object.
-    /// Used by QueryManager to compute index deltas for synced updates.
-    pub old_content: Option<Vec<u8>>,
-}
 
 /// Visible row change emitted when a row object's winning version changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,23 +28,6 @@ pub enum Error {
     ParentNotFound(CommitId),
     /// Storage operation failed.
     StorageError(StorageError),
-}
-
-/// Result of a branch truncation operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TruncateResult {
-    Success { deleted_commits: usize },
-    PermanentError(TruncateError),
-}
-
-/// Errors specific to branch truncation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TruncateError {
-    ObjectNotFound(ObjectId),
-    BranchNotFound(BranchName),
-    TailNotFound(CommitId),
-    /// Can't truncate past the frontier - tip is not a descendant of any tail.
-    TipBeforeTail(CommitId),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,17 +56,6 @@ impl RowBranch {
 
     fn contains(&self, version_id: CommitId) -> bool {
         self.versions.contains_key(&version_id)
-    }
-
-    fn tip_ids_by_timestamp(&self) -> Vec<CommitId> {
-        let mut tip_vec: Vec<_> = self.tips.iter().copied().collect();
-        tip_vec.sort_by_key(|id| {
-            self.versions
-                .get(id)
-                .map(|row| (row.updated_at, *id))
-                .unwrap_or((0, *id))
-        });
-        tip_vec
     }
 
     fn recompute_current_visible(&mut self) -> Option<CommitId> {
@@ -224,16 +148,6 @@ impl RowBranch {
 pub struct ObjectManager {
     pub objects: HashMap<ObjectId, Object>,
     row_branches: HashMap<(ObjectId, BranchName), RowBranch>,
-    next_subscription_id: u64,
-    subscriptions: HashMap<SubscriptionId, Subscription>,
-    /// Index: (ObjectId, BranchName) → set of SubscriptionIds
-    branch_subscribers: HashMap<(ObjectId, BranchName), HashSet<SubscriptionId>>,
-    pub subscription_outbox: Vec<SubscriptionUpdate>,
-    /// Global (all-objects) subscriptions.
-    all_object_subscriptions: HashSet<AllObjectsSubscriptionId>,
-    next_all_objects_subscription_id: u64,
-    /// Outbox for global subscription updates.
-    pub all_objects_outbox: Vec<AllObjectUpdate>,
     /// Outbox for visible row changes.
     pub row_objects_outbox: Vec<RowObjectUpdate>,
     /// Last timestamp used, for monotonic ordering.
@@ -299,7 +213,6 @@ impl ObjectManager {
         let object = Object {
             id,
             metadata: metadata.clone().unwrap_or_default(),
-            branches: HashMap::new(),
         };
 
         // Sync storage - returns immediately
@@ -362,7 +275,6 @@ impl ObjectManager {
         let previous_row = self.visible_row(object_id, branch_name);
         let applied = self.remember_row_version(object_id, branch_name, row.clone());
         tracing::trace!(?version_id, "row version applied");
-        self.notify_subscribers_of_commit(object_id, branch_name);
         self.notify_row_object_update(
             io,
             &object_metadata,
@@ -566,11 +478,7 @@ impl ObjectManager {
                 }
             };
 
-            entry.insert(Object {
-                id,
-                metadata,
-                branches: HashMap::new(),
-            });
+            entry.insert(Object { id, metadata });
         }
 
         let (metadata, loaded_row_versions) = {
@@ -670,97 +578,7 @@ impl ObjectManager {
         self.objects.entry(object_id).or_insert(Object {
             id: object_id,
             metadata,
-            branches: HashMap::new(),
         });
-    }
-
-    /// Subscribe to updates on a branch.
-    ///
-    /// With sync storage, the branch is always immediately available if the object exists.
-    /// Queues an immediate update with existing commits if the branch exists.
-    pub fn subscribe(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-    ) -> SubscriptionId {
-        let branch_name = branch_name.into();
-        let id = SubscriptionId(self.next_subscription_id);
-        self.next_subscription_id += 1;
-
-        let subscription = Subscription {
-            object_id,
-            branch_name,
-        };
-        self.subscriptions.insert(id, subscription);
-
-        self.branch_subscribers
-            .entry((object_id, branch_name))
-            .or_default()
-            .insert(id);
-
-        // With sync storage, branch is immediately available if object exists
-        if let Some(branch) = self.row_branch(object_id, &branch_name) {
-            self.subscription_outbox.push(SubscriptionUpdate {
-                subscription_id: id,
-                object_id,
-                branch_name,
-                commit_ids: branch.tip_ids_by_timestamp(),
-            });
-        } else if let Some(object) = self.get(object_id)
-            && let Some(branch) = object.branches.get(&branch_name)
-        {
-            let commit_ids = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-            self.subscription_outbox.push(SubscriptionUpdate {
-                subscription_id: id,
-                object_id,
-                branch_name,
-                commit_ids,
-            });
-        }
-
-        id
-    }
-
-    /// Unsubscribe from updates.
-    ///
-    /// Removes the subscription and any pending updates for it.
-    pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) {
-        if let Some(sub) = self.subscriptions.remove(&subscription_id)
-            && let Some(subscribers) = self
-                .branch_subscribers
-                .get_mut(&(sub.object_id, sub.branch_name))
-        {
-            subscribers.remove(&subscription_id);
-        }
-
-        // Remove pending updates for this subscription
-        self.subscription_outbox
-            .retain(|u| u.subscription_id != subscription_id);
-    }
-
-    /// Take all pending subscription updates.
-    pub fn take_subscription_updates(&mut self) -> Vec<SubscriptionUpdate> {
-        std::mem::take(&mut self.subscription_outbox)
-    }
-
-    /// Subscribe to all object changes globally.
-    ///
-    /// Returns updates for any create(), receive_object(), add_commit(), receive_commit().
-    pub fn subscribe_all(&mut self) -> AllObjectsSubscriptionId {
-        let id = AllObjectsSubscriptionId(self.next_all_objects_subscription_id);
-        self.next_all_objects_subscription_id += 1;
-        self.all_object_subscriptions.insert(id);
-        id
-    }
-
-    /// Unsubscribe from global object updates.
-    pub fn unsubscribe_all(&mut self, id: AllObjectsSubscriptionId) {
-        self.all_object_subscriptions.remove(&id);
-    }
-
-    /// Take all pending global object updates.
-    pub fn take_all_object_updates(&mut self) -> Vec<AllObjectUpdate> {
-        std::mem::take(&mut self.all_objects_outbox)
     }
 
     /// Take all pending visible row updates.
@@ -781,44 +599,6 @@ impl ObjectManager {
                 && update.row.version_id() == version_id
         })?;
         Some(self.row_objects_outbox.remove(index))
-    }
-
-    /// Get the current frontier (tips) sorted by timestamp (oldest first).
-    fn tips_by_timestamp(
-        commits: &HashMap<CommitId, Commit>,
-        tips: &SmolSet<[CommitId; 2]>,
-    ) -> Vec<CommitId> {
-        let mut tip_vec: Vec<_> = tips.iter().copied().collect();
-        tip_vec.sort_by_key(|id| (commits.get(id).map(|c| c.timestamp).unwrap_or(0), *id));
-        tip_vec
-    }
-
-    /// Notify subscribers about a commit change - sends current frontier sorted by timestamp.
-    fn notify_subscribers_of_commit(&mut self, object_id: ObjectId, branch_name: BranchName) {
-        let key = (object_id, branch_name);
-        if let Some(subscriber_ids) = self.branch_subscribers.get(&key).cloned() {
-            // Get current tips from the branch
-            let commit_ids = if let Some(branch) = self.row_branch(object_id, &branch_name) {
-                branch.tip_ids_by_timestamp()
-            } else if let Some(object) = self.get(object_id) {
-                if let Some(branch) = object.branches.get(&branch_name) {
-                    Self::tips_by_timestamp(&branch.commits, &branch.tips)
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            };
-
-            for sub_id in subscriber_ids {
-                self.subscription_outbox.push(SubscriptionUpdate {
-                    subscription_id: sub_id,
-                    object_id,
-                    branch_name,
-                    commit_ids: commit_ids.clone(),
-                });
-            }
-        }
     }
 
     // ========================================================================
@@ -850,14 +630,8 @@ impl ObjectManager {
             }
         }
 
-        // Subscriptions
-        let subscriptions = self.subscriptions.len() * 80  // ~80 bytes per subscription
-            + self.branch_subscribers.len() * 96  // ~96 bytes per branch subscriber entry
-            + self.all_object_subscriptions.len() * 16
-            + self.subscription_outbox.len() * 128; // SubscriptionUpdate ~128 bytes
-
-        // Other (subscription outbox for all objects)
-        let other = self.all_objects_outbox.len() * 200; // AllObjectUpdate ~200 bytes
+        let subscriptions = 0usize;
+        let other = self.row_objects_outbox.len() * 192;
 
         let total = row_objects + index_objects + subscriptions + other;
         (row_objects, index_objects, subscriptions, other, total)
@@ -870,50 +644,6 @@ impl ObjectManager {
         // Metadata HashMap
         for (k, v) in &obj.metadata {
             size += k.len() + v.len() + 48; // String overhead + HashMap entry
-        }
-
-        // Branches
-        for (name, branch) in &obj.branches {
-            size += name.0.len() + 24; // BranchName (String) + overhead
-            size += 48; // HashMap entry overhead
-
-            // Branch struct base size
-            size += std::mem::size_of::<Branch>();
-
-            // Commits HashMap
-            for (commit_id, commit) in &branch.commits {
-                size += std::mem::size_of_val(commit_id);
-                size += self.estimate_commit_size(commit);
-                size += 48; // HashMap entry overhead
-            }
-
-            // Tips HashSet
-            size += branch.tips.len() * (32 + 16); // CommitId + HashSet entry overhead
-
-            // Tails Option<HashSet>
-            if let Some(tails) = &branch.tails {
-                size += tails.len() * (32 + 16);
-            }
-        }
-
-        size
-    }
-
-    /// Estimate memory size of a Commit.
-    fn estimate_commit_size(&self, commit: &Commit) -> usize {
-        let mut size = std::mem::size_of::<Commit>();
-
-        // Parents vec
-        size += commit.parents.capacity() * std::mem::size_of::<CommitId>();
-
-        // Content vec (this is often the biggest part)
-        size += commit.content.capacity();
-
-        // Metadata BTreeMap
-        if let Some(meta) = &commit.metadata {
-            for (k, v) in meta {
-                size += k.len() + v.len() + 64; // String overhead + BTreeMap node overhead
-            }
         }
 
         size

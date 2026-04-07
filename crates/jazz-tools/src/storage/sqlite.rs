@@ -7,16 +7,13 @@
 //! semantics for individual operations. Targets React Native / mobile.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-use crate::object::ObjectId;
 
 use super::{
     Storage, StorageError,
     storage_core::{
-        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_range_core,
     },
 };
 
@@ -224,24 +221,6 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            create_object_core(id, metadata, |key, value| {
-                Self::set(&inner.conn, key, value)
-            })
-        })
-    }
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.with_inner(|inner| load_object_metadata_core(id, |key| Self::get(&inner.conn, key)))
-    }
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
