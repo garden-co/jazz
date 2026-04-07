@@ -1,7 +1,7 @@
 ---
 title: Includes & Relations
 description: Resolve references with include(), pick columns with select(), inspect permissions, and run recursive queries.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -70,7 +70,9 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
 
 Jazz is distributed and supports offline edits, so a referenced row won't always be available locally&hairsp;—&hairsp;it might not have synced yet, or another peer might have deleted it.
 
-When you `include` a relation and the FK is set but the target row can't be resolved (not yet synced, deleted, or hidden by permissions), **the row is filtered out** (inner join semantics). If the FK column is `null` (nullable and unset), the row is still returned with the included field set to `null`. This filtering only applies when you explicitly load references with `include`&hairsp;—&hairsp;without it, the row appears in results with only its own columns.
+When you don't load a reference, the FK column contains its raw value (the UUID string) and the row always appears in results.
+
+When you do load a reference (TypeScript `include`, Rust `join`/`on`), Jazz uses inner-join semantics. If the FK is set but the target row can't be resolved&hairsp;—&hairsp;not yet synced, deleted, or hidden by permissions&hairsp;—&hairsp;**the row is filtered out**. If the FK column is `null` (nullable and unset), the row is still returned with the included field set to `null`.
 
 ### Requiring includes
 
@@ -93,27 +95,9 @@ To also filter out rows where the FK is `null`, use `.requireIncludes()`. This d
 (`todosViaOwner`, etc.) are unaffected. When used inside a nested `include`, it applies at that
 nesting level only.
 
-## Computed permissions columns
+## Magic columns
 
-Jazz exposes three computed columns&hairsp;—&hairsp;`$canRead`, `$canEdit`, and `$canDelete`&hairsp;—&hairsp;that reflect the current session's permissions on each row. They are computed at query time and don't exist in the database. They are omitted from `select("*")`, so you opt in explicitly&hairsp;—&hairsp;for example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
-
-- `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
-- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's update policy.
-- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's delete policy.
-- Without a session, all three return `null`.
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
-    </include>
-  </Tab>
-</Tabs>
+Jazz exposes computed columns for permission introspection (`$canRead`, `$canEdit`, `$canDelete`) and edit metadata (`$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`). See [Magic columns](/docs/reading/queries#magic-columns) for details and examples.
 
 ## Recursive queries with `gather` and `hopTo`
 

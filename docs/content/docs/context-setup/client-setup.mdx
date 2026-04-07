@@ -61,6 +61,14 @@ In browser clients, omitting `localAuthMode` and `localAuthToken` defaults to an
 
 <CreateJazzClientReference />
 
+For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
+
+### Storage driver
+
+By default, browser clients use `driver: { type: "persistent" }`, which runs a dedicated worker with OPFS-backed storage for offline support and local durability. Set `driver: { type: "memory" }` to skip the worker and OPFS entirely and keep data in memory only.
+
+`memory` mode requires `serverUrl` to be set, since there is no local persistence.
+
 ## Runtime overrides
 
 Use `runtime` when Jazz cannot infer where to load the browser worker or Wasm binary from, or when your runtime wants an in-memory Wasm source/module instead of URLs.

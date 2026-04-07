@@ -1,7 +1,6 @@
 import { access } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { expect } from "vitest";
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import {
@@ -16,6 +15,7 @@ import {
  */
 export class PolicyTestApp {
   constructor(
+    private readonly expect: Function,
     private readonly app: any,
     private readonly jazzContext: JazzContext,
     private readonly server: LocalJazzServerHandle,
@@ -42,7 +42,7 @@ export class PolicyTestApp {
    * TODO: rollback mutations performed as part of the callback (once we support transactions).
    */
   expectAllowed(callback: () => unknown): void {
-    expect(callback).not.toThrow();
+    this.expect(callback).not.toThrow();
   }
 
   /**
@@ -50,7 +50,7 @@ export class PolicyTestApp {
    * TODO: rollback mutations performed as part of the callback (once we support transactions).
    */
   expectDenied(callback: () => unknown): void {
-    expect(callback).toThrow('WriteError("policy denied');
+    this.expect(callback).toThrow('WriteError("policy denied');
   }
 
   /**
@@ -135,8 +135,12 @@ async function findPermissionsModulePath(rootDir: string): Promise<string | unde
  * This will start a local Jazz server and push the schema catalogue to it.
  * Returns a PolicyTestApp instance that can be used to seed the database and validate policy checks.
  * @param schemaDir - The directory containing the Jazz schema and permissions
+ * @param expectFn - The expect function to use for assertions
  */
-export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTestApp> {
+export async function createPolicyTestApp(
+  schemaDir: string,
+  expectFn: Function,
+): Promise<PolicyTestApp> {
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
   const resolvedPaths = await resolvePolicyTestSchemaPaths(schemaDir);
@@ -179,5 +183,5 @@ export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTest
     tier: "worker",
   });
 
-  return new PolicyTestApp(app, jazzContext, server);
+  return new PolicyTestApp(expectFn, app, jazzContext, server);
 }
