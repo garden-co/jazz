@@ -46,13 +46,6 @@ fn boolean_policy_document_input(
     ])
 }
 
-fn row_input<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
-    pairs
-        .into_iter()
-        .map(|(column, value)| (column.to_string(), value))
-        .collect()
-}
-
 fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)> {
     pairs
         .into_iter()
@@ -760,113 +753,77 @@ async fn select_policies_scalar_comparators_filter_rows() {
     let ne_match = create_row(
         &alice,
         "documents_select_ne",
-        row_input([
-            ("title", Value::Text("different".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "different", "priority" => 5i32),
     )
     .await;
     let ne_hidden = create_row(
         &alice,
         "documents_select_ne",
-        row_input([
-            ("title", Value::Text("exact".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "exact", "priority" => 3i32),
     )
     .await;
 
     let gt_match = create_row(
         &alice,
         "documents_select_gt",
-        row_input([
-            ("title", Value::Text("higher".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "higher", "priority" => 5i32),
     )
     .await;
     let gt_hidden = create_row(
         &alice,
         "documents_select_gt",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
 
     let gte_low = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("low".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "low", "priority" => 1i32),
     )
     .await;
     let gte_equal = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
     let gte_high = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("high".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "high", "priority" => 5i32),
     )
     .await;
 
     let lt_match = create_row(
         &alice,
         "documents_select_lt",
-        row_input([
-            ("title", Value::Text("lower".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "lower", "priority" => 1i32),
     )
     .await;
     let lt_hidden = create_row(
         &alice,
         "documents_select_lt",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
 
     let lte_low = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("low".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "low", "priority" => 1i32),
     )
     .await;
     let lte_equal = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
     let lte_hidden = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("high".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "high", "priority" => 5i32),
     )
     .await;
 
@@ -1037,114 +994,78 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     let select_eq_null_visible = create_row(
         &alice,
         "documents_select_eq_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_eq_null_hidden = create_row(
         &alice,
         "documents_select_eq_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let select_ne_null_hidden = create_row(
         &alice,
         "documents_select_ne_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_ne_null_visible = create_row(
         &alice,
         "documents_select_ne_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let select_is_null_visible = create_row(
         &alice,
         "documents_select_is_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_is_null_hidden = create_row(
         &alice,
         "documents_select_is_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let insert_eq_null_visible = create_row(
         &alice,
         "documents_insert_eq_null",
-        row_input([
-            ("title", Value::Text("allowed null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "allowed null", "reviewer_id" => Value::Null),
     )
     .await;
     let insert_eq_null_hidden = create_row(
         &alice,
         "documents_insert_eq_null",
-        row_input([
-            ("title", Value::Text("rejected non-null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "rejected non-null", "reviewer_id" => "alice"),
     )
     .await;
 
     let insert_ne_null_hidden = create_row(
         &alice,
         "documents_insert_ne_null",
-        row_input([
-            ("title", Value::Text("rejected null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "rejected null", "reviewer_id" => Value::Null),
     )
     .await;
     let insert_ne_null_visible = create_row(
         &alice,
         "documents_insert_ne_null",
-        row_input([
-            ("title", Value::Text("allowed non-null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "allowed non-null", "reviewer_id" => "alice"),
     )
     .await;
 
     let update_is_null_allowed = create_row(
         &alice,
         "documents_update_is_null",
-        row_input([
-            ("title", Value::Text("becomes null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "becomes null", "reviewer_id" => "alice"),
     )
     .await;
     let update_is_null_rejected = create_row(
         &alice,
         "documents_update_is_null",
-        row_input([
-            ("title", Value::Text("stays null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "stays null", "reviewer_id" => Value::Null),
     )
     .await;
 
@@ -1308,63 +1229,39 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
     let contains_match = create_row(
         &alice,
         "documents_select_contains",
-        row_input([
-            ("title", Value::Text("Launch Checklist".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Launch Checklist", "status" => "active", "archived" => false),
     )
     .await;
     let contains_hidden = create_row(
         &alice,
         "documents_select_contains",
-        row_input([
-            ("title", Value::Text("Backlog".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Backlog", "status" => "active", "archived" => false),
     )
     .await;
 
     let in_active = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Active".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Active", "status" => "active", "archived" => false),
     )
     .await;
     let in_trial = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Trial".into())),
-            ("status", Value::Text("trial".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Trial", "status" => "trial", "archived" => false),
     )
     .await;
     let in_hidden = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Archived".into())),
-            ("status", Value::Text("archived".into())),
-            ("archived", Value::Boolean(true)),
-        ]),
+        row_input!("title" => "Archived", "status" => "archived", "archived" => true),
     )
     .await;
 
     let empty_hidden = create_row(
         &alice,
         "documents_select_empty_in_list",
-        row_input([
-            ("title", Value::Text("Should stay hidden".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Should stay hidden", "status" => "active", "archived" => false),
     )
     .await;
 

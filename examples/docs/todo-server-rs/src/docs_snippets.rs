@@ -1,8 +1,6 @@
 //! Documentation snippet sources compiled with the example crate.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
@@ -16,12 +14,11 @@ fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
     ("replace-with-verified-sub".to_string(), json!({}))
 }
 
-fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
-    HashMap::from([
-        ("title".to_string(), Value::Text(title.into())),
-        ("done".to_string(), Value::Boolean(false)),
-        ("description".to_string(), Value::Text(description.into())),
-    ])
+fn todo_values(
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> std::collections::HashMap<String, Value> {
+    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 // #region backend-request-session-rust
