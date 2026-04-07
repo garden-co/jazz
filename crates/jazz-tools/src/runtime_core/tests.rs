@@ -607,15 +607,26 @@ fn execute_runtime_query_with_propagation(
     session: Option<Session>,
     propagation: crate::sync_manager::QueryPropagation,
 ) -> Vec<(ObjectId, Vec<Value>)> {
-    let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-
-    let mut future = core.query_with_propagation(
+    execute_runtime_query_with_durability_and_propagation(
+        core,
         query,
         session,
         ReadDurabilityOptions::default(),
         propagation,
-    );
+    )
+}
+
+fn execute_runtime_query_with_durability_and_propagation(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+    durability: ReadDurabilityOptions,
+    propagation: crate::sync_manager::QueryPropagation,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    let mut future = core.query_with_propagation(query, session, durability, propagation);
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Ok(results)) => results,
@@ -2265,6 +2276,92 @@ fn rc_query_settled_tier_empty_resolves() {
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
         Poll::Pending => panic!("Query should resolve after Worker QuerySettled"),
     }
+}
+
+#[test]
+fn query_reads_pick_row_versions_by_required_durability_tier() {
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "tier-aware-visible-row",
+        SyncManager::new().with_durability_tier(DurabilityTier::GlobalServer),
+    );
+    let branch_name = core.schema_manager().branch_name().to_string();
+
+    // Row history:
+    //   v1 --(global)--> visible for global queries
+    //    \
+    //     `-- v2 --(worker)--> current head for worker queries
+    let row_id = ObjectId::new();
+    let (object_id, _) = core
+        .insert("users", user_insert_values(row_id, "Alice-global"), None)
+        .unwrap();
+    core.immediate_tick();
+
+    let first_visible = core
+        .storage()
+        .load_visible_region_row("users", &branch_name, object_id)
+        .unwrap()
+        .expect("first visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "users",
+            first_visible.batch_id,
+            None,
+            Some(DurabilityTier::GlobalServer),
+        )
+        .unwrap();
+
+    core.update(
+        object_id,
+        vec![("name".into(), Value::Text("Alice-worker".into()))],
+        None,
+    )
+    .unwrap();
+    core.immediate_tick();
+
+    let second_visible = core
+        .storage()
+        .load_visible_region_row("users", &branch_name, object_id)
+        .unwrap()
+        .expect("second visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "users",
+            second_visible.batch_id,
+            None,
+            Some(DurabilityTier::Worker),
+        )
+        .unwrap();
+
+    let worker_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let global_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::GlobalServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+
+    assert_eq!(
+        worker_rows,
+        vec![(object_id, user_row_values(row_id, "Alice-worker"))]
+    );
+    assert_eq!(
+        global_rows,
+        vec![(object_id, user_row_values(row_id, "Alice-global"))]
+    );
 }
 
 #[test]

@@ -930,6 +930,7 @@ impl QueryManager {
                         storage_ref,
                         id,
                         &branches,
+                        subscription.durability_tier,
                         include_deleted,
                         &schema_context,
                         &branch_schema_map,
@@ -1427,6 +1428,7 @@ impl QueryManager {
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
+        durability_tier: Option<DurabilityTier>,
     ) -> Option<(String, StoredRowVersion)> {
         let table = storage
             .load_metadata(row_id)
@@ -1438,11 +1440,13 @@ impl QueryManager {
         let mut best: Option<(CommitId, StoredRowVersion)> = None;
 
         for branch in branches {
-            let Some(row) = storage
-                .load_visible_region_row(&table, branch, row_id)
-                .ok()
-                .flatten()
-            else {
+            let loaded = match durability_tier {
+                Some(required_tier) => {
+                    storage.load_visible_region_row_for_tier(&table, branch, row_id, required_tier)
+                }
+                None => storage.load_visible_region_row(&table, branch, row_id),
+            };
+            let Some(row) = loaded.ok().flatten() else {
                 continue;
             };
 
@@ -1470,6 +1474,7 @@ impl QueryManager {
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
+        durability_tier: Option<DurabilityTier>,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -1477,7 +1482,8 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let (table, row) = Self::load_best_visible_row_version(storage, row_id, branches)?;
+        let (table, row) =
+            Self::load_best_visible_row_version(storage, row_id, branches, durability_tier)?;
 
         if row.is_hard_deleted() {
             return None;

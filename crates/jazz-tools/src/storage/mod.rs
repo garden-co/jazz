@@ -311,6 +311,31 @@ pub trait Storage {
         ))
     }
 
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        let current = self.load_visible_region_row(table, branch, row_id)?;
+        if current.as_ref().is_some_and(|row| {
+            row.state.is_visible() && row.confirmed_tier.is_some_and(|tier| tier >= required_tier)
+        }) {
+            return Ok(current);
+        }
+
+        Ok(self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .filter(|row| {
+                row.branch == branch
+                    && row.state.is_visible()
+                    && row.confirmed_tier.is_some_and(|tier| tier >= required_tier)
+            })
+            .max_by_key(|row| (row.updated_at, row.version_id())))
+    }
+
     fn scan_visible_region_row_versions(
         &self,
         _table: &str,
@@ -564,6 +589,16 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         (**self).load_visible_region_row(table, branch, row_id)
+    }
+
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        (**self).load_visible_region_row_for_tier(table, branch, row_id, required_tier)
     }
 
     fn scan_visible_region_row_versions(
@@ -1010,6 +1045,31 @@ impl Storage for MemoryStorage {
                 .get(&(branch.to_string(), row_id))
                 .map(|entry| entry.current_row.clone())
         }))
+    }
+
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(None);
+        };
+        let Some(entry) = regions.visible.get(&(branch.to_string(), row_id)) else {
+            return Ok(None);
+        };
+
+        let version_id = entry.version_id_for_tier(required_tier);
+        if version_id == entry.current_version_id() {
+            return Ok(Some(entry.current_row.clone()));
+        }
+
+        Ok(regions
+            .history_rows_for(branch, row_id)
+            .into_iter()
+            .find(|row| row.version_id() == version_id))
     }
 
     fn scan_visible_region_row_versions(
