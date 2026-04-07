@@ -1,6 +1,6 @@
 use super::*;
 use crate::metadata::{MetadataKey, RowProvenance};
-use crate::storage::MemoryStorage;
+use crate::storage::{MemoryStorage, Storage};
 
 fn row_metadata(table: &str) -> HashMap<String, String> {
     HashMap::from([(MetadataKey::Table.to_string(), table.to_string())])
@@ -35,6 +35,13 @@ fn visible_row(
         RowState::VisibleDirect,
         None,
     )
+}
+
+fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowVersion {
+    storage
+        .load_visible_region_row("users", branch, row_id)
+        .unwrap()
+        .expect("visible row should exist")
 }
 
 #[test]
@@ -145,9 +152,7 @@ fn add_row_version_tracks_visible_row_and_tips() {
     assert!(tips.contains(&alice_id));
     assert!(tips.contains(&bob_id));
 
-    let winner = manager
-        .visible_row(row_id, BranchName::new("main"))
-        .expect("main branch should have a visible winner");
+    let winner = load_visible_row(&io, row_id, "main");
     assert_eq!(winner.version_id(), bob_id);
     assert_eq!(winner.data, b"bob".to_vec());
 
@@ -212,18 +217,9 @@ fn add_row_version_keeps_identical_payload_versions_across_branches() {
 
     let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
     assert_eq!(history_rows.len(), 2, "history should retain both branches");
+    assert_eq!(load_visible_row(&io, row_id, "main").data, b"same".to_vec());
     assert_eq!(
-        manager
-            .visible_row(row_id, BranchName::new("main"))
-            .expect("main row should stay visible")
-            .data,
-        b"same".to_vec()
-    );
-    assert_eq!(
-        manager
-            .visible_row(row_id, BranchName::new("draft"))
-            .expect("draft row should stay visible")
-            .data,
+        load_visible_row(&io, row_id, "draft").data,
         b"same".to_vec()
     );
 }
@@ -251,13 +247,7 @@ fn stale_row_version_does_not_replace_visible_winner() {
         manager.take_visible_row_updates().is_empty(),
         "stale history should not emit a visible-row update"
     );
-    assert_eq!(
-        manager
-            .visible_row(row_id, BranchName::new("main"))
-            .expect("main branch should still have a visible row")
-            .version_id(),
-        newer_id
-    );
+    assert_eq!(load_visible_row(&io, row_id, "main").version_id(), newer_id);
 }
 
 #[test]
@@ -274,7 +264,8 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
     let _ = manager.take_visible_row_updates();
 
     let update = manager
-        .patch_row_version_state(
+        .patch_row_version_state_with_storage(
+            &mut io,
             row_id,
             &BranchName::new("main"),
             version_id,
@@ -285,7 +276,8 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
     assert_eq!(update.row.version_id(), version_id);
     assert_eq!(update.row.confirmed_tier, Some(DurabilityTier::EdgeServer));
 
-    manager.patch_row_version_state(
+    manager.patch_row_version_state_with_storage(
+        &mut io,
         row_id,
         &BranchName::new("main"),
         version_id,
@@ -293,9 +285,7 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
         Some(DurabilityTier::Worker),
     );
 
-    let visible = manager
-        .visible_row(row_id, BranchName::new("main"))
-        .expect("visible row should remain present");
+    let visible = load_visible_row(&io, row_id, "main");
     assert_eq!(visible.confirmed_tier, Some(DurabilityTier::EdgeServer));
 }
 
@@ -325,10 +315,7 @@ fn get_or_load_hydrates_visible_and_history_rows_from_storage() {
         Some(&"users".to_string())
     );
     assert_eq!(
-        reader
-            .visible_row(row_id, BranchName::new("main"))
-            .expect("visible row should hydrate from visible region")
-            .version_id(),
+        load_visible_row(&writer_storage, row_id, "main").version_id(),
         newer_id
     );
     let tips = reader.get_tip_ids(row_id, "main").unwrap();

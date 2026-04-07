@@ -13,7 +13,7 @@ use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
-use crate::storage::MemoryStorage;
+use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{
     ClientId, Destination, InboxEntry, QueryId, RowMetadata, Source, SyncError, SyncManager,
     SyncPayload,
@@ -1192,21 +1192,18 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         .set_client_session(client_id, Session::new("alice"));
     qm.sync_manager_mut().take_outbox();
 
-    qm.sync_manager_mut()
-        .object_manager
-        .get_or_load(folder_id, &storage, &["main".to_string()]);
     assert!(
-        qm.sync_manager()
-            .object_manager
-            .visible_row(folder_id, BranchName::new("main"))
+        storage
+            .load_visible_region_row("folders", "main", folder_id)
+            .unwrap()
             .is_some()
     );
     assert!(
-        qm.sync_manager()
-            .object_manager
-            .visible_row(folder_id, BranchName::new(&branch))
-            .is_none(),
-        "setup should start with only the unrelated branch cached"
+        storage
+            .load_visible_region_row("folders", &branch, folder_id)
+            .unwrap()
+            .is_some(),
+        "requested-branch visible state should already live in storage"
     );
 
     let doc_id = ObjectId::new();
@@ -1219,10 +1216,9 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         "Hydrate branch instead of reusing main",
     );
 
-    // Wrong-branch cache:
+    // Wrong-branch reuse:
     //   storage: folder[main] = bob, folder[dev] = alice
-    //   cache:   only folder[main] is loaded before authorization
-    //   write:   document[dev] must hydrate folder[dev], not reuse folder[main]
+    //   write:   document[dev] must consult folder[dev], not reuse folder[main]
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();

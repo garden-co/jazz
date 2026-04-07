@@ -47,7 +47,6 @@ struct RowVersionApply {
 #[derive(Debug, Clone, Default)]
 pub struct ObjectManager {
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
-    row_visible_entries: HashMap<(ObjectId, BranchName), VisibleRowEntry>,
     #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
     /// Outbox for visible row changes.
@@ -123,24 +122,6 @@ impl ObjectManager {
             .ok_or(Error::ObjectNotFound(object_id))
     }
 
-    fn visible_entry(
-        &self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-    ) -> Option<&VisibleRowEntry> {
-        self.row_visible_entries.get(&(object_id, *branch_name))
-    }
-
-    fn cache_visible_entry(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: BranchName,
-        entry: VisibleRowEntry,
-    ) {
-        self.row_visible_entries
-            .insert((object_id, branch_name), entry);
-    }
-
     #[cfg(test)]
     fn cache_tips(&mut self, object_id: ObjectId, branch_name: BranchName, tips: &[CommitId]) {
         self.row_branch_tips
@@ -154,105 +135,8 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: &BranchName,
     ) -> Result<Option<VisibleRowEntry>, Error> {
-        Ok(self
-            .visible_entry(object_id, branch_name)
-            .cloned()
-            .or_else(|| {
-                io.load_visible_region_entry(table, branch_name.as_str(), object_id)
-                    .ok()
-                    .flatten()
-            }))
-    }
-
-    fn latest_row(
-        left: Option<StoredRowVersion>,
-        right: Option<StoredRowVersion>,
-    ) -> Option<StoredRowVersion> {
-        match (left, right) {
-            (Some(left), Some(right)) => {
-                if (left.updated_at, left.version_id()) >= (right.updated_at, right.version_id()) {
-                    Some(left)
-                } else {
-                    Some(right)
-                }
-            }
-            (Some(left), None) => Some(left),
-            (None, Some(right)) => Some(right),
-            (None, None) => None,
-        }
-    }
-
-    fn visible_entry_after_appending_row<H: Storage>(
-        &self,
-        io: &H,
-        table: &str,
-        previous_entry: Option<VisibleRowEntry>,
-        row: &StoredRowVersion,
-    ) -> Result<Option<VisibleRowEntry>, Error> {
-        let candidate_visible = row.state.is_visible().then_some(row.clone());
-        let previous_current = previous_entry
-            .as_ref()
-            .map(|entry| entry.current_row.clone());
-        let current_row = Self::latest_row(previous_current.clone(), candidate_visible.clone());
-
-        let Some(current_row) = current_row else {
-            return Ok(None);
-        };
-
-        let current_version_id = current_row.version_id();
-        let current_confirmed_tier = current_row.confirmed_tier;
-        let winner_version_id_for_tier =
-            |required_tier: DurabilityTier| -> Result<Option<CommitId>, Error> {
-                if current_confirmed_tier.is_some_and(|tier| tier >= required_tier) {
-                    return Ok(Some(current_version_id));
-                }
-
-                if !row.state.is_visible()
-                    || row.confirmed_tier.is_none_or(|tier| tier < required_tier)
-                {
-                    return Ok(previous_entry
-                        .as_ref()
-                        .and_then(|entry| entry.version_id_for_tier(required_tier)));
-                }
-
-                let row_version_id = row.version_id();
-                if row_version_id == current_version_id {
-                    return Ok(Some(current_version_id));
-                }
-
-                let Some(previous_winner_id) = previous_entry
-                    .as_ref()
-                    .and_then(|entry| entry.version_id_for_tier(required_tier))
-                else {
-                    return Ok(Some(row_version_id));
-                };
-
-                let Some(previous_winner) = io
-                    .load_history_row_version(table, row.row_id, previous_winner_id)
-                    .map_err(Error::StorageError)?
-                else {
-                    return Err(Error::StorageError(StorageError::IoError(format!(
-                        "missing previous winner {previous_winner_id:?} for row {}",
-                        row.row_id
-                    ))));
-                };
-
-                if Self::latest_row_wins(row, &previous_winner) {
-                    Ok(Some(row_version_id))
-                } else {
-                    Ok(Some(previous_winner_id))
-                }
-            };
-
-        Ok(Some(VisibleRowEntry {
-            current_row,
-            worker_version_id: winner_version_id_for_tier(DurabilityTier::Worker)?
-                .filter(|version_id| *version_id != current_version_id),
-            edge_version_id: winner_version_id_for_tier(DurabilityTier::EdgeServer)?
-                .filter(|version_id| *version_id != current_version_id),
-            global_version_id: winner_version_id_for_tier(DurabilityTier::GlobalServer)?
-                .filter(|version_id| *version_id != current_version_id),
-        }))
+        io.load_visible_region_entry(table, branch_name.as_str(), object_id)
+            .map_err(Error::StorageError)
     }
 
     fn load_branch_history<H: Storage>(
@@ -268,6 +152,13 @@ impl ObjectManager {
             .into_iter()
             .filter(|row| row.branch == branch_name.as_str())
             .collect())
+    }
+
+    fn visible_row_from_history(rows: &[StoredRowVersion]) -> Option<StoredRowVersion> {
+        rows.iter()
+            .filter(|row| row.state.is_visible())
+            .max_by_key(|row| (row.updated_at, row.version_id()))
+            .cloned()
     }
 
     fn rebuild_visible_entry_from_history<H: Storage>(
@@ -433,7 +324,7 @@ impl ObjectManager {
         row: StoredRowVersion,
     ) -> Result<RowVersionApply, Error> {
         let object_metadata = self
-            .get(object_id)
+            .get_or_load(object_id, io, &[])
             .ok_or(Error::ObjectNotFound(object_id))?
             .clone();
 
@@ -454,15 +345,13 @@ impl ObjectManager {
             }
         }
 
+        let mut branch_history = self.load_branch_history(io, &table, object_id, &branch_name)?;
         let version_id = row.version_id();
-        if io
-            .load_history_row_version(&table, object_id, version_id)
-            .map_err(Error::StorageError)?
-            .is_some_and(|existing| existing.branch == branch_name.as_str())
+        let previous_visible = Self::visible_row_from_history(&branch_history);
+        if branch_history
+            .iter()
+            .any(|existing| existing.version_id() == version_id)
         {
-            let previous_visible = self
-                .load_previous_visible_entry(io, &table, object_id, &branch_name)?
-                .map(|entry| entry.current_row);
             return Ok(RowVersionApply {
                 version_id,
                 current_visible: previous_visible.clone(),
@@ -472,25 +361,15 @@ impl ObjectManager {
             });
         }
 
-        let previous_entry =
-            self.load_previous_visible_entry(io, &table, object_id, &branch_name)?;
-        let previous_visible = previous_entry
-            .as_ref()
-            .map(|entry| entry.current_row.clone());
-
         io.append_history_region_rows(&table, std::slice::from_ref(&row))
             .map_err(Error::StorageError)?;
+        branch_history.push(row.clone());
+        let current_visible = Self::visible_row_from_history(&branch_history);
 
-        let current_entry =
-            self.visible_entry_after_appending_row(io, &table, previous_entry.clone(), &row)?;
-        let current_visible = current_entry
-            .as_ref()
-            .map(|entry| entry.current_row.clone());
-
-        if let Some(entry) = current_entry {
+        if let Some(current_row) = current_visible.clone() {
+            let entry = VisibleRowEntry::rebuild(current_row, &branch_history);
             io.upsert_visible_region_rows(&table, std::slice::from_ref(&entry))
                 .map_err(Error::StorageError)?;
-            self.cache_visible_entry(object_id, branch_name, entry);
         }
 
         #[cfg(test)]
@@ -521,7 +400,7 @@ impl ObjectManager {
 
         if applied.visible_changed {
             let metadata = self
-                .get(object_id)
+                .get_or_load(object_id, io, &[])
                 .ok_or(Error::ObjectNotFound(object_id))?
                 .clone();
             if let Some(current_visible) = applied.current_visible {
@@ -551,7 +430,7 @@ impl ObjectManager {
         }
 
         let metadata = self
-            .get(object_id)
+            .get_or_load(object_id, io, &[])
             .ok_or(Error::ObjectNotFound(object_id))?
             .clone();
         let Some(current_visible) = applied.current_visible else {
@@ -567,47 +446,6 @@ impl ObjectManager {
         }))
     }
 
-    #[cfg(test)]
-    pub fn remember_remote_row_version(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: BranchName,
-        row: StoredRowVersion,
-    ) {
-        let version_id = row.version_id();
-        self.cache_visible_entry(object_id, branch_name, VisibleRowEntry::new(row));
-        self.cache_tips(object_id, branch_name, &[version_id]);
-    }
-
-    pub fn visible_row(
-        &self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-    ) -> Option<StoredRowVersion> {
-        let branch_name = branch_name.into();
-        self.visible_entry(object_id, &branch_name)
-            .map(|entry| entry.current_row.clone())
-    }
-
-    pub fn visible_row_entry(
-        &self,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-    ) -> Option<VisibleRowEntry> {
-        let branch_name = branch_name.into();
-        self.visible_entry(object_id, &branch_name).cloned()
-    }
-
-    pub fn row_version_exists(
-        &self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        version_id: CommitId,
-    ) -> bool {
-        self.visible_entry(object_id, branch_name)
-            .is_some_and(|entry| entry.current_row.version_id() == version_id)
-    }
-
     pub fn patch_row_version_state_with_storage<H: Storage>(
         &mut self,
         io: &mut H,
@@ -617,7 +455,7 @@ impl ObjectManager {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Option<VisibleRowUpdate> {
-        let metadata = self.get(object_id)?.clone();
+        let metadata = self.get_or_load(object_id, io, &[])?.clone();
         let table = self.table_for_object(object_id).ok()?;
         let previous_entry = self
             .load_previous_visible_entry(io, &table, object_id, branch_name)
@@ -657,7 +495,6 @@ impl ObjectManager {
 
         io.upsert_visible_region_rows(&table, std::slice::from_ref(&patched_entry))
             .ok()?;
-        self.cache_visible_entry(object_id, *branch_name, patched_entry.clone());
 
         let current_visible = patched_entry.current_row;
         if previous_visible.as_ref() == Some(&current_visible) {
@@ -673,67 +510,6 @@ impl ObjectManager {
         })
     }
 
-    pub fn patch_row_version_state(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        version_id: CommitId,
-        state: Option<RowState>,
-        confirmed_tier: Option<DurabilityTier>,
-    ) -> Option<VisibleRowUpdate> {
-        let metadata = self.get(object_id)?.clone();
-        let entry = self
-            .row_visible_entries
-            .get_mut(&(object_id, *branch_name))?;
-        if entry.current_row.version_id() != version_id {
-            return None;
-        }
-
-        let previous_visible = entry.current_row.clone();
-        if let Some(state) = state {
-            entry.current_row.state = state;
-        }
-        entry.current_row.confirmed_tier = match (entry.current_row.confirmed_tier, confirmed_tier)
-        {
-            (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-            (Some(existing), None) => Some(existing),
-            (None, incoming) => incoming,
-        };
-
-        if previous_visible == entry.current_row {
-            return None;
-        }
-
-        Some(VisibleRowUpdate {
-            object_id,
-            metadata,
-            row: entry.current_row.clone(),
-            previous_row: Some(previous_visible),
-            is_new_object: false,
-        })
-    }
-
-    pub fn row_versions_for_sync(
-        &self,
-    ) -> Vec<(ObjectId, HashMap<String, String>, StoredRowVersion)> {
-        let mut rows = Vec::new();
-        for ((object_id, _branch_name), entry) in &self.row_visible_entries {
-            let Some(metadata) = self.metadata_by_id.get(object_id) else {
-                continue;
-            };
-            rows.push((*object_id, metadata.clone(), entry.current_row.clone()));
-        }
-        rows.sort_by_key(|(object_id, _, row)| {
-            (
-                *object_id,
-                row.branch.clone(),
-                row.updated_at,
-                row.version_id(),
-            )
-        });
-        rows
-    }
-
     /// Get an object by id.
     pub fn get(&self, id: ObjectId) -> Option<&HashMap<String, String>> {
         self.metadata_by_id.get(&id)
@@ -744,7 +520,7 @@ impl ObjectManager {
         &mut self,
         id: ObjectId,
         storage: &dyn Storage,
-        branches: &[String],
+        _branches: &[String],
     ) -> Option<&HashMap<String, String>> {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.metadata_by_id.entry(id) {
             let metadata = match storage.load_metadata(id) {
@@ -760,25 +536,16 @@ impl ObjectManager {
 
         let metadata = self.metadata_by_id.get(&id)?.clone();
         if Self::is_row_metadata(&metadata) {
-            let Some(table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
+            let Some(_table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
                 return self.metadata_by_id.get(&id);
             };
 
-            for branch_name in branches {
+            #[cfg(test)]
+            for branch_name in _branches {
                 let branch_name = BranchName::new(branch_name);
-                if self.visible_entry(id, &branch_name).is_some() {
-                    continue;
-                }
-                if let Ok(Some(entry)) =
-                    storage.load_visible_region_entry(&table, branch_name.as_str(), id)
+                if let Ok(tips) = storage.scan_row_branch_tip_ids(&_table, branch_name.as_str(), id)
                 {
-                    self.cache_visible_entry(id, branch_name, entry);
-                    #[cfg(test)]
-                    if let Ok(tips) =
-                        storage.scan_row_branch_tip_ids(&table, branch_name.as_str(), id)
-                    {
-                        self.cache_tips(id, branch_name, &tips);
-                    }
+                    self.cache_tips(id, branch_name, &tips);
                 }
             }
         }
@@ -853,9 +620,8 @@ impl ObjectManager {
             }
         }
 
-        let visible_cache = self.row_visible_entries.len() * 256;
         let subscriptions = 0usize;
-        let other = self.visible_row_updates.len() * 192 + visible_cache;
+        let other = self.visible_row_updates.len() * 192;
 
         let total = row_objects + index_objects + subscriptions + other;
         (row_objects, index_objects, subscriptions, other, total)

@@ -1947,11 +1947,9 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 
     let branch_name = core.schema_manager().branch_name();
     let version_id = core
-        .schema_manager()
-        .query_manager()
-        .sync_manager()
-        .object_manager
-        .visible_row(row_id, branch_name)
+        .storage
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
         .expect("persisted insert should materialize a visible row")
         .version_id();
 
