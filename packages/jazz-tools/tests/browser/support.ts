@@ -73,7 +73,13 @@ export async function waitForQuery<T>(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await db.all(queryBuilder, { tier });
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const queryTimeoutMs = Math.min(5000, remainingMs);
+      const rows = await withTimeout(
+        db.all(queryBuilder, { tier }),
+        queryTimeoutMs,
+        `${label}: db.all did not resolve`,
+      );
       if (predicate(rows)) {
         return rows;
       }
