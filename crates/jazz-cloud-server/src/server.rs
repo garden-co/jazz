@@ -10,7 +10,7 @@ use axum::{
     Router,
     extract::{Path as AxumPath, Query, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     response::{Html, IntoResponse, Json},
@@ -42,7 +42,7 @@ use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -2542,6 +2542,21 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
 }
 
 fn create_router(state: Arc<ServerState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers([
+            AUTHORIZATION,
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("x-jazz-admin-secret"),
+            HeaderName::from_static("x-jazz-backend-secret"),
+            HeaderName::from_static("x-jazz-session"),
+            HeaderName::from_static("x-jazz-local-mode"),
+            HeaderName::from_static("x-jazz-local-token"),
+            HeaderName::from_static("last-event-id"),
+        ])
+        .expose_headers(Any);
+
     Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
@@ -2591,7 +2606,7 @@ fn create_router(state: Arc<ServerState>) -> Router {
             post(manage_rotate_admin_secret_handler),
         )
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
 }
 

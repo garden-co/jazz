@@ -7,13 +7,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderName, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -53,6 +53,23 @@ impl AsyncDropGuard {
     }
 }
 
+fn sync_server_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-jazz-admin-secret"),
+            HeaderName::from_static("x-jazz-backend-secret"),
+            HeaderName::from_static("x-jazz-session"),
+            HeaderName::from_static("x-jazz-local-mode"),
+            HeaderName::from_static("x-jazz-local-token"),
+            HeaderName::from_static("last-event-id"),
+        ])
+        .expose_headers(Any)
+}
+
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let traced_routes = Router::new()
@@ -76,7 +93,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/events", get(events_handler))
         .merge(traced_routes)
-        .layer(CorsLayer::permissive())
+        .layer(sync_server_cors_layer())
         .with_state(state)
 }
 
@@ -1521,6 +1538,8 @@ async fn health_handler() -> impl IntoResponse {
 mod tests {
     use super::*;
 
+    use std::collections::HashSet;
+
     use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
@@ -1529,6 +1548,10 @@ mod tests {
         ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
     };
     use axum::body;
+    use axum::http::header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_REQUEST_HEADERS,
+        ACCESS_CONTROL_REQUEST_METHOD, ORIGIN,
+    };
     use axum::routing::{get, post};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -1629,6 +1652,15 @@ mod tests {
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
+    }
+
+    fn parse_allow_headers(value: &str) -> HashSet<String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_ascii_lowercase())
+            .collect()
     }
 
     // -------------------------------------------------------------------------
@@ -1755,6 +1787,54 @@ mod tests {
         assert_eq!(results.len(), 60);
         for result in results {
             assert_eq!(result["ok"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_preflight_explicitly_allows_authorization_and_jazz_headers() {
+        let app = make_sync_test_app("test-backend-secret").await;
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/sync")
+                    .header(ORIGIN, "http://localhost:3000")
+                    .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        ACCESS_CONTROL_REQUEST_HEADERS,
+                        "Authorization, Content-Type, X-Jazz-Admin-Secret, X-Jazz-Backend-Secret, X-Jazz-Session, X-Jazz-Local-Mode, X-Jazz-Local-Token, Last-Event-ID",
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+
+        let allow_headers = response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("preflight should include access-control-allow-headers")
+            .to_str()
+            .expect("header should be valid ascii");
+        let allow_headers = parse_allow_headers(allow_headers);
+
+        for expected in [
+            "authorization",
+            "content-type",
+            "x-jazz-admin-secret",
+            "x-jazz-backend-secret",
+            "x-jazz-session",
+            "x-jazz-local-mode",
+            "x-jazz-local-token",
+            "last-event-id",
+        ] {
+            assert!(
+                allow_headers.contains(expected),
+                "expected {expected} in access-control-allow-headers, got {allow_headers:?}",
+            );
         }
     }
 
