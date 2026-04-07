@@ -540,6 +540,17 @@ export class Db {
     }
   }
 
+  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl) {
+      return;
+    }
+    if (!options?.tier || options.tier === "worker") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
     if (!this.worker) {
       throw new Error("Cannot attach worker bridge without an active worker");
@@ -1172,7 +1183,7 @@ export class Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    await this.ensureBridgeReady();
+    await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
@@ -1524,7 +1535,7 @@ class ClientBackedDb extends Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    await this.ensureBridgeReady();
+    await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,

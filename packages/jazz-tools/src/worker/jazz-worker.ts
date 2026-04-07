@@ -433,12 +433,14 @@ function attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number |
   runtime.addServer(catalogueStateHash ?? null, nextSyncSeq ?? null);
   streamAttached = true;
   reconnectAttempt = 0;
+  post({ type: "upstream-connected" });
 }
 
 function detachServer(): void {
   if (!runtime || !streamAttached) return;
   runtime.removeServer();
   streamAttached = false;
+  post({ type: "upstream-disconnected" });
 }
 
 function scheduleReconnect(): void {

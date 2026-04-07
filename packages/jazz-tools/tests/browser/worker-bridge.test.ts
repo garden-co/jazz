@@ -949,6 +949,57 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   /**
+   *   writer ──baseline write──► server
+   *   fresh probe starts while server traffic is blocked
+   *   probe ──edge query pending──X server
+   *   network unblocks
+   *   expected: the first fresh edge query completes without needing a second client recreate
+   */
+  it("replays a fresh edge query once upstream attaches after init", async () => {
+    const sharedLocalAuthToken = `edge-query-late-attach-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { serverUrl } = await getTestingServerInfo();
+    const dbWriter = await createSyncedDb(ctx, "edge-late-attach-writer", sharedLocalAuthToken);
+
+    const baselineTitle = `edge-late-baseline-${Date.now()}`;
+    await withTimeout(
+      dbWriter.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+      10000,
+      "Baseline insert(worker) did not resolve",
+    );
+
+    await waitForTodos(
+      dbWriter,
+      (rows) => rows.some((row) => row.title === baselineTitle),
+      "Writer sees baseline row at edge before blocking",
+      20000,
+      "edge",
+    );
+
+    await blockTestingServerNetwork(serverUrl);
+    await sleep(250);
+
+    try {
+      const dbProbe = await createSyncedDb(ctx, "edge-late-attach-probe", sharedLocalAuthToken);
+      const probeRowsPromise = waitForTodos(
+        dbProbe,
+        (rows) => rows.some((row) => row.title === baselineTitle),
+        "Fresh edge query resolves after upstream attach",
+        20000,
+        "edge",
+      );
+
+      await sleep(500);
+      await unblockTestingServerNetwork(serverUrl);
+      await sleep(250);
+
+      const rowsOnProbe = await probeRowsPromise;
+      expect(rowsOnProbe.some((row) => row.title === baselineTitle)).toBe(true);
+    } finally {
+      await unblockTestingServerNetwork(serverUrl);
+    }
+  }, 60000);
+
+  /**
    *   A ──baseline write──► server ◄── B sees baseline
    *   browser blocks Jazz server traffic without reloading the page
    *   A ──offline write(worker)──X server
