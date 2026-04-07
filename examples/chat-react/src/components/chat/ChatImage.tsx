@@ -1,17 +1,9 @@
-import { FileNotFoundError, IncompleteFileDataError } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { downloadUrl } from "@/lib/utils";
 import { app, type Attachment } from "../../../schema.js";
-
-const IMAGE_LOAD_RETRY_DELAY_MS = 150;
-const MAX_IMAGE_LOAD_RETRIES = 20;
-
-function isRetryableImageLoadError(error: unknown) {
-  return error instanceof FileNotFoundError || error instanceof IncompleteFileDataError;
-}
 
 interface ChatImageProps {
   attachment: Attachment;
@@ -24,39 +16,19 @@ export function ChatImage({ attachment }: ChatImageProps) {
   useEffect(() => {
     let isActive = true;
     let objectUrl: string | null = null;
-    let retryTimer: number | null = null;
-    let retries = 0;
 
     async function loadImage() {
-      try {
-        const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
-        if (!isActive) return;
+      const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
+      if (!isActive) return;
 
-        objectUrl = URL.createObjectURL(blob);
-        setImageUrl(objectUrl);
-      } catch (error) {
-        if (!isActive) return;
-
-        if (isRetryableImageLoadError(error) && retries < MAX_IMAGE_LOAD_RETRIES) {
-          retries += 1;
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null;
-            void loadImage();
-          }, IMAGE_LOAD_RETRY_DELAY_MS);
-          return;
-        }
-
-        console.error(error);
-      }
+      objectUrl = URL.createObjectURL(blob);
+      setImageUrl(objectUrl);
     }
 
-    void loadImage();
+    loadImage();
 
     return () => {
       isActive = false;
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
-      }
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
