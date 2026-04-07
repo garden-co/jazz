@@ -38,37 +38,6 @@ fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
         .map_err(|err| storage_codec_error("decode", "stored row version", err))
 }
 
-fn history_rows_for_visible_entry(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = history_row_versions_prefix(table, branch, row_id);
-    scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| decode_history_row(&bytes))
-        .collect()
-}
-
-fn rebuild_visible_entry(
-    table: &str,
-    current_row: StoredRowVersion,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<VisibleRowEntry, StorageError> {
-    let mut history_rows =
-        history_rows_for_visible_entry(table, &current_row.branch, current_row.row_id, |prefix| {
-            scan_prefix(prefix)
-        })?;
-    if !history_rows
-        .iter()
-        .any(|row| row.version_id() == current_row.version_id())
-    {
-        history_rows.push(current_row.clone());
-    }
-    Ok(VisibleRowEntry::rebuild(current_row, &history_rows))
-}
-
 pub(super) fn raw_table_put_core(
     table: &str,
     key: &str,
@@ -135,28 +104,12 @@ pub(super) fn raw_table_scan_range_core(
 pub(super) fn append_history_region_rows_core(
     table: &str,
     rows: &[StoredRowVersion],
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let mut affected_visible_rows = HashSet::new();
     for row in rows {
         let key = history_row_key(table, &row.branch, row.row_id, row.updated_at);
         let encoded = encode_history_row(row)?;
         set(&key, &encoded)?;
-        affected_visible_rows.insert((row.branch.clone(), row.row_id));
-    }
-
-    for (branch, row_id) in affected_visible_rows {
-        let visible_key = visible_row_key(table, &branch, row_id);
-        let Some(bytes) = get(&visible_key)? else {
-            continue;
-        };
-        let current_row = decode_visible_entry(&bytes)?.current_row;
-        let visible_entry =
-            rebuild_visible_entry(table, current_row, |prefix| scan_prefix(prefix))?;
-        let encoded = encode_visible_entry(&visible_entry)?;
-        set(&visible_key, &encoded)?;
     }
     Ok(())
 }
@@ -164,14 +117,12 @@ pub(super) fn append_history_region_rows_core(
 #[allow(dead_code)]
 pub(super) fn upsert_visible_region_rows_core(
     table: &str,
-    rows: &[StoredRowVersion],
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    entries: &[VisibleRowEntry],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    for row in rows {
-        let key = visible_row_key(table, &row.branch, row.row_id);
-        let entry = rebuild_visible_entry(table, row.clone(), |prefix| scan_prefix(prefix))?;
-        let encoded = encode_visible_entry(&entry)?;
+    for entry in entries {
+        let key = visible_row_key(table, &entry.current_row.branch, entry.current_row.row_id);
+        let encoded = encode_visible_entry(entry)?;
         set(&key, &encoded)?;
     }
     Ok(())

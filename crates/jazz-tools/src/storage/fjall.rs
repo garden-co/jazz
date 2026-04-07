@@ -15,7 +15,7 @@ use fjall::{
 };
 
 use crate::object::ObjectId;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
@@ -211,13 +211,9 @@ impl Storage for FjallStorage {
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = RefCell::new(inner.db.write_tx());
-            append_history_region_rows_core(
-                table,
-                rows,
-                |key| Self::read_get(&*tx.borrow(), &inner.keyspace, key),
-                |prefix| Self::scan_prefix(&*tx.borrow(), &inner.keyspace, prefix),
-                |key, bytes| Self::set_on_cell(&tx, &inner.keyspace, key, bytes),
-            )?;
+            append_history_region_rows_core(table, rows, |key, bytes| {
+                Self::set_on_cell(&tx, &inner.keyspace, key, bytes)
+            })?;
             Self::commit_tx(tx.into_inner())
         })
     }
@@ -225,16 +221,13 @@ impl Storage for FjallStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = RefCell::new(inner.db.write_tx());
-            upsert_visible_region_rows_core(
-                table,
-                rows,
-                |prefix| Self::scan_prefix(&*tx.borrow(), &inner.keyspace, prefix),
-                |key, bytes| Self::set_on_cell(&tx, &inner.keyspace, key, bytes),
-            )?;
+            upsert_visible_region_rows_core(table, entries, |key, bytes| {
+                Self::set_on_cell(&tx, &inner.keyspace, key, bytes)
+            })?;
             Self::commit_tx(tx.into_inner())
         })
     }
@@ -368,7 +361,9 @@ mod tests {
 
     #[test]
     fn fjall_storage_row_regions_visible_and_history_round_trip() {
-        use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+        use crate::row_regions::{
+            BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry,
+        };
 
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.fjall");
@@ -396,7 +391,13 @@ mod tests {
             .append_history_region_rows("users", &[version.clone()])
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", &[version.clone()])
+            .upsert_visible_region_rows(
+                "users",
+                &[VisibleRowEntry::rebuild(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )],
+            )
             .unwrap();
 
         let visible = storage.scan_visible_region("users", "dev/main").unwrap();

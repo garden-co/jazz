@@ -103,9 +103,9 @@ impl Storage for RowRegionReadFailingStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_regions::StoredRowVersion],
+        entries: &[crate::row_regions::VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        self.inner.upsert_visible_region_rows(table, rows)
+        self.inner.upsert_visible_region_rows(table, entries)
     }
 
     fn patch_row_region_rows_by_batch(
@@ -284,9 +284,9 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_regions::StoredRowVersion],
+        entries: &[crate::row_regions::VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        self.inner.upsert_visible_region_rows(table, rows)
+        self.inner.upsert_visible_region_rows(table, entries)
     }
 
     fn patch_row_region_rows_by_batch(

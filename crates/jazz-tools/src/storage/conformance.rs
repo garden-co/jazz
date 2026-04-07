@@ -7,7 +7,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::Storage;
 use crate::sync_manager::DurabilityTier;
 
@@ -30,6 +30,13 @@ fn make_row_version(
         RowState::VisibleDirect,
         None,
     )
+}
+
+fn make_visible_entry(
+    current_row: StoredRowVersion,
+    history_rows: &[StoredRowVersion],
+) -> VisibleRowEntry {
+    VisibleRowEntry::rebuild(current_row, history_rows)
 }
 
 // ============================================================================
@@ -250,7 +257,13 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
         .append_history_region_rows("users", std::slice::from_ref(&version))
         .unwrap();
     storage
-        .upsert_visible_region_rows("users", std::slice::from_ref(&version))
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
         .unwrap();
 
     assert_eq!(
@@ -280,7 +293,13 @@ pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Stora
         .append_history_region_rows("users", std::slice::from_ref(&version))
         .unwrap();
     storage
-        .upsert_visible_region_rows("users", std::slice::from_ref(&version))
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
         .unwrap();
 
     storage
@@ -323,7 +342,13 @@ pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) 
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
         .unwrap();
     storage
-        .upsert_visible_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
         .unwrap();
 
     assert_eq!(
@@ -461,7 +486,13 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
             .append_history_region_rows("users", std::slice::from_ref(&version))
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", std::slice::from_ref(&version))
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&make_visible_entry(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )),
+            )
             .unwrap();
         storage
             .index_insert(
@@ -520,7 +551,13 @@ pub fn test_alice_bob_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
         .unwrap();
     storage
-        .upsert_visible_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
         .unwrap();
     storage
         .index_insert(

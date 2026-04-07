@@ -120,6 +120,10 @@ impl QueryManager {
         branch_name: &str,
     ) -> Option<StoredRowVersion> {
         let version = self.stored_row_version_for_tip(row_id, branch_name)?;
+        let visible_entry = self
+            .sync_manager
+            .object_manager
+            .visible_row_entry(row_id, BranchName::new(branch_name))?;
 
         if let Err(error) =
             storage.append_history_region_rows(table, std::slice::from_ref(&version))
@@ -134,7 +138,7 @@ impl QueryManager {
         }
 
         if let Err(error) =
-            storage.upsert_visible_region_rows(table, std::slice::from_ref(&version))
+            storage.upsert_visible_region_rows(table, std::slice::from_ref(&visible_entry))
         {
             tracing::warn!(
                 table,

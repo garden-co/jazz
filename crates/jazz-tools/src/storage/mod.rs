@@ -271,7 +271,7 @@ pub trait Storage {
     fn upsert_visible_region_rows(
         &mut self,
         _table: &str,
-        _rows: &[StoredRowVersion],
+        _entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
             "row-region visible upserts are not implemented for this backend yet".to_string(),
@@ -559,9 +559,9 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        (**self).upsert_visible_region_rows(table, rows)
+        (**self).upsert_visible_region_rows(table, entries)
     }
 
     fn patch_row_region_rows_by_batch(
@@ -937,17 +937,11 @@ impl Storage for MemoryStorage {
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
-        let mut affected_visible_rows = HashSet::new();
         for row in rows {
             regions.history.insert(
                 (row.branch.clone(), row.row_id, row.updated_at),
                 row.clone(),
             );
-            affected_visible_rows.insert((row.branch.clone(), row.row_id));
-        }
-
-        for (branch, row_id) in affected_visible_rows {
-            regions.rebuild_visible_entry(&branch, row_id);
         }
         Ok(())
     }
@@ -955,15 +949,14 @@ impl Storage for MemoryStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
-        for row in rows {
+        for entry in entries {
             regions.visible.insert(
-                (row.branch.clone(), row.row_id),
-                VisibleRowEntry::new(row.clone()),
+                (entry.current_row.branch.clone(), entry.current_row.row_id),
+                entry.clone(),
             );
-            regions.rebuild_visible_entry(&row.branch, row.row_id);
         }
         Ok(())
     }
@@ -1375,7 +1368,9 @@ mod tests {
 
     #[test]
     fn memory_storage_row_regions_visible_and_history_round_trip() {
-        use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+        use crate::row_regions::{
+            BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry,
+        };
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
@@ -1401,7 +1396,13 @@ mod tests {
             .append_history_region_rows("users", &[version.clone()])
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", &[version.clone()])
+            .upsert_visible_region_rows(
+                "users",
+                &[VisibleRowEntry::rebuild(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )],
+            )
             .unwrap();
 
         let visible = storage.scan_visible_region("users", "dev/main").unwrap();
@@ -1417,7 +1418,7 @@ mod tests {
 
     #[test]
     fn memory_storage_visible_entries_track_older_tier_winners() {
-        use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+        use crate::row_regions::{BatchId, RowState, StoredRowVersion, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
@@ -1460,7 +1461,13 @@ mod tests {
             )
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", std::slice::from_ref(&current_worker))
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    current_worker.clone(),
+                    &[globally_confirmed.clone(), current_worker.clone()],
+                )),
+            )
             .unwrap();
 
         let visible = storage
