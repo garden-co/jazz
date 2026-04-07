@@ -124,6 +124,7 @@ export interface CreateMigrationOptions extends MigrationCommandOptions {
   schemaDir: string;
   fromHash?: string;
   toHash?: string;
+  name?: string;
 }
 
 export interface PushMigrationOptions extends MigrationCommandOptions {
@@ -978,15 +979,32 @@ function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
+function normalizeMigrationName(name: string): string {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (normalized.length === 0) {
+    throw new Error(
+      "Migration name must contain at least one ASCII letter or digit after normalization.",
+    );
+  }
+
+  return normalized;
+}
+
 function migrationFilename(
   migrationsDir: string,
   fromHash: string,
   toHash: string,
+  name: string = "unnamed",
   timestamp: string = createTimestamp(),
 ): string {
   return join(
     migrationsDir,
-    `${timestamp}-unnamed-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
+    `${timestamp}-${name}-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
   );
 }
 
@@ -1286,6 +1304,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     options.migrationsDir,
     fromSchema.hash,
     toSchema.hash,
+    options.name ? normalizeMigrationName(options.name) : undefined,
     timestamp,
   );
   if (await pathExists(filePath)) {
@@ -1312,9 +1331,11 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   console.log("");
   console.log("Next steps:");
   console.log("1. Fill in migrate.");
-  console.log("2. Rename the file by replacing 'unnamed'.");
+  if (!options.name) {
+    console.log("2. Rename the file by replacing 'unnamed'.");
+  }
   console.log(
-    `3. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
+    `${options.name ? "2" : "3"}. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
   );
 
   return filePath;
@@ -1495,6 +1516,7 @@ if (isMainModule()) {
         schemaDir: options.schemaDir ?? process.cwd(),
         fromHash: getFlagValue(args, "--fromHash"),
         toHash: getFlagValue(args, "--toHash"),
+        name: getFlagValue(args, "--name"),
       });
     } else if (subcommand === "push") {
       const fromHash = process.argv[4];
@@ -1568,6 +1590,7 @@ if (isMainModule()) {
       "  --fromHash <hash>     Optional source schema hash (defaults to latest snapshot)",
     );
     console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
+    console.log("  --name <name>         Optional migration filename label (default: unnamed)");
     process.exit(command ? 1 : 0);
   }
 }
