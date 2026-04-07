@@ -1725,6 +1725,203 @@ describe("cloud-server integration (Jazz TS)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Creator shorthand integration
+// ---------------------------------------------------------------------------
+
+interface CreatorManagedItem {
+  id: string;
+  title: string;
+  shared: boolean;
+}
+
+interface CreatorManagedItemWhere {
+  id?: string;
+  title?: string;
+  shared?: boolean;
+}
+
+class CreatorManagedItemQueryBuilder {
+  declare readonly _rowType: CreatorManagedItem;
+  where(_input: CreatorManagedItemWhere): CreatorManagedItemQueryBuilder {
+    return this;
+  }
+}
+
+function buildCreatorManagedItemsSchema(): WasmSchema {
+  const schema: WasmSchema = {
+    creator_items: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "shared", column_type: { type: "Boolean" }, nullable: false },
+      ],
+    },
+  };
+
+  const app = {
+    creator_items: new CreatorManagedItemQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(app, ({ policy, anyOf, isCreator }) => {
+      policy.creator_items.managedByCreator();
+      policy.creator_items.allowRead.where(anyOf([isCreator, { shared: true }]));
+    }),
+  );
+
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return tables;
+}
+
+describe("Creator policy shorthands", () => {
+  beforeAll(() => {
+    assertIntegrationPrerequisites();
+  });
+
+  it("enforces managedByCreator() and composes isCreator with other rules", async () => {
+    function rowTitles(rows: Row[]): string[] {
+      return rows.map((row) => (row.values[0] as { type: "Text"; value: string }).value).sort();
+    }
+
+    const schema = buildCreatorManagedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "creator_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-creator-shorthands-");
+    const server = await startCloudServer({ dataRoot });
+    let aliceClient: JazzClient | null = null;
+    let bobClient: JazzClient | null = null;
+    let systemClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, schema);
+
+      aliceClient = await connectClient(
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("alice", JWT_SECRET, { principalId: "alice" }),
+          schema,
+        ),
+      );
+      bobClient = await connectClient(
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("bob", JWT_SECRET, { principalId: "bob" }),
+          schema,
+        ),
+      );
+      systemClient = (
+        await connectClient({
+          appId: app.app_id,
+          schema,
+          serverUrl: server.baseUrl,
+          serverPathPrefix: `/apps/${app.app_id}`,
+          env: "test",
+          userBranch: "main",
+          backendSecret: BACKEND_SECRET,
+        })
+      ).asBackend();
+
+      const alicePrivateId = (
+        await aliceClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "alice-private" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+      const aliceSharedId = (
+        await aliceClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "alice-shared" },
+            shared: { type: "Boolean", value: true },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+      const bobOwnId = (
+        await bobClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "bob-own" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+
+      const systemRowId = (
+        await systemClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "system-row" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+
+      const aliceRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length === 2);
+      expect(rowTitles(aliceRows)).toEqual(["alice-private", "alice-shared"]);
+      expect(aliceRows.some((row) => row.id === systemRowId)).toBe(false);
+
+      const bobRows = await waitForRows(bobClient, queryAllItems, (rows) => rows.length === 2);
+      expect(rowTitles(bobRows)).toEqual(["alice-shared", "bob-own"]);
+
+      expect(bobRows.some((row) => row.id === aliceSharedId)).toBe(true);
+      expect(bobRows.some((row) => row.id === bobOwnId)).toBe(true);
+      expect(bobRows.some((row) => row.id === alicePrivateId)).toBe(false);
+      expect(bobRows.some((row) => row.id === systemRowId)).toBe(false);
+
+      await expect(
+        bobClient.updateDurable(
+          alicePrivateId,
+          { title: { type: "Text", value: "bob-edit" } },
+          { tier: "edge" },
+        ),
+      ).rejects.toBeTruthy();
+      await expect(bobClient.deleteDurable(aliceSharedId, { tier: "edge" })).rejects.toBeTruthy();
+
+      const aliceRowsAfterRejects = await waitForRows(
+        aliceClient,
+        queryAllItems,
+        (rows) =>
+          rows.length === 2 &&
+          rows.some(
+            (row) =>
+              row.id === alicePrivateId &&
+              row.values[0]?.type === "Text" &&
+              row.values[0].value === "alice-private",
+          ) &&
+          rows.some((row) => row.id === aliceSharedId),
+      );
+      expect(aliceRowsAfterRejects.some((row) => row.id === bobOwnId)).toBe(false);
+    } finally {
+      if (aliceClient) await aliceClient.shutdown();
+      if (bobClient) await bobClient.shutdown();
+      if (systemClient) await systemClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
+});
+
+// ---------------------------------------------------------------------------
 // Policy bypass reproduction: subscription without session skips filtering
 // ---------------------------------------------------------------------------
 

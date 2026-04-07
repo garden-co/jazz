@@ -46,6 +46,15 @@ type PolicyAction = "read" | "insert" | "update" | "delete";
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
+const CREATOR_CONDITION = {
+  type: "Cmp",
+  column: "$createdBy",
+  op: "Eq",
+  value: {
+    type: "SessionRef",
+    path: ["user_id"],
+  },
+} satisfies PolicyExpr;
 
 interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
@@ -466,6 +475,7 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowDeletes: ActionBuilder<WhereInput, Row>;
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
+  managedByCreator(): void;
   exists: ExistsBuilder<WhereInput>;
 }
 
@@ -480,6 +490,7 @@ export type PolicyContext<TApp extends AppLike> = {
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
+  isCreator: Condition;
   allowedTo: AllowedToContext;
   session: SessionContext;
 };
@@ -588,6 +599,7 @@ export function definePermissions<TApp extends AppLike>(
     policy: buildPolicyContext(tableNames, relationsByTable, collectRule),
     anyOf,
     allOf,
+    isCreator: CREATOR_CONDITION,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
@@ -678,6 +690,12 @@ function buildTablePolicyBuilder(
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, collectRule);
+  const managedByCreator = (): void => {
+    read.where(CREATOR_CONDITION);
+    insert.where(CREATOR_CONDITION);
+    updateFactory().where(CREATOR_CONDITION);
+    del.where(CREATOR_CONDITION);
+  };
   const exists: ExistsBuilder<unknown> = {
     where: (input) => ({
       __jazzPermissionKind: "exists",
@@ -701,6 +719,7 @@ function buildTablePolicyBuilder(
     get allowUpdates() {
       return updateFactory();
     },
+    managedByCreator,
     exists,
     where(input: unknown): PermissionRelation {
       return createTableRelation(table, relationsByTable).where(input);

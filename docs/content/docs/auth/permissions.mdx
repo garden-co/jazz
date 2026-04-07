@@ -181,6 +181,10 @@ Jazz always tracks this metadata; select the columns explicitly to include them 
 You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
+For the most common case, Jazz also exposes `policy.<table>.managedByCreator()` and `isCreator` as
+shorthand for the same `$createdBy === session.user_id` condition. You can still write the raw
+`$createdBy` comparison yourself whenever you want the explicit form.
+
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
 </include>
