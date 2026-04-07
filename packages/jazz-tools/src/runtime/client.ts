@@ -1515,22 +1515,29 @@ export class JazzClient {
  */
 export type WasmModule = typeof import("jazz-wasm");
 
-type NodeWasmInitModule = {
-  tryReadPackagedWasmBinary(moduleUrl: string): Uint8Array | null;
-};
-
-type RuntimeImport = (specifier: string) => Promise<unknown>;
-
-// Keep the Node-only helper import opaque to Metro/Vite so browser bundles
-// do not try to statically transform or validate a Node-targeted module path.
-const runtimeImportModule = new Function("specifier", "return import(specifier)") as RuntimeImport;
-
 async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
-  const helperSpecifier = new URL("./node-wasm-init.js", import.meta.url).href;
-  const { tryReadPackagedWasmBinary } = (await runtimeImportModule(
-    helperSpecifier,
-  )) as NodeWasmInitModule;
-  return tryReadPackagedWasmBinary(import.meta.url);
+  const moduleBuiltin = process.getBuiltinModule?.("module");
+  const fsBuiltin = process.getBuiltinModule?.("fs");
+  const pathBuiltin = process.getBuiltinModule?.("path");
+
+  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
+    return null;
+  }
+
+  const { createRequire } = moduleBuiltin;
+  const { existsSync, readFileSync } = fsBuiltin;
+  const { dirname, resolve } = pathBuiltin;
+
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("jazz-wasm/package.json");
+  const packageDir = dirname(packageJsonPath);
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+  if (!existsSync(wasmPath)) {
+    return null;
+  }
+
+  return readFileSync(wasmPath);
 }
 
 /**
