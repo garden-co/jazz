@@ -1,8 +1,9 @@
-import { TestingServer } from "jazz-napi";
 import type { BrowserContext, Route } from "playwright";
 
+type JazzNapiTestingServer = import("jazz-napi").TestingServer;
+
 interface StartedTestingServer {
-  server: TestingServer;
+  server: JazzNapiTestingServer;
   appId: string;
   serverUrl: string;
   adminSecret: string;
@@ -11,7 +12,21 @@ interface StartedTestingServer {
 let testingServerPromise: Promise<StartedTestingServer> | null = null;
 const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
 
+async function loadTestingServer(): Promise<typeof import("jazz-napi").TestingServer> {
+  try {
+    const module = await import("jazz-napi");
+    return module.TestingServer;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      "Browser tests require the jazz-napi TestingServer host binding. Run `pnpm --filter jazz-napi build` first.\n\n" +
+        `Original error: ${message}`,
+    );
+  }
+}
+
 async function startTestingServer(): Promise<StartedTestingServer> {
+  const TestingServer = await loadTestingServer();
   const server = await TestingServer.start();
   return {
     server,

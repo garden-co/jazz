@@ -89,10 +89,12 @@ pnpm bench:realistic:export-criterion -- \
 Run the browser benchmark test:
 
 ```bash
+pnpm --filter jazz-napi build
 pnpm --dir packages/jazz-tools run bench:realistic:browser
 ```
 
 The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
+The Node-side test server used by the browser harness comes from `jazz-napi`, so its native binding needs to be built first in a workspace checkout.
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
 

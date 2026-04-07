@@ -222,6 +222,7 @@ jobs:
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter jazz-napi build
       - run: pnpm exec playwright install chromium
 
       - name: Collect host metadata
