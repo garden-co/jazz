@@ -112,13 +112,22 @@ impl ObjectManager {
         metadata.contains_key(MetadataKey::Table.as_str())
     }
 
-    fn table_for_object(&self, object_id: ObjectId) -> Result<String, Error> {
-        let metadata = self
-            .get(object_id)
-            .ok_or(Error::ObjectNotFound(object_id))?;
+    fn table_from_metadata(metadata: &HashMap<String, String>) -> Result<String, Error> {
         metadata
             .get(MetadataKey::Table.as_str())
             .cloned()
+            .ok_or(Error::StorageError(StorageError::IoError(
+                "row metadata missing table".to_string(),
+            )))
+    }
+
+    fn load_metadata_from_storage<H: Storage>(
+        &self,
+        io: &H,
+        object_id: ObjectId,
+    ) -> Result<HashMap<String, String>, Error> {
+        io.load_metadata(object_id)
+            .map_err(Error::StorageError)?
             .ok_or(Error::ObjectNotFound(object_id))
     }
 
@@ -323,17 +332,14 @@ impl ObjectManager {
         branch_name: BranchName,
         row: StoredRowVersion,
     ) -> Result<RowVersionApply, Error> {
-        let object_metadata = self
-            .get_or_load(object_id, io, &[])
-            .ok_or(Error::ObjectNotFound(object_id))?
-            .clone();
+        let object_metadata = self.load_metadata_from_storage(io, object_id)?;
 
         debug_assert!(
             Self::is_row_metadata(&object_metadata),
             "apply_row_version_internal should only be used for row-backed objects"
         );
 
-        let table = self.table_for_object(object_id)?;
+        let table = Self::table_from_metadata(&object_metadata)?;
 
         for parent in &row.parents {
             if io
@@ -399,10 +405,7 @@ impl ObjectManager {
         let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
 
         if applied.visible_changed {
-            let metadata = self
-                .get_or_load(object_id, io, &[])
-                .ok_or(Error::ObjectNotFound(object_id))?
-                .clone();
+            let metadata = self.load_metadata_from_storage(io, object_id)?;
             if let Some(current_visible) = applied.current_visible {
                 self.visible_row_updates.push(VisibleRowUpdate {
                     object_id,
@@ -429,10 +432,7 @@ impl ObjectManager {
             return Ok(None);
         }
 
-        let metadata = self
-            .get_or_load(object_id, io, &[])
-            .ok_or(Error::ObjectNotFound(object_id))?
-            .clone();
+        let metadata = self.load_metadata_from_storage(io, object_id)?;
         let Some(current_visible) = applied.current_visible else {
             return Ok(None);
         };
@@ -455,8 +455,8 @@ impl ObjectManager {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Option<VisibleRowUpdate> {
-        let metadata = self.get_or_load(object_id, io, &[])?.clone();
-        let table = self.table_for_object(object_id).ok()?;
+        let metadata = self.load_metadata_from_storage(io, object_id).ok()?;
+        let table = Self::table_from_metadata(&metadata).ok()?;
         let previous_entry = self
             .load_previous_visible_entry(io, &table, object_id, branch_name)
             .ok()?;
