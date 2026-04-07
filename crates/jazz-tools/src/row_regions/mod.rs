@@ -50,6 +50,10 @@ pub enum HistoryScan {
     AsOf { ts: u64 },
 }
 
+fn tier_satisfies(confirmed_tier: Option<DurabilityTier>, required_tier: DurabilityTier) -> bool {
+    confirmed_tier.is_some_and(|confirmed| confirmed >= required_tier)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
@@ -194,5 +198,128 @@ impl StoredRowVersion {
             .map(|value| value == DeleteKind::Hard.as_str())
             .unwrap_or(false)
             || (self.is_deleted && self.data.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleRowEntry {
+    pub current_row: StoredRowVersion,
+    pub worker_version_id: Option<CommitId>,
+    pub edge_version_id: Option<CommitId>,
+    pub global_version_id: Option<CommitId>,
+}
+
+impl VisibleRowEntry {
+    pub fn new(current_row: StoredRowVersion) -> Self {
+        Self {
+            current_row,
+            worker_version_id: None,
+            edge_version_id: None,
+            global_version_id: None,
+        }
+    }
+
+    pub fn rebuild(current_row: StoredRowVersion, history_rows: &[StoredRowVersion]) -> Self {
+        let current_version_id = current_row.version_id();
+        let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Worker);
+        let worker_version_id = worker.filter(|version_id| *version_id != current_version_id);
+
+        let worker_default = worker_version_id.unwrap_or(current_version_id);
+        let edge = latest_visible_version_for_tier(history_rows, DurabilityTier::EdgeServer);
+        let edge_version_id = edge.filter(|version_id| *version_id != worker_default);
+
+        let edge_default = edge_version_id.unwrap_or(worker_default);
+        let global = latest_visible_version_for_tier(history_rows, DurabilityTier::GlobalServer);
+        let global_version_id = global.filter(|version_id| *version_id != edge_default);
+
+        Self {
+            current_row,
+            worker_version_id,
+            edge_version_id,
+            global_version_id,
+        }
+    }
+
+    pub fn current_version_id(&self) -> CommitId {
+        self.current_row.version_id()
+    }
+
+    pub fn version_id_for_tier(&self, tier: DurabilityTier) -> CommitId {
+        let current = self.current_version_id();
+        let worker = self.worker_version_id.unwrap_or(current);
+        let edge = self.edge_version_id.unwrap_or(worker);
+        let global = self.global_version_id.unwrap_or(edge);
+
+        match tier {
+            DurabilityTier::Worker => worker,
+            DurabilityTier::EdgeServer => edge,
+            DurabilityTier::GlobalServer => global,
+        }
+    }
+}
+
+fn latest_visible_version_for_tier(
+    history_rows: &[StoredRowVersion],
+    required_tier: DurabilityTier,
+) -> Option<CommitId> {
+    history_rows
+        .iter()
+        .filter(|row| row.state.is_visible() && tier_satisfies(row.confirmed_tier, required_tier))
+        .max_by_key(|row| (row.updated_at, row.version_id()))
+        .map(StoredRowVersion::version_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::RowProvenance;
+
+    fn visible_row(updated_at: u64, confirmed_tier: Option<DurabilityTier>) -> StoredRowVersion {
+        StoredRowVersion::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            vec![updated_at as u8],
+            RowProvenance::for_insert("alice".to_string(), updated_at),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            confirmed_tier,
+        )
+    }
+
+    #[test]
+    fn visible_row_entry_omits_tier_pointers_when_current_is_globally_confirmed() {
+        let current = visible_row(30, Some(DurabilityTier::GlobalServer));
+        let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
+
+        assert_eq!(entry.worker_version_id, None);
+        assert_eq!(entry.edge_version_id, None);
+        assert_eq!(entry.global_version_id, None);
+    }
+
+    #[test]
+    fn visible_row_entry_resolves_tier_fallback_chain() {
+        let global = visible_row(10, Some(DurabilityTier::GlobalServer));
+        let edge = visible_row(20, Some(DurabilityTier::EdgeServer));
+        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let history = vec![global.clone(), edge.clone(), current.clone()];
+
+        let entry = VisibleRowEntry::rebuild(current.clone(), &history);
+
+        assert_eq!(entry.worker_version_id, None);
+        assert_eq!(entry.edge_version_id, Some(edge.version_id()));
+        assert_eq!(entry.global_version_id, Some(global.version_id()));
+        assert_eq!(
+            entry.version_id_for_tier(DurabilityTier::Worker),
+            current.version_id()
+        );
+        assert_eq!(
+            entry.version_id_for_tier(DurabilityTier::EdgeServer),
+            edge.version_id()
+        );
+        assert_eq!(
+            entry.version_id_for_tier(DurabilityTier::GlobalServer),
+            global.version_id()
+        );
     }
 }
