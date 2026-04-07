@@ -142,8 +142,8 @@ impl InsertResult {
     /// Check if the row data is durable (persisted to storage).
     ///
     /// Must call `QueryManager::process()` between checks to drive storage operations.
-    pub fn is_complete(&self, qm: &QueryManager) -> bool {
-        qm.is_version_stored(self.row_id, &self.row_version_id)
+    pub fn is_complete(&self, qm: &QueryManager, storage: &dyn Storage) -> bool {
+        qm.is_version_stored(storage, self.row_id, &self.row_version_id)
     }
 
     /// Check if the row is indexed (appears in the _id index).
@@ -1138,25 +1138,6 @@ impl QueryManager {
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
     }
-    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
-    /// When timestamps tie, CommitId provides a deterministic secondary ordering.
-    pub(super) fn load_row_from_object_on_branch(
-        &self,
-        row_id: ObjectId,
-        branch_name: &str,
-    ) -> Option<(Vec<u8>, CommitId)> {
-        let row = self
-            .sync_manager
-            .object_manager
-            .visible_row(row_id, BranchName::new(branch_name))?;
-        Some((row.data.clone(), row.version_id()))
-    }
-
-    /// Load a row's data from ObjectManager using the default branch.
-    pub(super) fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
-        self.load_row_from_object_on_branch(row_id, &self.current_branch())
-    }
-
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
@@ -1259,7 +1240,9 @@ impl QueryManager {
             self.pending_local_row_versions.remove(&update.object_id);
         }
 
-        if self.is_hard_deleted(update.object_id) && !update.row.is_hard_deleted() {
+        if self.visible_row_is_hard_deleted(storage, update.object_id, &update.row.branch)
+            && !update.row.is_hard_deleted()
+        {
             return;
         }
 
