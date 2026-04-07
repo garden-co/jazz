@@ -155,11 +155,11 @@ impl QueryManager {
         version_id: CommitId,
     ) -> Result<StoredRowVersion, QueryError> {
         let branch_name = BranchName::new(branch_name);
-        let Some(update) = self.sync_manager.object_manager.take_row_object_update_for(
-            row_id,
-            &branch_name,
-            version_id,
-        ) else {
+        let Some(update) = self
+            .sync_manager
+            .object_manager
+            .take_visible_row_update_for(row_id, &branch_name, version_id)
+        else {
             return Err(QueryError::EncodingError(format!(
                 "missing row update for local row version {:?} on {}",
                 version_id, row_id

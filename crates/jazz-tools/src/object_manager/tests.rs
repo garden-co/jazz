@@ -151,7 +151,7 @@ fn add_row_version_tracks_visible_row_and_tips() {
     assert_eq!(winner.version_id(), bob_id);
     assert_eq!(winner.data, b"bob".to_vec());
 
-    let updates = manager.take_row_object_updates();
+    let updates = manager.take_visible_row_updates();
     assert_eq!(updates.len(), 3);
     assert_eq!(updates[0].row.version_id(), root_id);
     assert_eq!(updates[1].row.version_id(), alice_id);
@@ -169,7 +169,7 @@ fn stale_row_version_does_not_replace_visible_winner() {
     let newer_id = manager
         .add_row_version(&mut io, row_id, "main", newer.clone())
         .unwrap();
-    let _ = manager.take_row_object_updates();
+    let _ = manager.take_visible_row_updates();
 
     let older = visible_row(row_id, "main", Vec::new(), 1_000, author, b"older");
     let older_id = manager
@@ -178,7 +178,7 @@ fn stale_row_version_does_not_replace_visible_winner() {
 
     assert_ne!(newer_id, older_id);
     assert!(
-        manager.take_row_object_updates().is_empty(),
+        manager.take_visible_row_updates().is_empty(),
         "stale history should not emit a visible-row update"
     );
     assert_eq!(
@@ -201,7 +201,7 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
     let version_id = manager
         .add_row_version(&mut io, row_id, "main", row)
         .unwrap();
-    let _ = manager.take_row_object_updates();
+    let _ = manager.take_visible_row_updates();
 
     let update = manager
         .patch_row_version_state(
