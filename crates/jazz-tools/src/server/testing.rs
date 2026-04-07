@@ -280,6 +280,11 @@ impl TestingServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// WebSocket URL for the `/ws` endpoint.
+    pub fn ws_url(&self) -> String {
+        format!("ws://127.0.0.1:{}", self.port)
+    }
+
     pub fn admin_secret(&self) -> &str {
         &self.admin_secret
     }
@@ -349,6 +354,9 @@ impl TestingServer {
             app_id: self.app_id,
             client_id: None,
             schema,
+            #[cfg(feature = "transport-ws")]
+            server_url: self.ws_url(),
+            #[cfg(not(feature = "transport-ws"))]
             server_url: self.base_url(),
             data_dir,
             storage: crate::ClientStorage::Memory,

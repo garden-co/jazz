@@ -664,6 +664,11 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     }
 
+    // Promote to admin if admin_secret was valid (allows catalogue writes)
+    if is_admin {
+        let _ = state.runtime.ensure_client_as_admin(client_id);
+    }
+
     // 4. Register connection
     let connection_id = state
         .next_connection_id
@@ -710,12 +715,12 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
                                         payload,
                                     };
                                     if let Err(e) = state.runtime.push_sync_inbox(entry) {
-                                        tracing::warn!(error = %e, "ws sync inbox push failed");
+                                        tracing::warn!(error = %e, "push_sync_inbox failed");
                                     }
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "ws: invalid sync batch request");
+                                tracing::warn!(error = %e, "invalid sync batch");
                             }
                         }
                     }

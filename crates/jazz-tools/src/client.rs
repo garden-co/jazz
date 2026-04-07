@@ -132,9 +132,16 @@ impl JazzClient {
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
+        // Determine transport mode from URL scheme
+        #[cfg(feature = "transport-ws")]
+        let use_ws =
+            context.server_url.starts_with("ws://") || context.server_url.starts_with("wss://");
+        #[cfg(not(feature = "transport-ws"))]
+        let use_ws = false;
+
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
-        let server_connection = if !context.server_url.is_empty() {
+        let server_connection = if !context.server_url.is_empty() && !use_ws {
             match ServerConnection::connect(&context.server_url, auth_config).await {
                 Ok(conn) => Some(Arc::new(conn)),
                 Err(e) => {
@@ -303,6 +310,65 @@ impl JazzClient {
         } else {
             None
         };
+
+        // WebSocket transport path — connect via TransportManager
+        #[cfg(feature = "transport-ws")]
+        if use_ws {
+            let ws_url = format!("{}/ws", context.server_url);
+            let ws_auth = crate::transport_ws::WsAuthConfig {
+                client_id: Some(client_id.to_string()),
+                auth: if let Some(ref secret) = context.backend_secret {
+                    crate::transport_ws::AuthPayload::Backend {
+                        secret: secret.clone(),
+                        session: default_session
+                            .as_ref()
+                            .map(|s| serde_json::to_string(s).unwrap_or_default())
+                            .unwrap_or_default(),
+                    }
+                } else if let Some(ref token) = context.jwt_token {
+                    crate::transport_ws::AuthPayload::Jwt {
+                        token: token.clone(),
+                    }
+                } else {
+                    crate::transport_ws::AuthPayload::None
+                },
+                admin_secret: context.admin_secret.clone(),
+                catalogue_state_hash: None,
+            };
+
+            let signal = runtime
+                .connect(ws_url, ws_auth)
+                .map_err(|e| JazzError::Connection(e.to_string()))?;
+
+            // Wait for the server's Connected event (carries catalogue_state_hash)
+            let catalogue_state_hash = tokio::time::timeout(Duration::from_secs(10), signal.rx)
+                .await
+                .map_err(|_| {
+                    JazzError::Connection("timed out waiting for WebSocket Connected event".into())
+                })?
+                .map_err(|_| {
+                    JazzError::Connection(
+                        "WebSocket connection closed before Connected event".into(),
+                    )
+                })?;
+
+            // Register server with sync manager, using the catalogue hash for delta sync
+            if let Err(e) = runtime
+                .add_server_with_catalogue_state_hash(server_id, catalogue_state_hash.as_deref())
+            {
+                tracing::warn!("Failed to register server with sync manager: {}", e);
+            }
+
+            return Ok(Self {
+                declared_schema,
+                default_session,
+                runtime,
+                server_connection: None,
+                subscriptions: Arc::new(RwLock::new(HashMap::new())),
+                next_handle: std::sync::atomic::AtomicU64::new(1),
+                stream_listener_task: None,
+            });
+        }
 
         let initial_server_catalogue_state_hash =
             if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {

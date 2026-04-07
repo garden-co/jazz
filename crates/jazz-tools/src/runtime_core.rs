@@ -231,6 +231,11 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     scheduler: Sch,
     sync_sender: Sy,
 
+    /// Channel-based transport (replaces SyncSender when set).
+    /// When `Some`, `batched_tick()` uses channels instead of `sync_sender`.
+    #[cfg(feature = "transport-ws")]
+    transport: Option<crate::transport_ws::TransportHandle>,
+
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
     /// Sequenced server messages buffered for in-order application.
@@ -265,6 +270,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             storage,
             scheduler,
             sync_sender,
+            #[cfg(feature = "transport-ws")]
+            transport: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -312,6 +319,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get reference to the SyncSender.
     pub fn sync_sender(&self) -> &Sy {
         &self.sync_sender
+    }
+
+    /// Set the channel-based transport (replaces SyncSender for I/O).
+    #[cfg(feature = "transport-ws")]
+    pub fn set_transport(&mut self, transport: crate::transport_ws::TransportHandle) {
+        self.transport = Some(transport);
+    }
+
+    /// Clear the channel-based transport.
+    #[cfg(feature = "transport-ws")]
+    pub fn clear_transport(&mut self) {
+        self.transport = None;
     }
 
     /// Get reference to the Scheduler.

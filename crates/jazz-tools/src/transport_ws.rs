@@ -26,7 +26,6 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, ServerId, Source};
@@ -85,34 +84,21 @@ pub struct TransportHandle {
     pub inbound_rx: tokio::sync::mpsc::UnboundedReceiver<InboxEntry>,
 }
 
-// ============================================================================
-// AuthConfig
-// ============================================================================
-
-/// Authentication configuration for the WebSocket handshake.
-/// Sent as the first message after connection upgrade.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WsAuthConfig {
-    pub client_id: Option<String>,
-    #[serde(flatten)]
-    pub auth: AuthPayload,
-    pub admin_secret: Option<String>,
-    pub catalogue_state_hash: Option<String>,
+/// Signal that fires once the WebSocket handshake completes (server sends `Connected`).
+/// Carries the server's catalogue_state_hash for delta sync.
+pub struct ConnectedSignal {
+    pub rx: tokio::sync::oneshot::Receiver<Option<String>>,
 }
 
-/// Authentication payload variants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum AuthPayload {
-    #[serde(rename = "jwt")]
-    Jwt { token: String },
-    #[serde(rename = "backend")]
-    Backend { secret: String, session: String },
-    #[serde(rename = "local")]
-    Local { mode: String, token: Option<String> },
-    #[serde(rename = "none")]
-    None,
-}
+// ============================================================================
+// AuthConfig — re-export from transport_protocol
+// ============================================================================
+
+/// Re-export the auth handshake types so callers can use them without
+/// depending on transport_protocol directly.
+pub use crate::transport_protocol::{
+    AuthHandshake as WsAuthConfig, AuthHandshakePayload as AuthPayload,
+};
 
 // ============================================================================
 // ReconnectState
@@ -173,6 +159,7 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     inbound_tx: tokio::sync::mpsc::UnboundedSender<InboxEntry>,
     tick: T,
     reconnect: ReconnectState,
+    connected_tx: Option<tokio::sync::oneshot::Sender<Option<String>>>,
     _phantom: std::marker::PhantomData<W>,
 }
 
@@ -180,11 +167,9 @@ impl<W: StreamAdapter, T: TickNotifier> TransportManager<W, T> {
     /// Main loop. Connects, runs send/recv, reconnects on failure.
     /// Exits when the outbox channel closes (TransportHandle dropped).
     pub async fn run(mut self) {
-        info!(url = %self.url, "transport manager starting");
         loop {
             match W::connect(&self.url).await {
                 Ok(mut ws) => {
-                    info!(url = %self.url, "websocket connected");
                     self.reconnect.reset();
 
                     if let Err(e) = self.send_auth_handshake(&mut ws).await {
@@ -225,15 +210,20 @@ impl<W: StreamAdapter, T: TickNotifier> TransportManager<W, T> {
                 msg = self.outbox_rx.recv() => {
                     match msg {
                         Some(entry) => {
+                            // Only send server-destined messages over the WebSocket.
+                            // Client-destined messages (peer/worker bridge) are handled elsewhere.
+                            if !matches!(entry.destination, crate::sync_manager::Destination::Server(_)) {
+                                continue;
+                            }
                             let frame = match self.serialize_outbox_entry(&entry) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    warn!(error = %e, "failed to serialize outbox entry");
+                                    warn!(error = %e, "serialize outbox entry failed");
                                     continue;
                                 }
                             };
                             if let Err(e) = ws.send(&frame).await {
-                                warn!(error = %e, "websocket send failed");
+                                warn!(error = %e, "ws send failed");
                                 return false; // reconnect
                             }
                         }
@@ -269,15 +259,15 @@ impl<W: StreamAdapter, T: TickNotifier> TransportManager<W, T> {
     }
 
     /// Handle a received server event.
-    fn handle_server_event(&self, event: ServerEvent) {
+    fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::Connected {
-                client_id,
-                connection_id,
+                catalogue_state_hash,
                 ..
             } => {
-                debug!(?connection_id, %client_id, "server confirmed connection");
-                // TODO: store connection_id, handle catalogue_state_hash
+                if let Some(tx) = self.connected_tx.take() {
+                    let _ = tx.send(catalogue_state_hash);
+                }
             }
             ServerEvent::SyncUpdate { payload, .. } => {
                 let entry = InboxEntry {
@@ -342,9 +332,10 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     url: String,
     auth: WsAuthConfig,
     tick: T,
-) -> (TransportHandle, TransportManager<W, T>) {
+) -> (TransportHandle, TransportManager<W, T>, ConnectedSignal) {
     let (outbox_tx, outbox_rx) = tokio::sync::mpsc::unbounded_channel();
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
 
     let handle = TransportHandle {
         outbox_tx,
@@ -358,8 +349,11 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         inbound_tx,
         tick,
         reconnect: ReconnectState::new(),
+        connected_tx: Some(connected_tx),
         _phantom: std::marker::PhantomData,
     };
 
-    (handle, manager)
+    let signal = ConnectedSignal { rx: connected_rx };
+
+    (handle, manager, signal)
 }

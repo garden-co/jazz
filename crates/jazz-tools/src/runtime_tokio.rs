@@ -580,6 +580,86 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
         Ok(result)
     }
+
+    /// Connect to a Jazz server via WebSocket.
+    ///
+    /// Creates a `TransportHandle` (channels) + `TransportManager` (async task),
+    /// sets the transport on RuntimeCore, and spawns the manager as a tokio task.
+    /// Connect to a Jazz server via WebSocket.
+    ///
+    /// Returns a `ConnectedSignal` that fires when the server sends `Connected`.
+    /// Callers should await the signal before registering the server with SyncManager.
+    #[cfg(feature = "transport-ws")]
+    pub fn connect(
+        &self,
+        url: String,
+        auth: crate::transport_ws::WsAuthConfig,
+    ) -> Result<crate::transport_ws::ConnectedSignal, RuntimeError> {
+        let tick = TokioTickNotifier::new(&self.core);
+        let (handle, manager, signal) = crate::transport_ws::create::<
+            crate::ws_native::NativeWsStream,
+            TokioTickNotifier,
+        >(url, auth, tick);
+        {
+            let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+            core.set_transport(handle);
+        }
+        tokio::spawn(manager.run());
+        Ok(signal)
+    }
+
+    /// Disconnect from the server (drops the transport channels).
+    #[cfg(feature = "transport-ws")]
+    pub fn disconnect(&self) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.clear_transport();
+        Ok(())
+    }
+}
+
+// ============================================================================
+// TokioTickNotifier (for TransportManager inbound → schedule_batched_tick)
+// ============================================================================
+
+/// TickNotifier for the Tokio platform — triggers `schedule_batched_tick()`
+/// from the TransportManager's recv loop (which may run on a different tokio task).
+///
+/// Uses a type-erased callback (`Arc<dyn Fn()>`) to avoid leaking the
+/// `TokioCoreType<S>` generic into the transport layer.
+#[cfg(feature = "transport-ws")]
+pub struct TokioTickNotifier {
+    trigger: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(feature = "transport-ws")]
+impl TokioTickNotifier {
+    fn new<S: Storage + Send + 'static>(core: &Arc<Mutex<TokioCoreType<S>>>) -> Self {
+        let core_weak = Arc::downgrade(core);
+        let flag = Arc::new(AtomicBool::new(false));
+        Self {
+            trigger: Arc::new(move || {
+                if !flag.swap(true, Ordering::SeqCst) {
+                    let core_ref = core_weak.clone();
+                    let flag_inner = flag.clone();
+                    tokio::spawn(async move {
+                        flag_inner.store(false, Ordering::SeqCst);
+                        if let Some(core_arc) = core_ref.upgrade() {
+                            if let Ok(mut core) = core_arc.lock() {
+                                core.batched_tick();
+                            }
+                        }
+                    });
+                }
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "transport-ws")]
+impl crate::transport_ws::TickNotifier for TokioTickNotifier {
+    fn notify(&self) {
+        (self.trigger)();
+    }
 }
 
 #[cfg(test)]

@@ -165,6 +165,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn batched_tick(&mut self) {
         let _span = debug_span!("batched_tick", tier = self.tier_label).entered();
 
+        // 0. Drain inbound channel if transport is set (WebSocket path)
+        #[cfg(feature = "transport-ws")]
+        if let Some(ref mut transport) = self.transport {
+            while let Ok(msg) = transport.inbound_rx.try_recv() {
+                self.parked_sync_messages.push(msg);
+            }
+        }
+
         // 1. Send all outgoing sync messages
         let outbox = self
             .schema_manager
@@ -174,9 +182,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if !outbox.is_empty() {
             debug!(count = outbox.len(), "flushing outbox");
         }
-        for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
-        }
+        self.send_outbox(outbox);
 
         // 2. Process parked sync messages
         self.handle_sync_messages();
@@ -192,14 +198,28 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if !outbox.is_empty() {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
-        for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
-        }
+        self.send_outbox(outbox);
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         {
             let _span = tracing::debug_span!("flush_wal").entered();
             self.storage.flush_wal();
+        }
+    }
+
+    /// Send outbox entries via TransportHandle (if set) or SyncSender (fallback).
+    fn send_outbox(&mut self, outbox: Vec<OutboxEntry>) {
+        #[cfg(feature = "transport-ws")]
+        if let Some(ref transport) = self.transport {
+            for msg in outbox {
+                let _ = transport.outbox_tx.send(msg);
+            }
+            return;
+        }
+
+        // Legacy path: SyncSender callback
+        for msg in outbox {
+            self.sync_sender.send_sync_message(msg);
         }
     }
 
