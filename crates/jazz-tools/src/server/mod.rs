@@ -79,6 +79,8 @@ pub struct ServerState {
     /// Client state TTL. Default: 5 minutes.
     /// Disconnected clients are reaped after this duration.
     pub client_ttl: RwLock<Duration>,
+    /// Optional sync message tracer for test observability.
+    pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
 /// State for a single SSE connection.

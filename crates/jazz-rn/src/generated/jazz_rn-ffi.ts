@@ -192,10 +192,12 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client(): number;
@@ -206,6 +208,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new(): number;
   ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update(): number;

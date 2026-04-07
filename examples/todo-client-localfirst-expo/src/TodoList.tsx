@@ -48,7 +48,7 @@ export function TodoList() {
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();
     if (!trimmed || !sessionUserId) return;
-    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
 

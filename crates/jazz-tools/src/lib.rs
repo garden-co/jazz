@@ -14,6 +14,7 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
+pub mod sync_tracer;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
@@ -89,6 +90,10 @@ pub struct AppContext {
     /// Admin secret for schema/policy sync.
     /// Required to sync catalogue objects.
     pub admin_secret: Option<String>,
+
+    /// Optional sync message tracer for test observability.
+    /// Set via `TestingClient::with_tracer()` — `None` in production.
+    pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
 }
 
 /// Local storage backend for a client application.

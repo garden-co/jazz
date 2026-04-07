@@ -10,6 +10,7 @@ use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -1682,6 +1683,248 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that a single client's operations reach the server in causal order.
+///
+/// This test lives in the policy suite but the failure mode is caused by the
+/// sync layer: the transport may deliver two writes from the same client out of
+/// order, making an otherwise-correct policy decision look wrong.
+///
+/// Alice locks herself out by transferring ownership to bob, then immediately
+/// fires a title update. The two writes race to the server via the same
+/// transport — if the transport delivers them out of order, the title update
+/// lands while alice still owns the row and is incorrectly accepted.
+///
+/// The observer's EdgeServer query is used as a causal barrier: once the
+/// marker document (sent last by alice) is visible, all prior writes have
+/// been processed. The observer then checks the settled state of the document.
+///
+/// ```text
+/// alice ── create(doc, owner="alice", title="original") ──► server ✓
+/// alice ── update(doc, owner="bob")        ────────────────► server ✓  (alice locked out)
+/// alice ── update(doc, title="nope")       ────────────────► server ✗  (owner≠session)
+/// .. 500 times ..
+/// alice ── create(marker)                  ────────────────► server ✓  (causal barrier)
+///
+/// observer ── wait for marker ──► query doc
+///   expected: owner="bob", title="original"  (in-order: title rejected)
+///   broken:   owner="bob", title="nope"      (out-of-order: title accepted before lockout)
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TODO: sync transport does not guarantee delivery order - writes from the same client can arrive at the server out of sequence"]
+async fn single_client_operations_reach_server_in_causal_order() {
+    let schema = write_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("observer")
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let query = QueryBuilder::new("documents").build();
+
+    let doc_id = create_document(&alice, "alice", "original").await;
+    wait_for_rows(&observer, query.clone(), "document on server", |rows| {
+        rows.iter().any(|(id, _)| *id == doc_id).then_some(())
+    })
+    .await;
+
+    // Transfer ownership (allowed — USING checks current owner_id = "alice").
+    alice
+        .update(
+            doc_id,
+            vec![("owner_id".to_string(), Value::Text("bob".to_string()))],
+        )
+        .await
+        .expect("optimistic local update: transfer ownership");
+
+    // Yield to the runtime so the transport's background sender can pick up
+    // the ownership transfer and begin dispatching it as its own HTTP batch.
+    // The title updates below then land in a second batch that races with the
+    // first on the server's worker threads — widening the race window enough
+    // to make the failure deterministic.
+    tokio::task::yield_now().await;
+
+    // Immediately try to update title — server must reject this because, in
+    // order, ownership has already moved to bob.
+    for i in 0..500 {
+        alice
+            .update(
+                doc_id,
+                vec![("title".to_string(), Value::Text("nope".to_string()))],
+            )
+            .await
+            .expect(&format!(
+                "optimistic local update: title change after lockout {}",
+                i
+            ))
+    }
+
+    // Marker travels through the same transport; it cannot arrive before the
+    // race window of the updates above.
+    let marker_id = create_document(&alice, "alice", "marker").await;
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "marker visible on server",
+        |rows| rows.iter().any(|(id, _)| *id == marker_id).then_some(()),
+    )
+    .await;
+
+    let rows = wait_for_rows(&observer, query, "observer: settled doc state", |rows| {
+        rows.iter()
+            .find(|(id, _)| *id == doc_id)
+            .map(|(_, values)| values.clone())
+    })
+    .await;
+
+    assert_eq!(
+        rows,
+        document_row_values("bob", "original"),
+        "title update after ownership transfer must be rejected — \
+         proves operations arrive in causal order"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that a rejected mutation is rolled back to the originating client.
+///
+/// This test lives in the policy suite but the failure mode is triggered by the
+/// sync layer: the server rejects a mutation but never sends a correction back,
+/// so the originating client's local state diverges from the server's truth.
+///
+/// This is a companion to `single_client_operations_reach_server_in_causal_order`.
+/// That test confirms the *server* correctly rejects alice's title update. This
+/// test asks whether *alice herself* ever learns about the rejection.
+///
+/// When the server drops a mutation it does not (yet) send a correction back
+/// to the originating client. Alice's local store keeps the optimistic value
+/// indefinitely — she has no way to know her write failed.
+///
+/// The correct behaviour: a rejected mutation must produce a rollback event
+/// delivered to the originating client so her local state converges to the
+/// server's truth.
+///
+/// ```text
+/// alice ── update(doc, title="nope") ──► server ✗ (rejected)
+///                                           │
+///                         missing ◄─────────┘  rollback to alice
+///
+/// alice.query(doc) → title="nope"   (stuck on optimistic — WRONG)
+///                  → title="original" (converged to server — CORRECT, not yet implemented)
+/// ```
+///
+/// STATUS: FAILS — server does not notify the originating client of rejections.
+#[tokio::test]
+#[ignore = "TODO: server does not notify the originating client of rejections."]
+async fn originating_client_receives_rollback_for_rejected_mutation() {
+    let schema = write_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("observer")
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let query = QueryBuilder::new("documents").build();
+
+    let doc_id = create_document(&alice, "alice", "original").await;
+    wait_for_rows(&observer, query.clone(), "document on server", |rows| {
+        rows.iter().any(|(id, _)| *id == doc_id).then_some(())
+    })
+    .await;
+
+    alice
+        .update(
+            doc_id,
+            vec![("owner_id".to_string(), Value::Text("bob".to_string()))],
+        )
+        .await
+        .expect("optimistic local update: transfer ownership");
+
+    alice
+        .update(
+            doc_id,
+            vec![("title".to_string(), Value::Text("nope".to_string()))],
+        )
+        .await
+        .expect("optimistic local update: title change after lockout");
+
+    // Use the marker as a causal barrier so we know the server has settled
+    // before asking alice about her local view.
+    let marker_id = create_document(&alice, "alice", "marker").await;
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "marker visible on server",
+        |rows| rows.iter().any(|(id, _)| *id == marker_id).then_some(()),
+    )
+    .await;
+
+    // Alice's *local* cache must converge to the server's truth after rejection.
+    // We deliberately query with no durability tier (local reads only) so the
+    // assertion exercises alice's in-process state rather than round-tripping to
+    // the server. Using EdgeServer durability here would bypass the bug: the
+    // server holds the correct value regardless, so an EdgeServer read always
+    // returns title="original" even when alice never received a rollback event.
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        None,
+        QUERY_TIMEOUT,
+        "alice: local cache converged after rollback",
+        |rows| {
+            rows.iter()
+                .find(|(id, _)| *id == doc_id)
+                .map(|(_, values)| values.clone())
+        },
+    )
+    .await;
+
+    assert_eq!(
+        alice_rows,
+        document_row_values("bob", "original"),
+        "alice must see the rollback — the rejected title update should be \
+         reverted so she knows the mutation failed"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
     server.shutdown().await;
 }

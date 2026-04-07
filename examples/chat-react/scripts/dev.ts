@@ -8,7 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { startLocalJazzServer } from "jazz-tools/testing";
 
-const APP_ID = "00000000-0000-0000-0000-000000000003";
+const APP_ID = "019d4349-2486-7021-a33e-566b0820c5af";
 const PORT = 4200;
 const ADMIN_SECRET = "dev-admin-secret-chat-react";
 const ROOT = join(import.meta.dirname ?? __dirname, "..");

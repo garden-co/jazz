@@ -10,7 +10,7 @@ export async function createUploadFromBlob(db: Db, blob: Blob | File) {
   return db.insertDurable(
     app.uploads,
     {
-      ownerId: EXAMPLE_OWNER_ID,
+      owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
     },
@@ -30,7 +30,7 @@ export async function createUploadFromStream(db: Db, stream: ReadableStream<Uint
   return db.insertDurable(
     app.uploads,
     {
-      ownerId: EXAMPLE_OWNER_ID,
+      owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
     },

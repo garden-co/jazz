@@ -407,7 +407,7 @@ pub async fn clear_nullable_fields(
 ) -> jazz_tools::Result<()> {
     // Set a nullable column to null
     client
-        .update(todo_id, vec![("ownerId".to_string(), Value::Null)])
+        .update(todo_id, vec![("owner_id".to_string(), Value::Null)])
         .await?;
 
     // Only the specified columns are changed; omitted columns are left as-is.

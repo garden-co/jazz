@@ -5,7 +5,7 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext, Session } from "./context.js";
+import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
@@ -26,6 +26,10 @@ import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import {
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+} from "./runtime-config.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -639,7 +643,7 @@ export class JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Load WASM module dynamically
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(resolvedContext.runtimeSources);
 
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
@@ -1511,14 +1515,45 @@ export class JazzClient {
  */
 export type WasmModule = typeof import("jazz-wasm");
 
+async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
+  const moduleBuiltin = process.getBuiltinModule?.("module");
+  const fsBuiltin = process.getBuiltinModule?.("fs");
+  const pathBuiltin = process.getBuiltinModule?.("path");
+
+  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
+    return null;
+  }
+
+  const { createRequire } = moduleBuiltin;
+  const { existsSync, readFileSync } = fsBuiltin;
+  const { dirname, resolve } = pathBuiltin;
+
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("jazz-wasm/package.json");
+  const packageDir = dirname(packageJsonPath);
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+  if (!existsSync(wasmPath)) {
+    return null;
+  }
+
+  return readFileSync(wasmPath);
+}
+
 /**
  * Load and initialize the WASM module.
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(): Promise<WasmModule> {
+export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
+
+  if (syncInitInput) {
+    wasmModule.initSync(syncInitInput);
+    return wasmModule;
+  }
 
   // In Node.js, we need to read the .wasm file and use initSync.
   // In browsers/React Native, the default fetch-based init works (or default()).
@@ -1526,17 +1561,9 @@ export async function loadWasmModule(): Promise<WasmModule> {
   let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
     try {
-      const { existsSync, readFileSync } = await import("node:fs");
-      const { createRequire } = await import("node:module");
-      const { dirname, resolve } = await import("node:path");
-
-      const require = createRequire(import.meta.url);
-      const packageJsonPath = require.resolve("jazz-wasm/package.json");
-      const packageDir = dirname(packageJsonPath);
-      const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
-
-      if (existsSync(wasmPath)) {
-        wasmModule.initSync({ module: readFileSync(wasmPath) });
+      const wasmBinary = await tryLoadNodePackagedWasmBinary();
+      if (wasmBinary) {
+        wasmModule.initSync({ module: wasmBinary });
         nodeInitDone = true;
       }
     } catch {
@@ -1544,7 +1571,16 @@ export async function loadWasmModule(): Promise<WasmModule> {
     }
   }
   if (!nodeInitDone && typeof wasmModule.default === "function") {
-    await wasmModule.default();
+    const wasmUrl =
+      typeof location !== "undefined"
+        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
+        : null;
+
+    if (wasmUrl) {
+      await wasmModule.default({ module_or_path: wasmUrl });
+    } else {
+      await wasmModule.default();
+    }
   }
 
   return wasmModule;

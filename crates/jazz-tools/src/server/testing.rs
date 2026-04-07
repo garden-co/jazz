@@ -23,16 +23,30 @@ const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
 /// Builder for configuring and starting a [`TestingServer`].
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TestingServerBuilder {
     port: Option<u16>,
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
+    sqlite_storage: bool,
+    rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+}
+
+impl std::fmt::Debug for TestingServerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestingServerBuilder")
+            .field("port", &self.port)
+            .field("app_id", &self.app_id)
+            .field("persistent_storage", &self.persistent_storage)
+            .field("has_tracer", &self.sync_tracer.is_some())
+            .finish()
+    }
 }
 
 impl TestingServerBuilder {
@@ -66,6 +80,24 @@ impl TestingServerBuilder {
         self
     }
 
+    /// Use SQLite as the server storage backend, regardless of which other
+    /// storage features are compiled in.  Implies persistent storage.
+    #[cfg(feature = "sqlite")]
+    pub fn with_sqlite_storage(mut self) -> Self {
+        self.sqlite_storage = true;
+        self.persistent_storage = true;
+        self
+    }
+
+    /// Use RocksDB as the server storage backend, regardless of which other
+    /// storage features are compiled in.  Implies persistent storage.
+    #[cfg(feature = "rocksdb")]
+    pub fn with_rocksdb_storage(mut self) -> Self {
+        self.rocksdb_storage = true;
+        self.persistent_storage = true;
+        self
+    }
+
     pub fn with_admin_secret(mut self, secret: impl Into<String>) -> Self {
         self.admin_secret = Some(secret.into());
         self
@@ -78,6 +110,11 @@ impl TestingServerBuilder {
 
     pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
         self.jwks_url = Some(jwks_url.into());
+        self
+    }
+
+    pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
+        self.sync_tracer = Some(tracer);
         self
     }
 
@@ -162,9 +199,12 @@ impl TestingServer {
             data_dir,
             schema,
             persistent_storage,
+            sqlite_storage,
+            rocksdb_storage,
             admin_secret,
             backend_secret,
             jwks_url,
+            sync_tracer,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
@@ -193,15 +233,21 @@ impl TestingServer {
             admin_secret: Some(admin_secret.clone()),
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        server_builder = if persistent_storage {
-            server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
-        } else {
-            server_builder.with_in_memory_storage()
-        };
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let data_dir_str = data_dir.to_string_lossy().into_owned();
+        let mut server_builder = apply_storage_mode(
+            server_builder,
+            data_dir_str,
+            persistent_storage,
+            sqlite_storage,
+            rocksdb_storage,
+        );
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
+        }
+        if let Some(tracer) = sync_tracer {
+            server_builder = server_builder.with_sync_tracer(tracer);
         }
         let built = server_builder.build().await.expect("build test server");
 
@@ -355,6 +401,7 @@ impl TestingServer {
             jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
             backend_secret: Some(self.backend_secret.clone()),
             admin_secret: Some(self.admin_secret.clone()),
+            sync_tracer: None,
         }
     }
 
@@ -452,6 +499,31 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
             let temp_dir = OwnedTempDir::new("jazz-tools-testing-server");
             (temp_dir.path().to_path_buf(), Some(temp_dir))
         }
+    }
+}
+
+/// Applies the storage mode flags from [`TestingServerBuilder`] to a
+/// [`ServerBuilder`].  Kept as a free function to avoid nested `#[cfg]`
+/// blocks inside `start_from_builder`.
+fn apply_storage_mode(
+    builder: ServerBuilder,
+    data_dir: String,
+    persistent: bool,
+    #[allow(unused_variables)] sqlite: bool,
+    #[allow(unused_variables)] rocksdb: bool,
+) -> ServerBuilder {
+    #[cfg(feature = "sqlite")]
+    if sqlite {
+        return builder.with_sqlite_storage(data_dir);
+    }
+    #[cfg(feature = "rocksdb")]
+    if rocksdb {
+        return builder.with_rocksdb_storage(data_dir);
+    }
+    if persistent {
+        builder.with_persistent_storage(data_dir)
+    } else {
+        builder.with_in_memory_storage()
     }
 }
 

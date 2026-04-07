@@ -10,7 +10,9 @@ repository = "https://github.com/garden-co/jazz2"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-compare-native = ["dep:bf-tree", "dep:rocksdb", "dep:fjall"]
+fjall = ["dep:fjall"]
+rocksdb = ["dep:rocksdb"]
+compare-native = ["dep:bf-tree", "rocksdb", "fjall"]
 
 [dependencies]
 rustc-hash = "2"

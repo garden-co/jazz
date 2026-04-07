@@ -1,10 +1,9 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": ["Cargo.lock", "**/Cargo.toml"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "target/**", "pkg/**"],
+      "outputs": ["dist/**", "pkg/**"],
       "env": ["JAZZ_NAPI_RELEASE"]
     },
     "docs#build": {
@@ -16,19 +15,46 @@
       "outputs": [".next/**", "!.next/cache/**"]
     },
     "jazz-napi#build": {
-      "outputs": ["jazz-napi.node", "index.d.ts"]
+      "dependsOn": ["@jazz/rust#build:crates"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
+      "outputs": ["jazz-napi.node", "index.js", "index.d.ts"]
     },
     "jazz-wasm#build": {
       "dependsOn": ["@jazz/rust#build:crates"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
       "outputs": ["pkg/**"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
-      "outputs": ["../target/debug/jazz*"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
+      "outputs": [
+        "$TURBO_ROOT$/target/debug/jazz-tools",
+        "$TURBO_ROOT$/target/debug/jazz-cloud-server"
+      ]
     },
     "build:rn": {
       "dependsOn": ["^build:rn"],
-      "inputs": ["rust/**"],
+      "inputs": [
+        "rust/**",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
       "outputs": ["android/**", "ios/**", "lib/**", "src/**"]
     },
     "test": {

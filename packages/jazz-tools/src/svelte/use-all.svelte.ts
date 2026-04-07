@@ -31,11 +31,17 @@ export class QuerySubscription<T extends { id: string }> {
 
   #unsubscribe: (() => void) | null = null;
 
-  constructor(query: QueryBuilder<T>, options?: QueryOptions) {
+  constructor(query: QueryBuilder<T> | undefined, options?: QueryOptions) {
     const ctx = getJazzContext();
     this.current = options?.tier ? undefined : [];
 
     $effect(() => {
+      if (!query) {
+        this.current = undefined;
+        this.loading = false;
+        return;
+      }
+
       const manager = ctx.manager;
       if (!manager) return;
 

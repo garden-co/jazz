@@ -113,7 +113,7 @@ function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
   console.warn(
     `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
       `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
-      `\`npx jazz-tools migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
+      `\`npx jazz-tools@alpha migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
   );
 }
 
@@ -437,8 +437,16 @@ export function generateClientId(): string {
   });
 }
 
-const fallbackClientId = generateClientId();
+let fallbackClientId: string | null = null;
 const SYNC_FETCH_TIMEOUT_MS = 10_000;
+
+function getFallbackClientId(): string {
+  if (!fallbackClientId) {
+    fallbackClientId = generateClientId();
+  }
+
+  return fallbackClientId;
+}
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
@@ -586,7 +594,7 @@ export async function sendSyncPayload(
     applySyncAuthHeaders(headers, auth);
   }
 
-  const body = `{"payloads":[${payloadJson}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const body = `{"payloads":[${payloadJson}],"client_id":${JSON.stringify(auth.clientId ?? getFallbackClientId())}}`;
   await postSyncBatch(
     buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
     headers,
@@ -614,7 +622,7 @@ export async function sendSyncPayloadBatch(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   applySyncAuthHeaders(headers, auth);
 
-  const body = `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const body = `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? getFallbackClientId())}}`;
   await postSyncBatch(
     buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
     headers,

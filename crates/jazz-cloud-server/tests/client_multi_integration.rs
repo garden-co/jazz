@@ -266,6 +266,7 @@ fn make_context(
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
+        sync_tracer: None,
     }
 }
 

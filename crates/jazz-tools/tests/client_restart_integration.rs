@@ -211,6 +211,7 @@ fn make_context(
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
+        sync_tracer: None,
     }
 }
 
@@ -423,6 +424,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context.clone())

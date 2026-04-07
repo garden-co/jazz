@@ -9,10 +9,7 @@
   const db = getDb();
   const session = getSession();
   const audio = getAudioContext();
-  const allParticipants = new QuerySubscription(app.participants);
-  const jamParticipants = $derived(
-    (allParticipants.current ?? []).filter((p) => p.jam === jamId),
-  );
+  const participants = new QuerySubscription(app.participants.where({ jamId }));
 
   let editingId = $state<string | null>(null);
   let editValue = $state("");
@@ -43,13 +40,13 @@
 <section class="participants">
   <h2>The Band</h2>
 
-  {#each jamParticipants as participant (participant.id)}
-    {@const isMe = participant.user_id === session?.user_id}
+  {#each participants.current ?? [] as participant (participant.id)}
+    {@const isMe = participant.userId === session?.user_id}
     <div class="participant" class:is-me={isMe}>
       <div
         class="avatar"
         style="background-color: oklch(0.6 0.15 {getStableHue(
-          participant.user_id,
+          participant.userId,
         )})"
       ></div>
       {#if isMe && editingId === participant.id}

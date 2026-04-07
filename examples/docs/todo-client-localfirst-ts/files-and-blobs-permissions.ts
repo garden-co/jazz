@@ -3,10 +3,10 @@ import { app } from "./schema.js";
 
 // #region files-permissions-ts
 export const fileBlobPermissions = s.definePermissions(app, ({ policy, allowedTo, session }) => {
-  policy.uploads.allowRead.where({ ownerId: session.user_id });
-  policy.uploads.allowInsert.where({ ownerId: session.user_id });
-  policy.uploads.allowUpdate.where({ ownerId: session.user_id });
-  policy.uploads.allowDelete.where({ ownerId: session.user_id });
+  policy.uploads.allowRead.where({ owner_id: session.user_id });
+  policy.uploads.allowInsert.where({ owner_id: session.user_id });
+  policy.uploads.allowUpdate.where({ owner_id: session.user_id });
+  policy.uploads.allowDelete.where({ owner_id: session.user_id });
 
   // Files are created before the parent upload row exists, so inserts are direct for now.
   policy.files.allowInsert.where({});

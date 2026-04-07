@@ -1,4 +1,4 @@
-#![cfg(feature = "test")]
+#![cfg(all(feature = "test", feature = "rocksdb"))]
 
 mod support;
 
@@ -84,6 +84,7 @@ async fn make_client_external_jwks(
         jwt_token: Some(TestingServer::jwt_for_user(user_id)),
         backend_secret: Some(TestingServer::BACKEND_SECRET.to_string()),
         admin_secret: Some(TestingServer::ADMIN_SECRET.to_string()),
+        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context).await.expect("connect client");
@@ -107,7 +108,7 @@ async fn make_client_external_jwks(
 async fn rocksdb_server_storage() {
     // --- shared-server subtests ---
     let server = TestingServer::builder()
-        .with_persistent_storage()
+        .with_rocksdb_storage()
         .start()
         .await;
 
@@ -650,7 +651,7 @@ async fn restart_preserves_data() {
 
     // --- server₁ ---
     let server1 = TestingServer::builder()
-        .with_persistent_storage()
+        .with_rocksdb_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -699,7 +700,7 @@ async fn restart_preserves_data() {
 
     // --- server₂ (same data_dir) ---
     let server2 = TestingServer::builder()
-        .with_persistent_storage()
+        .with_rocksdb_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -801,7 +802,7 @@ async fn catalogue_manifest_survives_restart() {
     let schema = todos_schema();
 
     let server1 = TestingServer::builder()
-        .with_persistent_storage()
+        .with_rocksdb_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -839,7 +840,7 @@ async fn catalogue_manifest_survives_restart() {
 
     // Restart with same data_dir — catalogue manifest should be rehydrated.
     let server2 = TestingServer::builder()
-        .with_persistent_storage()
+        .with_rocksdb_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()

@@ -120,3 +120,12 @@ s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
   );
 });
 // #endregion permissions-shares-ts
+
+// #region permissions-whereold-wherenew-ts
+s.definePermissions(exampleApp, ({ policy, session }) => {
+  // User can only update their own rows, and the result must still be owned by them
+  policy.todos.allowUpdate
+    .whereOld({ owner_id: session.user_id })
+    .whereNew({ owner_id: session.user_id });
+});
+// #endregion permissions-whereold-wherenew-ts
