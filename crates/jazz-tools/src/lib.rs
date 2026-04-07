@@ -1,16 +1,16 @@
 pub mod binding_support;
 pub mod commit;
 pub mod metadata;
-#[cfg(feature = "cli")]
+#[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
 pub mod object;
 pub mod object_manager;
 pub mod query_manager;
-#[cfg(feature = "cli")]
+#[cfg(any(feature = "cli", feature = "server"))]
 pub mod routes;
 pub mod runtime_core;
 pub mod schema_manager;
-#[cfg(feature = "cli")]
+#[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod storage;
 pub mod sync_manager;

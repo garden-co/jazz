@@ -1,11 +1,13 @@
 import type { ColumnDescriptor } from "jazz-tools";
 import { useMemo, useState } from "react";
+import { Link } from "react-router";
 import {
   buildMutationFormFields,
   formatMutationFieldValue,
   type MutationFormMode,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
+import { buildRelationFilterHref } from "./relation-navigation.js";
 import styles from "./RowMutationSidebar.module.css";
 
 interface FieldState {
@@ -19,8 +21,9 @@ interface RowMutationSidebarProps {
   schemaColumns: ColumnDescriptor[];
   targetRowId: string | null;
   rowValues: Record<string, unknown> | null;
-  onCancel: () => void;
+  onCancel?: () => void;
   onSave: (updates: Record<string, unknown>) => void | Promise<void>;
+  onDelete?: () => void | Promise<void>;
 }
 
 function modeLabel(mode: MutationFormMode): string {
@@ -74,6 +77,15 @@ function createInitialFields(
   return nextFields;
 }
 
+function getRelationTarget(fieldState: FieldState, column: ColumnDescriptor): string | null {
+  if (!column.references || fieldState.isNull) {
+    return null;
+  }
+
+  const value = fieldState.text.trim();
+  return value.length > 0 ? value : null;
+}
+
 export function RowMutationSidebar({
   mode,
   tableName,
@@ -82,6 +94,7 @@ export function RowMutationSidebar({
   rowValues,
   onCancel,
   onSave,
+  onDelete,
 }: RowMutationSidebarProps) {
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
     createInitialFields(rowValues, mode, schemaColumns),
@@ -89,10 +102,28 @@ export function RowMutationSidebar({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
 
   const formFields = useMemo(() => buildMutationFormFields(schemaColumns), [schemaColumns]);
 
   if (!rowValues) {
+    if (mode === "edit") {
+      return (
+        <aside className={styles.sidebar} aria-label={`${modeLabel(mode)} panel`}>
+          <div className={styles.form}>
+            <header className={styles.header}>
+              <h3 className={styles.title}>{modeLabel(mode)}</h3>
+              <p className={styles.meta}>{tableName} · no row selected</p>
+            </header>
+            <div className={styles.emptyState}>
+              <p>Select a row from the table to edit it.</p>
+            </div>
+          </div>
+        </aside>
+      );
+    }
+
     return null;
   }
 
@@ -117,6 +148,7 @@ export function RowMutationSidebar({
         className={styles.form}
         onSubmit={async (event) => {
           event.preventDefault();
+
           const nextErrors: Record<string, string> = {};
           const updates: Record<string, unknown> = {};
 
@@ -159,7 +191,7 @@ export function RowMutationSidebar({
         <header className={styles.header}>
           <h3 className={styles.title}>{modeLabel(mode)}</h3>
           <p className={styles.meta}>
-            {tableName} · {mode === "edit" ? targetRowId : "new row"}
+            {tableName} · {mode === "insert" ? "new row" : targetRowId}
           </p>
         </header>
 
@@ -168,7 +200,7 @@ export function RowMutationSidebar({
             <span className={styles.label}>id</span>
             <input
               className={styles.input}
-              value={mode === "edit" ? (targetRowId ?? "") : "auto-generated"}
+              value={mode === "insert" ? "auto-generated" : (targetRowId ?? "")}
               readOnly
             />
           </label>
@@ -178,11 +210,27 @@ export function RowMutationSidebar({
             const fieldError = errors[column.name];
             const isReadOnly = readOnlyReason !== null;
             const value = fieldState.text;
+            const relationTarget = getRelationTarget(fieldState, column);
 
             return (
-              <div key={column.name} className={styles.fieldWrap}>
+              <div
+                key={column.name}
+                className={styles.fieldWrap}
+                aria-label={`${column.name} field`}
+              >
                 <label className={styles.field}>
-                  <span className={styles.label}>{column.name}</span>
+                  <span className={styles.fieldHeader}>
+                    <span className={styles.label}>{column.name}</span>
+                    {relationTarget && column.references ? (
+                      <Link
+                        to={buildRelationFilterHref(column.references, relationTarget)}
+                        className={styles.showLink}
+                        aria-label={`Show ${column.name} in ${column.references}`}
+                      >
+                        Show
+                      </Link>
+                    ) : null}
+                  </span>
                   {column.column_type.type === "Enum" && !isReadOnly ? (
                     <select
                       className={styles.select}
@@ -229,11 +277,14 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) =>
-                        updateFieldState(column, (currentField) => ({
-                          ...currentField,
-                          text: event.target.value,
-                        }))
+                      onChange={
+                        isReadOnly
+                          ? undefined
+                          : (event) =>
+                              updateFieldState(column, (currentField) => ({
+                                ...currentField,
+                                text: event.target.value,
+                              }))
                       }
                     />
                   ) : (
@@ -242,11 +293,14 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) =>
-                        updateFieldState(column, (currentField) => ({
-                          ...currentField,
-                          text: event.target.value,
-                        }))
+                      onChange={
+                        isReadOnly
+                          ? undefined
+                          : (event) =>
+                              updateFieldState(column, (currentField) => ({
+                                ...currentField,
+                                text: event.target.value,
+                              }))
                       }
                     />
                   )}
@@ -280,17 +334,60 @@ export function RowMutationSidebar({
         {saveError ? <p className={styles.error}>{saveError}</p> : null}
 
         <footer className={styles.actions}>
-          <button type="submit" className={styles.primaryButton} disabled={isSaving}>
-            {isSaving ? "Saving..." : saveLabel(mode)}
-          </button>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={onCancel}
-            disabled={isSaving}
-          >
-            Cancel
-          </button>
+          {mode === "edit" && onDelete ? (
+            deleteConfirm ? (
+              <div className={styles.deleteConfirm}>
+                <span className={styles.deleteConfirmText}>Delete this row?</span>
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  disabled={isDeleting}
+                  onClick={async () => {
+                    try {
+                      setIsDeleting(true);
+                      await onDelete();
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                >
+                  {isDeleting ? "Deleting..." : "Confirm"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  onClick={() => setDeleteConfirm(false)}
+                  disabled={isDeleting}
+                >
+                  No
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.dangerButton}
+                onClick={() => setDeleteConfirm(true)}
+                disabled={isSaving}
+              >
+                Delete
+              </button>
+            )
+          ) : null}
+          <div className={styles.actionsRight}>
+            <button type="submit" className={styles.primaryButton} disabled={isSaving}>
+              {isSaving ? "Saving..." : saveLabel(mode)}
+            </button>
+            {onCancel ? (
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={onCancel}
+                disabled={isSaving}
+              >
+                Cancel
+              </button>
+            ) : null}
+          </div>
         </footer>
       </form>
     </aside>

@@ -97,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release -p jazz-tools --features client --example realistic_bench
-          cargo bench -p jazz-tools --features fjall --bench realistic_phase1 --no-run
+          cargo bench -p jazz-tools --bench realistic_phase1 --no-run
 
       - name: Run native benchmark suite
         run: |
@@ -636,4 +636,5 @@ jobs:
             exit 0
           fi
           git commit -m "bench: update realistic benchmark site (${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT})"
+          git pull --rebase origin main
           git push origin HEAD:main

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "./schema-fetch.js";
+import {
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  publishStoredMigration,
+} from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
 
 describe("schema-fetch", () => {

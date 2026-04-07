@@ -6,10 +6,10 @@
 //! Per-operation SAVEPOINTs nested inside that transaction provide rollback
 //! semantics for individual operations. Targets React Native / mobile.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -60,7 +60,7 @@ impl SqliteInner {
 }
 
 pub struct SqliteStorage {
-    inner: RefCell<Option<SqliteInner>>,
+    inner: Mutex<Option<SqliteInner>>,
 }
 
 impl SqliteStorage {
@@ -97,7 +97,7 @@ impl SqliteStorage {
         .map_err(|e| StorageError::IoError(format!("sqlite init: {e}")))?;
 
         Ok(Self {
-            inner: RefCell::new(Some(SqliteInner {
+            inner: Mutex::new(Some(SqliteInner {
                 conn,
                 path: path.to_path_buf(),
                 write_tx_open: false,
@@ -105,11 +105,17 @@ impl SqliteStorage {
         })
     }
 
+    fn lock_inner(&self) -> Result<MutexGuard<'_, Option<SqliteInner>>, StorageError> {
+        self.inner
+            .lock()
+            .map_err(|_| StorageError::IoError("sqlite storage mutex poisoned".to_string()))
+    }
+
     fn with_inner<T>(
         &self,
         f: impl FnOnce(&SqliteInner) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        let inner = self.inner.borrow();
+        let inner = self.lock_inner()?;
         let inner = inner
             .as_ref()
             .ok_or_else(|| StorageError::IoError("sqlite storage already closed".to_string()))?;
@@ -120,7 +126,7 @@ impl SqliteStorage {
         &self,
         f: impl FnOnce(&mut SqliteInner) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.lock_inner()?;
         let inner = inner
             .as_mut()
             .ok_or_else(|| StorageError::IoError("sqlite storage already closed".to_string()))?;
@@ -478,7 +484,10 @@ impl Storage for SqliteStorage {
     }
 
     fn flush_wal(&self) {
-        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+        let Ok(mut inner) = self.lock_inner() else {
+            return;
+        };
+        if let Some(inner) = inner.as_mut() {
             // Commit the open write transaction so writes land in the WAL
             // and survive a process crash.
             let _ = inner.commit_write_tx();
@@ -493,7 +502,7 @@ impl Storage for SqliteStorage {
     }
 
     fn close(&self) -> Result<(), StorageError> {
-        let Some(mut inner) = self.inner.borrow_mut().take() else {
+        let Some(mut inner) = self.lock_inner()?.take() else {
             return Ok(());
         };
         // Commit any pending writes before closing.
@@ -555,6 +564,12 @@ mod tests {
             result.is_err(),
             "load_object_metadata should return Err after close, got Ok"
         );
+    }
+
+    #[test]
+    fn storage_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SqliteStorage>();
     }
 
     mod sqlite_conformance {

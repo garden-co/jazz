@@ -194,6 +194,40 @@ describe("WorkerBridge", () => {
     expect(bridge.getWorkerClientId()).toBe("worker-client-123");
   });
 
+  it("includes runtimeSources in the worker init payload", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const wasmSource = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      runtimeSources: {
+        baseUrl: "/assets/jazz/",
+        wasmSource,
+      },
+    });
+
+    expect(worker.posted[0]).toMatchObject({
+      type: "init",
+      runtimeSources: {
+        baseUrl: "/assets/jazz/",
+        wasmSource,
+      },
+    });
+
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+    });
+
+    await expect(initPromise).resolves.toBe("worker-client-123");
+  });
+
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
