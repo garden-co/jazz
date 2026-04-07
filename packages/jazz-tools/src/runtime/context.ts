@@ -8,6 +8,34 @@ import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 export type LocalAuthMode = "anonymous" | "demo";
 
 /**
+ * Runtime source overrides for Jazz WASM and worker startup.
+ *
+ * These are primarily used by browser and edge-style runtimes.
+ */
+export interface RuntimeSourcesConfig {
+  /**
+   * Base URL for Jazz runtime files.
+   *
+   * When set, Jazz derives:
+   * - `jazz_wasm_bg.wasm`
+   * - `worker/jazz-worker.js`
+   */
+  baseUrl?: string;
+
+  /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
+  wasmUrl?: string;
+
+  /** Explicit URL for the worker entry script. Overrides `baseUrl`. */
+  workerUrl?: string;
+
+  /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
+  wasmSource?: BufferSource;
+
+  /** Explicit compiled WASM module. Highest-precedence bootstrap input. */
+  wasmModule?: WebAssembly.Module;
+}
+
+/**
  * Session context for policy evaluation.
  */
 export interface Session {
@@ -34,6 +62,9 @@ export interface AppContext {
   serverUrl?: string;
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
+
+  /** Optional runtime source overrides for WASM and worker loading. */
+  runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
