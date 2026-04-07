@@ -8,9 +8,6 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
     measurement::WallTime,
 };
-use fjall::{
-    Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions, PersistMode,
-};
 use opfs_btree::{
     BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, StdFile as OpfsStdFile,
 };
@@ -373,66 +370,6 @@ impl Engine for RocksDbEngine {
     }
 }
 
-struct FjallEngine {
-    database: FjallDatabase,
-    keyspace: FjallKeyspace,
-}
-
-impl FjallEngine {
-    fn open(path: &Path) -> Self {
-        let database = FjallDatabase::builder(path.join("fjall"))
-            .open()
-            .expect("open fjall database");
-        let keyspace = database
-            .keyspace("bench", KeyspaceCreateOptions::default)
-            .expect("open fjall keyspace");
-        Self { database, keyspace }
-    }
-}
-
-impl Engine for FjallEngine {
-    fn put(&mut self, key: &[u8], value: &[u8]) {
-        self.keyspace.insert(key, value).expect("fjall insert");
-    }
-
-    fn delete(&mut self, key: &[u8]) {
-        self.keyspace.remove(key).expect("fjall remove");
-    }
-
-    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        self.keyspace
-            .get(key)
-            .expect("fjall get")
-            .map(|v| v.to_vec())
-    }
-
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.get_opt(key).expect("fjall key present")
-    }
-
-    fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
-        let mut seen = 0usize;
-        let mut checksum = 0u64;
-
-        for item in self.keyspace.range(start.to_vec()..end.to_vec()) {
-            let value = item.value().expect("fjall range value");
-            checksum = checksum.wrapping_add(value.first().copied().unwrap_or(0) as u64);
-            seen += 1;
-            if seen == limit {
-                break;
-            }
-        }
-
-        checksum.wrapping_add(seen as u64)
-    }
-
-    fn finish_writes(&mut self) {
-        self.database
-            .persist(PersistMode::SyncData)
-            .expect("fjall persist");
-    }
-}
-
 fn key(i: usize) -> Vec<u8> {
     format!("k{i:08}").into_bytes()
 }
@@ -488,9 +425,6 @@ fn engine_factories(
             Box::new(|path| Box::new(RocksDbEngine::open(path))),
         ));
     }
-    if engine_enabled("fjall") {
-        out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
-    }
     out
 }
 
@@ -515,9 +449,6 @@ fn cold_read_engine_factories(
             "rocksdb",
             Box::new(|path| Box::new(RocksDbEngine::open(path))),
         ));
-    }
-    if engine_enabled("fjall") {
-        out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
     }
     out
 }
