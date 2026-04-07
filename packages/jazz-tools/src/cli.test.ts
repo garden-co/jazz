@@ -619,6 +619,65 @@ describe("cli migrations", () => {
     expect(generated).not.toContain("migrate: {");
   });
 
+  it("keeps duplicate-shape table changes as add/drop instead of guessing a rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "7878787878787878787878787878787878787878787878787878787878787878";
+    const toHash = "9090909090909090909090909090909090909090909090909090909090909090";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            archived_users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).not.toContain("renameTables: {");
+    expect(generated).toContain("createTables: {");
+    expect(generated).toContain('"people": true,');
+    expect(generated).toContain("dropTables: {");
+    expect(generated).toContain('"archived_users": true,');
+    expect(generated).toContain('"users": true,');
+  });
+
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");

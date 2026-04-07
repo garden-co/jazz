@@ -294,39 +294,22 @@ function detectPossibleTableRenames(
   const addedTables = Object.keys(toSchema)
     .filter((tableName) => !fromSchema[tableName])
     .sort();
+  const matches = removedTables
+    .map((oldTableName) => {
+      const candidateAddedTables = addedTables.filter((newTableName) =>
+        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]),
+      );
+      return candidateAddedTables.length === 1
+        ? ([oldTableName, candidateAddedTables[0]!] as const)
+        : undefined;
+    })
+    .filter((match) => match !== undefined);
 
-  const removedCandidates = removedTables.map((oldTableName) =>
-    addedTables
-      .map((newTableName, addedIndex) =>
-        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]) ? addedIndex : -1,
-      )
-      .filter((addedIndex) => addedIndex >= 0),
-  );
-  const addedCandidates = addedTables.map((newTableName) =>
-    removedTables
-      .map((oldTableName, removedIndex) =>
-        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]) ? removedIndex : -1,
-      )
-      .filter((removedIndex) => removedIndex >= 0),
-  );
-
-  return removedCandidates.flatMap((candidateAddedTables, removedIndex) => {
-    if (candidateAddedTables.length !== 1) {
-      return [];
-    }
-
-    const addedIndex = candidateAddedTables[0]!;
-    const candidateRemovedTables = addedCandidates[addedIndex]!;
-    if (candidateRemovedTables.length !== 1 || candidateRemovedTables[0] !== removedIndex) {
-      return [];
-    }
-
-    return [
-      {
-        oldTableName: removedTables[removedIndex]!,
-        newTableName: addedTables[addedIndex]!,
-      },
-    ];
+  return matches.flatMap(([oldTableName, newTableName], i) => {
+    const isDuplicateNewTableMatch = matches.some(([_, otherNewTableName], j) => {
+      return i !== j && newTableName === otherNewTableName;
+    });
+    return !isDuplicateNewTableMatch ? [{ oldTableName, newTableName }] : [];
   });
 }
 
