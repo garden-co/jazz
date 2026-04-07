@@ -525,7 +525,7 @@ export class Db {
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
    */
-  private async ensureBridgeReady(): Promise<void> {
+  protected async ensureBridgeReady(): Promise<void> {
     await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
