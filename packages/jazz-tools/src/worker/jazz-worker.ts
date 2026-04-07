@@ -34,11 +34,30 @@ declare const self: {
   location?: { origin?: string; href?: string };
 };
 
-type RuntimeImport = (specifier: string) => Promise<unknown>;
+type VitestBrowserRunner = {
+  wrapDynamicImport<T>(loader: () => Promise<T>): Promise<T>;
+};
 
-// Keep the worker's jazz-wasm import opaque to Vitest browser mode so the
-// worker can boot without the page-only browser runner shim.
-const runtimeImportModule = new Function("specifier", "return import(specifier)") as RuntimeImport;
+function ensureVitestWorkerImportShim(): void {
+  const globalRef = globalThis as typeof globalThis & {
+    __vitest_browser_runner__?: VitestBrowserRunner;
+  };
+
+  if (globalRef.__vitest_browser_runner__) {
+    return;
+  }
+
+  // Vitest browser mode installs this on the page global, but dedicated workers
+  // can miss that setup. Provide the same no-op wrapper so transformed worker
+  // imports still resolve through the bundler.
+  globalRef.__vitest_browser_runner__ = {
+    wrapDynamicImport<T>(loader: () => Promise<T>): Promise<T> {
+      return loader();
+    },
+  };
+}
+
+ensureVitestWorkerImportShim();
 
 let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
@@ -222,7 +241,7 @@ function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transfe
 
 async function startup(): Promise<void> {
   try {
-    const wasmModule: any = await runtimeImportModule("jazz-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     // Eager init only when the worker URL already carries an explicit wasm URL.
     // Otherwise wait for init so runtimeSources.wasmSource/wasmModule can win.
     if (readWorkerRuntimeWasmUrl(self.location?.href)) {
@@ -240,7 +259,7 @@ async function startup(): Promise<void> {
 
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
-    const wasmModule: any = await runtimeImportModule("jazz-wasm");
+    const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
