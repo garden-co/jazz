@@ -42,7 +42,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
         throw new Error("Profile is still loading. Please try again.");
       }
 
-      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "edge" });
+      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "worker" });
 
       const message = await db.insertDurable(
         app.messages,
@@ -52,7 +52,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
           senderId: myProfile.id,
           createdAt: new Date(),
         },
-        { tier: "edge" },
+        { tier: "worker" },
       );
 
       await db.insertDurable(
@@ -64,7 +64,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
           fileId: storedFile.id,
           size: attachment.file.size,
         },
-        { tier: "edge" },
+        { tier: "worker" },
       );
     },
     [userId, chatId, db, myProfile],
