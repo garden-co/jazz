@@ -519,6 +519,38 @@ describe("cli migrations", () => {
     expect(noopLogs).toContain("No structural schema changes detected.");
   });
 
+  it("uses --name to generate a named migration file and skips the rename reminder", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await createMigration({
+      schemaDir: root,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+    });
+
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const { result: filePath, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        name: "Add Todo Notes",
+      }),
+    );
+
+    expect(filePath).not.toBeNull();
+    assert(filePath, "Expected createMigration() to return a migration file path.");
+
+    expect(filePath).toContain("-add-todo-notes-");
+    expect(filePath).not.toContain("-unnamed-");
+    expect(logs).not.toContain("2. Rename the file by replacing 'unnamed'.");
+  });
+
   it("generates a typed migration stub from an explicit historical fromHash to the current schema", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
