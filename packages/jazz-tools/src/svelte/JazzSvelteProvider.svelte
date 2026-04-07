@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
 	import type { Db } from '../runtime/db.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
@@ -13,30 +12,33 @@
 	let { client, children, fallback }: Props = $props();
 
 	const ctx = initJazzContext();
-	let resolvedClient: JazzClient | null = null;
 	let error = $state<Error | null>(null);
-	let cancelled = false;
 
-	Promise.resolve(client)
-		.then((c) => {
-			if (cancelled) {
-				c.shutdown();
-				return;
+	$effect(() => {
+		let cancelled = false;
+		let resolved: JazzClient | null = null;
+
+		Promise.resolve(client)
+			.then((c) => {
+				if (cancelled) {
+					c.shutdown();
+					return;
+				}
+				resolved = c;
+				ctx.db = c.db;
+				ctx.session = c.session;
+				ctx.manager = c.manager;
+			})
+			.catch((reason) => {
+				error = reason instanceof Error ? reason : new Error(String(reason));
+			});
+
+		return () => {
+			cancelled = true;
+			if (resolved) {
+				resolved.shutdown();
 			}
-			resolvedClient = c;
-			ctx.db = c.db;
-			ctx.session = c.session;
-			ctx.manager = c.manager;
-		})
-		.catch((reason) => {
-			error = reason instanceof Error ? reason : new Error(String(reason));
-		});
-
-	onDestroy(() => {
-		cancelled = true;
-		if (resolvedClient) {
-			void resolvedClient.shutdown();
-		}
+		};
 	});
 </script>
 

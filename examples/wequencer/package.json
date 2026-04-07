@@ -23,6 +23,7 @@
     "@vitejs/plugin-basic-ssl": "^2.2.0",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "tsx": "^4.0.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",

@@ -196,6 +196,20 @@ function storedRootSchema() {
   };
 }
 
+function storedRootSchemaWithReorderedColumns() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+}
+
 describe("cli validate", () => {
   it("validates root schema.ts without generating SQL or app artifacts", async () => {
     const { root } = await createWorkspace();
@@ -930,6 +944,44 @@ describe("cli permissions", () => {
 
     expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
     expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
+  });
+
+  it("matches stored schemas even when server column order differs", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "ababeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return new Response(JSON.stringify(storedRootSchemaWithReorderedColumns()), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(
+      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
+    );
   });
 
   it("publishes permissions with the current head bundle as the expected parent", async () => {

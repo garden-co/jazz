@@ -13,7 +13,7 @@ const sessionUserId = session?.user_id ?? null;
 // #endregion auth-session-vue-user-id
 
 // #region auth-session-vue-query
-const ownedTodos = useAll(app.todos.where({ ownerId: sessionUserId ?? "__no-session__" }));
+const ownedTodos = useAll(sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined);
 // #endregion auth-session-vue-query
 
 // #region auth-session-vue-insert
@@ -23,7 +23,7 @@ function addOwnedTodo(title: string) {
   db.insert(app.todos, {
     title,
     done: false,
-    ownerId: sessionUserId,
+    owner_id: sessionUserId,
   });
 }
 // #endregion auth-session-vue-insert
