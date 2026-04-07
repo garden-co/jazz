@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::RowObjectUpdate;
+use crate::object_manager::VisibleRowUpdate;
 use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::Storage;
@@ -377,7 +377,7 @@ pub struct QueryManager {
 
     /// Buffered row updates for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
-    pub(super) pending_row_updates: Vec<RowObjectUpdate>,
+    pub(super) pending_row_updates: Vec<VisibleRowUpdate>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
@@ -857,7 +857,7 @@ impl QueryManager {
         // 2. Process row updates from SyncManager FIRST so indices are current
         // before subscriptions are processed.
         let mut row_updates = std::mem::take(&mut self.pending_row_updates);
-        row_updates.extend(self.sync_manager.object_manager.take_row_object_updates());
+        row_updates.extend(self.sync_manager.object_manager.take_visible_row_updates());
         row_updates.extend(self.sync_manager.take_pending_row_updates());
         if !row_updates.is_empty() {
             tracing::debug!(count = row_updates.len(), "processing row updates");
@@ -1136,7 +1136,7 @@ impl QueryManager {
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
-        update: RowObjectUpdate,
+        update: VisibleRowUpdate,
         local_update: bool,
     ) {
         let table = match update.metadata.get(MetadataKey::Table.as_str()) {
@@ -1347,7 +1347,11 @@ impl QueryManager {
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }
 
-    pub(super) fn handle_row_update(&mut self, storage: &mut dyn Storage, update: RowObjectUpdate) {
+    pub(super) fn handle_row_update(
+        &mut self,
+        storage: &mut dyn Storage,
+        update: VisibleRowUpdate,
+    ) {
         self.handle_row_update_with_origin(storage, update, false);
     }
     /// Mark subscriptions dirty for a table based on update origin.

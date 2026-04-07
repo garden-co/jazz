@@ -12,7 +12,7 @@ use crate::sync_manager::DurabilityTier;
 
 /// Visible row change emitted when a row object's winning version changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RowObjectUpdate {
+pub struct VisibleRowUpdate {
     pub object_id: ObjectId,
     pub metadata: HashMap<String, String>,
     pub row: StoredRowVersion,
@@ -149,7 +149,7 @@ pub struct ObjectManager {
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     row_branches: HashMap<(ObjectId, BranchName), RowBranch>,
     /// Outbox for visible row changes.
-    pub row_objects_outbox: Vec<RowObjectUpdate>,
+    pub visible_row_updates: Vec<VisibleRowUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
 }
@@ -333,7 +333,7 @@ impl ObjectManager {
         }
 
         let is_new_object = previous_row.is_none();
-        self.row_objects_outbox.push(RowObjectUpdate {
+        self.visible_row_updates.push(VisibleRowUpdate {
             object_id: current_row.row_id,
             metadata: metadata.clone(),
             row: current_row,
@@ -400,7 +400,7 @@ impl ObjectManager {
         version_id: CommitId,
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
-    ) -> Option<RowObjectUpdate> {
+    ) -> Option<VisibleRowUpdate> {
         let metadata = self.get(object_id)?.clone();
         let applied = self.row_branch_mut(object_id, branch_name)?.patch_state(
             version_id,
@@ -414,7 +414,7 @@ impl ObjectManager {
 
         let row = applied.current_visible?;
         let is_new_object = applied.previous_visible.is_none();
-        Some(RowObjectUpdate {
+        Some(VisibleRowUpdate {
             object_id,
             metadata,
             row,
@@ -574,23 +574,23 @@ impl ObjectManager {
     }
 
     /// Take all pending visible row updates.
-    pub fn take_row_object_updates(&mut self) -> Vec<RowObjectUpdate> {
-        std::mem::take(&mut self.row_objects_outbox)
+    pub fn take_visible_row_updates(&mut self) -> Vec<VisibleRowUpdate> {
+        std::mem::take(&mut self.visible_row_updates)
     }
 
     /// Take one pending visible row update for the given concrete row version.
-    pub fn take_row_object_update_for(
+    pub fn take_visible_row_update_for(
         &mut self,
         object_id: ObjectId,
         branch_name: &BranchName,
         version_id: CommitId,
-    ) -> Option<RowObjectUpdate> {
-        let index = self.row_objects_outbox.iter().position(|update| {
+    ) -> Option<VisibleRowUpdate> {
+        let index = self.visible_row_updates.iter().position(|update| {
             update.object_id == object_id
                 && update.row.branch == branch_name.as_str()
                 && update.row.version_id() == version_id
         })?;
-        Some(self.row_objects_outbox.remove(index))
+        Some(self.visible_row_updates.remove(index))
     }
 
     // ========================================================================
@@ -622,7 +622,7 @@ impl ObjectManager {
         }
 
         let subscriptions = 0usize;
-        let other = self.row_objects_outbox.len() * 192;
+        let other = self.visible_row_updates.len() * 192;
 
         let total = row_objects + index_objects + subscriptions + other;
         (row_objects, index_objects, subscriptions, other, total)

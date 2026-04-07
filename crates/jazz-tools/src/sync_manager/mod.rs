@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::{ObjectManager, RowObjectUpdate};
+use crate::object_manager::{ObjectManager, VisibleRowUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::storage::Storage;
@@ -47,7 +47,7 @@ pub struct SyncManager {
     /// Pending query unsubscriptions awaiting cleanup by QueryManager.
     pub(super) pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
     /// Row updates applied through row-region-native sync.
-    pub(super) pending_row_updates: Vec<RowObjectUpdate>,
+    pub(super) pending_row_updates: Vec<VisibleRowUpdate>,
     /// Catalogue/system entry updates awaiting SchemaManager processing.
     pub(super) pending_catalogue_updates: Vec<CatalogueEntry>,
 
@@ -590,7 +590,7 @@ impl SyncManager {
 
     /// Take pending row updates for QueryManager to materialize into indices
     /// and subscriptions.
-    pub fn take_pending_row_updates(&mut self) -> Vec<RowObjectUpdate> {
+    pub fn take_pending_row_updates(&mut self) -> Vec<VisibleRowUpdate> {
         std::mem::take(&mut self.pending_row_updates)
     }
 
@@ -601,7 +601,7 @@ impl SyncManager {
 
     /// Requeue row updates that could not be processed yet, typically because
     /// the corresponding schema has not been activated yet.
-    pub fn requeue_pending_row_updates(&mut self, updates: Vec<RowObjectUpdate>) {
+    pub fn requeue_pending_row_updates(&mut self, updates: Vec<VisibleRowUpdate>) {
         self.pending_row_updates.extend(updates);
     }
 
