@@ -58,7 +58,6 @@ impl SyncManager {
                 Object {
                     id: object_id,
                     metadata,
-                    branches: HashMap::new(),
                 },
             );
             return;

@@ -90,6 +90,32 @@ pub(crate) fn validate_index_value_size(
 pub type ObjectMetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
 pub type RawTableRows = Vec<(String, Vec<u8>)>;
 
+const OBJECT_METADATA_TABLE: &str = "__object_metadata";
+
+fn object_metadata_raw_key(id: ObjectId) -> String {
+    hex::encode(id.uuid().as_bytes())
+}
+
+fn decode_object_metadata_raw_key(key: &str) -> Result<ObjectId, StorageError> {
+    let bytes = hex::decode(key).map_err(|err| {
+        StorageError::IoError(format!("invalid object metadata key '{key}': {err}"))
+    })?;
+    let uuid = uuid::Uuid::from_slice(&bytes).map_err(|err| {
+        StorageError::IoError(format!("invalid object metadata uuid '{key}': {err}"))
+    })?;
+    Ok(ObjectId::from_uuid(uuid))
+}
+
+fn encode_object_metadata(metadata: &HashMap<String, String>) -> Result<Vec<u8>, StorageError> {
+    serde_json::to_vec(metadata)
+        .map_err(|err| StorageError::IoError(format!("serialize object metadata: {err}")))
+}
+
+fn decode_object_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError> {
+    serde_json::from_slice(bytes)
+        .map_err(|err| StorageError::IoError(format!("deserialize object metadata: {err}")))
+}
+
 // ============================================================================
 // Storage Trait
 // ============================================================================
@@ -114,19 +140,32 @@ pub trait Storage {
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let bytes = encode_object_metadata(&metadata)?;
+        self.raw_table_put(OBJECT_METADATA_TABLE, &object_metadata_raw_key(id), &bytes)
+    }
 
     /// Load object metadata. Returns None if object doesn't exist.
     fn load_object_metadata(
         &self,
         id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError>;
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.raw_table_get(OBJECT_METADATA_TABLE, &object_metadata_raw_key(id))?
+            .map(|bytes| decode_object_metadata(&bytes))
+            .transpose()
+    }
 
     /// Enumerate all persisted object metadata rows.
     fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
-        Err(StorageError::IoError(
-            "object metadata scans are not implemented for this backend yet".to_string(),
-        ))
+        let mut rows = Vec::new();
+        for (key, bytes) in self.raw_table_scan_prefix(OBJECT_METADATA_TABLE, "")? {
+            rows.push((
+                decode_object_metadata_raw_key(&key)?,
+                decode_object_metadata(&bytes)?,
+            ));
+        }
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
     }
 
     // ================================================================
@@ -645,19 +684,10 @@ struct TableRowRegions {
 /// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
 pub struct MemoryStorage {
-    /// Object storage: object_id -> ObjectData
-    objects: HashMap<ObjectId, ObjectData>,
-
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     /// Row-region storage keyed by table.
     row_regions: HashMap<String, TableRowRegions>,
-}
-
-/// Internal object storage structure.
-#[derive(Debug, Clone, Default)]
-struct ObjectData {
-    metadata: HashMap<String, String>,
 }
 
 impl MemoryStorage {
@@ -769,36 +799,6 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
-    // ================================================================
-    // Object storage
-    // ================================================================
-
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.objects.insert(id, ObjectData { metadata });
-        Ok(())
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        Ok(self.objects.get(&id).map(|obj| obj.metadata.clone()))
-    }
-
-    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
-        let mut objects: Vec<_> = self
-            .objects
-            .iter()
-            .map(|(object_id, obj)| (*object_id, obj.metadata.clone()))
-            .collect();
-        objects.sort_by_key(|(object_id, _)| *object_id);
-        Ok(objects)
-    }
-
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.raw_tables
             .entry(table.to_string())

@@ -1,22 +1,17 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, raw tables, row regions, and derived indices.
+//! raw tables, row regions, and derived indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
 //! ```text
-//! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "raw:{table}:{local_key}"                               → raw table entry
 //! "row:{table}:0:{branch}:{row_uuid}"                     → JSON StoredRowVersion
 //! "row:{table}:1:{branch}:{row_uuid}:{updated_at}"        → JSON StoredRowVersion
 //! ```
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
@@ -34,12 +29,11 @@ use super::{
     Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_rows_core, create_object_core, load_object_metadata_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
-        scan_visible_region_core, scan_visible_region_row_versions_core,
-        upsert_visible_region_rows_core,
+        append_history_region_rows_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -220,21 +214,6 @@ impl OpfsBTreeStorage {
 }
 
 impl Storage for OpfsBTreeStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        create_object_core(id, metadata, |key, value| self.tree_insert(key, value))
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        load_object_metadata_core(id, |key| self.tree_read(key))
-    }
-
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         raw_table_put_core(table, key, value, |storage_key, bytes| {
             self.tree_insert(storage_key, bytes)

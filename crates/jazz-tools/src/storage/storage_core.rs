@@ -8,11 +8,10 @@ use crate::sync_manager::DurabilityTier;
 
 use super::key_codec::{
     history_row_key, history_row_prefix, history_row_versions_prefix, history_table_prefix,
-    increment_string, obj_meta_key, obj_meta_prefix, raw_table_entry_key, raw_table_prefix,
-    raw_table_scan_prefix, strip_raw_table_key, visible_row_key, visible_row_prefix,
-    visible_table_prefix,
+    increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
+    strip_raw_table_key, visible_row_key, visible_row_prefix, visible_table_prefix,
 };
-use super::{ObjectMetadataRows, RawTableRows, StorageError};
+use super::{RawTableRows, StorageError};
 
 pub(super) fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -24,53 +23,6 @@ pub(super) fn decode_json<T: DeserializeOwned>(
 ) -> Result<T, StorageError> {
     serde_json::from_slice(bytes)
         .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
-}
-
-pub(super) fn create_object_core(
-    id: ObjectId,
-    metadata: HashMap<String, String>,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let key = obj_meta_key(id);
-    let json = encode_json(&metadata, "metadata")?;
-    set(&key, &json)
-}
-
-pub(super) fn load_object_metadata_core(
-    id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<HashMap<String, String>>, StorageError> {
-    let key = obj_meta_key(id);
-    match get(&key)? {
-        Some(data) => Ok(Some(decode_json(&data, "metadata")?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_object_metadata_core(
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<ObjectMetadataRows, StorageError> {
-    let mut objects = Vec::new();
-    for (key, data) in scan_prefix(obj_meta_prefix())? {
-        let Some(hex_id) = key
-            .strip_prefix("obj:")
-            .and_then(|rest| rest.strip_suffix(":meta"))
-        else {
-            continue;
-        };
-
-        let bytes = hex::decode(hex_id).map_err(|err| {
-            StorageError::IoError(format!("invalid object metadata key '{key}': {err}"))
-        })?;
-        let uuid = uuid::Uuid::from_slice(&bytes).map_err(|err| {
-            StorageError::IoError(format!("invalid object metadata uuid '{key}': {err}"))
-        })?;
-        let metadata = decode_json::<HashMap<String, String>>(&data, "object metadata")?;
-        objects.push((ObjectId::from_uuid(uuid), metadata));
-    }
-    objects.sort_by_key(|(object_id, _)| *object_id);
-    Ok(objects)
 }
 
 pub(super) fn raw_table_put_core(

@@ -19,12 +19,11 @@ use crate::sync_manager::DurabilityTier;
 use super::{
     Storage, StorageError,
     storage_core::{
-        append_history_region_rows_core, create_object_core, load_object_metadata_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
-        scan_object_metadata_core, scan_visible_region_core, scan_visible_region_row_versions_core,
-        upsert_visible_region_rows_core,
+        append_history_region_rows_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -165,39 +164,6 @@ impl FjallStorage {
 }
 
 impl Storage for FjallStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let mut tx = inner.db.write_tx();
-            create_object_core(id, metadata, |key, value| {
-                Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
-            })?;
-            Self::commit_tx(tx)
-        })
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            load_object_metadata_core(id, |key| Self::read_get(&tx, &inner.keyspace, key))
-        })
-    }
-
-    fn scan_object_metadata(
-        &self,
-    ) -> Result<Vec<(ObjectId, HashMap<String, String>)>, StorageError> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            scan_object_metadata_core(|prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix))
-        })
-    }
-
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let mut tx = inner.db.write_tx();

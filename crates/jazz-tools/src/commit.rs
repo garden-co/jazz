@@ -47,42 +47,52 @@ pub struct Commit {
     pub ack_state: CommitAckState,
 }
 
+pub fn compute_commit_id(
+    parents: &[CommitId],
+    content: &[u8],
+    timestamp: u64,
+    author: &str,
+    metadata: Option<&BTreeMap<String, String>>,
+) -> CommitId {
+    let mut hasher = Hasher::new();
+
+    hasher.update(&(parents.len() as u64).to_le_bytes());
+    for parent in parents {
+        hasher.update(&parent.0);
+    }
+
+    hasher.update(&(content.len() as u64).to_le_bytes());
+    hasher.update(content);
+
+    hasher.update(&timestamp.to_le_bytes());
+    hasher.update(author.as_bytes());
+
+    if let Some(meta) = metadata {
+        hasher.update(&[1u8]);
+        hasher.update(&(meta.len() as u64).to_le_bytes());
+        for (k, v) in meta {
+            hasher.update(&(k.len() as u64).to_le_bytes());
+            hasher.update(k.as_bytes());
+            hasher.update(&(v.len() as u64).to_le_bytes());
+            hasher.update(v.as_bytes());
+        }
+    } else {
+        hasher.update(&[0u8]);
+    }
+
+    CommitId(*hasher.finalize().as_bytes())
+}
+
 impl Commit {
     /// Compute the CommitId by hashing the serialized commit data.
     pub fn id(&self) -> CommitId {
-        let mut hasher = Hasher::new();
-
-        // Hash parents
-        hasher.update(&(self.parents.len() as u64).to_le_bytes());
-        for parent in &self.parents {
-            hasher.update(&parent.0);
-        }
-
-        // Hash content
-        hasher.update(&(self.content.len() as u64).to_le_bytes());
-        hasher.update(&self.content);
-
-        // Hash timestamp
-        hasher.update(&self.timestamp.to_le_bytes());
-
-        // Hash author
-        hasher.update(self.author.as_bytes());
-
-        // Hash metadata
-        if let Some(meta) = &self.metadata {
-            hasher.update(&[1u8]); // presence marker
-            hasher.update(&(meta.len() as u64).to_le_bytes());
-            for (k, v) in meta {
-                hasher.update(&(k.len() as u64).to_le_bytes());
-                hasher.update(k.as_bytes());
-                hasher.update(&(v.len() as u64).to_le_bytes());
-                hasher.update(v.as_bytes());
-            }
-        } else {
-            hasher.update(&[0u8]); // absence marker
-        }
-
-        CommitId(*hasher.finalize().as_bytes())
+        compute_commit_id(
+            &self.parents,
+            &self.content,
+            self.timestamp,
+            &self.author,
+            self.metadata.as_ref(),
+        )
     }
 
     pub fn is_soft_deleted(&self) -> bool {
