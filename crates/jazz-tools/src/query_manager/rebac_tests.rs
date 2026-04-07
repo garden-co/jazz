@@ -47,6 +47,23 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
+fn connect_client(qm: &mut QueryManager, storage: &MemoryStorage, client_id: ClientId) {
+    qm.sync_manager_mut()
+        .add_client_with_storage(storage, client_id);
+}
+
+fn set_client_query_scope(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    client_id: ClientId,
+    query_id: QueryId,
+    scope: HashSet<(ObjectId, BranchName)>,
+    session: Option<Session>,
+) {
+    qm.sync_manager_mut()
+        .set_client_query_scope_with_storage(storage, client_id, query_id, scope, session);
+}
+
 fn stored_row_commit(
     parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
     content: Vec<u8>,
@@ -524,14 +541,13 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let branch = get_branch(&qm);
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
     let mut scope = HashSet::new();
     scope.insert((grand_id, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(100), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(100), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     let folders_descriptor = RowDescriptor::new(vec![
@@ -617,7 +633,7 @@ fn rebac_insert_allowed_by_simple_policy() {
 
     // Add a client with session
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -630,8 +646,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     // Register a query scope so the update is in-scope
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content: owner_id = "alice", title = "My Doc", folder_id = NULL
@@ -684,7 +699,7 @@ fn rebac_insert_denied_by_simple_policy() {
 
     // Add a client with session
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -697,8 +712,7 @@ fn rebac_insert_denied_by_simple_policy() {
     // Register a query scope
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content: owner_id = "bob" (different from session user)
@@ -789,7 +803,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -801,8 +815,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
 
     let mut scope = HashSet::new();
     scope.insert((obj_id, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     let commit = stored_row_commit(
@@ -872,7 +885,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -941,7 +954,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
 
     let mut storage = MemoryStorage::new();
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -960,8 +973,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
 
     let mut scope = HashSet::new();
     scope.insert((doc_id, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     let commit = enqueue_inherited_insert(
@@ -1021,7 +1033,7 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
 
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
     qm.sync_manager_mut().take_outbox();
@@ -1094,7 +1106,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
         .expect("seed folder should have one tip");
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
     qm.sync_manager_mut().take_outbox();
@@ -1175,7 +1187,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
 
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
     qm.sync_manager_mut().take_outbox();
@@ -1254,7 +1266,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -1343,7 +1355,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -1426,7 +1438,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -1508,7 +1520,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     let mut storage = MemoryStorage::new();
 
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -1579,7 +1591,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     // Add a client with session
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
@@ -1594,8 +1606,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     // Register a query scope
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
@@ -1649,13 +1660,13 @@ fn rebac_two_clients_different_sessions() {
 
     // Client 1: alice
     let client1 = ClientId::new();
-    qm.sync_manager_mut().add_client(client1);
+    connect_client(&mut qm, &storage, client1);
     qm.sync_manager_mut()
         .set_client_session(client1, Session::new("alice"));
 
     // Client 2: bob
     let client2 = ClientId::new();
-    qm.sync_manager_mut().add_client(client2);
+    connect_client(&mut qm, &storage, client2);
     qm.sync_manager_mut()
         .set_client_session(client2, Session::new("bob"));
 
@@ -1672,13 +1683,11 @@ fn rebac_two_clients_different_sessions() {
     // Register query scopes
     let mut scope1 = HashSet::new();
     scope1.insert((obj1, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client1, QueryId(1), scope1, None);
+    set_client_query_scope(&mut qm, &storage, client1, QueryId(1), scope1, None);
 
     let mut scope2 = HashSet::new();
     scope2.insert((obj2, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client2, QueryId(2), scope2, None);
+    set_client_query_scope(&mut qm, &storage, client2, QueryId(2), scope2, None);
 
     qm.sync_manager_mut().take_outbox();
 
@@ -1789,7 +1798,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Add a client with session for non-admin user
     let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("regular_user"));
 
@@ -1806,8 +1815,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     // Register query scope
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
@@ -1938,15 +1946,14 @@ fn rebac_update_denied_by_using_policy() {
 
     // Now Bob connects and tries to update Alice's document
     let bob_client = ClientId::new();
-    qm.sync_manager_mut().add_client(bob_client);
+    connect_client(&mut qm, &storage, bob_client);
     qm.sync_manager_mut()
         .set_client_session(bob_client, Session::new("bob"));
 
     // Register query scope for Bob
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(bob_client, QueryId(1), scope, None);
+    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Bob tries to update Alice's document (keeping owner as alice to pass WITH CHECK,
@@ -2472,15 +2479,14 @@ fn rebac_update_denied_by_using_exists_policy() {
     // ---- Bob (non-admin) tries to update ----
     let branch = get_branch(&qm);
     let bob_client = ClientId::new();
-    qm.sync_manager_mut().add_client(bob_client);
+    connect_client(&mut qm, &storage, bob_client);
     qm.sync_manager_mut()
         .set_client_session(bob_client, Session::new("bob"));
 
     // Register query scope for Bob
     let mut bob_scope = HashSet::new();
     bob_scope.insert((protected_obj, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(bob_client, QueryId(1), bob_scope, None);
+    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), bob_scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Bob tries to update the protected row
@@ -2549,15 +2555,21 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // ---- Alice (admin) tries to update ----
     let alice_client = ClientId::new();
-    qm.sync_manager_mut().add_client(alice_client);
+    connect_client(&mut qm, &storage, alice_client);
     qm.sync_manager_mut()
         .set_client_session(alice_client, Session::new("alice"));
 
     // Register query scope for Alice
     let mut alice_scope = HashSet::new();
     alice_scope.insert((protected_obj, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(alice_client, QueryId(2), alice_scope, None);
+    set_client_query_scope(
+        &mut qm,
+        &storage,
+        alice_client,
+        QueryId(2),
+        alice_scope,
+        None,
+    );
     qm.sync_manager_mut().take_outbox();
 
     // Alice tries to update the protected row
@@ -3253,14 +3265,13 @@ fn synced_soft_delete_should_use_delete_policy() {
         .expect("protected row metadata");
 
     let bob_client = ClientId::new();
-    qm.sync_manager_mut().add_client(bob_client);
+    connect_client(&mut qm, &storage, bob_client);
     qm.sync_manager_mut()
         .set_client_session(bob_client, Session::new("bob"));
 
     let mut bob_scope = HashSet::new();
     bob_scope.insert((protected.row_id, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(bob_client, QueryId(1), bob_scope, None);
+    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), bob_scope, None);
     qm.sync_manager_mut().take_outbox();
 
     let delete_content =

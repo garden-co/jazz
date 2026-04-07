@@ -2823,11 +2823,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(upstream_server_id);
+            .add_server_with_storage(upstream_server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(upstream_server_id);
+            .add_server_with_storage(upstream_server_id, false, &io_b);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
@@ -3181,7 +3181,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_server, client_a_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -3189,7 +3189,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_b_id);
+            .add_client_with_storage(&io_server, client_b_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -3199,11 +3199,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_b);
 
         // Process to generate outbox messages
         client_a.process(&mut io_a);
@@ -3414,6 +3414,10 @@ mod tests {
         )
         .unwrap();
 
+        let mut io_a = MemoryStorage::new();
+        let mut io_b = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
+
         // === Network topology ===
         let client_a_id = ClientId::new();
         let client_b_id = ClientId::new();
@@ -3423,11 +3427,11 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_server, client_a_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_b_id);
+            .add_client_with_storage(&io_server, client_b_id);
 
         // Set sessions for permission checking
         server
@@ -3443,11 +3447,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_b);
 
         // Clear initial sync
         client_a
@@ -3459,10 +3463,6 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
-
-        let mut io_a = MemoryStorage::new();
-        let mut io_b = MemoryStorage::new();
-        let mut io_server = MemoryStorage::new();
 
         // === Create documents on server through public insert API ===
         let alice_doc_id = server
@@ -3676,6 +3676,9 @@ mod tests {
         )
         .unwrap();
 
+        let mut io_client = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
+
         // === Network topology ===
         let client_id = ClientId::new();
         let server_id = ServerId::new();
@@ -3683,7 +3686,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_id);
+            .add_client_with_storage(&io_server, client_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -3691,14 +3694,11 @@ mod tests {
         client
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_client);
 
         // Clear initial sync
         client.query_manager_mut().sync_manager_mut().take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
-
-        let mut io_client = MemoryStorage::new();
-        let mut io_server = MemoryStorage::new();
 
         // === Client persists schema to catalogue ===
         let schema_obj_id = client.persist_schema(&mut io_client);
@@ -4085,11 +4085,11 @@ mod tests {
         server_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_b, client_a_id);
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_b_id);
+            .add_server_with_storage(server_b_id, false, &io_a);
 
         // Insert a row on server B
         let row_id = ObjectId::new();

@@ -1399,30 +1399,22 @@ fn create_3tier_rc() -> ThreeTierRC {
 
     // Topology: A ↔ B ↔ C
     {
-        let sm = b
-            .schema_manager_mut()
+        b.add_client(a_client_of_b, None);
+        b.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(a_client_of_b);
-        sm.set_client_role(a_client_of_b, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(a_client_of_b, ClientRole::Peer);
     }
-    a.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(b_server_for_a);
+    a.add_server(b_server_for_a);
 
     {
-        let sm = c
-            .schema_manager_mut()
+        c.add_client(b_client_of_c, None);
+        c.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(b_client_of_c);
-        sm.set_client_role(b_client_of_c, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(b_client_of_c, ClientRole::Peer);
     }
-    b.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(c_server_for_b);
+    b.add_server(c_server_for_b);
 
     // Initial tick + clear initial sync messages
     a.immediate_tick();
@@ -1651,17 +1643,13 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     let c_server_for_b = ServerId::new();
 
     {
-        let sm = b
-            .schema_manager_mut()
+        b.add_client(a_client_of_b, None);
+        b.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(a_client_of_b);
-        sm.set_client_role(a_client_of_b, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(a_client_of_b, ClientRole::Peer);
     }
-    a.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(b_server_for_a);
+    a.add_server(b_server_for_a);
 
     // Clear any startup sync traffic.
     a.immediate_tick();
@@ -1694,12 +1682,11 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
 
     // Bring up B <-> C after B already has active downstream query state.
     {
-        let sm = c
-            .schema_manager_mut()
+        c.add_client(b_client_of_c, None);
+        c.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(b_client_of_c);
-        sm.set_client_role(b_client_of_c, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(b_client_of_c, ClientRole::Peer);
     }
     b.add_server(c_server_for_b);
     b.batched_tick();

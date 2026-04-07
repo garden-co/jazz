@@ -186,25 +186,6 @@ impl SyncManager {
     // Connection Management
     // ========================================================================
 
-    /// Add a server connection. Queues all existing objects to sync.
-    pub fn add_server(&mut self, server_id: ServerId) {
-        self.add_server_with_catalogue_match(server_id, false);
-    }
-
-    /// Add a server connection, optionally skipping catalogue replay when both
-    /// sides already advertise the same catalogue state.
-    pub fn add_server_with_catalogue_match(
-        &mut self,
-        server_id: ServerId,
-        skip_catalogue_sync: bool,
-    ) {
-        self.servers.insert(server_id, ServerState::default());
-        self.queue_full_sync_to_server(server_id);
-        if !skip_catalogue_sync {
-            self.queue_catalogue_sync_to_server(server_id);
-        }
-    }
-
     /// Add a server connection using storage-backed current-state replay.
     pub fn add_server_with_storage<H: Storage>(
         &mut self,
@@ -222,12 +203,6 @@ impl SyncManager {
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
-    }
-
-    /// Add a client connection.
-    pub fn add_client(&mut self, client_id: ClientId) {
-        self.clients.insert(client_id, ClientState::default());
-        self.queue_catalogue_sync_to_client(client_id);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
@@ -357,58 +332,6 @@ impl SyncManager {
     /// QueryManager will remove server-side QueryGraphs and forward upstream.
     pub fn take_pending_query_unsubscriptions(&mut self) -> Vec<PendingQueryUnsubscription> {
         std::mem::take(&mut self.pending_query_unsubscriptions)
-    }
-
-    /// Set the scope for a client's query subscription.
-    ///
-    /// Called by QueryManager after building QueryGraph and computing contributing ObjectIds.
-    /// This triggers initial sync of all objects in the scope.
-    pub fn set_client_query_scope(
-        &mut self,
-        client_id: ClientId,
-        query_id: QueryId,
-        scope: HashSet<(ObjectId, BranchName)>,
-        session: Option<Session>,
-    ) {
-        let Some(client) = self.clients.get_mut(&client_id) else {
-            return;
-        };
-
-        // Collect all objects currently in any query scope
-        let old_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        // Insert/update the query with the computed scope
-        client.queries.insert(
-            query_id,
-            QueryScope {
-                scope: scope.clone(),
-                session,
-            },
-        );
-
-        // Collect all objects now in any query scope
-        let new_scope: HashSet<(ObjectId, BranchName)> = client
-            .queries
-            .values()
-            .flat_map(|q| q.scope.iter().cloned())
-            .collect();
-
-        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
-            old_scope.difference(&new_scope).cloned().collect();
-        // Find newly visible (object, branch) pairs
-        let newly_visible: Vec<(ObjectId, BranchName)> =
-            new_scope.difference(&old_scope).cloned().collect();
-
-        self.prune_client_scope_tracking(client_id, &no_longer_visible);
-
-        // Queue initial syncs for newly visible objects
-        for (object_id, branch_name) in newly_visible {
-            self.queue_initial_sync_to_client(client_id, object_id, branch_name);
-        }
     }
 
     /// Storage-backed version of `set_client_query_scope` that can replay row

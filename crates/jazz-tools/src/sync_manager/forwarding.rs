@@ -31,26 +31,6 @@ impl SyncManager {
             .max_by_key(|row| (row.updated_at, row.version_id()))
     }
 
-    /// Forward an update to all servers.
-    ///
-    /// Call this after local writes to sync changes to connected servers.
-    pub fn forward_update_to_servers(&mut self, object_id: ObjectId, branch_name: BranchName) {
-        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
-        if !server_ids.is_empty() {
-            tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
-        }
-
-        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
-            return;
-        };
-
-        if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
-            for server_id in server_ids {
-                self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
-            }
-        }
-    }
-
     #[cfg(test)]
     pub fn forward_update_to_servers_with_storage<H: crate::storage::Storage>(
         &mut self,
