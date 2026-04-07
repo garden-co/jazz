@@ -236,6 +236,11 @@ export interface RenameOp<TOldName extends string = string> {
   oldName: TOldName;
 }
 
+export interface RenameTableFromOp<TOldName extends string = string> {
+  _type: "renameTable";
+  oldName: TOldName;
+}
+
 export type MigrationOp = AddOp | DropOp | RenameOp;
 
 // Internal representation for a single-table migration
@@ -276,6 +281,9 @@ export type LensOpType = LensOp["type"];
 
 export interface TableLens {
   table: string;
+  added?: boolean;
+  removed?: boolean;
+  renamedFrom?: string;
   operations: LensOp[];
 }
 

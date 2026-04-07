@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
@@ -15,9 +16,9 @@ export function DataExplorer() {
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
 
   return (
-    <div className={styles.layout}>
-      <aside className={styles.sidebar}>
-        <div className={styles.sidebarHeader}>
+    <Group className={styles.layout} orientation="horizontal">
+      <Panel className={styles.sidebarPanel} defaultSize="20%" minSize="14%" maxSize="30%">
+        <aside className={styles.sidebar}>
           <h2 className={styles.sidebarTitle}>Tables</h2>
           {runtime === "extension" ? (
             <label className={styles.propagationSwitch}>
@@ -32,11 +33,9 @@ export function DataExplorer() {
               />
             </label>
           ) : null}
-        </div>
-        <ul className={styles.tableList}>
-          {tableNames.map((tableName) => (
-            <li key={tableName}>
-              <div className={styles.tableRow}>
+          <ul className={styles.tableList}>
+            {tableNames.map((tableName) => (
+              <li key={tableName}>
                 <NavLink
                   to={`/data-explorer/${tableName}/data`}
                   className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}
@@ -44,28 +43,23 @@ export function DataExplorer() {
                 >
                   {tableName}
                 </NavLink>
-                <NavLink
-                  to={`/data-explorer/${tableName}/schema`}
-                  className={styles.schemaLink}
-                  aria-label={`View ${tableName} schema`}
-                >
-                  <span className={styles.schemaIcon}>⌘</span>
-                  <span className={styles.schemaLabel}>Schema</span>
-                </NavLink>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </aside>
-      <main className={styles.content}>
-        {!table ? (
-          <section className={styles.emptyState}>
-            <h3 className={styles.emptyTitle}>Select a table</h3>
-            <p className={styles.emptyText}>Choose a table from the left sidebar to view rows.</p>
-          </section>
-        ) : null}
-        <Outlet />
-      </main>
-    </div>
+              </li>
+            ))}
+          </ul>
+        </aside>
+      </Panel>
+      <Separator className={styles.resizeHandle} />
+      <Panel className={styles.contentPanel} minSize="40%">
+        <main className={styles.content}>
+          {!table ? (
+            <section className={styles.emptyState}>
+              <h3 className={styles.emptyTitle}>Select a table</h3>
+              <p className={styles.emptyText}>Choose a table from the left sidebar to view rows.</p>
+            </section>
+          ) : null}
+          <Outlet />
+        </main>
+      </Panel>
+    </Group>
   );
 }

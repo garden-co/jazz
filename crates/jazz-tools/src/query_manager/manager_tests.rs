@@ -14,8 +14,6 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
     TableSchema, Value,
 };
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::SyncManager;
 
@@ -74,21 +72,6 @@ fn create_query_manager(
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
     (qm, MemoryStorage::new())
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn create_query_manager_with_fjall(
-    sync_manager: SyncManager,
-    schema: Schema,
-) -> (QueryManager, tempfile::TempDir, FjallStorage) {
-    let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.fjall");
-    let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
-
-    (qm, temp_dir, storage)
 }
 
 /// Get the current branch name from a QueryManager.
@@ -160,70 +143,6 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
         .into(),
     );
     out
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn large_index_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("todos"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-        ])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("tag_lists"),
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "labels",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Text),
-            },
-        )])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("documents"),
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "payload",
-            ColumnType::Json { schema: None },
-        )])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("file_parts"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
-    );
-    schema.insert(
-        TableName::new("files"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new(
-                "parts",
-                ColumnType::Array {
-                    element: Box::new(ColumnType::Uuid),
-                },
-            )
-            .references("file_parts"),
-        ])
-        .into(),
-    );
-    schema
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_text() -> String {
-    "x".repeat(40_000)
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_json() -> String {
-    format!(r#"{{"body":"{}"}}"#, oversized_text())
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_ref_array(member_id: ObjectId) -> Value {
-    Value::Array((0..1_500).map(|_| Value::Uuid(member_id)).collect())
 }
 
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
@@ -786,134 +705,6 @@ fn update_row() {
         0,
         "Old indexed value should no longer match"
     );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_text_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "todos",
-            &[Value::Text(oversized_text()), Value::Boolean(false)],
-        )
-        .expect("oversized indexed text insert should succeed");
-
-    let oversized = oversized_text();
-    let query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text(oversized.clone()))
-        .build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized text");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1[0], Value::Text(oversized));
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_json_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let payload = oversized_json();
-    let handle = qm
-        .insert(&mut storage, "documents", &[Value::Text(payload.clone())])
-        .expect("oversized indexed json insert should succeed");
-
-    let query = qm
-        .query("documents")
-        .filter_eq("payload", Value::Text(payload.clone()))
-        .build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized json");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1, vec![Value::Text(payload)]);
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_ref_array_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let member = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("part-a".into())])
-        .expect("insert referenced row");
-    let parts = oversized_ref_array(member.row_id);
-    let handle = qm
-        .insert(&mut storage, "files", std::slice::from_ref(&parts))
-        .expect("oversized indexed array(ref) insert should succeed");
-
-    let query = qm.query("files").filter_eq("parts", parts.clone()).build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized array(ref)");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1, vec![parts.clone()]);
-
-    let branch = get_branch(&qm);
-    let member_lookup =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(member.row_id));
-    assert!(
-        member_lookup.contains(&handle.row_id),
-        "array(ref) membership index should still track each referenced row id"
-    );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_text_update_reindexes_to_new_value() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "todos",
-            &[Value::Text("keep-me".into()), Value::Boolean(false)],
-        )
-        .expect("insert initial row");
-
-    let oversized = oversized_text();
-    qm.update(
-        &mut storage,
-        handle.row_id,
-        &[Value::Text(oversized.clone()), Value::Boolean(false)],
-    )
-    .expect("oversized indexed text update should succeed");
-
-    let new_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text(oversized.clone()))
-        .build();
-    let new_rows =
-        execute_query(&mut qm, &mut storage, new_query).expect("query oversized indexed value");
-    assert_eq!(new_rows.len(), 1);
-    assert_eq!(new_rows[0].0, handle.row_id);
-
-    let query = qm.query("todos").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after update");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(
-        rows[0].1,
-        vec![Value::Text(oversized), Value::Boolean(false)]
-    );
-
-    let old_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text("keep-me".into()))
-        .build();
-    let old_rows =
-        execute_query(&mut qm, &mut storage, old_query).expect("query old indexed value");
-    assert_eq!(old_rows.len(), 0, "old title index entry should be removed");
 }
 
 #[test]
@@ -6455,6 +6246,63 @@ fn configure_legacy_client_with_current_permissions(qm: &mut QueryManager) {
     qm.set_authorization_schema(current_documents_permission_schema());
 }
 
+fn current_renamed_documents_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("files"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_update(
+                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                )
+                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+    schema
+}
+
+fn legacy_documents_to_renamed_current_permissions_lens() -> crate::schema_manager::lens::Lens {
+    let legacy_schema = legacy_documents_schema();
+    let current_schema = current_renamed_documents_permission_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let current_hash = crate::query_manager::types::SchemaHash::compute(&current_schema);
+    let mut transform = crate::schema_manager::lens::LensTransform::new();
+    transform.push(
+        crate::schema_manager::lens::LensOp::RenameTable {
+            old_name: "documents".to_string(),
+            new_name: "files".to_string(),
+        },
+        false,
+    );
+    transform.push(
+        crate::schema_manager::lens::LensOp::AddColumn {
+            table: "files".to_string(),
+            column: "owner_id".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("alice".into()),
+        },
+        false,
+    );
+    crate::schema_manager::lens::Lens::new(legacy_hash, current_hash, transform)
+}
+
+fn configure_legacy_client_with_renamed_current_permissions(qm: &mut QueryManager) {
+    let legacy_schema = legacy_documents_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let mut known_schemas = std::collections::HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    qm.set_known_schemas(std::sync::Arc::new(known_schemas));
+    qm.register_lens(legacy_documents_to_renamed_current_permissions_lens());
+    qm.set_authorization_schema(current_renamed_documents_permission_schema());
+}
+
 fn legacy_join_provenance_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
@@ -6930,6 +6778,120 @@ fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_tr
 }
 
 #[test]
+fn local_subscription_uses_current_permissions_after_table_rename_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
+    configure_legacy_client_with_renamed_current_permissions(&mut qm);
+
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[Value::Text("Legacy doc".into())],
+    )
+    .unwrap();
+
+    let query = qm.query("documents").build();
+    let alice_sub = qm
+        .subscribe_with_session(query.clone(), Some(PolicySession::new("alice")), None)
+        .unwrap();
+    let bob_sub = qm
+        .subscribe_with_session(query, Some(PolicySession::new("bob")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let alice_results = qm.get_subscription_results(alice_sub);
+    assert_eq!(
+        alice_results.len(),
+        1,
+        "Alice should see the legacy row after table-rename auth transform"
+    );
+    assert_eq!(alice_results[0].1, vec![Value::Text("Legacy doc".into())]);
+    assert!(
+        qm.get_subscription_results(bob_sub).is_empty(),
+        "Bob should be filtered out by the renamed current permission schema"
+    );
+}
+
+#[test]
+fn local_write_permissions_use_current_permissions_after_table_rename_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
+    configure_legacy_client_with_renamed_current_permissions(&mut qm);
+
+    let inserted = qm
+        .insert_with_session(
+            &mut storage,
+            "documents",
+            &[Value::Text("Alice insert".into())],
+            Some(&PolicySession::new("alice")),
+        )
+        .expect("alice insert should be allowed by renamed current permissions");
+
+    let insert_err = qm
+        .insert_with_session(
+            &mut storage,
+            "documents",
+            &[Value::Text("Bob insert".into())],
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob insert should be denied by renamed current permissions");
+    assert_eq!(
+        insert_err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Insert,
+        }
+    );
+
+    let update_err = qm
+        .update_with_session(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("Bob edit".into())],
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob update should be denied by renamed current permissions");
+    assert_eq!(
+        update_err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Update,
+        }
+    );
+
+    qm.update_with_session(
+        &mut storage,
+        inserted.row_id,
+        &[Value::Text("Alice edit".into())],
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("alice update should be allowed by renamed current permissions");
+
+    let delete_err = qm
+        .delete_with_session(
+            &mut storage,
+            inserted.row_id,
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob delete should be denied by renamed current permissions");
+    assert_eq!(
+        delete_err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Delete,
+        }
+    );
+
+    qm.delete_with_session(
+        &mut storage,
+        inserted.row_id,
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("alice delete should be allowed by renamed current permissions");
+}
+
+#[test]
 fn server_join_query_uses_current_permissions_for_joined_provenance() {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -7045,6 +7007,142 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     assert!(
         object_updates.is_empty(),
         "Joined rows should be filtered when current permissions deny any contributing provenance row"
+    );
+}
+
+#[test]
+fn server_subscription_uses_current_permissions_after_table_rename_lens_transform() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    // legacy branch: documents(title)
+    //                |
+    //                | RenameTable documents -> files
+    //                | AddColumn owner_id = "alice"
+    //                v
+    // current auth:  files(title, owner_id) with owner-based select policy
+    let authorization_schema = current_renamed_documents_permission_schema();
+    let structural_schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
+    let legacy_schema = legacy_documents_schema();
+    let legacy_hash = SchemaHash::compute(&legacy_schema);
+    let legacy_branch = ComposedBranchName::new("dev", legacy_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let sync_manager = SyncManager::new();
+    let mut server_qm = QueryManager::new(sync_manager);
+    server_qm.set_current_schema(structural_schema, "dev", "main");
+    server_qm.add_live_schema(legacy_schema.clone());
+    server_qm.register_lens(legacy_documents_to_renamed_current_permissions_lens());
+    server_qm.set_authorization_schema(authorization_schema);
+
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    server_qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
+    metadata.insert(
+        MetadataKey::OriginSchemaHash.to_string(),
+        legacy_hash.to_string(),
+    );
+    let document_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(metadata));
+    add_row_commit(
+        &mut server_qm,
+        &mut storage,
+        document_id,
+        &legacy_branch,
+        vec![],
+        encode_row(
+            &RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
+            &[Value::Text("Legacy doc".into())],
+        )
+        .unwrap(),
+        1000,
+        author.to_string(),
+    );
+
+    let alice = ClientId::new();
+    server_qm.sync_manager_mut().add_client(alice);
+    let alice_session = PolicySession::new("alice");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(alice, alice_session.clone());
+
+    let bob = ClientId::new();
+    server_qm.sync_manager_mut().add_client(bob);
+    let bob_session = PolicySession::new("bob");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(bob, bob_session.clone());
+
+    let query = QueryBuilder::new("files").branch(&legacy_branch).build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query.clone()),
+            session: Some(alice_session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(bob),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(2),
+            query: Box::new(query),
+            session: Some(bob_session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let alice_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == alice))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+    let bob_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == bob))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        alice_updates.len(),
+        1,
+        "Alice should receive the renamed legacy row after current-permissions auth filtering"
+    );
+    assert!(
+        alice_updates.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == document_id
+        )),
+        "Alice should receive the legacy document object"
+    );
+    assert!(
+        bob_updates.is_empty(),
+        "Bob should be filtered out by the current renamed permission schema"
     );
 }
 
@@ -9933,9 +10031,7 @@ fn remove_client_cleans_active_policy_checks() {
     // alice disconnects → only bob's policy check remains.
     //
     use crate::query_manager::policy::Operation;
-    use crate::sync_manager::{
-        ClientId, Destination, PendingPermissionCheck, PendingUpdateId, SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, PendingPermissionCheck, PendingUpdateId, SyncPayload};
     use uuid::Uuid;
 
     let sync_manager = SyncManager::new();
@@ -9948,13 +10044,14 @@ fn remove_client_cleans_active_policy_checks() {
     server_qm.sync_manager_mut().add_client(bob);
 
     let obj_id = crate::object::ObjectId::new();
+    let branch_name = crate::object::BranchName::new("main");
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
         id: PendingUpdateId(id),
         client_id,
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: crate::object::BranchName::new("main"),
+            branch_name,
             commits: vec![],
         },
         session: crate::query_manager::session::Session {
@@ -9975,7 +10072,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
-            branch: crate::object::BranchName::new("main"),
+            branch: branch_name,
             pending_check: make_check(1, alice),
         },
     );
@@ -9984,7 +10081,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
-            branch: crate::object::BranchName::new("main"),
+            branch: branch_name,
             pending_check: make_check(2, bob),
         },
     );

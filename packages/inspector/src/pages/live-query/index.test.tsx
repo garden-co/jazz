@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LiveQuery } from "./index";
 
@@ -58,7 +59,11 @@ describe("LiveQuery", () => {
   });
 
   it("renders an empty state when there are no active extension subscriptions", () => {
-    render(<LiveQuery />);
+    render(
+      <MemoryRouter>
+        <LiveQuery />
+      </MemoryRouter>,
+    );
 
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
@@ -78,7 +83,11 @@ describe("LiveQuery", () => {
       },
     ]);
 
-    render(<LiveQuery />);
+    render(
+      <MemoryRouter>
+        <LiveQuery />
+      </MemoryRouter>,
+    );
 
     expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();
     expect(screen.getByRole("cell", { name: "full" })).not.toBeNull();
@@ -115,7 +124,11 @@ describe("LiveQuery", () => {
       },
     ]);
 
-    render(<LiveQuery />);
+    render(
+      <MemoryRouter>
+        <LiveQuery />
+      </MemoryRouter>,
+    );
 
     fireEvent.change(screen.getByLabelText("Filter by table"), {
       target: { value: "projects" },
@@ -173,7 +186,11 @@ describe("LiveQuery", () => {
       },
     });
 
-    render(<LiveQuery />);
+    render(
+      <MemoryRouter>
+        <LiveQuery />
+      </MemoryRouter>,
+    );
 
     const rows = screen.getAllByRole("row");
     expect(rows[1]?.textContent).toContain("users");
@@ -206,7 +223,11 @@ describe("LiveQuery", () => {
       ],
     });
 
-    render(<LiveQuery />);
+    render(
+      <MemoryRouter>
+        <LiveQuery />
+      </MemoryRouter>,
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();
