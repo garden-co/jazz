@@ -72,7 +72,7 @@ impl QueryManager {
         branch_name: BranchName,
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (_, row) = Self::load_best_visible_row_version(storage, object_id, &branches)?;
+        let (_, row) = Self::load_best_visible_row_version(storage, object_id, &branches, None)?;
         Some(row.row_provenance())
     }
 
@@ -263,7 +263,8 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, row) = Self::load_best_visible_row_version(storage, object_id, &branches)?;
+        let (table, row) =
+            Self::load_best_visible_row_version(storage, object_id, &branches, None)?;
         if row.is_hard_deleted() {
             return None;
         }
@@ -365,7 +366,8 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) = Self::load_best_visible_row_version(storage, object_id, &branches)
+        let Some((table, row)) =
+            Self::load_best_visible_row_version(storage, object_id, &branches, None)
         else {
             return false;
         };
@@ -747,6 +749,7 @@ impl QueryManager {
                         storage_ref,
                         id,
                         &branches,
+                        None,
                         include_deleted,
                         &subscription_context,
                         &branch_schema_map,
@@ -913,6 +916,7 @@ impl QueryManager {
                             storage,
                             id,
                             branches,
+                            None,
                             include_deleted,
                             &sub.schema_context,
                             &branch_schema_map,
@@ -1560,7 +1564,7 @@ impl QueryManager {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version(storage, id, &branches)?;
+                let (_, row) = Self::load_best_visible_row_version(storage, id, &branches, None)?;
                 if row.is_hard_deleted() {
                     return None;
                 }

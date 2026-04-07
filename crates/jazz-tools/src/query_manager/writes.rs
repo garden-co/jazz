@@ -194,7 +194,7 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<(String, StoredRowVersion)> {
-        Self::load_best_visible_row_version(storage, row_id, &[branch_name.to_string()])
+        Self::load_best_visible_row_version(storage, row_id, &[branch_name.to_string()], None)
     }
 
     fn load_row_provenance_on_branch<H: Storage>(
@@ -405,7 +405,7 @@ impl QueryManager {
             .object_manager
             .get_or_load(id, storage, branches)?;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (table, row) = Self::load_best_visible_row_version(storage, id, branches)?;
+        let (table, row) = Self::load_best_visible_row_version(storage, id, branches, None)?;
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
@@ -999,7 +999,7 @@ impl QueryManager {
         let storage_ref: &dyn Storage = storage;
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
             let (_, row) =
-                Self::load_best_visible_row_version(storage_ref, id, &[branch.to_string()])?;
+                Self::load_best_visible_row_version(storage_ref, id, &[branch.to_string()], None)?;
             if row.is_hard_deleted() {
                 return None;
             }
