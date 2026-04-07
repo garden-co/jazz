@@ -1,6 +1,6 @@
 ---
 title: Client Setup
-description: Create Jazz client contexts across frameworks and runtimes, with zero-config defaults and explicit runtime overrides when needed.
+description: Create Jazz client contexts across frameworks and runtimes, with zero-config defaults and explicit runtime source overrides when needed.
 reviewedAt: "4059cdef"
 ---
 
@@ -48,13 +48,14 @@ In browser clients, omitting `localAuthMode` and `localAuthToken` defaults to an
 
 ## Where zero-config works
 
-- The browser quickstarts in these docs are Vite-based, and Jazz works out of the box there with no `runtime` config.
-- Expo / React Native uses the native Jazz runtime instead of the browser worker + Wasm asset path. Follow the Expo setup from the [Client quickstart](/docs/quickstarts/client#install) and you usually do not need `runtime`.
-- If your browser bundle serves Jazz assets from a custom base path, rewrites module URLs to `file://...`, or otherwise fails to resolve `jazz_wasm_bg.wasm` / `jazz-worker.js`, pass `runtime` explicitly.
+- The browser quickstarts in these docs are Vite-based, and Jazz works out of the box there with no `runtimeSources` config.
+- Expo / React Native uses the native Jazz runtime instead of the browser worker + Wasm asset path. Follow the Expo setup from the [Client quickstart](/docs/quickstarts/client#install) and you usually do not need `runtimeSources`.
+- If your browser bundle serves Jazz assets from a custom base path, rewrites module URLs to `file://...`, or otherwise fails to resolve `jazz_wasm_bg.wasm` / `jazz-worker.js`, pass `runtimeSources` explicitly.
 
 <Callout type="info">
-  If you are not using the quickstart stack, start with the zero-config setup above. Add `runtime`
-  only when your bundler or runtime cannot infer the Wasm and worker locations correctly.
+  If you are not using the quickstart stack, start with the zero-config setup above. Add
+  `runtimeSources` only when your bundler or runtime cannot infer the Wasm and worker locations
+  correctly.
 </Callout>
 
 ## Client config options
@@ -69,24 +70,24 @@ By default, browser clients use `driver: { type: "persistent" }`, which runs a d
 
 `memory` mode requires `serverUrl` to be set, since there is no local persistence.
 
-## Runtime overrides
+## Runtime source overrides
 
-Use `runtime` when Jazz cannot infer where to load the browser worker or Wasm binary from, or when your runtime wants an in-memory Wasm source/module instead of URLs.
+Use `runtimeSources` when Jazz cannot infer where to load the browser worker or Wasm binary from, or when your runtime wants an in-memory Wasm source/module instead of URLs.
 
-| Field                | Use it when                                                                 |
-| -------------------- | --------------------------------------------------------------------------- |
-| `runtime.baseUrl`    | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
-| `runtime.wasmUrl`    | The Wasm file has an explicit public URL                                    |
-| `runtime.workerUrl`  | The browser worker entry has an explicit public URL                         |
-| `runtime.wasmSource` | Your runtime gives you Wasm bytes directly                                  |
-| `runtime.wasmModule` | Your runtime gives you a precompiled `WebAssembly.Module`                   |
+| Field                       | Use it when                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `runtimeSources.baseUrl`    | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
+| `runtimeSources.wasmUrl`    | The Wasm file has an explicit public URL                                    |
+| `runtimeSources.workerUrl`  | The browser worker entry has an explicit public URL                         |
+| `runtimeSources.wasmSource` | Your runtime gives you Wasm bytes directly                                  |
+| `runtimeSources.wasmModule` | Your runtime gives you a precompiled `WebAssembly.Module`                   |
 
 Jazz resolves these in this order:
 
-1. `runtime.wasmModule`
-2. `runtime.wasmSource`
-3. `runtime.wasmUrl` / `runtime.workerUrl`
-4. `runtime.baseUrl`
+1. `runtimeSources.wasmModule`
+2. `runtimeSources.wasmSource`
+3. `runtimeSources.wasmUrl` / `runtimeSources.workerUrl`
+4. `runtimeSources.baseUrl`
 5. built-in zero-config fallback
 
 ### Browser asset overrides
@@ -104,7 +105,7 @@ React, Vue, and Svelte all pass the same config shape through to the shared clie
           config={{
             appId: "my-app",
             serverUrl: "https://my-jazz-server.example.com",
-            runtime: {
+            runtimeSources: {
               baseUrl: "/assets/jazz/",
             },
           }}
@@ -125,7 +126,7 @@ React, Vue, and Svelte all pass the same config shape through to the shared clie
     const client = createJazzClient({
       appId: "my-app",
       serverUrl: "https://my-jazz-server.example.com",
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
       },
     });
@@ -147,7 +148,7 @@ React, Vue, and Svelte all pass the same config shape through to the shared clie
       const client = createJazzClient({
         appId: "my-app",
         serverUrl: "https://my-jazz-server.example.com",
-        runtime: {
+        runtimeSources: {
           baseUrl: "/assets/jazz/",
         },
       });
@@ -166,7 +167,7 @@ React, Vue, and Svelte all pass the same config shape through to the shared clie
     const db = await createDb({
       appId: "my-app",
       serverUrl: "https://my-jazz-server.example.com",
-      runtime: {
+      runtimeSources: {
         wasmUrl: "/static/jazz/jazz_wasm_bg.wasm",
         workerUrl: "/static/jazz/worker/jazz-worker.js",
       },
@@ -180,7 +181,7 @@ Use `baseUrl` when both assets live together under one public directory. Use exp
 
 ### Edge-style Wasm setup
 
-Some runtimes do not use the browser worker boot path at all. In those cases, prefer `runtime.wasmModule` or `runtime.wasmSource`.
+Some runtimes do not use the browser worker boot path at all. In those cases, prefer `runtimeSources.wasmModule` or `runtimeSources.wasmSource`.
 
 ```ts title="worker.ts"
 import { createDb } from "jazz-tools";
@@ -188,18 +189,18 @@ import jazzWasmModule from "jazz-wasm/pkg/jazz_wasm_bg.wasm";
 
 const db = await createDb({
   appId: "my-app",
-  runtime: {
+  runtimeSources: {
     wasmModule: jazzWasmModule,
   },
 });
 ```
 
-If your platform hands you raw bytes instead of a compiled module, use `runtime.wasmSource`:
+If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
 
 ```ts title="worker.ts"
 const db = await createDb({
   appId: "my-app",
-  runtime: {
+  runtimeSources: {
     wasmSource: wasmBytes,
   },
 });

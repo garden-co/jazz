@@ -35,7 +35,7 @@ export type {
   QueryBuilder,
   QueryOptions,
   RowDelta,
-  RuntimeConfig,
+  RuntimeSourcesConfig,
   SubscriptionDelta,
   TableProxy,
 } from "../runtime/index.js";

@@ -1,12 +1,12 @@
 # Cloudflare Worker Runtime Example
 
-Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by passing a precompiled Wasm module through `runtime.wasmModule`.
+Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by passing a precompiled Wasm module through `runtimeSources.wasmModule`.
 
 ## What it verifies
 
 - `wrangler dev` can bundle the Worker locally
 - Cloudflare's Worker runtime can import `jazz-wasm/pkg/jazz_wasm_bg.wasm` as a `WebAssembly.Module`
-- `createDb({ runtime: { wasmModule } })` can initialize Jazz without relying on browser asset URLs
+- `createDb({ runtimeSources: { wasmModule } })` can initialize Jazz without relying on browser asset URLs
 - The repo-local example imports Jazz from source so it is not blocked on packaging `jazz-tools` first
 
 ## Run locally

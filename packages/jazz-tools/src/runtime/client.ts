@@ -5,7 +5,7 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext, RuntimeConfig, Session } from "./context.js";
+import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
@@ -643,7 +643,7 @@ export class JazzClient {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Load WASM module dynamically
-    const wasmModule = await loadWasmModule(resolvedContext.runtime);
+    const wasmModule = await loadWasmModule(resolvedContext.runtimeSources);
 
     // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
@@ -1533,7 +1533,7 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(runtime?: RuntimeConfig): Promise<WasmModule> {
+export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);

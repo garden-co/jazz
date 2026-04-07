@@ -110,7 +110,7 @@ describe("Db worker runtime bootstrap", () => {
     const db = await Db.createWithWorker({
       appId: "worker-bootstrap-explicit-urls",
       driver: { type: "persistent", dbName: "worker-bootstrap-explicit-urls" },
-      runtime: {
+      runtimeSources: {
         baseUrl: "/ignored/",
         workerUrl: "/custom/jazz-worker.js",
         wasmUrl: "/custom/jazz_wasm_bg.wasm",
@@ -124,7 +124,7 @@ describe("Db worker runtime bootstrap", () => {
     ]);
   });
 
-  it("derives worker and wasm URLs from runtime.baseUrl when explicit URLs are omitted", async () => {
+  it("derives worker and wasm URLs from runtimeSources.baseUrl when explicit URLs are omitted", async () => {
     const spawnedWorkerUrls: string[] = [];
 
     class FakeWorker extends EventTarget {
@@ -155,7 +155,7 @@ describe("Db worker runtime bootstrap", () => {
     const db = await Db.createWithWorker({
       appId: "worker-bootstrap-base-url",
       driver: { type: "persistent", dbName: "worker-bootstrap-base-url" },
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
       },
     });
@@ -208,7 +208,7 @@ describe("Db worker runtime bootstrap", () => {
     ]);
   });
 
-  it("does not append a bootstrap wasm URL when runtime provides in-memory wasmSource", async () => {
+  it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {
     const spawnedWorkerUrls: string[] = [];
 
     class FakeWorker extends EventTarget {
@@ -239,7 +239,7 @@ describe("Db worker runtime bootstrap", () => {
     const db = await Db.createWithWorker({
       appId: "worker-bootstrap-wasm-source",
       driver: { type: "persistent", dbName: "worker-bootstrap-wasm-source" },
-      runtime: {
+      runtimeSources: {
         workerUrl: "/custom/jazz-worker.js",
         wasmSource: new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
       },

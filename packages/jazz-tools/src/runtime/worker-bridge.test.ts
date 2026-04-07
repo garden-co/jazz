@@ -194,7 +194,7 @@ describe("WorkerBridge", () => {
     expect(bridge.getWorkerClientId()).toBe("worker-client-123");
   });
 
-  it("includes runtime in the worker init payload", async () => {
+  it("includes runtimeSources in the worker init payload", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
@@ -206,7 +206,7 @@ describe("WorkerBridge", () => {
       env: "dev",
       userBranch: "main",
       dbName: "db-1",
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmSource,
       },
@@ -214,7 +214,7 @@ describe("WorkerBridge", () => {
 
     expect(worker.posted[0]).toMatchObject({
       type: "init",
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmSource,
       },

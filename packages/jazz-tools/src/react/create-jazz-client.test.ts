@@ -165,10 +165,10 @@ describe("react/create-jazz-client unit", () => {
     expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
 
-  it("RC-U05: forwards runtime through framework client creation", async () => {
+  it("RC-U05: forwards runtimeSources through framework client creation", async () => {
     const config: DbConfig = {
       appId: "react-client-unit-5",
-      runtime: {
+      runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmUrl: "/assets/jazz/custom.wasm",
         workerUrl: "/assets/jazz/custom-worker.js",

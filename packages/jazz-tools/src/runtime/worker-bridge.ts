@@ -7,7 +7,7 @@
  */
 
 import type { Runtime } from "./client.js";
-import type { RuntimeConfig } from "./context.js";
+import type { RuntimeSourcesConfig } from "./context.js";
 import type {
   InitMessage,
   WorkerLifecycleEvent,
@@ -30,7 +30,7 @@ export interface WorkerBridgeOptions {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
   adminSecret?: string;
-  runtime?: RuntimeConfig;
+  runtimeSources?: RuntimeSourcesConfig;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
@@ -153,7 +153,7 @@ export class WorkerBridge {
       localAuthMode: options.localAuthMode,
       localAuthToken: options.localAuthToken,
       adminSecret: options.adminSecret,
-      runtime: options.runtime,
+      runtimeSources: options.runtimeSources,
       logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };

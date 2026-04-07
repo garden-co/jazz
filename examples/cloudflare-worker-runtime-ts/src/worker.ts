@@ -27,7 +27,7 @@ function getDb(): Promise<Db> {
     userBranch: "main",
     localAuthMode: "anonymous",
     localAuthToken: LOCAL_AUTH_TOKEN,
-    runtime: {
+    runtimeSources: {
       wasmModule: jazzWasmModule,
     },
   });
@@ -50,7 +50,7 @@ async function handleSmoke(db: Db): Promise<Response> {
   return json({
     ok: true,
     runtime: "cloudflare-workers",
-    wasmInit: "runtime.wasmModule",
+    wasmInit: "runtimeSources.wasmModule",
     insertedId: inserted.id,
     todoCount: todos.length,
     todos,

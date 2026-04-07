@@ -36,4 +36,4 @@ export {
   type SyntheticUserStorageOptions,
   type SyntheticUserStore,
 } from "./synthetic-users.js";
-export type { QueryOptions, RuntimeConfig } from "../runtime/index.js";
+export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
