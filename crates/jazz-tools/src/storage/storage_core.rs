@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::row_regions::{
     BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_stored_row_version,
@@ -107,7 +108,7 @@ pub(super) fn append_history_region_rows_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, &row.branch, row.row_id, row.updated_at);
+        let key = history_row_key(table, row.row_id, row.version_id());
         let encoded = encode_history_row(row)?;
         set(&key, &encoded)?;
     }
@@ -256,16 +257,27 @@ pub(super) fn scan_history_row_versions_core(
     row_id: ObjectId,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
 ) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = history_table_prefix(table);
+    let prefix = history_row_versions_prefix(table, row_id);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
         .map(|(_, bytes)| decode_history_row(&bytes))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|row| row.row_id == row_id)
-        .collect();
-    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at));
+        .collect::<Result<_, _>>()?;
+    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
     Ok(rows)
+}
+
+#[allow(dead_code)]
+pub(super) fn load_history_row_version_core(
+    table: &str,
+    row_id: ObjectId,
+    version_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<StoredRowVersion>, StorageError> {
+    let key = history_row_key(table, row_id, version_id);
+    match get(&key)? {
+        Some(bytes) => Ok(Some(decode_history_row(&bytes)?)),
+        None => Ok(None),
+    }
 }
 
 #[allow(dead_code)]
@@ -276,8 +288,8 @@ pub(super) fn scan_history_region_core(
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
 ) -> Result<Vec<StoredRowVersion>, StorageError> {
     let prefix = match scan {
-        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table, branch),
-        HistoryScan::Row { row_id } => history_row_versions_prefix(table, branch, row_id),
+        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
+        HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
     };
 
     let scanned: Vec<StoredRowVersion> = scan_prefix(&prefix)?
@@ -285,12 +297,15 @@ pub(super) fn scan_history_region_core(
         .map(|(_, bytes)| decode_history_row(&bytes))
         .collect::<Result<_, _>>()?;
 
-    let mut rows = match scan {
-        HistoryScan::Branch | HistoryScan::Row { .. } => scanned,
+    let mut rows: Vec<StoredRowVersion> = match scan {
+        HistoryScan::Branch | HistoryScan::Row { .. } => scanned
+            .into_iter()
+            .filter(|row| row.branch == branch)
+            .collect(),
         HistoryScan::AsOf { ts } => {
             let mut latest_per_row = HashMap::<ObjectId, StoredRowVersion>::new();
             for row in scanned {
-                if row.updated_at > ts || !row.state.is_visible() {
+                if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
                     continue;
                 }
 
@@ -305,6 +320,13 @@ pub(super) fn scan_history_region_core(
         }
     };
 
-    rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
+    rows.sort_by_key(|row| {
+        (
+            row.branch.clone(),
+            row.row_id,
+            row.updated_at,
+            row.version_id(),
+        )
+    });
     Ok(rows)
 }

@@ -90,7 +90,7 @@ fn add_row_version_rejects_unknown_parent() {
         ),
     );
 
-    assert_eq!(result, Err(Error::BranchNotFound(BranchName::new("main"))));
+    assert_eq!(result, Err(Error::ParentNotFound(missing_parent)));
 
     manager
         .add_row_version(
@@ -156,6 +156,76 @@ fn add_row_version_tracks_visible_row_and_tips() {
     assert_eq!(updates[0].row.version_id(), root_id);
     assert_eq!(updates[1].row.version_id(), alice_id);
     assert_eq!(updates[2].row.version_id(), bob_id);
+}
+
+#[test]
+fn add_row_version_keeps_distinct_same_timestamp_siblings_in_history() {
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let row_id = manager.create(&mut io, Some(row_metadata("users")));
+    let author = ObjectId::new();
+
+    let root = visible_row(row_id, "main", Vec::new(), 1_000, author, b"root");
+    let root_id = manager
+        .add_row_version(&mut io, row_id, "main", root.clone())
+        .unwrap();
+
+    let alice = visible_row(row_id, "main", vec![root_id], 2_000, author, b"alice");
+    let alice_id = manager
+        .add_row_version(&mut io, row_id, "main", alice.clone())
+        .unwrap();
+
+    let bob = visible_row(row_id, "main", vec![root_id], 2_000, author, b"bob");
+    let bob_id = manager
+        .add_row_version(&mut io, row_id, "main", bob.clone())
+        .unwrap();
+
+    assert_ne!(alice_id, bob_id);
+
+    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    assert_eq!(history_rows.len(), 3, "history should keep both siblings");
+
+    let tips = manager.get_tip_ids(row_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+    assert!(tips.contains(&alice_id));
+    assert!(tips.contains(&bob_id));
+}
+
+#[test]
+fn add_row_version_keeps_identical_payload_versions_across_branches() {
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let row_id = manager.create(&mut io, Some(row_metadata("users")));
+    let author = ObjectId::new();
+
+    let main = visible_row(row_id, "main", Vec::new(), 1_000, author, b"same");
+    let main_id = manager
+        .add_row_version(&mut io, row_id, "main", main.clone())
+        .unwrap();
+
+    let draft = visible_row(row_id, "draft", Vec::new(), 1_000, author, b"same");
+    let draft_id = manager
+        .add_row_version(&mut io, row_id, "draft", draft.clone())
+        .unwrap();
+
+    assert_ne!(main_id, draft_id, "branch-local versions must not collide");
+
+    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    assert_eq!(history_rows.len(), 2, "history should retain both branches");
+    assert_eq!(
+        manager
+            .visible_row(row_id, BranchName::new("main"))
+            .expect("main row should stay visible")
+            .data,
+        b"same".to_vec()
+    );
+    assert_eq!(
+        manager
+            .visible_row(row_id, BranchName::new("draft"))
+            .expect("draft row should stay visible")
+            .data,
+        b"same".to_vec()
+    );
 }
 
 #[test]

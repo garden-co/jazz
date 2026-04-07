@@ -17,8 +17,7 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{Session, WriteContext};
 use super::types::{
-    ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName,
-    Value,
+    ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -223,12 +222,7 @@ impl QueryManager {
             .object_manager
             .get(row_id)
             .cloned()
-            .or_else(|| {
-                storage
-                    .load_metadata(row_id)
-                    .ok()
-                    .flatten()
-            })?;
+            .or_else(|| storage.load_metadata(row_id).ok().flatten())?;
         let table = metadata.get(MetadataKey::Table.as_str())?;
         let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
         resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())
@@ -2015,11 +2009,10 @@ impl QueryManager {
     /// With sync storage, commits are stored immediately.
     /// Used by `InsertResult::is_complete()` to check durability.
     pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
-        self.sync_manager.object_manager.row_version_exists(
-            object_id,
-            &BranchName::new(self.current_branch()),
-            *commit_id,
-        )
+        self.sync_manager
+            .object_manager
+            .visible_row(object_id, BranchName::new(self.current_branch()))
+            .is_some_and(|row| row.version_id() == *commit_id)
     }
 }
 

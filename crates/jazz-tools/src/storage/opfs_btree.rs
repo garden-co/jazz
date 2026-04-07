@@ -8,7 +8,7 @@
 //! ```text
 //! "raw:{table}:{local_key}"                               → raw table entry
 //! "row:{table}:0:{branch}:{row_uuid}"                     → encoded VisibleRowEntry
-//! "row:{table}:1:{branch}:{row_uuid}:{updated_at}"        → encoded StoredRowVersion
+//! "row:{table}:1:{row_uuid}:{version_id}"                 → encoded StoredRowVersion
 //! ```
 
 use std::cell::RefCell;
@@ -29,13 +29,15 @@ use super::{
     Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_rows_core, load_visible_region_row_core,
-        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
-        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
+        append_history_region_rows_core, load_history_row_version_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
+        scan_visible_region_core, scan_visible_region_row_versions_core,
+        upsert_visible_region_rows_core,
     },
 };
+use crate::commit::CommitId;
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -313,6 +315,15 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         scan_history_row_versions_core(table, row_id, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        load_history_row_version_core(table, row_id, version_id, |key| self.tree_read(key))
     }
 
     fn scan_history_region(

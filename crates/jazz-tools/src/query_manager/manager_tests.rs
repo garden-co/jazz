@@ -160,14 +160,14 @@ fn receive_row_commit(
     branch: &str,
     commit: crate::commit::Commit,
 ) -> crate::commit::CommitId {
-    let version_id = commit.id();
     let row = StoredRowVersion::from_commit(
         object_id,
         branch,
-        version_id,
+        commit.id(),
         &commit,
         RowState::VisibleDirect,
     );
+    let version_id = row.version_id();
     qm.sync_manager_mut()
         .object_manager
         .add_row_version(storage, object_id, branch, row)

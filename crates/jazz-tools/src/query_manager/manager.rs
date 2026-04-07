@@ -1544,18 +1544,17 @@ impl QueryManager {
                         .then_some(schema_context.current_hash)
                 })
                 .or_else(|| {
-                    ComposedBranchName::parse(&BranchName::new(branch))
-                        .and_then(|composed| {
-                            if composed.schema_hash.short() == schema_context.current_hash.short() {
-                                Some(schema_context.current_hash)
-                            } else {
-                                schema_context
-                                    .live_schemas
-                                    .keys()
-                                    .copied()
-                                    .find(|hash| hash.short() == composed.schema_hash.short())
-                            }
-                        })
+                    ComposedBranchName::parse(&BranchName::new(branch)).and_then(|composed| {
+                        if composed.schema_hash.short() == schema_context.current_hash.short() {
+                            Some(schema_context.current_hash)
+                        } else {
+                            schema_context
+                                .live_schemas
+                                .keys()
+                                .copied()
+                                .find(|hash| hash.short() == composed.schema_hash.short())
+                        }
+                    })
                 });
             let scan_table = branch_schema_hash
                 .and_then(|hash| {
@@ -1624,27 +1623,26 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved =
-            Self::load_best_visible_row_version(
+        let resolved = Self::load_best_visible_row_version(
+            storage,
+            row_id,
+            branches,
+            durability_tier,
+            schema_context,
+            branch_schema_map,
+        )
+        .or_else(|| {
+            let pending_version_id = local_pending_version?;
+            let (table, row) = Self::load_best_visible_row_version(
                 storage,
                 row_id,
                 branches,
-                durability_tier,
+                None,
                 schema_context,
                 branch_schema_map,
-            )
-                .or_else(|| {
-                    let pending_version_id = local_pending_version?;
-                    let (table, row) = Self::load_best_visible_row_version(
-                        storage,
-                        row_id,
-                        branches,
-                        None,
-                        schema_context,
-                        branch_schema_map,
-                    )?;
-                    (row.version_id() == pending_version_id).then_some((table, row))
-                })?;
+            )?;
+            (row.version_id() == pending_version_id).then_some((table, row))
+        })?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {
