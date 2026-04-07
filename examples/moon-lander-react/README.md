@@ -85,8 +85,9 @@ src/
     useDeposits.ts        Deposit subscription and reconciliation.
     writes.ts             DB write helpers (playerStateChanged, reconcileDeposits).
 
+schema.ts                 Table definitions (players, fuel_deposits, chat_messages).
+permissions.ts            Access control policies.
 schema/
-  current.ts              Table definitions (players, fuel_deposits, chat_messages).
   app.ts                  Auto-generated TypeScript interfaces and query builders.
 ```
 

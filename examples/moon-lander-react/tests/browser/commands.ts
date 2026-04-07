@@ -238,7 +238,7 @@ export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx
     adminSecret: FRESH_ADMIN_SECRET,
   });
 
-  const schemaDir = join(import.meta.dirname ?? __dirname, "../../schema");
+  const schemaDir = join(import.meta.dirname ?? __dirname, "../..");
   await pushSchemaCatalogue({
     serverUrl: handle.url,
     appId: FRESH_APP_ID,

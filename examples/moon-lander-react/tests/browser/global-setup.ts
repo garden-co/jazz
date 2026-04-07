@@ -29,7 +29,7 @@ export async function setup(): Promise<void> {
 
   const handle = await server;
 
-  const schemaDir = join(import.meta.dirname ?? __dirname, "../../schema");
+  const schemaDir = join(import.meta.dirname ?? __dirname, "../..");
   await pushSchemaCatalogue({
     serverUrl: handle.url,
     appId: APP_ID,
