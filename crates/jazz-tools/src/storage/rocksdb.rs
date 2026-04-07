@@ -23,7 +23,7 @@ use super::{
     },
 };
 use crate::object::ObjectId;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 struct RocksDBInner {
@@ -238,13 +238,9 @@ impl Storage for RocksDBStorage {
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            append_history_region_rows_core(
-                table,
-                rows,
-                |key| Self::get_from_db(&inner.db, key),
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-                |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
-            )?;
+            append_history_region_rows_core(table, rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
             Self::commit_txn(txn.into_inner())
         })
     }
@@ -252,16 +248,13 @@ impl Storage for RocksDBStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            upsert_visible_region_rows_core(
-                table,
-                rows,
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-                |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
-            )?;
+            upsert_visible_region_rows_core(table, entries, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
             Self::commit_txn(txn.into_inner())
         })
     }

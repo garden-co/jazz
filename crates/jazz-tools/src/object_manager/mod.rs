@@ -6,7 +6,7 @@ use smolset::SmolSet;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
@@ -52,6 +52,12 @@ impl RowBranch {
     fn current_visible_row(&self) -> Option<StoredRowVersion> {
         let version_id = self.current_visible?;
         self.versions.get(&version_id).cloned()
+    }
+
+    fn visible_entry(&self) -> Option<VisibleRowEntry> {
+        let current_row = self.current_visible_row()?;
+        let history_rows = self.versions.values().cloned().collect::<Vec<_>>();
+        Some(VisibleRowEntry::rebuild(current_row, &history_rows))
     }
 
     fn contains(&self, version_id: CommitId) -> bool {
@@ -295,12 +301,12 @@ impl ObjectManager {
         }
     }
 
-    fn upsert_visible_row<H: Storage>(io: &mut H, table: &str, row: &StoredRowVersion) {
-        if let Err(error) = io.upsert_visible_region_rows(table, std::slice::from_ref(row)) {
+    fn upsert_visible_row<H: Storage>(io: &mut H, table: &str, entry: &VisibleRowEntry) {
+        if let Err(error) = io.upsert_visible_region_rows(table, std::slice::from_ref(entry)) {
             tracing::warn!(
                 table,
-                branch = row.branch,
-                row_id = %row.row_id,
+                branch = entry.current_row.branch,
+                row_id = %entry.current_row.row_id,
                 %error,
                 "failed to upsert row-region visible row"
             );
@@ -327,7 +333,10 @@ impl ObjectManager {
         };
 
         if visible_changed {
-            Self::upsert_visible_row(io, &table, &current_row);
+            let branch_name = BranchName::new(current_row.branch.clone());
+            if let Some(entry) = self.visible_row_entry(history_row.row_id, branch_name) {
+                Self::upsert_visible_row(io, &table, &entry);
+            }
         } else {
             return;
         }
@@ -381,6 +390,16 @@ impl ObjectManager {
         let branch_name = branch_name.into();
         self.row_branch(object_id, &branch_name)
             .and_then(RowBranch::current_visible_row)
+    }
+
+    pub fn visible_row_entry(
+        &self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+    ) -> Option<VisibleRowEntry> {
+        let branch_name = branch_name.into();
+        self.row_branch(object_id, &branch_name)
+            .and_then(RowBranch::visible_entry)
     }
 
     pub fn row_version_exists(
@@ -492,19 +511,22 @@ impl ObjectManager {
                     continue;
                 }
 
-                let history_rows =
-                    match storage.scan_history_region(&table, bn.as_str(), HistoryScan::Branch) {
-                        Ok(rows) => rows,
-                        Err(err) => {
-                            tracing::warn!(
-                                %id,
-                                branch = %bn,
-                                error = ?err,
-                                "get_or_load: failed to hydrate row history"
-                            );
-                            Vec::new()
-                        }
-                    };
+                let history_rows = match storage.scan_history_region(
+                    &table,
+                    bn.as_str(),
+                    HistoryScan::Row { row_id: id },
+                ) {
+                    Ok(rows) => rows,
+                    Err(err) => {
+                        tracing::warn!(
+                            %id,
+                            branch = %bn,
+                            error = ?err,
+                            "get_or_load: failed to hydrate row history"
+                        );
+                        Vec::new()
+                    }
+                };
 
                 for row in history_rows {
                     self.remember_remote_row_version(id, bn, row);

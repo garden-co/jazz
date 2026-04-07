@@ -1,6 +1,7 @@
 use super::*;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::query::QueryBuilder;
+use crate::row_regions::VisibleRowEntry;
 use crate::storage::{MemoryStorage, Storage};
 use std::collections::{HashMap, HashSet};
 
@@ -37,8 +38,14 @@ fn seed_visible_row(
         .create_with_id(io, row.row_id, Some(row_metadata(table)));
     io.append_history_region_rows(table, std::slice::from_ref(&row))
         .unwrap();
-    io.upsert_visible_region_rows(table, std::slice::from_ref(&row))
-        .unwrap();
+    io.upsert_visible_region_rows(
+        table,
+        std::slice::from_ref(&VisibleRowEntry::rebuild(
+            row.clone(),
+            std::slice::from_ref(&row),
+        )),
+    )
+    .unwrap();
     sm.object_manager
         .remember_remote_row_version(row.row_id, BranchName::new(&row.branch), row);
 }
@@ -510,8 +517,14 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     io.put_metadata(row_id, row_metadata("users")).unwrap();
     io.append_history_region_rows("users", &[older.clone(), newer.clone()])
         .unwrap();
-    io.upsert_visible_region_rows("users", std::slice::from_ref(&newer))
-        .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&VisibleRowEntry::rebuild(
+            newer.clone(),
+            &[older.clone(), newer.clone()],
+        )),
+    )
+    .unwrap();
 
     let mut sm = SyncManager::new();
     let server_id = ServerId::new();

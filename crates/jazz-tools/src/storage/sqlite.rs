@@ -20,7 +20,7 @@ use super::{
     },
 };
 use crate::object::ObjectId;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
@@ -290,13 +290,9 @@ impl Storage for SqliteStorage {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
-                append_history_region_rows_core(
-                    table,
-                    rows,
-                    |key| Self::get(&inner.conn, key),
-                    |prefix| Self::scan_prefix(&inner.conn, prefix),
-                    |key, bytes| Self::set(&inner.conn, key, bytes),
-                )
+                append_history_region_rows_core(table, rows, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
             })
         })
     }
@@ -304,17 +300,14 @@ impl Storage for SqliteStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
-                upsert_visible_region_rows_core(
-                    table,
-                    rows,
-                    |prefix| Self::scan_prefix(&inner.conn, prefix),
-                    |key, bytes| Self::set(&inner.conn, key, bytes),
-                )
+                upsert_visible_region_rows_core(table, entries, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
             })
         })
     }

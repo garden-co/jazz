@@ -77,10 +77,6 @@ impl SyncManager {
             .or_else(|| storage.load_metadata(row.row_id).ok().flatten())
     }
 
-    fn row_version_wins(incoming: &StoredRowVersion, current: &StoredRowVersion) -> bool {
-        (incoming.updated_at, incoming.version_id()) > (current.updated_at, current.version_id())
-    }
-
     fn apply_row_updated<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -105,6 +101,24 @@ impl SyncManager {
             && storage.load_metadata(row.row_id).ok().flatten().is_none();
 
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
+        let _ = self.object_manager.get_or_load(
+            row.row_id,
+            storage,
+            std::slice::from_ref(&branch_name),
+        );
+        self.object_manager.remember_remote_row_version(
+            row.row_id,
+            BranchName::new(&row.branch),
+            row.clone(),
+        );
+
+        let visible_entry = self
+            .object_manager
+            .visible_row_entry(row.row_id, BranchName::new(&row.branch));
+        let visible_changed = visible_entry
+            .as_ref()
+            .map(|entry| entry.current_row.clone())
+            != previous_row;
 
         if let Err(error) = storage.append_history_region_rows(&table, std::slice::from_ref(&row)) {
             tracing::warn!(
@@ -116,13 +130,8 @@ impl SyncManager {
             );
         }
 
-        let visible_changed = previous_row
-            .as_ref()
-            .is_none_or(|current| Self::row_version_wins(&row, current));
-
         if visible_changed
-            && let Err(error) =
-                storage.upsert_visible_region_rows(&table, std::slice::from_ref(&row))
+            && let Err(error) = storage.upsert_visible_region_rows(&table, visible_entry.as_slice())
         {
             tracing::warn!(
                 table,
@@ -132,12 +141,6 @@ impl SyncManager {
                 "failed to upsert synced visible row"
             );
         }
-
-        self.object_manager.remember_remote_row_version(
-            row.row_id,
-            BranchName::new(&row.branch),
-            row.clone(),
-        );
 
         Some(AppliedRowVersion {
             metadata,

@@ -22,7 +22,7 @@ use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::object::ObjectId;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
@@ -254,26 +254,15 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
-        append_history_region_rows_core(
-            table,
-            rows,
-            |key| self.tree_read(key),
-            |prefix| self.tree_scan_prefix(prefix),
-            |key, bytes| self.tree_insert(key, bytes),
-        )
+        append_history_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
     }
 
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        upsert_visible_region_rows_core(
-            table,
-            rows,
-            |prefix| self.tree_scan_prefix(prefix),
-            |key, bytes| self.tree_insert(key, bytes),
-        )
+        upsert_visible_region_rows_core(table, entries, |key, bytes| self.tree_insert(key, bytes))
     }
 
     fn patch_row_region_rows_by_batch(
@@ -362,7 +351,7 @@ mod tests {
     use crate::catalogue::CatalogueEntry;
     use crate::metadata::RowProvenance;
     use crate::query_manager::types::Value;
-    use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+    use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
 
     fn make_row_version(
@@ -419,7 +408,13 @@ mod tests {
             .append_history_region_rows("users", std::slice::from_ref(&row))
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
             .unwrap();
 
         assert_eq!(
@@ -543,7 +538,13 @@ mod tests {
             .append_history_region_rows("users", std::slice::from_ref(&row))
             .unwrap();
         storage
-            .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
             .unwrap();
         storage
             .patch_row_region_rows_by_batch(
@@ -583,7 +584,13 @@ mod tests {
                 .append_history_region_rows("users", std::slice::from_ref(&row))
                 .unwrap();
             storage
-                .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+                .upsert_visible_region_rows(
+                    "users",
+                    std::slice::from_ref(&VisibleRowEntry::rebuild(
+                        row.clone(),
+                        std::slice::from_ref(&row),
+                    )),
+                )
                 .unwrap();
 
             storage
