@@ -69,10 +69,7 @@ impl SyncManager {
             return Some(metadata.metadata.clone());
         }
 
-        self.object_manager
-            .get(row.row_id)
-            .cloned()
-            .or_else(|| storage.load_metadata(row.row_id).ok().flatten())
+        storage.load_metadata(row.row_id).ok().flatten()
     }
 
     fn apply_row_updated<H: Storage>(

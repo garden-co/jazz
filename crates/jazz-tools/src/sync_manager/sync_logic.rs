@@ -215,7 +215,7 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: BranchName,
     ) {
-        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
+        let Some(metadata) = storage.load_metadata(object_id).ok().flatten() else {
             return;
         };
         if let Some(row) =

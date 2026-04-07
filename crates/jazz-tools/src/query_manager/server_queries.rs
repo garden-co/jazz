@@ -638,7 +638,6 @@ impl QueryManager {
         base_scope: &HashSet<(ObjectId, BranchName)>,
         graph: &super::graph::QueryGraph,
         branches: &[String],
-        object_manager: &crate::object_manager::ObjectManager,
         storage: &H,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
@@ -653,7 +652,10 @@ impl QueryManager {
         }
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        for (object_id, metadata) in &object_manager.metadata_by_id {
+        let Ok(objects) = storage.scan_metadata() else {
+            return scope;
+        };
+        for (object_id, metadata) in objects {
             let Some(table_name) = metadata.get(MetadataKey::Table.as_str()) else {
                 continue;
             };
@@ -666,14 +668,14 @@ impl QueryManager {
 
             for branch_name in &branch_names {
                 let Some(row) = storage
-                    .load_visible_region_row(table_name, branch_name.as_str(), *object_id)
+                    .load_visible_region_row(table_name, branch_name.as_str(), object_id)
                     .ok()
                     .flatten()
                 else {
                     continue;
                 };
                 if !row.is_hard_deleted() {
-                    scope.insert((*object_id, *branch_name));
+                    scope.insert((object_id, *branch_name));
                 }
             }
         }
@@ -807,25 +809,10 @@ impl QueryManager {
             };
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
-                let om = &self.sync_manager.object_manager;
-                Self::scope_with_policy_context_rows(
-                    &result_scope,
-                    &graph,
-                    &branches,
-                    om,
-                    storage_ref,
-                )
+                Self::scope_with_policy_context_rows(&result_scope, &graph, &branches, storage_ref)
             } else {
                 result_scope
             };
-
-            for (object_id, branch_name) in &scope {
-                let _ = self.sync_manager.object_manager.get_or_load(
-                    *object_id,
-                    storage_ref,
-                    &[branch_name.as_str().to_string()],
-                );
-            }
 
             // Set scope in SyncManager (triggers initial sync)
             self.sync_manager.set_client_query_scope_with_storage(
@@ -978,12 +965,10 @@ impl QueryManager {
                     )
                 };
                 if self.should_sync_policy_context_rows(client_id) {
-                    let om = &self.sync_manager.object_manager;
                     Self::scope_with_policy_context_rows(
                         &result_scope,
                         &sub.graph,
                         branches,
-                        om,
                         storage,
                     )
                 } else {
@@ -991,13 +976,6 @@ impl QueryManager {
                 }
             };
             if new_scope != sub.last_scope {
-                for (object_id, branch_name) in &new_scope {
-                    let _ = self.sync_manager.object_manager.get_or_load(
-                        *object_id,
-                        storage,
-                        &[branch_name.as_str().to_string()],
-                    );
-                }
                 scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
                 sub.last_scope = new_scope;
             }
@@ -1581,15 +1559,13 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Settle each active policy check
-        let metadata_by_id = &self.sync_manager.object_manager.metadata_by_id;
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version_with_cache(
+                let (_, row) = Self::load_best_visible_row_version_from_storage(
                     storage,
-                    metadata_by_id,
                     id,
                     &branches,
                     None,

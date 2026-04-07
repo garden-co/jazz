@@ -1498,15 +1498,11 @@ impl QueryManager {
         }
     }
 
-    fn load_row_metadata_with_cache(
+    fn load_row_metadata(
         storage: &dyn Storage,
-        metadata_by_id: &HashMap<ObjectId, HashMap<String, String>>,
         row_id: ObjectId,
     ) -> Option<HashMap<String, String>> {
-        metadata_by_id
-            .get(&row_id)
-            .cloned()
-            .or_else(|| storage.load_metadata(row_id).ok().flatten())
+        storage.load_metadata(row_id).ok().flatten()
     }
 
     pub(super) fn load_best_visible_row_version(
@@ -1518,9 +1514,8 @@ impl QueryManager {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        Self::load_best_visible_row_version_with_cache(
+        Self::load_best_visible_row_version_from_storage(
             storage,
-            &self.sync_manager.object_manager.metadata_by_id,
             row_id,
             branches,
             durability_tier,
@@ -1529,16 +1524,15 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn load_best_visible_row_version_with_cache(
+    pub(super) fn load_best_visible_row_version_from_storage(
         storage: &dyn Storage,
-        metadata_by_id: &HashMap<ObjectId, HashMap<String, String>>,
         row_id: ObjectId,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        let metadata = Self::load_row_metadata_with_cache(storage, metadata_by_id, row_id)?;
+        let metadata = Self::load_row_metadata(storage, row_id)?;
         let original_table = metadata.get(MetadataKey::Table.as_str())?.clone();
         let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
         let current_table = resolve_current_table_name(

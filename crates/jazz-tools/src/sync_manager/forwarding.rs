@@ -43,7 +43,7 @@ impl SyncManager {
             tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
         }
 
-        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
+        let Some(metadata) = storage.load_metadata(object_id).ok().flatten() else {
             return;
         };
         if let Some(row) =
@@ -107,7 +107,7 @@ impl SyncManager {
 
         let _span = tracing::debug_span!("forward_update_to_clients", %object_id, %branch_name, client_count = client_ids.len()).entered();
 
-        let Some(metadata) = self.object_manager.get(object_id).cloned() else {
+        let Some(metadata) = storage.load_metadata(object_id).ok().flatten() else {
             return;
         };
         if let Some(row) =
