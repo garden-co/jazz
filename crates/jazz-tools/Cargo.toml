@@ -22,6 +22,7 @@ rocksdb = ["dep:rocksdb"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
+transport-ws = ["transport", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio"]
 client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
@@ -38,7 +39,7 @@ cli = [
   "dep:bytes",
   "dep:reqwest",
 ]
-test-utils = ["cli", "client"]
+test-utils = ["cli", "client", "transport-ws"]
 test = ["test-utils"]
 otel = [
   "cli",
@@ -75,7 +76,7 @@ tokio = { version = "1", features = ["full"], optional = true }
 fjall = { version = "3.0.2", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
 
-axum = { version = "0.7", optional = true }
+axum = { version = "0.7", features = ["ws"], optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -89,6 +90,8 @@ reqwest = { version = "0.12", default-features = false, features = [
   "stream",
   "rustls-tls",
 ], optional = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", optional = true }
 thiserror = { version = "1", optional = true }
 
 opentelemetry = { version = "0.31", optional = true }

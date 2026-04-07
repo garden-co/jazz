@@ -6,7 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
@@ -18,8 +21,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
+    AuthHandshake, AuthHandshakePayload, ConnectionId, ErrorResponse, ServerEvent,
+    SyncBatchRequest, SyncBatchResponse, SyncPayloadResult,
 };
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
@@ -75,6 +78,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 
     Router::new()
         .route("/events", get(events_handler))
+        .route("/ws", get(ws_handler))
         .merge(traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -485,6 +489,301 @@ async fn events_handler(
             )
         })
 }
+
+// ============================================================================
+// WebSocket handler
+// ============================================================================
+
+/// WebSocket upgrade handler — bidirectional sync over a single ordered connection.
+///
+/// Replaces the SSE (`/events`) + HTTP POST (`/sync`) pair. Auth is carried in
+/// the first message after upgrade (AuthHandshake), not HTTP headers.
+async fn ws_handler(
+    State(state): State<Arc<ServerState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+}
+
+/// Run the WebSocket connection lifecycle:
+/// 1. Read AuthHandshake (first message)
+/// 2. Authenticate
+/// 3. Register connection
+/// 4. Send Connected response
+/// 5. Bidirectional select! loop: recv sync frames / send ServerEvent frames
+async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
+    // 1. Read the first message as AuthHandshake
+    let handshake: AuthHandshake = match read_auth_handshake(&mut socket).await {
+        Ok(h) => h,
+        Err(msg) => {
+            tracing::warn!(%msg, "ws auth handshake failed");
+            let error = ServerEvent::Error {
+                message: msg,
+                code: crate::jazz_transport::ErrorCode::Unauthorized,
+            };
+            let _ = send_server_event(&mut socket, &error).await;
+            return;
+        }
+    };
+
+    // 2. Resolve client_id
+    let client_id = match handshake.client_id {
+        Some(ref s) => match ClientId::parse(s) {
+            Some(id) => id,
+            None => {
+                let error = ServerEvent::Error {
+                    message: format!("Invalid client_id: {}", s),
+                    code: crate::jazz_transport::ErrorCode::BadRequest,
+                };
+                let _ = send_server_event(&mut socket, &error).await;
+                return;
+            }
+        },
+        None => ClientId::new(),
+    };
+
+    tracing::info!(%client_id, "ws client connecting");
+
+    // 3. Authenticate based on handshake payload
+    let is_admin = if let Some(ref secret) = handshake.admin_secret {
+        match validate_admin_secret(Some(secret.as_str()), &state.auth_config) {
+            Ok(()) => true,
+            Err((_, msg)) => {
+                let error = ServerEvent::Error {
+                    message: msg.to_string(),
+                    code: crate::jazz_transport::ErrorCode::Unauthorized,
+                };
+                let _ = send_server_event(&mut socket, &error).await;
+                return;
+            }
+        }
+    } else {
+        false
+    };
+
+    // Authenticate the client with the runtime
+    match &handshake.auth {
+        AuthHandshakePayload::Backend { secret, session } => {
+            if let Err((_, msg)) =
+                validate_backend_secret(Some(secret.as_str()), &state.auth_config)
+            {
+                let error = ServerEvent::Error {
+                    message: msg.to_string(),
+                    code: crate::jazz_transport::ErrorCode::Unauthorized,
+                };
+                let _ = send_server_event(&mut socket, &error).await;
+                return;
+            }
+            if let Ok(session) =
+                serde_json::from_str::<crate::query_manager::session::Session>(session)
+            {
+                let _ = state.runtime.ensure_client_with_session(client_id, session);
+            } else {
+                let _ = state.runtime.ensure_client_as_backend(client_id);
+            }
+        }
+        AuthHandshakePayload::Jwt { token } => {
+            // Build fake headers for the existing extract_session path
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+            let session = {
+                let external_identities = state.external_identities.read().await;
+                match extract_session(
+                    &headers,
+                    state.app_id,
+                    &state.auth_config,
+                    Some(&external_identities),
+                    state.jwks_cache.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        let error = ServerEvent::Error {
+                            message: "Invalid JWT token".to_string(),
+                            code: crate::jazz_transport::ErrorCode::Unauthorized,
+                        };
+                        let _ = send_server_event(&mut socket, &error).await;
+                        return;
+                    }
+                    Err((_, msg)) => {
+                        let error = ServerEvent::Error {
+                            message: msg.to_string(),
+                            code: crate::jazz_transport::ErrorCode::Unauthorized,
+                        };
+                        let _ = send_server_event(&mut socket, &error).await;
+                        return;
+                    }
+                }
+            };
+            let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
+        AuthHandshakePayload::Local { mode, token } => {
+            // Build fake headers for the existing local auth path
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::HeaderName::from_static("x-jazz-local-mode"),
+                axum::http::HeaderValue::from_str(mode).unwrap(),
+            );
+            if let Some(token) = token {
+                headers.insert(
+                    axum::http::HeaderName::from_static("x-jazz-local-token"),
+                    axum::http::HeaderValue::from_str(token).unwrap(),
+                );
+            }
+            match parse_local_auth_headers(&headers) {
+                Ok(Some((local_mode, local_token))) => {
+                    let user_id = derive_local_principal_id(state.app_id, local_mode, &local_token);
+                    let session = crate::query_manager::session::Session {
+                        user_id,
+                        claims: serde_json::Value::Object(Default::default()),
+                    };
+                    let _ = state.runtime.ensure_client_with_session(client_id, session);
+                }
+                _ => {
+                    let error = ServerEvent::Error {
+                        message: "Invalid local auth".to_string(),
+                        code: crate::jazz_transport::ErrorCode::Unauthorized,
+                    };
+                    let _ = send_server_event(&mut socket, &error).await;
+                    return;
+                }
+            }
+        }
+        AuthHandshakePayload::None => {
+            if is_admin {
+                let _ = state.runtime.ensure_client_as_admin(client_id);
+            } else {
+                let error = ServerEvent::Error {
+                    message: "Authentication required".to_string(),
+                    code: crate::jazz_transport::ErrorCode::Unauthorized,
+                };
+                let _ = send_server_event(&mut socket, &error).await;
+                return;
+            }
+        }
+    }
+
+    // 4. Register connection
+    let connection_id = state
+        .next_connection_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut connections = state.connections.write().await;
+        connections.insert(connection_id, ConnectionState { client_id });
+    }
+    state.on_client_connected(client_id).await;
+
+    let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
+
+    // 5. Send Connected response
+    let connected = ServerEvent::Connected {
+        connection_id: ConnectionId(connection_id),
+        client_id: client_id.to_string(),
+        next_sync_seq: None,
+        catalogue_state_hash,
+    };
+    if send_server_event(&mut socket, &connected).await.is_err() {
+        return;
+    }
+
+    // 6. Subscribe to broadcast channel for this client's events
+    let mut sync_rx = state.sync_broadcast.subscribe();
+
+    // 7. Bidirectional select! loop
+    loop {
+        tokio::select! {
+            // Client → Server: receive sync frames
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(msg @ (Message::Binary(_) | Message::Text(_)))) => {
+                        let parse_result = match &msg {
+                            Message::Binary(data) => serde_json::from_slice::<SyncBatchRequest>(data),
+                            Message::Text(text) => serde_json::from_str::<SyncBatchRequest>(text),
+                            _ => unreachable!(),
+                        };
+                        match parse_result {
+                            Ok(request) => {
+                                for payload in request.payloads {
+                                    let entry = crate::sync_manager::InboxEntry {
+                                        source: crate::sync_manager::Source::Client(client_id),
+                                        payload,
+                                    };
+                                    if let Err(e) = state.runtime.push_sync_inbox(entry) {
+                                        tracing::warn!(error = %e, "ws sync inbox push failed");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "ws: invalid sync batch request");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(e)) => {
+                        tracing::debug!(error = %e, "ws recv error");
+                        break;
+                    }
+                }
+            }
+            // Server → Client: forward sync updates for this client
+            result = sync_rx.recv() => {
+                match result {
+                    Ok((target_client_id, payload)) => {
+                        if target_client_id == client_id {
+                            let event = ServerEvent::SyncUpdate {
+                                seq: None,
+                                payload: Box::new(payload),
+                            };
+                            if send_server_event(&mut socket, &event).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(connection_id, lagged = n, "ws client lagged on sync updates");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    // Cleanup: remove connection, mark for TTL reaping
+    {
+        let mut connections = state.connections.write().await;
+        connections.remove(&connection_id);
+    }
+    state.on_connection_closed(client_id).await;
+    tracing::debug!(connection_id, %client_id, "ws connection closed");
+}
+
+/// Read the first WebSocket message as an AuthHandshake.
+async fn read_auth_handshake(socket: &mut WebSocket) -> Result<AuthHandshake, String> {
+    match tokio::time::timeout(Duration::from_secs(10), socket.recv()).await {
+        Ok(Some(Ok(Message::Binary(data)))) => {
+            serde_json::from_slice(&data).map_err(|e| format!("invalid auth handshake: {e}"))
+        }
+        Ok(Some(Ok(Message::Text(text)))) => {
+            serde_json::from_str(&text).map_err(|e| format!("invalid auth handshake: {e}"))
+        }
+        Ok(Some(Ok(_))) => Err("expected binary or text message for auth handshake".into()),
+        Ok(Some(Err(e))) => Err(format!("ws error during auth handshake: {e}")),
+        Ok(None) => Err("connection closed before auth handshake".into()),
+        Err(_) => Err("auth handshake timed out (10s)".into()),
+    }
+}
+
+/// Send a ServerEvent as a JSON binary frame over WebSocket.
+async fn send_server_event(socket: &mut WebSocket, event: &ServerEvent) -> Result<(), axum::Error> {
+    let json = serde_json::to_vec(event).unwrap_or_default();
+    socket.send(Message::Binary(json)).await
+}
+
+// ============================================================================
+// HTTP POST sync handler (legacy — coexists with /ws during transition)
+// ============================================================================
 
 /// Push an ordered batch of sync payloads to the server's inbox.
 ///

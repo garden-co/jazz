@@ -26,6 +26,11 @@ pub mod transport_protocol;
 #[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
 
+#[cfg(feature = "transport-ws")]
+pub mod transport_ws;
+#[cfg(feature = "transport-ws")]
+pub mod ws_native;
+
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
