@@ -73,7 +73,7 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (_, row) = Self::load_best_visible_row_version(
+        let (_, row) = self.load_best_visible_row_version(
             storage,
             object_id,
             &branches,
@@ -271,7 +271,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, row) = Self::load_best_visible_row_version(
+        let (table, row) = self.load_best_visible_row_version(
             storage,
             object_id,
             &branches,
@@ -380,7 +380,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) = Self::load_best_visible_row_version(
+        let Some((table, row)) = self.load_best_visible_row_version(
             storage,
             object_id,
             &branches,
@@ -764,7 +764,7 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             {
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    Self::load_visible_row_for_query(
+                    self.load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
@@ -932,7 +932,7 @@ impl QueryManager {
             let new_scope = {
                 {
                     let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        Self::load_visible_row_for_query(
+                        self.load_visible_row_for_query(
                             storage,
                             id,
                             branches,
@@ -1581,13 +1581,15 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Settle each active policy check
+        let metadata_by_id = &self.sync_manager.object_manager.metadata_by_id;
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version(
+                let (_, row) = Self::load_best_visible_row_version_with_cache(
                     storage,
+                    metadata_by_id,
                     id,
                     &branches,
                     None,

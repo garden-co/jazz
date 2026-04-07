@@ -1462,29 +1462,20 @@ mod tests {
 
     #[test]
     fn memory_storage_row_regions_visible_and_history_round_trip() {
-        use crate::row_regions::{
-            BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry,
-        };
+        use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
-        let batch_id = BatchId::new();
-
-        let version = StoredRowVersion {
+        let version = StoredRowVersion::new(
             row_id,
-            branch: "dev/main".to_string(),
-            parents: Vec::new(),
-            updated_at: 10,
-            created_by: "alice".to_string(),
-            created_at: 10,
-            updated_by: "alice".to_string(),
-            batch_id,
-            state: RowState::VisibleDirect,
-            confirmed_tier: Some(DurabilityTier::Worker),
-            is_deleted: false,
-            data: b"alice".to_vec(),
-            metadata: HashMap::new(),
-        };
+            "dev/main",
+            Vec::new(),
+            b"alice".to_vec(),
+            crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
 
         storage
             .append_history_region_rows("users", &[version.clone()])
@@ -1512,41 +1503,36 @@ mod tests {
 
     #[test]
     fn memory_storage_visible_entries_track_older_tier_winners() {
-        use crate::row_regions::{BatchId, RowState, StoredRowVersion, VisibleRowEntry};
+        use crate::row_regions::{RowState, StoredRowVersion, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
 
-        let globally_confirmed = StoredRowVersion {
+        let globally_confirmed = StoredRowVersion::new(
             row_id,
-            branch: "dev/main".to_string(),
-            parents: Vec::new(),
-            updated_at: 10,
-            created_by: "alice".to_string(),
-            created_at: 10,
-            updated_by: "alice".to_string(),
-            batch_id: BatchId::new(),
-            state: RowState::VisibleDirect,
-            confirmed_tier: Some(DurabilityTier::GlobalServer),
-            is_deleted: false,
-            data: b"v1".to_vec(),
-            metadata: HashMap::new(),
-        };
-        let current_worker = StoredRowVersion {
+            "dev/main",
+            Vec::new(),
+            b"v1".to_vec(),
+            crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
+        );
+        let current_worker = StoredRowVersion::new(
             row_id,
-            branch: "dev/main".to_string(),
-            parents: vec![globally_confirmed.version_id()],
-            updated_at: 20,
-            created_by: "alice".to_string(),
-            created_at: 10,
-            updated_by: "alice".to_string(),
-            batch_id: BatchId::new(),
-            state: RowState::VisibleDirect,
-            confirmed_tier: Some(DurabilityTier::Worker),
-            is_deleted: false,
-            data: b"v2".to_vec(),
-            metadata: HashMap::new(),
-        };
+            "dev/main",
+            vec![globally_confirmed.version_id()],
+            b"v2".to_vec(),
+            crate::metadata::RowProvenance {
+                created_by: "alice".to_string(),
+                created_at: 10,
+                updated_by: "alice".to_string(),
+                updated_at: 20,
+            },
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
 
         storage
             .append_history_region_rows(
