@@ -4,6 +4,8 @@
  * Pure type definitions — no runtime code.
  */
 
+import type { RuntimeSourcesConfig } from "../runtime/context.js";
+
 // ============================================================================
 // Main Thread → Worker Messages
 // ============================================================================
@@ -23,6 +25,7 @@ export interface InitMessage {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
   adminSecret?: string;
+  runtimeSources?: RuntimeSourcesConfig;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
@@ -122,7 +125,7 @@ export type MainToWorkerMessage =
 // Worker → Main Thread Messages
 // ============================================================================
 
-/** Worker has loaded WASM and is ready to receive init. */
+/** Worker entry point is ready to receive init. */
 export interface ReadyMessage {
   type: "ready";
 }

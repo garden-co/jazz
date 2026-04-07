@@ -9,7 +9,10 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
 use crate::row_regions::StoredRowVersion;
-use crate::schema_manager::{LensTransformer, SchemaContext};
+use crate::schema_manager::{
+    LensTransformer, SchemaContext, origin_schema_hash_from_metadata, resolve_current_table_name,
+    translate_table_name_to_schema,
+};
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
@@ -1160,13 +1163,12 @@ impl QueryManager {
         update: VisibleRowUpdate,
         local_update: bool,
     ) {
-        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
+        let original_table = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(table) => table.clone(),
             None => return,
         };
-
-        let table_name = TableName::new(&table);
         let branch = update.row.branch.as_str();
+        let origin_schema_hash = origin_schema_hash_from_metadata(&update.metadata);
 
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
@@ -1199,6 +1201,20 @@ impl QueryManager {
                 }
             }
         };
+
+        let logical_table = resolve_current_table_name(
+            &self.schema_context,
+            &original_table,
+            origin_schema_hash.as_ref(),
+        )
+        .unwrap_or_else(|| original_table.clone());
+        let branch_table = if schema_hash == self.schema_context.current_hash {
+            logical_table.clone()
+        } else {
+            translate_table_name_to_schema(&self.schema_context, &logical_table, &schema_hash)
+                .unwrap_or_else(|| original_table.clone())
+        };
+        let table_name = TableName::new(&branch_table);
 
         let table_schema = if schema_hash == self.schema_context.current_hash {
             match self.schema.get(&table_name) {
@@ -1251,21 +1267,21 @@ impl QueryManager {
             let old_data = old_row.map(|row| row.data.as_slice());
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 old_data,
                 &descriptor,
             );
             if local_update {
-                self.mark_subscriptions_dirty_local(&table);
+                self.mark_subscriptions_dirty_local(&logical_table);
             } else {
-                self.mark_subscriptions_dirty(&table);
+                self.mark_subscriptions_dirty(&logical_table);
             }
             if local_update {
-                self.mark_local_row_deleted_in_subscriptions(&table, update.object_id);
+                self.mark_local_row_deleted_in_subscriptions(&logical_table, update.object_id);
             } else {
-                self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+                self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
             }
             return;
         }
@@ -1274,7 +1290,7 @@ impl QueryManager {
             if let Some(old_row) = old_row {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
-                    &table,
+                    &branch_table,
                     branch,
                     update.object_id,
                     &old_row.data,
@@ -1282,21 +1298,21 @@ impl QueryManager {
                 );
             } else {
                 let _ = storage.index_remove(
-                    &table,
+                    &branch_table,
                     "_id",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
                 if let Err(error) = storage.index_insert(
-                    &table,
+                    &branch_table,
                     "_id_deleted",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 ) {
                     tracing::error!(
-                        table,
+                        table = branch_table,
                         branch,
                         object_id = %update.object_id,
                         %error,
@@ -1305,11 +1321,11 @@ impl QueryManager {
                 }
             }
             if local_update {
-                self.mark_subscriptions_dirty_local(&table);
+                self.mark_subscriptions_dirty_local(&logical_table);
             } else {
-                self.mark_subscriptions_dirty(&table);
+                self.mark_subscriptions_dirty(&logical_table);
             }
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
             return;
         }
 
@@ -1319,14 +1335,14 @@ impl QueryManager {
         if was_soft_deleted {
             if let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1334,14 +1350,14 @@ impl QueryManager {
                 );
             }
             if local_update {
-                self.mark_subscriptions_dirty_local(&table);
+                self.mark_subscriptions_dirty_local(&logical_table);
             } else {
-                self.mark_subscriptions_dirty(&table);
+                self.mark_subscriptions_dirty(&logical_table);
             }
             if local_update {
-                self.mark_local_row_updated_in_subscriptions(&table, update.object_id);
+                self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
             } else {
-                self.mark_row_updated_in_subscriptions(&table, update.object_id);
+                self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
             }
             return;
         }
@@ -1349,14 +1365,14 @@ impl QueryManager {
         if old_row.is_none() || update.is_new_object {
             if let Err(error) = Self::update_indices_for_insert_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1366,7 +1382,7 @@ impl QueryManager {
         } else if let Some(old_row) = old_row
             && let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &old_row.data,
@@ -1375,7 +1391,7 @@ impl QueryManager {
             )
         {
             tracing::error!(
-                table,
+                table = branch_table,
                 branch,
                 object_id = %update.object_id,
                 %error,
@@ -1384,14 +1400,14 @@ impl QueryManager {
         }
 
         if local_update {
-            self.mark_subscriptions_dirty_local(&table);
+            self.mark_subscriptions_dirty_local(&logical_table);
         } else {
-            self.mark_subscriptions_dirty(&table);
+            self.mark_subscriptions_dirty(&logical_table);
         }
         if local_update {
-            self.mark_local_row_updated_in_subscriptions(&table, update.object_id);
+            self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
         } else {
-            self.mark_row_updated_in_subscriptions(&table, update.object_id);
+            self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
         }
     }
 
@@ -1504,24 +1520,74 @@ impl QueryManager {
         row_id: ObjectId,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        let table = storage
-            .load_metadata(row_id)
-            .ok()
-            .flatten()?
-            .get(MetadataKey::Table.as_str())?
-            .clone();
+        let metadata = storage.load_metadata(row_id).ok().flatten()?;
+        let original_table = metadata.get(MetadataKey::Table.as_str())?.clone();
+        let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
+        let current_table = resolve_current_table_name(
+            schema_context,
+            &original_table,
+            origin_schema_hash.as_ref(),
+        )
+        .unwrap_or_else(|| original_table.clone());
 
         let mut best: Option<(CommitId, StoredRowVersion)> = None;
 
         for branch in branches {
-            let loaded = match durability_tier {
-                Some(required_tier) => {
-                    storage.load_visible_region_row_for_tier(&table, branch, row_id, required_tier)
-                }
-                None => storage.load_visible_region_row(&table, branch, row_id),
+            let branch_schema_hash = branch_schema_map
+                .get(branch)
+                .copied()
+                .or_else(|| {
+                    (branch.as_str() == schema_context.branch_name().as_str())
+                        .then_some(schema_context.current_hash)
+                })
+                .or_else(|| {
+                    ComposedBranchName::parse(&BranchName::new(branch))
+                        .and_then(|composed| {
+                            if composed.schema_hash.short() == schema_context.current_hash.short() {
+                                Some(schema_context.current_hash)
+                            } else {
+                                schema_context
+                                    .live_schemas
+                                    .keys()
+                                    .copied()
+                                    .find(|hash| hash.short() == composed.schema_hash.short())
+                            }
+                        })
+                });
+            let scan_table = branch_schema_hash
+                .and_then(|hash| {
+                    if hash == schema_context.current_hash {
+                        Some(current_table.clone())
+                    } else {
+                        translate_table_name_to_schema(schema_context, &current_table, &hash)
+                    }
+                })
+                .unwrap_or_else(|| original_table.clone());
+            let candidate_tables = if scan_table == original_table {
+                vec![scan_table]
+            } else {
+                vec![scan_table, original_table.clone()]
             };
-            let Some(row) = loaded.ok().flatten() else {
+            let mut loaded_row = None;
+            for candidate_table in candidate_tables {
+                let loaded = match durability_tier {
+                    Some(required_tier) => storage.load_visible_region_row_for_tier(
+                        &candidate_table,
+                        branch,
+                        row_id,
+                        required_tier,
+                    ),
+                    None => storage.load_visible_region_row(&candidate_table, branch, row_id),
+                };
+                if let Some(row) = loaded.ok().flatten() {
+                    loaded_row = Some(row);
+                    break;
+                }
+            }
+            let Some(row) = loaded_row else {
                 continue;
             };
 
@@ -1541,7 +1607,7 @@ impl QueryManager {
             }
         }
 
-        best.map(|(_, row)| (table, row))
+        best.map(|(_, row)| (current_table, row))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1559,11 +1625,24 @@ impl QueryManager {
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
         let resolved =
-            Self::load_best_visible_row_version(storage, row_id, branches, durability_tier)
+            Self::load_best_visible_row_version(
+                storage,
+                row_id,
+                branches,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
                 .or_else(|| {
                     let pending_version_id = local_pending_version?;
-                    let (table, row) =
-                        Self::load_best_visible_row_version(storage, row_id, branches, None)?;
+                    let (table, row) = Self::load_best_visible_row_version(
+                        storage,
+                        row_id,
+                        branches,
+                        None,
+                        schema_context,
+                        branch_schema_map,
+                    )?;
                     (row.version_id() == pending_version_id).then_some((table, row))
                 })?;
         let (table, row) = resolved;

@@ -1,6 +1,14 @@
+use std::collections::HashMap;
+
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smolset::SmolSet;
 use uuid::Uuid;
+
+use crate::{
+    commit::{Commit, CommitId},
+    metadata::MetadataKey,
+};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -24,6 +32,17 @@ impl<'de> Deserialize<'de> for ObjectId {
         let uuid = Uuid::deserialize(deserializer)?;
         Ok(ObjectId::from_uuid(uuid))
     }
+}
+
+/// How deeply a branch has been loaded from storage.
+/// Note: With sync storage, this is mainly used to track whether branch data exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchLoadedState {
+    #[default]
+    NotLoaded,
+    TipIdsOnly,
+    TipsOnly,
+    AllCommits,
 }
 
 impl std::fmt::Display for ObjectId {
@@ -110,6 +129,42 @@ impl<T: Into<String>> From<T> for BranchName {
 impl std::fmt::Display for BranchName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+/// A branch containing commits and tracking unmerged tips.
+#[derive(Debug, Clone, Default)]
+pub struct Branch {
+    pub commits: HashMap<CommitId, Commit>,
+    /// Current tips (unmerged heads). Inline storage for ≤2 tips.
+    pub tips: SmolSet<[CommitId; 2]>,
+    /// Truncation boundary. None = full history from roots.
+    /// Some(tails) = history only includes tails and their descendants.
+    pub tails: Option<SmolSet<[CommitId; 2]>>,
+    pub loaded_state: BranchLoadedState,
+}
+
+/// An object with metadata and named branches.
+#[derive(Debug, Clone)]
+pub struct Object {
+    pub id: ObjectId,
+    pub metadata: HashMap<String, String>,
+    pub branches: HashMap<BranchName, Branch>,
+}
+
+impl Object {
+    pub fn new(metadata: Option<HashMap<String, String>>) -> Self {
+        Self {
+            id: ObjectId::new(),
+            metadata: metadata.unwrap_or_default(),
+            branches: HashMap::new(),
+        }
+    }
+
+    pub fn original_table_name(&self) -> &str {
+        self.metadata
+            .get(MetadataKey::Table.as_str())
+            .expect("unexpected object with no table name")
     }
 }
 

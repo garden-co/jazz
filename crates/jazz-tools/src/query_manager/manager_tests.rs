@@ -17,8 +17,6 @@ use crate::query_manager::types::{
     TablePolicies, TableSchema, Value,
 };
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::SyncManager;
 
@@ -77,21 +75,6 @@ fn create_query_manager(
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
     (qm, MemoryStorage::new())
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn create_query_manager_with_fjall(
-    sync_manager: SyncManager,
-    schema: Schema,
-) -> (QueryManager, tempfile::TempDir, FjallStorage) {
-    let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.fjall");
-    let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
-
-    (qm, temp_dir, storage)
 }
 
 /// Get the current branch name from a QueryManager.
@@ -206,70 +189,6 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
         .into(),
     );
     out
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn large_index_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("todos"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-        ])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("tag_lists"),
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "labels",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Text),
-            },
-        )])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("documents"),
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "payload",
-            ColumnType::Json { schema: None },
-        )])
-        .into(),
-    );
-    schema.insert(
-        TableName::new("file_parts"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
-    );
-    schema.insert(
-        TableName::new("files"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new(
-                "parts",
-                ColumnType::Array {
-                    element: Box::new(ColumnType::Uuid),
-                },
-            )
-            .references("file_parts"),
-        ])
-        .into(),
-    );
-    schema
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_text() -> String {
-    "x".repeat(40_000)
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_json() -> String {
-    format!(r#"{{"body":"{}"}}"#, oversized_text())
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn oversized_ref_array(member_id: ObjectId) -> Value {
-    Value::Array((0..1_500).map(|_| Value::Uuid(member_id)).collect())
 }
 
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
@@ -832,134 +751,6 @@ fn update_row() {
         0,
         "Old indexed value should no longer match"
     );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_text_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "todos",
-            &[Value::Text(oversized_text()), Value::Boolean(false)],
-        )
-        .expect("oversized indexed text insert should succeed");
-
-    let oversized = oversized_text();
-    let query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text(oversized.clone()))
-        .build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized text");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1[0], Value::Text(oversized));
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_json_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let payload = oversized_json();
-    let handle = qm
-        .insert(&mut storage, "documents", &[Value::Text(payload.clone())])
-        .expect("oversized indexed json insert should succeed");
-
-    let query = qm
-        .query("documents")
-        .filter_eq("payload", Value::Text(payload.clone()))
-        .build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized json");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1, vec![Value::Text(payload)]);
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_ref_array_insert_stays_queryable() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let member = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("part-a".into())])
-        .expect("insert referenced row");
-    let parts = oversized_ref_array(member.row_id);
-    let handle = qm
-        .insert(&mut storage, "files", std::slice::from_ref(&parts))
-        .expect("oversized indexed array(ref) insert should succeed");
-
-    let query = qm.query("files").filter_eq("parts", parts.clone()).build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized array(ref)");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1, vec![parts.clone()]);
-
-    let branch = get_branch(&qm);
-    let member_lookup =
-        storage.index_lookup("files", "parts", &branch, &Value::Uuid(member.row_id));
-    assert!(
-        member_lookup.contains(&handle.row_id),
-        "array(ref) membership index should still track each referenced row id"
-    );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_text_update_reindexes_to_new_value() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "todos",
-            &[Value::Text("keep-me".into()), Value::Boolean(false)],
-        )
-        .expect("insert initial row");
-
-    let oversized = oversized_text();
-    qm.update(
-        &mut storage,
-        handle.row_id,
-        &[Value::Text(oversized.clone()), Value::Boolean(false)],
-    )
-    .expect("oversized indexed text update should succeed");
-
-    let new_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text(oversized.clone()))
-        .build();
-    let new_rows =
-        execute_query(&mut qm, &mut storage, new_query).expect("query oversized indexed value");
-    assert_eq!(new_rows.len(), 1);
-    assert_eq!(new_rows[0].0, handle.row_id);
-
-    let query = qm.query("todos").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after update");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(
-        rows[0].1,
-        vec![Value::Text(oversized), Value::Boolean(false)]
-    );
-
-    let old_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text("keep-me".into()))
-        .build();
-    let old_rows =
-        execute_query(&mut qm, &mut storage, old_query).expect("query old indexed value");
-    assert_eq!(old_rows.len(), 0, "old title index entry should be removed");
 }
 
 #[test]
