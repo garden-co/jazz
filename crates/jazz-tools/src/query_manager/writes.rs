@@ -78,6 +78,7 @@ impl QueryManager {
     }
 
     fn authored_row_version(
+        &self,
         row_id: ObjectId,
         branch_name: &str,
         parents: Vec<CommitId>,
@@ -95,7 +96,7 @@ impl QueryManager {
                 .into_iter()
                 .collect(),
             RowState::VisibleDirect,
-            None,
+            self.sync_manager.max_local_durability_tier(),
         )
     }
 
@@ -370,7 +371,7 @@ impl QueryManager {
             .map(|tips| tips.iter().copied().collect())
             .unwrap_or_default();
 
-        let row = Self::authored_row_version(
+        let row = self.authored_row_version(
             id,
             branch,
             parents,
@@ -551,7 +552,7 @@ impl QueryManager {
 
         // Add commit with row data
         let branch = self.current_branch();
-        let row = Self::authored_row_version(
+        let row = self.authored_row_version(
             object_id,
             branch.as_str(),
             vec![],
@@ -694,7 +695,7 @@ impl QueryManager {
 
         // Add commit with row data to specified branch
         let row =
-            Self::authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
+            self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
         let row_commit_id = self
             .sync_manager
             .object_manager
@@ -1497,7 +1498,7 @@ impl QueryManager {
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_row = Self::authored_row_version(
+        let delete_row = self.authored_row_version(
             id,
             self.current_branch().as_str(),
             parents,
@@ -1635,7 +1636,7 @@ impl QueryManager {
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
-        let delete_row = Self::authored_row_version(
+        let delete_row = self.authored_row_version(
             id,
             branch,
             parents,
@@ -1739,7 +1740,7 @@ impl QueryManager {
         let row_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with row data (no delete metadata = undelete)
-        let row = Self::authored_row_version(
+        let row = self.authored_row_version(
             id,
             self.current_branch().as_str(),
             parents,
@@ -1820,7 +1821,7 @@ impl QueryManager {
         let delete_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with empty content + delete: hard metadata
-        let delete_row = Self::authored_row_version(
+        let delete_row = self.authored_row_version(
             id,
             self.current_branch().as_str(),
             parents,

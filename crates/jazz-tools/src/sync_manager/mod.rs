@@ -177,6 +177,11 @@ impl SyncManager {
         self.my_tiers.clone()
     }
 
+    /// Return the strongest durability tier this node can attest to locally.
+    pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
+        self.my_tiers.iter().copied().max()
+    }
+
     // ========================================================================
     // Connection Management
     // ========================================================================
@@ -277,6 +282,10 @@ impl SyncManager {
     /// Get server state.
     pub fn get_server(&self, server_id: ServerId) -> Option<&ServerState> {
         self.servers.get(&server_id)
+    }
+
+    pub fn has_servers(&self) -> bool {
+        !self.servers.is_empty()
     }
 
     /// Get client state.
@@ -609,16 +618,20 @@ impl SyncManager {
     ///
     /// Called by QueryManager when a server subscription settles for the first time.
     pub fn emit_query_settled(&mut self, client_id: ClientId, query_id: QueryId) {
-        for tier in self.my_tiers.iter().copied() {
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(client_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier,
-                    through_seq: 0,
-                },
-            });
-        }
+        let tier = self
+            .my_tiers
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(DurabilityTier::Worker);
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::QuerySettled {
+                query_id,
+                tier,
+                through_seq: 0,
+            },
+        });
     }
 
     /// Emit a schema warning to a client.

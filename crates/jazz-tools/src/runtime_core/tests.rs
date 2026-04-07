@@ -2283,7 +2283,7 @@ fn query_reads_pick_row_versions_by_required_durability_tier() {
     let mut core = create_runtime_with_schema_and_sync_manager(
         test_schema(),
         "tier-aware-visible-row",
-        SyncManager::new().with_durability_tier(DurabilityTier::GlobalServer),
+        SyncManager::new(),
     );
     let branch_name = core.schema_manager().branch_name().to_string();
 
@@ -2405,14 +2405,16 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
 
     // Force QuerySettled before row delivery to expose ordering assumptions.
     let mut settled_to_a = Vec::new();
-    let mut updates_to_a = Vec::new();
+    let mut rows_to_a = Vec::new();
+    let mut row_state_to_a = Vec::new();
     for entry in b_out {
         if entry.destination != Destination::Client(s.a_client_of_b) {
             continue;
         }
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
-            payload @ SyncPayload::RowVersionNeeded { .. } => updates_to_a.push(payload),
+            payload @ SyncPayload::RowVersionNeeded { .. } => rows_to_a.push(payload),
+            payload @ SyncPayload::RowVersionStateChanged { .. } => row_state_to_a.push(payload),
             _ => {}
         }
     }
@@ -2421,13 +2423,12 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         !settled_to_a.is_empty(),
         "Expected QuerySettled notification for A"
     );
-    assert!(!updates_to_a.is_empty(), "Expected row payload for A");
-
+    assert!(!rows_to_a.is_empty(), "Expected row payload for A");
     // Mirror connected stream initialization: first expected seq is 1.
     s.a.set_next_expected_server_sequence(s.b_server_for_a, 1);
 
     let mut next_update_seq = 1u64;
-    let settled_seq_base = updates_to_a.len() as u64 + 1;
+    let settled_seq_base = (rows_to_a.len() + row_state_to_a.len()) as u64 + 1;
 
     for (idx, payload) in settled_to_a.into_iter().enumerate() {
         s.a.park_sync_message_with_sequence(
@@ -2446,7 +2447,17 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         "Query should stay pending until lower sequence row payload arrives"
     );
 
-    for payload in updates_to_a {
+    for payload in rows_to_a {
+        s.a.park_sync_message_with_sequence(
+            InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload,
+            },
+            next_update_seq,
+        );
+        next_update_seq += 1;
+    }
+    for payload in row_state_to_a {
         s.a.park_sync_message_with_sequence(
             InboxEntry {
                 source: Source::Server(s.b_server_for_a),
@@ -2542,7 +2553,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         )
         .unwrap();
 
-    // Initial delivery should still wait for the requested remote tier.
+    // Initial delivery should still wait for the initial remote frontier.
     let (first_id, _row_values) =
         s.a.insert(
             "users",
@@ -2555,32 +2566,40 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     let calls = received.lock().unwrap();
     assert!(
         calls.is_empty(),
-        "Initial delivery should wait for EdgeServer settlement"
+        "Initial delivery should wait for query frontier completion"
     );
     drop(calls);
 
-    // Worker settlement is not enough for an EdgeServer subscription.
+    // Worker frontier completion is enough to unblock the first snapshot, but
+    // the row still does not satisfy the requested EdgeServer tier.
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
-    assert!(
-        received.lock().unwrap().is_empty(),
-        "Worker tier should not unlock first delivery for EdgeServer reads"
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "First callback should happen after frontier completion"
     );
+    assert!(
+        calls[0].is_empty(),
+        "EdgeServer query should still hide rows that are only worker-settled"
+    );
+    drop(calls);
 
-    // Reach EdgeServer settlement for the initial snapshot.
+    // Reach EdgeServer settlement for the first row.
     pump_b_to_c(&mut s);
     pump_c_to_b_to_a(&mut s);
 
     let calls = received.lock().unwrap();
     assert!(
-        !calls.is_empty(),
-        "First delivery should happen once EdgeServer settlement is reached"
+        calls.len() >= 2,
+        "Row should appear once its settled tier reaches EdgeServer"
     );
-    let first_delivery = &calls[0];
+    let first_delivery = &calls[1];
     assert_eq!(
         first_delivery.len(),
         1,
-        "First snapshot should include one row"
+        "EdgeServer-settled delivery should include one row"
     );
     assert_eq!(first_delivery[0].0, first_id);
     drop(calls);
@@ -2598,10 +2617,10 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     let calls = received.lock().unwrap();
     assert_eq!(
         calls.len(),
-        2,
+        3,
         "Second local write should trigger immediate callback"
     );
-    let second_delivery = &calls[1];
+    let second_delivery = &calls[2];
     assert_eq!(
         second_delivery.len(),
         1,

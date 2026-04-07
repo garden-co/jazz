@@ -1061,7 +1061,9 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
 
-        let version_id = entry.version_id_for_tier(required_tier);
+        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+            return Ok(None);
+        };
         if version_id == entry.current_version_id() {
             return Ok(Some(entry.current_row.clone()));
         }
@@ -1475,7 +1477,10 @@ mod tests {
         assert_eq!(entry.current_row, current_worker);
         assert_eq!(entry.worker_version_id, None);
         assert_eq!(entry.edge_version_id, Some(globally_confirmed.version_id()));
-        assert_eq!(entry.global_version_id, None);
+        assert_eq!(
+            entry.global_version_id,
+            Some(globally_confirmed.version_id())
+        );
     }
 
     mod memory_conformance {
