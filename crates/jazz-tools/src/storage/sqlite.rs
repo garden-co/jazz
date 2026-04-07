@@ -12,10 +12,16 @@ use std::path::{Path, PathBuf};
 use super::{
     Storage, StorageError,
     storage_core::{
-        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_range_core,
+        append_history_region_rows_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
+use crate::object::ObjectId;
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
     conn: rusqlite::Connection,
@@ -272,6 +278,118 @@ impl Storage for SqliteStorage {
         self.with_inner(|inner| {
             raw_table_scan_range_core(table, start, end, |start_key, end_key| {
                 Self::scan_range(&inner.conn, start_key, end_key)
+            })
+        })
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                append_history_region_rows_core(table, rows, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
+            })
+        })
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                upsert_visible_region_rows_core(table, rows, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
+            })
+        })
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                patch_row_region_rows_by_batch_core(
+                    table,
+                    batch_id,
+                    state,
+                    confirmed_tier,
+                    |prefix| Self::scan_prefix(&inner.conn, prefix),
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )
+            })
+        })
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_core(table, branch, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
+        })
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_region_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_row_versions_core(table, row_id, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
+        })
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_history_row_versions_core(table, row_id, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
+        })
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_history_region_core(table, branch, scan, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
             })
         })
     }

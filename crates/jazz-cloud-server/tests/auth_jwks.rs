@@ -107,26 +107,31 @@ impl TestServer {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_dir.path().to_str().expect("temp dir path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .envs(extra_env)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_dir.path().to_str().expect("temp dir path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .envs(extra_env)
+        .stdout(Stdio::null());
 
-        let server = Self {
+        if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        }
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
+
+        let mut server = Self {
             process,
             port,
             _data_dir: data_dir,
@@ -141,9 +146,12 @@ impl TestServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -303,7 +311,7 @@ fn auth_jwks_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock auth_jwks test guard")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
@@ -328,11 +336,23 @@ fn sync_body() -> Value {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "RowVersionCreated": {
                 "metadata": null,
-                "branch_name": "main",
-                "commits": []
+                "row": {
+                    "row_id": "01234567-89ab-cdef-0123-456789abcdef",
+                    "branch": "main",
+                    "parents": [],
+                    "updated_at": 1000,
+                    "created_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "created_at": 1000,
+                    "updated_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "batch_id": uuid::Uuid::nil(),
+                    "state": "VisibleDirect",
+                    "confirmed_tier": null,
+                    "is_deleted": false,
+                    "data": [97,108,105,99,101],
+                    "metadata": {}
+                }
             }
         }]
     })

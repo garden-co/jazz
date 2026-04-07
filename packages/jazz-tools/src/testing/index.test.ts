@@ -3,9 +3,19 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { WasmSchema } from "../drivers/types.js";
 import { TestingServer, pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
 
 const tempRoots: string[] = [];
+const TEST_SCHEMA: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
+  },
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -75,6 +85,27 @@ exit 13
   return binaryPath;
 }
 
+function makeSchemaCatalogueSyncBody(appId: string) {
+  return {
+    client_id: "01234567-89ab-cdef-0123-456789abcdef",
+    payloads: [
+      {
+        CatalogueEntryUpdated: {
+          entry: {
+            object_id: "11111111-1111-1111-1111-111111111111",
+            metadata: {
+              type: "catalogue_schema",
+              app_id: appId,
+              schema_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+            content: Array.from(new TextEncoder().encode(serializeRuntimeSchema(TEST_SCHEMA))),
+          },
+        },
+      },
+    ],
+  };
+}
+
 describe("TestingServer", () => {
   it("starts and is reachable at /health", async () => {
     const server = await TestingServer.start();
@@ -107,22 +138,7 @@ describe("TestingServer", () => {
       expect(server.adminSecret).toBe(adminSecret);
       expect(server.backendSecret).toBe(backendSecret);
 
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
+      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
 
       const allowed = await fetch(`${server.url}/sync`, {
         method: "POST",
@@ -242,22 +258,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
+      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
 
       const response = await fetch(`${server.url}/sync`, {
         method: "POST",
@@ -285,22 +286,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
+      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
 
       const response = await fetch(`${server.url}/sync`, {
         method: "POST",

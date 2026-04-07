@@ -200,8 +200,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_schema",
             },
@@ -227,8 +227,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_lens",
             },
@@ -249,8 +249,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_lens",
             },

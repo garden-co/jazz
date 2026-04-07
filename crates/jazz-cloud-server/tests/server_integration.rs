@@ -83,7 +83,7 @@ impl ServerProcess {
 
         let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             client: Client::new(),
@@ -96,9 +96,12 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -273,11 +276,23 @@ fn sync_body() -> Value {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "RowVersionCreated": {
                 "metadata": null,
-                "branch_name": "main",
-                "commits": []
+                "row": {
+                    "row_id": "01234567-89ab-cdef-0123-456789abcdef",
+                    "branch": "main",
+                    "parents": [],
+                    "updated_at": 1000,
+                    "created_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "created_at": 1000,
+                    "updated_by": "01234567-89ab-cdef-0123-456789abcdef",
+                    "batch_id": uuid::Uuid::nil(),
+                    "state": "VisibleDirect",
+                    "confirmed_tier": null,
+                    "is_deleted": false,
+                    "data": [97,108,105,99,101],
+                    "metadata": {}
+                }
             }
         }]
     })
@@ -742,7 +757,6 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     let schema_hash = SchemaHash::compute(&schema);
     let encoded_schema = encode_schema(&schema);
     let object_id = schema_hash.to_object_id().to_string();
-    let author_id = Uuid::new_v4().to_string();
     let mut metadata = std::collections::HashMap::new();
     metadata.insert(
         MetadataKey::Type.as_str().to_string(),
@@ -760,22 +774,12 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     let sync_payload = json!({
         "client_id": Uuid::new_v4().to_string(),
         "payloads": [{
-            "ObjectUpdated": {
+            "CatalogueEntryUpdated": {
+                "entry": {
                 "object_id": object_id,
-                "metadata": {
-                    "id": object_id,
-                    "metadata": metadata
-                },
-                "branch_name": "main",
-                "commits": [
-                    {
-                        "parents": [],
-                        "content": encoded_schema,
-                        "timestamp": 1,
-                        "author": author_id,
-                        "metadata": null
-                    }
-                ]
+                "metadata": metadata,
+                "content": encoded_schema
+                }
             }
         }]
     });
