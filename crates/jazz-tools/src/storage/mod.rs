@@ -28,8 +28,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
+use smolset::SmolSet;
 
 use crate::catalogue::CatalogueEntry;
+use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
@@ -330,6 +332,79 @@ pub trait Storage {
                     && row.confirmed_tier.is_some_and(|tier| tier >= required_tier)
             })
             .max_by_key(|row| (row.updated_at, row.version_id())))
+    }
+
+    fn load_visible_region_entry(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<VisibleRowEntry>, StorageError> {
+        let Some(current_row) = self.load_visible_region_row(table, branch, row_id)? else {
+            return Ok(None);
+        };
+
+        let history_rows = self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .filter(|row| row.branch == branch)
+            .collect::<Vec<_>>();
+
+        Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .find(|row| row.version_id() == version_id))
+    }
+
+    fn row_version_exists(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .any(|row| row.branch == branch && row.version_id() == version_id))
+    }
+
+    fn scan_row_branch_tip_ids(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<CommitId>, StorageError> {
+        let branch_rows = self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .filter(|row| row.branch == branch)
+            .collect::<Vec<_>>();
+
+        let mut non_tips = SmolSet::<[CommitId; 2]>::new();
+        for row in &branch_rows {
+            for parent in &row.parents {
+                non_tips.insert(*parent);
+            }
+        }
+
+        let mut tips = branch_rows
+            .into_iter()
+            .map(|row| row.version_id())
+            .filter(|version_id| !non_tips.contains(version_id))
+            .collect::<Vec<_>>();
+        tips.sort();
+        tips.dedup();
+        Ok(tips)
     }
 
     fn scan_visible_region_row_versions(
@@ -692,7 +767,7 @@ type RawTableEntries = BTreeMap<String, Vec<u8>>;
 #[derive(Debug, Clone, Default)]
 struct TableRowRegions {
     visible: BTreeMap<(String, ObjectId), VisibleRowEntry>,
-    history: BTreeMap<(String, ObjectId, u64), StoredRowVersion>,
+    history: BTreeMap<(ObjectId, CommitId), StoredRowVersion>,
 }
 
 impl TableRowRegions {
@@ -700,9 +775,7 @@ impl TableRowRegions {
         let mut rows: Vec<_> = self
             .history
             .iter()
-            .filter(|((history_branch, history_row_id, _), _)| {
-                history_branch == branch && *history_row_id == row_id
-            })
+            .filter(|((history_row_id, _), row)| *history_row_id == row_id && row.branch == branch)
             .map(|(_, row)| row.clone())
             .collect();
         rows.sort_by_key(|row| (row.updated_at, row.version_id()));
@@ -934,10 +1007,9 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
         for row in rows {
-            regions.history.insert(
-                (row.branch.clone(), row.row_id, row.updated_at),
-                row.clone(),
-            );
+            regions
+                .history
+                .insert((row.row_id, row.version_id()), row.clone());
         }
         Ok(())
     }
@@ -1094,11 +1166,23 @@ impl Storage for MemoryStorage {
         let mut rows: Vec<_> = regions
             .history
             .iter()
-            .filter(|((_, history_row_id, _), _)| *history_row_id == row_id)
+            .filter(|((history_row_id, _), _)| *history_row_id == row_id)
             .map(|(_, row)| row.clone())
             .collect();
-        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at));
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
         Ok(rows)
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self
+            .row_regions
+            .get(table)
+            .and_then(|regions| regions.history.get(&(row_id, version_id)).cloned()))
     }
 
     fn scan_history_region(
@@ -1115,30 +1199,44 @@ impl Storage for MemoryStorage {
             HistoryScan::Branch => regions
                 .history
                 .iter()
-                .filter(|((row_branch, _, _), _)| row_branch == branch)
+                .filter(|(_, row)| row.branch == branch)
                 .map(|(_, row)| row.clone())
                 .collect(),
             HistoryScan::Row { row_id } => regions
                 .history
                 .iter()
-                .filter(|((row_branch, history_row_id, _), _)| {
-                    row_branch == branch && *history_row_id == row_id
+                .filter(|((history_row_id, _), row)| {
+                    row.branch == branch && *history_row_id == row_id
                 })
                 .map(|(_, row)| row.clone())
                 .collect(),
             HistoryScan::AsOf { ts } => {
                 let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
-                for ((row_branch, row_id, updated_at), row) in &regions.history {
-                    if row_branch != branch || *updated_at > ts || !row.state.is_visible() {
+                for ((row_id, _), row) in &regions.history {
+                    if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
                         continue;
                     }
-                    latest_per_row.insert(*row_id, row.clone());
+                    match latest_per_row.get(row_id) {
+                        Some(existing)
+                            if (existing.updated_at, existing.version_id())
+                                >= (row.updated_at, row.version_id()) => {}
+                        _ => {
+                            latest_per_row.insert(*row_id, row.clone());
+                        }
+                    }
                 }
                 latest_per_row.into_values().collect()
             }
         };
 
-        rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
+        rows.sort_by_key(|row| {
+            (
+                row.branch.clone(),
+                row.row_id,
+                row.updated_at,
+                row.version_id(),
+            )
+        });
         Ok(rows)
     }
 }

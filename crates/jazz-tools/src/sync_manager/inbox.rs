@@ -4,7 +4,7 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
 use crate::query_manager::policy::Operation;
-use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+use crate::row_regions::{RowState, StoredRowVersion};
 use crate::storage::Storage;
 use std::collections::{HashMap, HashSet};
 
@@ -31,9 +31,7 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 struct AppliedRowVersion {
     metadata: HashMap<String, String>,
     row: StoredRowVersion,
-    previous_row: Option<StoredRowVersion>,
-    is_new_object: bool,
-    visible_changed: bool,
+    visible_update: Option<VisibleRowUpdate>,
 }
 
 impl SyncManager {
@@ -91,107 +89,23 @@ impl SyncManager {
         }
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
-        let table = metadata.get(MetadataKey::Table.as_str())?.clone();
-        let branch_name = row.branch.clone();
-        let previous_row = storage
-            .load_visible_region_row(&table, &branch_name, row.row_id)
+        self.ensure_object_metadata(storage, row.row_id, metadata.clone());
+        let visible_update = self
+            .object_manager
+            .remember_remote_row_version_with_storage(
+                storage,
+                row.row_id,
+                BranchName::new(&row.branch),
+                row.clone(),
+            )
             .ok()
             .flatten();
-        let is_new_object = self.object_manager.get(row.row_id).is_none()
-            && storage.load_metadata(row.row_id).ok().flatten().is_none();
-
-        self.ensure_object_metadata(storage, row.row_id, metadata.clone());
-        let _ = self.object_manager.get_or_load(
-            row.row_id,
-            storage,
-            std::slice::from_ref(&branch_name),
-        );
-        self.object_manager.remember_remote_row_version(
-            row.row_id,
-            BranchName::new(&row.branch),
-            row.clone(),
-        );
-
-        let visible_entry = self
-            .object_manager
-            .visible_row_entry(row.row_id, BranchName::new(&row.branch));
-        let visible_changed = visible_entry
-            .as_ref()
-            .map(|entry| entry.current_row.clone())
-            != previous_row;
-
-        if let Err(error) = storage.append_history_region_rows(&table, std::slice::from_ref(&row)) {
-            tracing::warn!(
-                table,
-                branch = branch_name,
-                row_id = %row.row_id,
-                %error,
-                "failed to append synced history row"
-            );
-        }
-
-        if visible_changed
-            && let Err(error) = storage.upsert_visible_region_rows(&table, visible_entry.as_slice())
-        {
-            tracing::warn!(
-                table,
-                branch = branch_name,
-                row_id = %row.row_id,
-                %error,
-                "failed to upsert synced visible row"
-            );
-        }
 
         Some(AppliedRowVersion {
             metadata,
             row,
-            previous_row,
-            is_new_object,
-            visible_changed,
+            visible_update,
         })
-    }
-
-    fn table_for_object_id<H: Storage>(&self, storage: &H, object_id: ObjectId) -> Option<String> {
-        self.object_manager
-            .get(object_id)
-            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
-            .or_else(|| {
-                storage
-                    .load_metadata(object_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
-            })
-    }
-
-    fn patch_row_region_state<H: Storage>(
-        &self,
-        storage: &mut H,
-        row_id: ObjectId,
-        version_id: CommitId,
-        state: Option<RowState>,
-        confirmed_tier: Option<DurabilityTier>,
-    ) {
-        let Some(table) = self.table_for_object_id(storage, row_id) else {
-            return;
-        };
-
-        if let Err(error) = storage.patch_row_region_rows_by_batch(
-            &table,
-            BatchId::from_commit_id(version_id),
-            state,
-            confirmed_tier,
-        ) {
-            tracing::warn!(
-                %row_id,
-                ?version_id,
-                table,
-                ?state,
-                ?confirmed_tier,
-                %error,
-                "failed to patch row-region system state"
-            );
-        }
     }
 
     fn apply_row_version_state_changed<H: Storage>(
@@ -207,9 +121,8 @@ impl SyncManager {
             return;
         }
 
-        self.patch_row_region_state(storage, row_id, version_id, state, confirmed_tier);
-
-        let row_update = self.object_manager.patch_row_version_state(
+        let row_update = self.object_manager.patch_row_version_state_with_storage(
+            storage,
             row_id,
             &branch_name,
             version_id,
@@ -285,15 +198,8 @@ impl SyncManager {
                         });
                     }
 
-                    if applied.visible_changed {
-                        self.pending_row_updates.push(VisibleRowUpdate {
-                            object_id: applied.row.row_id,
-                            metadata: applied.metadata,
-                            row: applied.row,
-                            previous_row: applied.previous_row,
-                            is_new_object: applied.is_new_object,
-                        });
-
+                    if let Some(update) = applied.visible_update {
+                        self.pending_row_updates.push(update);
                         self.forward_update_to_clients_with_storage(
                             storage,
                             object_id,
@@ -712,15 +618,8 @@ impl SyncManager {
 
                     self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
 
-                    if applied.visible_changed {
-                        self.pending_row_updates.push(VisibleRowUpdate {
-                            object_id: applied.row.row_id,
-                            metadata: applied.metadata,
-                            row: applied.row,
-                            previous_row: applied.previous_row,
-                            is_new_object: applied.is_new_object,
-                        });
-
+                    if let Some(update) = applied.visible_update {
+                        self.pending_row_updates.push(update);
                         self.forward_update_to_clients_except_with_storage(
                             storage,
                             object_id,

@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
+use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(test)]
 use crate::commit::Commit;
-use crate::commit::{CommitId, compute_commit_id};
+use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{EncodingError, decode_row, encode_row};
@@ -61,6 +62,47 @@ fn malformed(message: impl Into<String>) -> EncodingError {
     EncodingError::MalformedData {
         message: message.into(),
     }
+}
+
+pub fn compute_row_version_id(
+    branch: &str,
+    parents: &[CommitId],
+    data: &[u8],
+    updated_at: u64,
+    updated_by: &str,
+    metadata: Option<&BTreeMap<String, String>>,
+) -> CommitId {
+    let mut hasher = Hasher::new();
+
+    hasher.update(b"row-version-v1");
+    hasher.update(&(branch.len() as u64).to_le_bytes());
+    hasher.update(branch.as_bytes());
+
+    hasher.update(&(parents.len() as u64).to_le_bytes());
+    for parent in parents {
+        hasher.update(&parent.0);
+    }
+
+    hasher.update(&(data.len() as u64).to_le_bytes());
+    hasher.update(data);
+
+    hasher.update(&updated_at.to_le_bytes());
+    hasher.update(updated_by.as_bytes());
+
+    if let Some(metadata) = metadata {
+        hasher.update(&[1u8]);
+        hasher.update(&(metadata.len() as u64).to_le_bytes());
+        for (key, value) in metadata {
+            hasher.update(&(key.len() as u64).to_le_bytes());
+            hasher.update(key.as_bytes());
+            hasher.update(&(value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+    } else {
+        hasher.update(&[0u8]);
+    }
+
+    CommitId(*hasher.finalize().as_bytes())
 }
 
 fn metadata_entry_descriptor() -> &'static RowDescriptor {
@@ -506,7 +548,9 @@ impl StoredRowVersion {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect::<BTreeMap<_, _>>()
         });
-        let version_id = compute_commit_id(
+        let branch = branch.into();
+        let version_id = compute_row_version_id(
+            &branch,
             &parents,
             &data,
             provenance.updated_at,
@@ -516,7 +560,7 @@ impl StoredRowVersion {
 
         Self {
             row_id,
-            branch: branch.into(),
+            branch,
             parents,
             updated_at: provenance.updated_at,
             created_by: provenance.created_by,
@@ -535,37 +579,53 @@ impl StoredRowVersion {
     pub fn from_commit(
         row_id: ObjectId,
         branch: impl Into<String>,
-        commit_id: CommitId,
+        _commit_id: CommitId,
         commit: &Commit,
         state: RowState,
     ) -> Self {
         let provenance = commit
             .row_provenance()
             .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
+        let branch = branch.into();
+        let metadata: HashMap<String, String> = commit
+            .metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let metadata_btree = (!metadata.is_empty()).then(|| {
+            metadata
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>()
+        });
+        let version_id = compute_row_version_id(
+            &branch,
+            &commit.parents.iter().copied().collect::<Vec<_>>(),
+            &commit.content,
+            provenance.updated_at,
+            &provenance.updated_by,
+            metadata_btree.as_ref(),
+        );
 
         Self {
             row_id,
-            branch: branch.into(),
+            branch,
             parents: commit.parents.iter().copied().collect(),
             updated_at: provenance.updated_at,
             created_by: provenance.created_by,
             created_at: provenance.created_at,
             updated_by: provenance.updated_by,
-            batch_id: BatchId::from_commit_id(commit_id),
+            batch_id: BatchId::from_commit_id(version_id),
             state,
             confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
             is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
             data: commit.content.clone(),
-            metadata: commit
-                .metadata
-                .as_ref()
-                .map(|metadata| {
-                    metadata
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            metadata,
         }
     }
 
@@ -579,7 +639,8 @@ impl StoredRowVersion {
     }
 
     pub fn version_id(&self) -> CommitId {
-        compute_commit_id(
+        compute_row_version_id(
+            &self.branch,
             &self.parents,
             &self.data,
             self.updated_at,

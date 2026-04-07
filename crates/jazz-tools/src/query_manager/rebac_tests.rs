@@ -87,6 +87,21 @@ fn row_version_created_payload(
     }
 }
 
+fn row_version_id_for_commit(
+    object_id: ObjectId,
+    branch: &str,
+    commit: &Commit,
+) -> crate::commit::CommitId {
+    StoredRowVersion::from_commit(
+        object_id,
+        branch,
+        commit.id(),
+        commit,
+        RowState::VisibleDirect,
+    )
+    .version_id()
+}
+
 fn add_row_commit(
     qm: &mut QueryManager,
     storage: &mut MemoryStorage,
@@ -583,7 +598,11 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         .object_manager
         .get_tip_ids(grand_id, &branch)
         .unwrap();
-    let applied = tips.contains(&update_commit.id());
+    let applied = tips.contains(&row_version_id_for_commit(
+        grand_id,
+        &branch,
+        &update_commit,
+    ));
 
     (denied, applied)
 }
@@ -650,7 +669,7 @@ fn rebac_insert_allowed_by_simple_policy() {
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Insert should be approved when owner matches session"
     );
 }
@@ -733,7 +752,10 @@ fn rebac_insert_denied_by_simple_policy() {
         .object_manager
         .get_tip_ids(obj_id, "main");
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Insert should be denied when owner doesn't match session"
     );
 }
@@ -976,7 +998,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should be applied when the parent folder is visible on the payload branch"
     );
 }
@@ -1041,7 +1063,7 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should be applied after settlement reads the parent from the payload branch"
     );
 }
@@ -1110,7 +1132,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should still be applied after permission settlement"
     );
 }
@@ -1212,7 +1234,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should apply once the requested parent branch is consulted"
     );
 }
@@ -1612,7 +1634,7 @@ fn rebac_table_without_policy_allows_all_writes() {
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
-        tips.contains(&commit.id()),
+        tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Table without policy should allow all writes"
     );
 }
@@ -1717,7 +1739,7 @@ fn rebac_two_clients_different_sessions() {
         .get_tip_ids(obj1, "main")
         .unwrap();
     assert!(
-        tips1.contains(&commit1.id()),
+        tips1.contains(&row_version_id_for_commit(obj1, "main", &commit1)),
         "Alice's document should be approved"
     );
 
@@ -1727,7 +1749,7 @@ fn rebac_two_clients_different_sessions() {
         .get_tip_ids(obj2, "main")
         .unwrap();
     assert!(
-        tips2.contains(&commit2.id()),
+        tips2.contains(&row_version_id_for_commit(obj2, "main", &commit2)),
         "Bob's document should be approved"
     );
 }
@@ -1987,7 +2009,7 @@ fn rebac_update_denied_by_using_policy() {
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
-        !tips.contains(&update_commit.id()),
+        !tips.contains(&row_version_id_for_commit(obj_id, "main", &update_commit,)),
         "Bob's update should be denied - he cannot see Alice's document"
     );
 }
@@ -2517,7 +2539,11 @@ fn rebac_update_denied_by_using_exists_policy() {
         .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
-        !tips.contains(&bob_commit.id()),
+        !tips.contains(&row_version_id_for_commit(
+            protected_obj,
+            &branch,
+            &bob_commit,
+        )),
         "Bob's update should not be applied - he is not an admin"
     );
 
@@ -2587,7 +2613,11 @@ fn rebac_update_denied_by_using_exists_policy() {
         .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
-        tips.contains(&alice_commit.id()),
+        tips.contains(&row_version_id_for_commit(
+            protected_obj,
+            &branch,
+            &alice_commit,
+        )),
         "Alice's update should be applied - she is an admin"
     );
 }

@@ -1,5 +1,6 @@
 use std::ops::Bound;
 
+use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 
@@ -164,26 +165,22 @@ pub(super) fn visible_table_prefix(table: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn history_row_key(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    updated_at: u64,
-) -> String {
+pub(super) fn history_row_key(table: &str, row_id: ObjectId, version_id: CommitId) -> String {
     format!(
-        "row:{table}:1:{branch}:{}:{updated_at:016x}",
-        format_uuid(row_id)
+        "row:{table}:1:{}:{}",
+        format_uuid(row_id),
+        hex::encode(version_id.0)
     )
 }
 
 #[allow(dead_code)]
-pub(super) fn history_row_prefix(table: &str, branch: &str) -> String {
-    format!("row:{table}:1:{branch}:")
+pub(super) fn history_row_prefix(table: &str) -> String {
+    format!("row:{table}:1:")
 }
 
 #[allow(dead_code)]
-pub(super) fn history_row_versions_prefix(table: &str, branch: &str, row_id: ObjectId) -> String {
-    format!("row:{table}:1:{branch}:{}:", format_uuid(row_id))
+pub(super) fn history_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
+    format!("row:{table}:1:{}:", format_uuid(row_id))
 }
 
 #[allow(dead_code)]

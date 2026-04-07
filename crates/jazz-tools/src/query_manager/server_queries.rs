@@ -387,8 +387,7 @@ impl QueryManager {
             None,
             auth_context,
             source_branch_schema_map,
-        )
-        else {
+        ) else {
             return false;
         };
         if row.is_hard_deleted() {
