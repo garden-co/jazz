@@ -2,6 +2,7 @@ packages:
   - docs
   - packages/*
   - examples/*
+  - "!examples/world-tour"
   - examples/docs/*
   - stress-tests/*
   - crates

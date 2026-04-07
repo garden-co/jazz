@@ -529,7 +529,8 @@ async function createTempDir(prefix: string): Promise<string> {
 describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const { NapiRuntime } = await loadNapiModule();
-    const dataPath = await createTempDir("jazz-napi-large-index-");
+    const dataDir = await createTempDir("jazz-napi-large-index-");
+    const dataPath = join(dataDir, "jazz.db");
     const runtime = new NapiRuntime(
       serializeRuntimeSchema(TEST_SCHEMA),
       `napi-large-index-${randomUUID()}`,
@@ -585,7 +586,7 @@ describe("NAPI integration", () => {
       expect(updatedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
     } finally {
       runtime.close();
-      await rm(dataPath, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
     }
   }, 20_000);
 
@@ -1425,7 +1426,7 @@ describe("NAPI integration", () => {
 
   it("reopens persistent backend runtimes cleanly and retains local data", async () => {
     const dataRoot = await createTempDir("jazz-napi-persistent-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const appId = randomUUID();
     let writerContext: {
       db(): Db;
@@ -1504,7 +1505,7 @@ describe("NAPI integration", () => {
 
   it("accepts modern epoch-millisecond timestamps from the TS value converter on backend durable writes", async () => {
     const dataRoot = await createTempDir("jazz-napi-timestamp-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const timestamp = 1773285322816;
     let context: {
       db(): Db;

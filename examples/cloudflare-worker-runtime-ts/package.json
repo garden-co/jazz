@@ -1,0 +1,21 @@
+{
+  "name": "cloudflare-worker-runtime-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ensure:jazz": "pnpm --filter jazz-wasm build",
+    "dev": "pnpm run ensure:jazz && wrangler dev",
+    "dev:remote": "pnpm run ensure:jazz && wrangler dev --remote",
+    "build": "pnpm run ensure:jazz && wrangler deploy --dry-run --outdir .wrangler-dist",
+    "check": "pnpm run ensure:jazz && tsc --noEmit && wrangler deploy --dry-run --outdir .wrangler-dist"
+  },
+  "dependencies": {
+    "jazz-wasm": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "catalog:default",
+    "wrangler": "^4.80.0"
+  }
+}

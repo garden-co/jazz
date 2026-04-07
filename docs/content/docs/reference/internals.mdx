@@ -1,0 +1,241 @@
+---
+title: Advanced Internals
+description: "How Jazz works under the hood: the storage engine, sync protocol, query pipeline, and browser architecture."
+reviewedAt: "f6535a533"
+---
+
+This page describes Jazz's internal architecture. You don't need any of this to use Jazz, but it
+can help if you're debugging, reasoning about performance, or understanding why the system behaves the
+way it does. It's also useful for anyone who may want to contribute to Jazz.
+
+## Data model
+
+### Row = Object
+
+Every table row is a standalone Jazz object identified by a UUIDv7. The row's `id` column is its
+ObjectId. This means each row carries its own version history, can sync independently, and has
+content-addressed commits. Two clients creating identical commits independently produce the same
+CommitId, so sync can detect and skip duplicates.
+
+### Automatic column indexing
+
+Every column in every table gets a single-column index automatically. There is no manual index
+management. The `_id` index for each table doubles as the authoritative row manifest&hairsp;—
+&hairsp;discovering all rows in a table is just an `_id` index scan.
+
+This is a deliberate trade-off: local-first databases are small enough that index overhead is
+negligible, and it guarantees every `where` filter hits an index rather than scanning rows.
+Custom index configuration is planned as a future feature.
+
+### Deletion
+
+The user-facing `delete` and `deleteDurable` APIs perform a **soft delete**: the row's content is
+preserved but it is hidden from queries. Internally, the row moves from the `_id` index to a
+separate `_id_deleted` index.
+
+A **hard delete** mode also exists at the storage layer (content emptied, irreversible, always wins
+in conflicts), but it is not currently exposed to application code.
+
+### History and truncation
+
+Each row's history is an append-only DAG of commits. History grows unboundedly by default. A
+low-level API for branch truncation exists, which removes ancestor commits below a
+specified boundary while preserving the current state, but this is not yet exposed to
+application code. Exposing history truncation is planned as a future feature.
+
+### Monotonic timestamps
+
+Each runtime instance maintains a monotonic timestamp counter. Every commit gets a timestamp that is
+strictly greater than the previous one from the same node. This guarantees causal ordering within a
+single instance, which is what makes last-writer-wins conflict resolution deterministic when commits
+originate from the same device.
+
+### Cold start
+
+On startup, Jazz loads indices first (not all row data), then lazy-loads row objects on demand as
+queries reference them. As a result, startup time is proportional to index size, not total data size.
+
+## Browser architecture
+
+### Dual-runtime model
+
+In the browser, Jazz runs two runtime instances:
+
+- **Main thread**&hairsp;— &hairsp;an in-memory runtime that serves all reads and writes instantly.
+- **Dedicated worker**&hairsp;— &hairsp;a persistent runtime backed by OPFS (Origin Private File
+  System) that owns durable storage and upstream server sync.
+
+The main thread treats the worker as its upstream server. Writes apply to the in-memory runtime
+immediately, then sync to the worker via `postMessage`. The worker persists them to OPFS and
+forwards them to the edge server. Incoming server updates flow the reverse path: edge &rarr; worker
+&rarr; main thread &rarr; your UI callback.
+
+```text
+Main thread (MemoryStorage)
+  ↕ postMessage
+Dedicated worker (OPFS via OpfsBTreeStorage)
+  ↕ HTTP/SSE
+Edge server (FjallStorage)
+```
+
+With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely&hairsp;— &hairsp;the
+main-thread runtime syncs directly with the server.
+
+### OPFS crash safety
+
+The OPFS storage engine uses checkpoint-based persistence with two superblock slots (A/B). Each
+checkpoint writes dirty pages, flushes, then swaps the active superblock. On reopen after a crash or
+torn write, the highest valid superblock generation wins, recovering to the last complete checkpoint.
+
+### Tab coordination
+
+Jazz uses the Web Locks API (`navigator.locks`) to elect a single tab as the storage leader; other
+tabs route through it via `BroadcastChannel`. When a leader tab closes, the browser releases the
+lock and the first follower to acquire it becomes the new leader.
+
+### React Native
+
+React Native uses a separate runtime adapter with no web worker or OPFS path. Local persistence
+works differently from the browser&hairsp;— &hairsp;there is no OPFS equivalent. The sync layer
+connects directly to the server from the main runtime.
+
+## Query engine
+
+### Execution pipeline
+
+Queries compile into a graph of processing nodes:
+
+```text
+IndexScan → [Union] → Materialize → [PolicyFilter]
+  → [ArraySubquery] → [Filter] → [Sort] → [LimitOffset]
+  → [Project] → Output
+```
+
+Index scans are per `(branch, filter-disjunct)` pair. Nodes in brackets are only present when the
+query requires them. The graph processes deltas (added/removed/updated tuples) incrementally, which means that on data changes, only dirty nodes re-evaluate. This is what makes live
+subscriptions efficient: when a single row changes, the engine doesn't re-run the whole query.
+
+### One-shot queries
+
+`db.all()` and `db.one()` are implemented as "subscribe, receive first durability-qualified
+snapshot, then auto-unsubscribe." They share the same reactive machinery as live subscriptions,
+which is why both participate in durability-tier gating and lens transforms.
+
+### Include performance
+
+Each outer row in an `include()` / array subquery gets its own compiled sub-graph. With 1,000 outer
+rows, that's 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
+correct and simple, but worth knowing if you're including across large result sets&hairsp;—&hairsp;limiting includes can improve performance.
+
+## Sync protocol
+
+### Transport
+
+Jazz uses HTTP with binary framing&hairsp;— &hairsp;not WebSockets or raw SSE text.
+
+- **Server &rarr; client**: `GET /events?client_id=<uuid>`&hairsp;— &hairsp;a persistent binary
+  stream of length-prefixed JSON frames (`[4-byte u32 BE length][JSON payload]`). Event types:
+  `Connected`, `SyncUpdate`, `Heartbeat` (every 30 seconds).
+- **Client &rarr; server**: `POST /sync`&hairsp;— &hairsp;sends mutations and subscription changes.
+- **Admin**: `GET /schemas`, `GET /schema/:hash`&hairsp;— &hairsp;schema catalogue reads (requires
+  admin secret).
+- **Health**: `GET /health`.
+
+### Client identity
+
+Each client generates and persists a UUID `ClientId` (v7 in Rust, v4 in TypeScript). On reconnect with the same ID, the server's
+tip tracking means it only sends data that's new since the last connection.
+
+### Reconnection
+
+The TypeScript client uses exponential backoff with jitter (base 300ms, cap 10s, 0–199ms random
+jitter). On reconnect, active query subscriptions are replayed as anti-entropy (meaning any divergence between client and server is repaired): the server re-evaluates them and sends any data the client is missing.
+
+### Trust model and client roles
+
+Sync is asymmetric:
+
+- **Upward** (client &rarr; server): all objects are pushed. Servers are trusted.
+- **Downward** (server &rarr; client): only objects matching the client's active query subscriptions
+  are sent. Clients are untrusted and never receive data they haven't asked for.
+
+Each client connection has a **role** that determines how writes are routed:
+
+| Role    | Write handling                                              |
+| ------- | ----------------------------------------------------------- |
+| `User`  | Writes queued for permission policy evaluation before apply |
+| `Admin` | Writes applied directly, no permission check                |
+| `Peer`  | Writes applied directly, used for server-to-server sync     |
+
+Frontend clients authenticate as `User`. Backend services with a backend secret authenticate as
+`Admin` or `Peer`. The role is invisible to application code&hairsp;— &hairsp;it's determined by the
+auth mechanism used when connecting.
+
+## Schema evolution
+
+### Lenses
+
+Migrations in Jazz produce **lenses**&hairsp;— &hairsp;bidirectional transformations between schema
+versions. When `jazz-tools migrations create` diffs two schemas, it generates a lens with
+declarative operations:
+
+| Operation      | Forward                        | Backward (auto-generated)               |
+| -------------- | ------------------------------ | --------------------------------------- |
+| `AddColumn`    | Adds column with default value | Removes the column                      |
+| `RemoveColumn` | Removes column                 | Adds column back with backwards default |
+| `RenameColumn` | Renames from old to new        | Renames from new to old                 |
+| `AddTable`     | Adds table                     | Removes the table                       |
+| `RemoveTable`  | Removes table                  | Adds table back                         |
+
+The backward transform is always computed automatically from the forward transform.
+
+#### At query time
+
+When a query touches data written under an older schema, the lens chain converts rows transparently.
+Index lookups translate column names through the chain (e.g. v1's `email` becomes v2's
+`email_address`), and row loading applies the lens transform to add default values for new columns
+or reshape the data.
+
+Results from all reachable schema versions are unioned together, with last-writer-wins deduplication
+by ObjectId when the same row appears on multiple schema branches.
+
+#### At write time
+
+Updating a row that lives on an old-schema branch triggers a **copy-on-write**: the row is loaded,
+lens-transformed to the current schema, the update is applied, and the result is written to the
+current schema's branch. The old branch data stays untouched.
+
+### Draft lenses
+
+Auto-generated lenses may contain **draft** operations&hairsp;— &hairsp;uncertain transformations
+like potential renames (same column type, different name) or non-nullable columns without sensible
+defaults. A draft lens in the path to any live schema will fail at startup, forcing you to review
+and resolve the ambiguity before the app can run.
+
+### Catalogue sync
+
+Schemas and lenses are themselves Jazz objects. When a client connects, its schema and lens objects
+propagate through normal sync. Servers discover schemas lazily and activate them on demand&hairsp;— &hairsp;no deployment coordination is needed when clients ship new schema versions.
+
+## Durability signals
+
+Jazz separates two durability concepts:
+
+| Signal           | Gates               | Question it answers                         |
+| ---------------- | ------------------- | ------------------------------------------- |
+| `QuerySettled`   | First read delivery | "Has the query result arrived from tier T?" |
+| `PersistenceAck` | Write completion    | "Is this commit durable at tier T?"         |
+
+Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different questions. A
+query's first callback is held until `QuerySettled` arrives at the requested tier. A durable write's
+promise resolves when `PersistenceAck` arrives at the requested tier.
+
+<Callout type="warn">
+  The read durability tier only gates the **first** delivery of a subscription. After the initial
+  snapshot arrives at the requested tier, subsequent updates are delivered as they reach the local
+  node, regardless of which tier they've propagated to. This means a subscription with `tier:
+  "global"` guarantees a globally-consistent initial snapshot, but later incremental updates may
+  arrive before reaching the global tier. The `localUpdates: "immediate"` option (the default)
+  additionally allows your own local writes to appear in the subscription before even the first
+  delivery, but only after the subscription has settled at least once.
+</Callout>

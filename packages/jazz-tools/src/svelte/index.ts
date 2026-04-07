@@ -26,4 +26,4 @@ export {
   type SyntheticUserStore,
 } from "../synthetic-users.js";
 export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
-export type { DurabilityTier, QueryOptions } from "../runtime/index.js";
+export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";

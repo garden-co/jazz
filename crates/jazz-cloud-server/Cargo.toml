@@ -12,6 +12,7 @@ jazz_tools = { package = "jazz-tools", path = "../jazz-tools", features = [
   "runtime-tokio",
   "transport",
   "client",
+  "rocksdb",
 ] }
 
 axum = "0.7"
