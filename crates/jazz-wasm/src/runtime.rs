@@ -534,8 +534,16 @@ impl WasmRuntime {
         sequence: Option<f64>,
     ) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload = self.parse_sync_payload(payload)?;
+        let mut payload = self.parse_sync_payload(payload)?;
         let sequence = Self::parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
         let server_id = (*self.upstream_server_id.borrow()).ok_or_else(|| {
             JsError::new("No upstream server registered; call addServer() before sync delivery")
         })?;

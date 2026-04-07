@@ -23,6 +23,7 @@ use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
 
+#[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct BuiltServer {
