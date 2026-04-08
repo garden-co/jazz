@@ -171,10 +171,11 @@ const app = {
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
-    definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
+    definePermissions(app, ({ policy, anyOf, allowedTo, session, isCreator }) => {
       expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
       expectTypeOf(session["claims.role"]!.path).toEqualTypeOf<string[]>();
+      expectTypeOf(isCreator).toMatchTypeOf<Parameters<typeof anyOf>[0][number]>();
 
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.userId },
@@ -182,18 +183,20 @@ describe("permissions type inference", () => {
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
       });
 
-      const hasViewerGrant = (resource: unknown) =>
-        policy.exists(
+      function hasViewerGrant(resource: unknown) {
+        return policy.exists(
           reachableTeams.hopTo("resource_access_edgesViaTeam").where({
             "resource_access_edges.resource": resource,
             grant_role: "viewer",
           }),
         );
+      }
 
       return [
         policy.todos.allowRead.where((todo) =>
           anyOf([
             { done: false },
+            isCreator,
             session.where({ "claims.role": "manager" }),
             policy.projects.exists.where({
               id: todo.projectId,
@@ -253,6 +256,13 @@ describe("permissions type inference", () => {
         policy.todos.allowRead.where((todo) => ({ ownerId: todo.missingColumn }));
       }
 
+      return [];
+    });
+  });
+
+  it("exposes managedByCreator() on table builders", () => {
+    definePermissions(app, ({ policy }) => {
+      policy.todos.managedByCreator();
       return [];
     });
   });

@@ -38,15 +38,18 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 // #endregion permissions-simple-ts
 
 // #region permissions-created-by-ts
-s.definePermissions(exampleApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user_id });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate
-    .whereOld({ $createdBy: session.user_id })
-    .whereNew({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+s.definePermissions(exampleApp, ({ policy }) => {
+  // Sugar for applying `$createdBy === session.user_id` to read/insert/update/delete.
+  policy.todos.managedByCreator();
 });
 // #endregion permissions-created-by-ts
+
+// #region permissions-created-by-combinator-ts
+s.definePermissions(exampleApp, ({ policy, anyOf, isCreator }) => {
+  // The same creator condition can still be composed with other rules.
+  policy.todos.allowRead.where(anyOf([isCreator, { done: true }]));
+});
+// #endregion permissions-created-by-combinator-ts
 
 // #region permissions-always-ts
 s.definePermissions(exampleApp, ({ policy }) => {
