@@ -214,7 +214,7 @@ impl QueryManager {
             .as_deref()
             .and_then(SchemaHash::from_hex);
         resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())
-            .or(Some(locator.table))
+            .or(Some(locator.table.to_string()))
     }
 
     fn load_visible_row_on_branch(

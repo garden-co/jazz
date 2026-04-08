@@ -582,7 +582,7 @@ impl RecursiveRelationNode {
             Some(instance) => instance,
             None => return Vec::new(),
         };
-        let _delta = instance.graph.settle(io, row_loader);
+        let _delta = instance.graph.settle(io, &mut |id, _| row_loader(id));
         instance.graph.current_output_rows_with_provenance()
     }
 

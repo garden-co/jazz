@@ -2045,7 +2045,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -2207,11 +2207,10 @@ impl QueryGraph {
                     if let Some(GraphNode::RecursiveRelation(recursive_node)) =
                         self.get_node_mut(node_id)
                     {
-                        let delta = recursive_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut row_loader,
-                        );
+                        let delta =
+                            recursive_node.process_with_context(input_delta, storage, &mut |id| {
+                                row_loader(id, None)
+                            });
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2263,7 +2262,7 @@ impl QueryGraph {
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
                         let delta =
                             magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
+                                row_loader(id, None)
                             });
                         tracing::debug!(
                             node_id = node_id.0,
@@ -2305,7 +2304,7 @@ impl QueryGraph {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
                             policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
+                                row_loader(id, None)
                             })
                         } else {
                             RowNode::process(policy_node, input_delta)
@@ -2379,17 +2378,16 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id))
+                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id, None))
                         } else {
                             TupleDelta::new()
                         };
 
                         // Process outer input changes
-                        let outer_delta = subquery_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut row_loader,
-                        );
+                        let outer_delta =
+                            subquery_node.process_with_context(input_delta, storage, &mut |id| {
+                                row_loader(id, None)
+                            });
 
                         // Merge outer delta into combined delta
                         delta.merge(outer_delta);

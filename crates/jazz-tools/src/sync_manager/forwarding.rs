@@ -66,7 +66,7 @@ impl SyncManager {
         if !server_ids.is_empty() {
             tracing::trace!(
                 %object_id,
-                branch = row.branch,
+                branch = row.branch.as_str(),
                 servers = server_ids.len(),
                 "forwarding row version to servers"
             );

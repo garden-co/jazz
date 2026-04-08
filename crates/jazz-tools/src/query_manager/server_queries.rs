@@ -765,10 +765,11 @@ impl QueryManager {
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
             {
-                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
+                let row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
                     Self::load_visible_row_for_query(
                         storage_ref,
                         id,
+                        table_hint.as_deref(),
                         &branches,
                         None,
                         None,
@@ -918,21 +919,23 @@ impl QueryManager {
             // Row loader for this subscription
             let new_scope = {
                 {
-                    let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        Self::load_visible_row_for_query(
-                            storage,
-                            id,
-                            branches,
-                            None,
-                            None,
-                            include_deleted,
-                            &sub.schema_context,
-                            &branch_schema_map,
-                            &table,
-                            super::graph_nodes::output::QuerySubscriptionId(query_id.0),
-                            &mut schema_warnings,
-                        )
-                    };
+                    let row_loader =
+                        |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
+                            Self::load_visible_row_for_query(
+                                storage,
+                                id,
+                                table_hint.as_deref(),
+                                branches,
+                                None,
+                                None,
+                                include_deleted,
+                                &sub.schema_context,
+                                &branch_schema_map,
+                                &table,
+                                super::graph_nodes::output::QuerySubscriptionId(query_id.0),
+                                &mut schema_warnings,
+                            )
+                        };
 
                     let _delta = sub.graph.settle(storage, row_loader);
                 }

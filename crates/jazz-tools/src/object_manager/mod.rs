@@ -604,7 +604,7 @@ impl ObjectManager {
             .load_history_row_version(&table, object_id, version_id)
             .ok()
             .flatten()?;
-        if patched_row.branch != branch_name.as_str() {
+        if patched_row.branch.as_str() != branch_name.as_str() {
             return None;
         }
 

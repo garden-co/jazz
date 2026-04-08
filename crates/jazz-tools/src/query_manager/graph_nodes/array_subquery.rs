@@ -363,7 +363,7 @@ impl ArraySubqueryNode {
             None => return (Value::Array(vec![]), TupleProvenance::default()),
         };
 
-        let _row_delta = instance.graph.settle(io, row_loader);
+        let _row_delta = instance.graph.settle(io, &mut |id, _| row_loader(id));
         let mut provenance = TupleProvenance::default();
         let array_elements: Vec<Value> = instance
             .graph
