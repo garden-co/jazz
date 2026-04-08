@@ -68,6 +68,101 @@ impl<'de> Deserialize<'de> for RowBytes {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct SharedString(Arc<str>);
+
+impl SharedString {
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl From<String> for SharedString {
+    fn from(value: String) -> Self {
+        Self(Arc::from(value.into_boxed_str()))
+    }
+}
+
+impl From<&str> for SharedString {
+    fn from(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl From<SharedString> for String {
+    fn from(value: SharedString) -> Self {
+        value.0.as_ref().to_owned()
+    }
+}
+
+impl From<&SharedString> for String {
+    fn from(value: &SharedString) -> Self {
+        value.0.as_ref().to_owned()
+    }
+}
+
+impl Deref for SharedString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl AsRef<str> for SharedString {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl std::borrow::Borrow<str> for SharedString {
+    fn borrow(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq<&str> for SharedString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_ref() == *other
+    }
+}
+
+impl PartialEq<SharedString> for &str {
+    fn eq(&self, other: &SharedString) -> bool {
+        *self == other.0.as_ref()
+    }
+}
+
+impl PartialEq<String> for SharedString {
+    fn eq(&self, other: &String) -> bool {
+        self.0.as_ref() == other.as_str()
+    }
+}
+
+impl PartialEq<SharedString> for String {
+    fn eq(&self, other: &SharedString) -> bool {
+        self.as_str() == other.0.as_ref()
+    }
+}
+
+impl std::fmt::Display for SharedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_ref())
+    }
+}
+
+impl Serialize for SharedString {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
 /// A row with its object ID, binary data, and version reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {

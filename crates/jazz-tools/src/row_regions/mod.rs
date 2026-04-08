@@ -12,7 +12,9 @@ use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{EncodingError, decode_row, encode_row};
-use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, Value};
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
+};
 use crate::sync_manager::DurabilityTier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -399,7 +401,7 @@ fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
     vec![
         Value::Uuid(row.row_id),
         commit_id_to_value(row.version_id),
-        Value::Text(row.branch.clone()),
+        Value::Text(row.branch.to_string()),
         Value::Array(
             row.parents
                 .iter()
@@ -408,9 +410,9 @@ fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
                 .collect(),
         ),
         Value::Timestamp(row.updated_at),
-        Value::Text(row.created_by.clone()),
+        Value::Text(row.created_by.to_string()),
         Value::Timestamp(row.created_at),
-        Value::Text(row.updated_by.clone()),
+        Value::Text(row.updated_by.to_string()),
         batch_id_to_value(row.batch_id),
         row_state_to_value(row.state),
         row.confirmed_tier
@@ -444,12 +446,12 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
     Ok(StoredRowVersion {
         row_id: expect_uuid(&values[0], "row_id")?,
         version_id: commit_id_from_value(&values[1])?,
-        branch: expect_text(&values[2], "branch")?,
+        branch: expect_text(&values[2], "branch")?.into(),
         parents,
         updated_at: expect_timestamp(&values[4], "updated_at")?,
-        created_by: expect_text(&values[5], "created_by")?,
+        created_by: expect_text(&values[5], "created_by")?.into(),
         created_at: expect_timestamp(&values[6], "created_at")?,
-        updated_by: expect_text(&values[7], "updated_by")?,
+        updated_by: expect_text(&values[7], "updated_by")?.into(),
         batch_id: batch_id_from_value(&values[8])?,
         state: row_state_from_value(&values[9])?,
         confirmed_tier: durability_tier_from_value(&values[10])?,
@@ -524,12 +526,12 @@ pub(crate) fn decode_visible_row_entry(data: &[u8]) -> Result<VisibleRowEntry, E
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
     pub version_id: CommitId,
-    pub branch: String,
+    pub branch: SharedString,
     pub parents: SmallVec<[crate::commit::CommitId; 2]>,
     pub updated_at: u64,
-    pub created_by: String,
+    pub created_by: SharedString,
     pub created_at: u64,
-    pub updated_by: String,
+    pub updated_by: SharedString,
     pub batch_id: BatchId,
     pub state: RowState,
     pub confirmed_tier: Option<DurabilityTier>,
@@ -591,7 +593,7 @@ impl StoredRowVersion {
                 value == DeleteKind::Soft.as_str() || value == DeleteKind::Hard.as_str()
             });
         let metadata = RowMetadata::from_hash_map(metadata);
-        let branch = branch.into();
+        let branch = SharedString::from(branch.into());
         let version_id = compute_row_version_id(
             &branch,
             &parents,
@@ -607,9 +609,9 @@ impl StoredRowVersion {
             branch,
             parents: SmallVec::from_vec(parents),
             updated_at: provenance.updated_at,
-            created_by: provenance.created_by,
+            created_by: provenance.created_by.into(),
             created_at: provenance.created_at,
-            updated_by: provenance.updated_by,
+            updated_by: provenance.updated_by.into(),
             batch_id: BatchId::from_commit_id(version_id),
             state,
             confirmed_tier,
@@ -630,7 +632,7 @@ impl StoredRowVersion {
         let provenance = commit
             .row_provenance()
             .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
-        let branch = branch.into();
+        let branch = SharedString::from(branch.into());
         let metadata = RowMetadata::from_hash_map(
             commit
                 .metadata
@@ -658,9 +660,9 @@ impl StoredRowVersion {
             branch,
             parents: commit.parents.iter().copied().collect(),
             updated_at: provenance.updated_at,
-            created_by: provenance.created_by,
+            created_by: provenance.created_by.into(),
             created_at: provenance.created_at,
-            updated_by: provenance.updated_by,
+            updated_by: provenance.updated_by.into(),
             batch_id: BatchId::from_commit_id(version_id),
             state,
             confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
@@ -672,9 +674,9 @@ impl StoredRowVersion {
 
     pub fn row_provenance(&self) -> RowProvenance {
         RowProvenance {
-            created_by: self.created_by.clone(),
+            created_by: self.created_by.to_string(),
             created_at: self.created_at,
-            updated_by: self.updated_by.clone(),
+            updated_by: self.updated_by.to_string(),
             updated_at: self.updated_at,
         }
     }

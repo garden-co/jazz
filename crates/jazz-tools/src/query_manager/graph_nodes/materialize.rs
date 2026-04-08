@@ -38,7 +38,7 @@ pub struct MaterializeNode {
 }
 
 /// Function type for loading row data from storage.
-pub type RowLoader = Box<dyn FnMut(ObjectId) -> Option<LoadedRow>>;
+pub type RowLoader = Box<dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>>;
 
 impl MaterializeNode {
     /// Create a new materialize node with TupleDescriptor and selective element materialization.
@@ -116,7 +116,7 @@ impl MaterializeNode {
     /// If loader returns None for any element in a tuple, that tuple is silently dropped.
     pub fn materialize_tuples<F>(&mut self, delta: TupleDelta, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -185,7 +185,7 @@ impl MaterializeNode {
     /// Returns None if any element that should be materialized can't be loaded.
     fn materialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Option<Tuple>
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let mut materialized_elements = Vec::with_capacity(tuple.len());
         let mut materialized_provenance = if tuple.len() == 1 {
@@ -204,7 +204,11 @@ impl MaterializeNode {
             match elem {
                 TupleElement::Id(id) => {
                     // Try to load the row data
-                    if let Some(loaded) = loader(*id) {
+                    let table_hint = self
+                        .output_descriptor
+                        .element(elem_idx)
+                        .map(|element| element.table.clone());
+                    if let Some(loaded) = loader(*id, table_hint) {
                         let row = Row::new(
                             *id,
                             loaded.data.clone(),
@@ -277,7 +281,7 @@ impl MaterializeNode {
     /// Check for updated IDs and return update deltas (tuple version).
     pub fn check_updated_tuples<F>(&mut self, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
         let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
@@ -405,7 +409,7 @@ mod tests {
 
         let delta = make_tuple_delta_add(&[id1, id2]);
 
-        let loader = |id: ObjectId| -> Option<LoadedRow> {
+        let loader = |id: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
             if id == id1 {
                 Some(make_loaded_row(data1.clone(), commit1))
             } else if id == id2 {
@@ -432,8 +436,9 @@ mod tests {
 
         // First add
         let add_delta = make_tuple_delta_add(&[id1]);
-        let loader =
-            |_: ObjectId| -> Option<LoadedRow> { Some(make_loaded_row(data1.clone(), commit1)) };
+        let loader = |_: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+            Some(make_loaded_row(data1.clone(), commit1))
+        };
         let added = node.materialize_tuples(add_delta, loader);
         assert_eq!(added.added.len(), 1);
 
@@ -441,7 +446,7 @@ mod tests {
         let materialized_tuple = added.added[0].clone();
         let remove_delta = make_tuple_delta_remove(vec![materialized_tuple]);
 
-        let result = node.materialize_tuples(remove_delta, |_| None);
+        let result = node.materialize_tuples(remove_delta, |_, _| None);
 
         assert!(result.added.is_empty());
         assert_eq!(result.removed.len(), 1);
@@ -459,14 +464,16 @@ mod tests {
 
         // Add the row
         let add_delta = make_tuple_delta_add(&[id1]);
-        node.materialize_tuples(add_delta, |_| Some(make_loaded_row(data1.clone(), commit1)));
+        node.materialize_tuples(add_delta, |_, _| {
+            Some(make_loaded_row(data1.clone(), commit1))
+        });
 
         // Mark for update check
         node.mark_updated(id1);
 
         // Check for update with new data
         let update_delta =
-            node.check_updated_tuples(|_| Some(make_loaded_row(data2.clone(), commit2)));
+            node.check_updated_tuples(|_, _| Some(make_loaded_row(data2.clone(), commit2)));
 
         assert_eq!(update_delta.updated.len(), 1);
     }
@@ -481,14 +488,16 @@ mod tests {
 
         // Add the row
         let add_delta = make_tuple_delta_add(&[id1]);
-        node.materialize_tuples(add_delta, |_| Some(make_loaded_row(data1.clone(), commit1)));
+        node.materialize_tuples(add_delta, |_, _| {
+            Some(make_loaded_row(data1.clone(), commit1))
+        });
 
         // Mark for update check
         node.mark_updated(id1);
 
         // Check for update with same data - should not emit update
         let update_delta =
-            node.check_updated_tuples(|_| Some(make_loaded_row(data1.clone(), commit1)));
+            node.check_updated_tuples(|_, _| Some(make_loaded_row(data1.clone(), commit1)));
 
         assert!(update_delta.updated.is_empty());
     }
@@ -505,7 +514,7 @@ mod tests {
         let delta = make_tuple_delta_add(&[id1, id2]);
 
         // Loader only returns data for id1, not id2
-        let loader = |id: ObjectId| -> Option<LoadedRow> {
+        let loader = |id: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
             if id == id1 {
                 Some(make_loaded_row(data1.clone(), commit1))
             } else {
@@ -533,8 +542,9 @@ mod tests {
         let commit1 = make_commit_id(1);
 
         let delta = make_tuple_delta_add(&[id1]);
-        let loader =
-            |_: ObjectId| -> Option<LoadedRow> { Some(make_loaded_row(data1.clone(), commit1)) };
+        let loader = |_: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+            Some(make_loaded_row(data1.clone(), commit1))
+        };
 
         let result = node.materialize_tuples(delta, loader);
 
@@ -551,7 +561,7 @@ mod tests {
 
         // Add but loader returns None - tuple is dropped
         let add_delta = make_tuple_delta_add(&[id1]);
-        let result = node.materialize_tuples(add_delta, |_| None);
+        let result = node.materialize_tuples(add_delta, |_, _| None);
         assert_eq!(result.added.len(), 0);
 
         // Node should have no tuples
@@ -567,14 +577,14 @@ mod tests {
         let commit1 = make_commit_id(1);
 
         let add_delta = make_tuple_delta_add(&[id1]);
-        let dropped = node.materialize_tuples(add_delta, |_| None);
+        let dropped = node.materialize_tuples(add_delta, |_, _| None);
         assert!(dropped.added.is_empty());
         assert_eq!(node.current_tuples().len(), 0);
 
         node.mark_updated(id1);
 
         let update_delta =
-            node.check_updated_tuples(|_| Some(make_loaded_row(data1.clone(), commit1)));
+            node.check_updated_tuples(|_, _| Some(make_loaded_row(data1.clone(), commit1)));
 
         assert_eq!(update_delta.added.len(), 1);
         assert!(update_delta.updated.is_empty());

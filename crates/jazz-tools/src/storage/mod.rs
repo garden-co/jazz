@@ -34,7 +34,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
-use crate::query_manager::types::Value;
+use crate::query_manager::types::{SharedString, Value};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
@@ -94,8 +94,8 @@ const ROW_LOCATOR_TABLE: &str = "__row_locator";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowLocator {
-    pub table: String,
-    pub origin_schema_hash: Option<String>,
+    pub table: SharedString,
+    pub origin_schema_hash: Option<SharedString>,
 }
 
 fn metadata_raw_key(id: ObjectId) -> String {
@@ -122,10 +122,11 @@ fn decode_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError
 
 fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLocator> {
     Some(RowLocator {
-        table: metadata.get(MetadataKey::Table.as_str())?.clone(),
+        table: metadata.get(MetadataKey::Table.as_str())?.clone().into(),
         origin_schema_hash: metadata
             .get(MetadataKey::OriginSchemaHash.as_str())
-            .cloned(),
+            .cloned()
+            .map(Into::into),
     })
 }
 
@@ -1063,7 +1064,10 @@ impl Storage for MemoryStorage {
         let regions = self.row_regions.entry(table.to_string()).or_default();
         for entry in entries {
             regions.visible.insert(
-                (entry.current_row.branch.clone(), entry.current_row.row_id),
+                (
+                    entry.current_row.branch.to_string(),
+                    entry.current_row.row_id,
+                ),
                 entry.clone(),
             );
         }

@@ -158,7 +158,7 @@ pub(super) fn patch_row_region_rows_by_batch_core(
             affected_visible_rows.insert((row.branch.clone(), row.row_id));
         }
         history_by_visible_row
-            .entry((row.branch.clone(), row.row_id))
+            .entry((row.branch.to_string(), row.row_id))
             .or_default()
             .push(row);
     }
@@ -179,16 +179,16 @@ pub(super) fn patch_row_region_rows_by_batch_core(
             };
             affected_visible_rows.insert((row.branch.clone(), row.row_id));
         }
-        visible_by_key.insert((row.branch.clone(), row.row_id), entry);
+        visible_by_key.insert((row.branch.to_string(), row.row_id), entry);
     }
 
     for (branch, row_id) in affected_visible_rows {
-        let Some(entry) = visible_by_key.get(&(branch.clone(), row_id)).cloned() else {
+        let Some(entry) = visible_by_key.get(&(branch.to_string(), row_id)).cloned() else {
             continue;
         };
         let current_row = entry.current_row;
         let mut history_rows = history_by_visible_row
-            .remove(&(branch.clone(), row_id))
+            .remove(&(branch.to_string(), row_id))
             .unwrap_or_default();
         if !history_rows
             .iter()

@@ -248,7 +248,7 @@ impl PolicyGraph {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> bool {
-        let _delta = self.graph.settle(io, row_loader);
+        let _delta = self.graph.settle(io, &mut |id, _| row_loader(id));
         true
     }
 
