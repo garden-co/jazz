@@ -1,0 +1,10 @@
+Geist Mono webfonts sourced from the official Vercel geist-font 1.8.0 release:
+https://github.com/vercel/geist-font/releases/tag/1.8.0
+
+Files copied from:
+- fonts/GeistMono/webfonts/GeistMono[wght].woff2
+- fonts/GeistMono/webfonts/GeistMono-Italic[wght].woff2
+
+License:
+- SIL Open Font License 1.1
+- See OFL.txt in this directory
