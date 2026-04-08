@@ -6,6 +6,7 @@ pub mod metadata;
 pub mod middleware;
 mod monotonic_clock;
 pub mod object;
+#[cfg(test)]
 pub mod object_manager;
 pub mod query_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
