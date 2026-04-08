@@ -23,6 +23,7 @@ function printHelp() {
   node benchmarks/realistic/run_ci_benchmarks.mjs \\
     --suite native|browser \\
     --out-dir bench-out/native \\
+    [--storage-engine rocksdb|sqlite] \\
     [--profile s] \\
     [--skip-set benchmarks/realistic/ci_skip_set.json] \\
     [--repeat-count 3] \\
@@ -34,6 +35,7 @@ function parseArgs(argv) {
   const out = {
     suite: "",
     outDir: "",
+    storageEngine: "",
     profile: "s",
     skipSet: "benchmarks/realistic/ci_skip_set.json",
     repeatCount: DEFAULT_NOISE_REPEAT_COUNT,
@@ -49,6 +51,10 @@ function parseArgs(argv) {
     }
     if (arg === "--out-dir") {
       out.outDir = argv[++i] ?? "";
+      continue;
+    }
+    if (arg === "--storage-engine") {
+      out.storageEngine = argv[++i] ?? "";
       continue;
     }
     if (arg === "--profile") {
@@ -76,6 +82,12 @@ function parseArgs(argv) {
 
   if (!out.suite) fail("--suite is required");
   if (!out.outDir) fail("--out-dir is required");
+  if (out.suite === "native" && !["rocksdb", "sqlite"].includes(out.storageEngine)) {
+    fail("--storage-engine must be one of: rocksdb, sqlite");
+  }
+  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "opfs-btree") {
+    fail("--storage-engine is only supported for native suites");
+  }
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds < 1) {
     fail("--timeout-seconds must be a number >= 1");
   }
@@ -429,6 +441,7 @@ function summarizeBenchmark(benchmark, status, durationMs, extra = {}) {
   return {
     id: benchmark.id,
     suite: benchmark.suite,
+    storage_engine: benchmark.storage_engine ?? null,
     label: benchmark.label,
     kind: benchmark.kind,
     status,
@@ -443,10 +456,28 @@ function stripAnsi(value) {
 
 export const NATIVE_EXAMPLE_FEATURES = "client,rocksdb";
 export const NATIVE_CRITERION_FEATURES = "rocksdb";
+export const NATIVE_EXAMPLE_FEATURES_BY_ENGINE = {
+  rocksdb: "client,rocksdb",
+  sqlite: "client,sqlite",
+};
+export const NATIVE_CRITERION_FEATURES_BY_ENGINE = {
+  rocksdb: "rocksdb",
+  sqlite: "sqlite",
+};
+
+function nativeStorageEngine(benchmark, args = {}) {
+  return benchmark?.storage_engine ?? args.storageEngine ?? "";
+}
 
 export function buildNativeExampleBaseCommand(benchmark, args) {
   const profilePath =
     benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+  const features = NATIVE_EXAMPLE_FEATURES_BY_ENGINE[nativeStorageEngine(benchmark, args)];
+  if (!features) {
+    throw new Error(
+      `Unsupported native example storage engine: ${nativeStorageEngine(benchmark, args)}`,
+    );
+  }
 
   return [
     "cargo",
@@ -455,7 +486,7 @@ export function buildNativeExampleBaseCommand(benchmark, args) {
     "-p",
     "jazz-tools",
     "--features",
-    NATIVE_EXAMPLE_FEATURES,
+    features,
     "--example",
     "realistic_bench",
     "--",
@@ -467,13 +498,19 @@ export function buildNativeExampleBaseCommand(benchmark, args) {
 }
 
 export function buildNativeCriterionCommand(benchmark) {
+  const features = NATIVE_CRITERION_FEATURES_BY_ENGINE[nativeStorageEngine(benchmark)];
+  if (!features) {
+    throw new Error(
+      `Unsupported native Criterion storage engine: ${nativeStorageEngine(benchmark)}`,
+    );
+  }
   return [
     "cargo",
     "bench",
     "-p",
     "jazz-tools",
     "--features",
-    NATIVE_CRITERION_FEATURES,
+    features,
     "--bench",
     "realistic_phase1",
     "--",
@@ -800,10 +837,12 @@ function countByStatus(results) {
   return counts;
 }
 
-function summaryMarkdown(suite, results, timeoutSeconds, repeatCount) {
+function summaryMarkdown(suite, results, timeoutSeconds, repeatCount, storageEngine = "") {
   const counts = countByStatus(results);
   const lines = [];
-  lines.push(`## ${suite === "native" ? "Native" : "Browser"} benchmark status`);
+  const suiteTitle = suite === "native" ? "Native" : "Browser";
+  const storageSuffix = storageEngine ? ` (${storageEngine})` : "";
+  lines.push(`## ${suiteTitle}${storageSuffix} benchmark status`);
   lines.push("");
   lines.push(`Budget per benchmark: ${timeoutSeconds}s`);
   lines.push(`Repeated scenario benchmarks: ${repeatCount}x`);
@@ -845,7 +884,7 @@ async function main() {
 
   const skipSet = readSkipSet(path.resolve(args.skipSet));
   const skipIdSet = skipIds(skipSet);
-  const catalog = benchmarksForSuite(args.suite);
+  const catalog = benchmarksForSuite(args.suite, { storageEngine: args.storageEngine });
   const results = [];
 
   for (const benchmark of catalog) {
@@ -875,6 +914,7 @@ async function main() {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
+    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
     profile: args.profile,
     repeat_count: args.repeatCount,
     timeout_seconds: args.timeoutSeconds,
@@ -883,12 +923,19 @@ async function main() {
   writeJson(statusFile, statusPayload);
   fs.writeFileSync(
     summaryFile,
-    summaryMarkdown(args.suite, results, args.timeoutSeconds, args.repeatCount),
+    summaryMarkdown(
+      args.suite,
+      results,
+      args.timeoutSeconds,
+      args.repeatCount,
+      args.suite === "browser" ? "opfs-btree" : args.storageEngine,
+    ),
   );
   writeJson(skipCandidatesFile, {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
+    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
     timeout_seconds: args.timeoutSeconds,
     benchmark_ids: results
       .filter((result) => result.status === "timed_out")
@@ -903,6 +950,7 @@ async function main() {
       runner: "jazz-ts-browser-opfs",
       generated_at: generatedAt,
       profile: args.profile,
+      storage_engine: "opfs-btree",
       scenarios,
       benchmark_statuses: results.map(({ scenario, ...rest }) => rest),
     });
