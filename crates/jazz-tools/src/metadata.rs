@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Keys used in object metadata (`HashMap<String, String>`) and commit
 /// metadata (`BTreeMap<String, String>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +100,7 @@ impl fmt::Display for ObjectType {
 }
 
 /// Values for the `Delete` commit metadata key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteKind {
     Soft,
     Hard,

@@ -7,6 +7,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::SchemaHash;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
@@ -130,8 +131,7 @@ impl ObjectManager {
             table: Self::table_from_metadata(metadata)?.into(),
             origin_schema_hash: metadata
                 .get(MetadataKey::OriginSchemaHash.as_str())
-                .cloned()
-                .map(Into::into),
+                .and_then(|raw_hash| SchemaHash::from_hex(raw_hash)),
         })
     }
 

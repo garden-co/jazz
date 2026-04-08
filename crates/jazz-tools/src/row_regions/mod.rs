@@ -11,7 +11,9 @@ use crate::commit::Commit;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
-use crate::query_manager::encoding::{EncodingError, decode_column, decode_row, encode_row};
+use crate::query_manager::encoding::{
+    EncodingError, column_bytes, decode_column, decode_row, encode_row,
+};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
@@ -139,6 +141,12 @@ fn confirmed_tier_column_type() -> ColumnType {
     }
 }
 
+fn delete_kind_column_type() -> ColumnType {
+    ColumnType::Enum {
+        variants: vec!["soft".to_string(), "hard".to_string()],
+    }
+}
+
 fn stored_row_version_descriptor() -> &'static RowDescriptor {
     static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
     DESCRIPTOR.get_or_init(|| {
@@ -159,6 +167,7 @@ fn stored_row_version_descriptor() -> &'static RowDescriptor {
             ColumnDescriptor::new("batch_id", ColumnType::Bytea),
             ColumnDescriptor::new("state", row_state_column_type()),
             ColumnDescriptor::new("confirmed_tier", confirmed_tier_column_type()).nullable(),
+            ColumnDescriptor::new("delete_kind", delete_kind_column_type()).nullable(),
             ColumnDescriptor::new("is_deleted", ColumnType::Boolean),
             ColumnDescriptor::new("data", ColumnType::Bytea),
             ColumnDescriptor::new(
@@ -243,6 +252,24 @@ fn durability_tier_from_value(value: &Value) -> Result<Option<DurabilityTier>, E
         },
         other => Err(malformed(format!(
             "expected durability tier text or null, got {other:?}"
+        ))),
+    }
+}
+
+fn delete_kind_to_value(kind: DeleteKind) -> Value {
+    Value::Text(kind.as_str().to_string())
+}
+
+fn delete_kind_from_value(value: &Value) -> Result<Option<DeleteKind>, EncodingError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => match value.as_str() {
+            "soft" => Ok(Some(DeleteKind::Soft)),
+            "hard" => Ok(Some(DeleteKind::Hard)),
+            _ => Err(malformed(format!("invalid delete kind: {value}"))),
+        },
+        other => Err(malformed(format!(
+            "expected delete kind text or null, got {other:?}"
         ))),
     }
 }
@@ -418,6 +445,9 @@ fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
         row.confirmed_tier
             .map(durability_tier_to_value)
             .unwrap_or(Value::Null),
+        row.delete_kind
+            .map(delete_kind_to_value)
+            .unwrap_or(Value::Null),
         Value::Boolean(row.is_deleted),
         Value::Bytea(row.data.to_vec()),
         metadata_to_value(&row.metadata),
@@ -455,9 +485,10 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
         batch_id: batch_id_from_value(&values[8])?,
         state: row_state_from_value(&values[9])?,
         confirmed_tier: durability_tier_from_value(&values[10])?,
-        is_deleted: expect_bool(&values[11], "is_deleted")?,
-        data: expect_bytea(&values[12], "data")?.into(),
-        metadata: metadata_from_value(&values[13])?,
+        delete_kind: delete_kind_from_value(&values[11])?,
+        is_deleted: expect_bool(&values[12], "is_deleted")?,
+        data: expect_bytea(&values[13], "data")?.into(),
+        metadata: metadata_from_value(&values[14])?,
     })
 }
 
@@ -532,6 +563,194 @@ pub(crate) fn decode_visible_current_row(data: &[u8]) -> Result<StoredRowVersion
     stored_row_version_from_value(&value)
 }
 
+fn parse_commit_id_bytes(bytes: &[u8], label: &str) -> Result<CommitId, EncodingError> {
+    if bytes.len() != 32 {
+        return Err(malformed(format!(
+            "expected 32-byte {label}, got {} bytes",
+            bytes.len()
+        )));
+    }
+    let mut commit_id = [0u8; 32];
+    commit_id.copy_from_slice(bytes);
+    Ok(CommitId(commit_id))
+}
+
+fn parse_shared_text(bytes: &[u8], label: &str) -> Result<SharedString, EncodingError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| malformed(format!("invalid utf8 for {label}: {err}")))?;
+    Ok(text.into())
+}
+
+fn parse_timestamp_bytes(bytes: &[u8], label: &str) -> Result<u64, EncodingError> {
+    if bytes.len() != 8 {
+        return Err(malformed(format!(
+            "expected 8-byte {label}, got {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn parse_row_state_bytes(bytes: &[u8]) -> Result<RowState, EncodingError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| malformed(format!("invalid utf8 for row state: {err}")))?;
+    row_state_from_value(&Value::Text(text.to_string()))
+}
+
+fn parse_delete_kind_bytes(bytes: Option<&[u8]>) -> Result<Option<DeleteKind>, EncodingError> {
+    match bytes {
+        Some(bytes) => {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|err| malformed(format!("invalid utf8 for delete kind: {err}")))?;
+            delete_kind_from_value(&Value::Text(text.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn embedded_row_payload<'a>(bytes: &'a [u8], label: &str) -> Result<&'a [u8], EncodingError> {
+    if bytes.is_empty() {
+        return Err(malformed(format!("{label} row payload missing")));
+    }
+    match bytes[0] {
+        0 => Ok(&bytes[1..]),
+        1 => {
+            if bytes.len() < 17 {
+                return Err(malformed(format!("{label} row id too short")));
+            }
+            Ok(&bytes[17..])
+        }
+        marker => Err(malformed(format!(
+            "invalid {label} row id marker: {marker}"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRowVersion {
+    pub version_id: CommitId,
+    pub branch: SharedString,
+    pub updated_at: u64,
+    pub created_by: SharedString,
+    pub created_at: u64,
+    pub updated_by: SharedString,
+    pub state: RowState,
+    pub delete_kind: Option<DeleteKind>,
+    pub data: RowBytes,
+}
+
+impl QueryRowVersion {
+    pub fn version_id(&self) -> CommitId {
+        self.version_id
+    }
+
+    pub fn row_provenance(&self) -> RowProvenance {
+        RowProvenance {
+            created_by: self.created_by.to_string(),
+            created_at: self.created_at,
+            updated_by: self.updated_by.to_string(),
+            updated_at: self.updated_at,
+        }
+    }
+
+    pub fn is_soft_deleted(&self) -> bool {
+        self.delete_kind == Some(DeleteKind::Soft)
+    }
+
+    pub fn is_hard_deleted(&self) -> bool {
+        self.delete_kind == Some(DeleteKind::Hard)
+    }
+}
+
+impl From<&StoredRowVersion> for QueryRowVersion {
+    fn from(row: &StoredRowVersion) -> Self {
+        Self {
+            version_id: row.version_id(),
+            branch: row.branch.clone(),
+            updated_at: row.updated_at,
+            created_by: row.created_by.clone(),
+            created_at: row.created_at,
+            updated_by: row.updated_by.clone(),
+            state: row.state,
+            delete_kind: row.delete_kind,
+            data: row.data.clone(),
+        }
+    }
+}
+
+pub(crate) fn decode_query_row_version(data: &[u8]) -> Result<QueryRowVersion, EncodingError> {
+    let descriptor = stored_row_version_descriptor();
+    Ok(QueryRowVersion {
+        version_id: parse_commit_id_bytes(
+            column_bytes(descriptor, data, 1)?
+                .ok_or_else(|| malformed("version_id cannot be null"))?,
+            "version_id",
+        )?,
+        branch: parse_shared_text(
+            column_bytes(descriptor, data, 2)?.ok_or_else(|| malformed("branch cannot be null"))?,
+            "branch",
+        )?,
+        updated_at: parse_timestamp_bytes(
+            column_bytes(descriptor, data, 4)?
+                .ok_or_else(|| malformed("updated_at cannot be null"))?,
+            "updated_at",
+        )?,
+        created_by: parse_shared_text(
+            column_bytes(descriptor, data, 5)?
+                .ok_or_else(|| malformed("created_by cannot be null"))?,
+            "created_by",
+        )?,
+        created_at: parse_timestamp_bytes(
+            column_bytes(descriptor, data, 6)?
+                .ok_or_else(|| malformed("created_at cannot be null"))?,
+            "created_at",
+        )?,
+        updated_by: parse_shared_text(
+            column_bytes(descriptor, data, 7)?
+                .ok_or_else(|| malformed("updated_by cannot be null"))?,
+            "updated_by",
+        )?,
+        state: parse_row_state_bytes(
+            column_bytes(descriptor, data, 9)?.ok_or_else(|| malformed("state cannot be null"))?,
+        )?,
+        delete_kind: parse_delete_kind_bytes(column_bytes(descriptor, data, 11)?)?,
+        data: column_bytes(descriptor, data, 13)?
+            .ok_or_else(|| malformed("data cannot be null"))?
+            .into(),
+    })
+}
+
+fn decode_visible_tier_pointer(
+    data: &[u8],
+    col_index: usize,
+) -> Result<Option<CommitId>, EncodingError> {
+    column_bytes(visible_row_entry_descriptor(), data, col_index)?
+        .map(|bytes| parse_commit_id_bytes(bytes, "tier version"))
+        .transpose()
+}
+
+pub(crate) fn decode_visible_query_row(data: &[u8]) -> Result<QueryRowVersion, EncodingError> {
+    let current_row = column_bytes(visible_row_entry_descriptor(), data, 0)?
+        .ok_or_else(|| malformed("current_row cannot be null"))?;
+    decode_query_row_version(embedded_row_payload(current_row, "current")?)
+}
+
+pub(crate) fn decode_visible_query_row_version_for_tier(
+    data: &[u8],
+    required_tier: DurabilityTier,
+) -> Result<CommitId, EncodingError> {
+    let current = decode_visible_query_row(data)?;
+    let worker = decode_visible_tier_pointer(data, 2)?;
+    let edge = decode_visible_tier_pointer(data, 3)?;
+    let global = decode_visible_tier_pointer(data, 4)?;
+
+    Ok(match required_tier {
+        DurabilityTier::Worker => worker.unwrap_or(current.version_id),
+        DurabilityTier::EdgeServer => edge.or(worker).unwrap_or(current.version_id),
+        DurabilityTier::GlobalServer => global.or(edge).or(worker).unwrap_or(current.version_id),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
@@ -545,6 +764,7 @@ pub struct StoredRowVersion {
     pub batch_id: BatchId,
     pub state: RowState,
     pub confirmed_tier: Option<DurabilityTier>,
+    pub delete_kind: Option<DeleteKind>,
     pub is_deleted: bool,
     pub data: RowBytes,
     pub metadata: RowMetadata,
@@ -585,6 +805,17 @@ impl RowMetadata {
     }
 }
 
+fn delete_kind_from_metadata(metadata: &HashMap<String, String>) -> Option<DeleteKind> {
+    match metadata
+        .get(MetadataKey::Delete.as_str())
+        .map(String::as_str)
+    {
+        Some("soft") => Some(DeleteKind::Soft),
+        Some("hard") => Some(DeleteKind::Hard),
+        _ => None,
+    }
+}
+
 impl StoredRowVersion {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -597,12 +828,14 @@ impl StoredRowVersion {
         state: RowState,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Self {
-        let is_deleted = metadata
-            .get(MetadataKey::Delete.as_str())
-            .is_some_and(|value| {
-                value == DeleteKind::Soft.as_str() || value == DeleteKind::Hard.as_str()
-            });
-        let metadata = RowMetadata::from_hash_map(metadata);
+        let delete_kind = delete_kind_from_metadata(&metadata);
+        let is_deleted = delete_kind.is_some();
+        let metadata = RowMetadata::from_hash_map(
+            metadata
+                .into_iter()
+                .filter(|(key, _)| key != MetadataKey::Delete.as_str())
+                .collect(),
+        );
         let branch = SharedString::from(branch.into());
         let parents = parents.into_iter().collect::<SmallVec<[CommitId; 2]>>();
         let version_id = compute_row_version_id(
@@ -626,6 +859,7 @@ impl StoredRowVersion {
             batch_id: BatchId::from_commit_id(version_id),
             state,
             confirmed_tier,
+            delete_kind,
             is_deleted,
             data: data.into(),
             metadata,
@@ -644,6 +878,16 @@ impl StoredRowVersion {
             .row_provenance()
             .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
         let branch = SharedString::from(branch.into());
+        let delete_kind = match commit
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(MetadataKey::Delete.as_str()))
+            .map(String::as_str)
+        {
+            Some("soft") => Some(DeleteKind::Soft),
+            Some("hard") => Some(DeleteKind::Hard),
+            _ => None,
+        };
         let metadata = RowMetadata::from_hash_map(
             commit
                 .metadata
@@ -651,6 +895,7 @@ impl StoredRowVersion {
                 .map(|metadata| {
                     metadata
                         .iter()
+                        .filter(|(key, _)| key.as_str() != MetadataKey::Delete.as_str())
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect()
                 })
@@ -677,7 +922,8 @@ impl StoredRowVersion {
             batch_id: BatchId::from_commit_id(version_id),
             state,
             confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
-            is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
+            delete_kind,
+            is_deleted: delete_kind.is_some(),
             data: commit.content.clone().into(),
             metadata,
         }
@@ -697,18 +943,11 @@ impl StoredRowVersion {
     }
 
     pub fn is_soft_deleted(&self) -> bool {
-        self.metadata
-            .get(MetadataKey::Delete.as_str())
-            .map(|value| value == DeleteKind::Soft.as_str())
-            .unwrap_or(false)
+        self.delete_kind == Some(DeleteKind::Soft)
     }
 
     pub fn is_hard_deleted(&self) -> bool {
-        self.metadata
-            .get(MetadataKey::Delete.as_str())
-            .map(|value| value == DeleteKind::Hard.as_str())
-            .unwrap_or(false)
-            || (self.is_deleted && self.data.is_empty())
+        self.delete_kind == Some(DeleteKind::Hard) || (self.is_deleted && self.data.is_empty())
     }
 }
 

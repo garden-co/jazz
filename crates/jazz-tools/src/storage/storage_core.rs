@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::row_regions::{
-    BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_stored_row_version,
-    decode_visible_current_row, decode_visible_row_entry, decode_visible_row_frontier,
-    encode_stored_row_version, encode_visible_row_entry,
+    BatchId, HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+    decode_query_row_version, decode_stored_row_version, decode_visible_current_row,
+    decode_visible_query_row, decode_visible_query_row_version_for_tier, decode_visible_row_entry,
+    decode_visible_row_frontier, encode_stored_row_version, encode_visible_row_entry,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -43,6 +44,16 @@ fn decode_visible_current(bytes: &[u8]) -> Result<StoredRowVersion, StorageError
 fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
     decode_stored_row_version(bytes)
         .map_err(|err| storage_codec_error("decode", "stored row version", err))
+}
+
+fn decode_query_row(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
+    decode_query_row_version(bytes)
+        .map_err(|err| storage_codec_error("decode", "query row version", err))
+}
+
+fn decode_visible_query(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
+    decode_visible_query_row(bytes)
+        .map_err(|err| storage_codec_error("decode", "visible query row", err))
 }
 
 pub(super) fn raw_table_put_core(
@@ -240,6 +251,20 @@ pub(super) fn load_visible_region_row_core(
 }
 
 #[allow(dead_code)]
+pub(super) fn load_visible_query_row_core(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<QueryRowVersion>, StorageError> {
+    let key = visible_row_key(table, branch, row_id);
+    match get(&key)? {
+        Some(bytes) => Ok(Some(decode_visible_query(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)]
 pub(super) fn load_visible_region_entry_core(
     table: &str,
     branch: &str,
@@ -251,6 +276,29 @@ pub(super) fn load_visible_region_entry_core(
         Some(bytes) => Ok(Some(decode_visible_entry(&bytes)?)),
         None => Ok(None),
     }
+}
+
+#[allow(dead_code)]
+pub(super) fn load_visible_query_row_for_tier_core(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    required_tier: DurabilityTier,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<QueryRowVersion>, StorageError> {
+    let visible_key = visible_row_key(table, branch, row_id);
+    let Some(bytes) = get(&visible_key)? else {
+        return Ok(None);
+    };
+
+    let current = decode_visible_query(&bytes)?;
+    let version_id = decode_visible_query_row_version_for_tier(&bytes, required_tier)
+        .map_err(|err| storage_codec_error("decode", "visible tier row version", err))?;
+    if version_id == current.version_id {
+        return Ok(Some(current));
+    }
+
+    load_history_query_row_version_core(table, row_id, version_id, get)
 }
 
 #[allow(dead_code)]
@@ -312,6 +360,20 @@ pub(super) fn load_history_row_version_core(
     let key = history_row_key(table, row_id, version_id);
     match get(&key)? {
         Some(bytes) => Ok(Some(decode_history_row(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)]
+pub(super) fn load_history_query_row_version_core(
+    table: &str,
+    row_id: ObjectId,
+    version_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<QueryRowVersion>, StorageError> {
+    let key = history_row_key(table, row_id, version_id);
+    match get(&key)? {
+        Some(bytes) => Ok(Some(decode_query_row(&bytes)?)),
         None => Ok(None),
     }
 }

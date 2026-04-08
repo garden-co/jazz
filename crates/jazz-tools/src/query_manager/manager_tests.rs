@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use smallvec::smallvec;
 
-use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
@@ -2885,10 +2885,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         delete_row.data, content_b,
         "Soft delete should preserve content from LWW winner"
     );
-    assert_eq!(
-        delete_row.metadata.get(MetadataKey::Delete.as_str()),
-        Some(&"soft".to_string())
-    );
+    assert_eq!(delete_row.delete_kind, Some(DeleteKind::Soft));
 
     // Additionally verify that querying with include_deleted shows the correct content
     let query = qm.query("users").include_deleted().build();
