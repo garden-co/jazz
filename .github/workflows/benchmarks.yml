@@ -79,22 +79,21 @@ jobs:
           lscpu > bench-out/native/lscpu.txt
           for engine in rocksdb sqlite; do
             mkdir -p "bench-out/native/${engine}"
-            cat > "bench-out/native/${engine}/metadata.json" <<EOF
-            {
-              "workflow": "${GITHUB_WORKFLOW}",
-              "run_id": "${GITHUB_RUN_ID}",
-              "run_attempt": "${GITHUB_RUN_ATTEMPT}",
-              "repository": "${GITHUB_REPOSITORY}",
-              "sha": "${BENCH_SHA}",
-              "ref": "${BENCH_REF}",
-              "branch": "${BENCH_BRANCH}",
-              "profile": "${BENCH_PROFILE}",
-              "runner_name": "${RUNNER_NAME}",
-              "runner_os": "${RUNNER_OS}",
-              "runner_arch": "${RUNNER_ARCH}",
-              "storage_engine": "${engine}"
-            }
-            EOF
+            printf '%s\n' \
+              '{' \
+              "  \"workflow\": \"${GITHUB_WORKFLOW}\"," \
+              "  \"run_id\": \"${GITHUB_RUN_ID}\"," \
+              "  \"run_attempt\": \"${GITHUB_RUN_ATTEMPT}\"," \
+              "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+              "  \"sha\": \"${BENCH_SHA}\"," \
+              "  \"ref\": \"${BENCH_REF}\"," \
+              "  \"branch\": \"${BENCH_BRANCH}\"," \
+              "  \"profile\": \"${BENCH_PROFILE}\"," \
+              "  \"runner_name\": \"${RUNNER_NAME}\"," \
+              "  \"runner_os\": \"${RUNNER_OS}\"," \
+              "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+              "  \"storage_engine\": \"${engine}\"" \
+              '}' > "bench-out/native/${engine}/metadata.json"
             cp bench-out/native/rustc.txt "bench-out/native/${engine}/rustc.txt"
             cp bench-out/native/uname.txt "bench-out/native/${engine}/uname.txt"
             cp bench-out/native/lscpu.txt "bench-out/native/${engine}/lscpu.txt"
