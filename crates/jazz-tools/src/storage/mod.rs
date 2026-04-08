@@ -869,6 +869,8 @@ impl TableRowRegions {
 pub struct MemoryStorage {
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
+    /// Decoded row locators keyed by logical row id.
+    row_locators: HashMap<ObjectId, RowLocator>,
     /// Row-region storage keyed by table.
     row_regions: HashMap<String, TableRowRegions>,
 }
@@ -982,6 +984,38 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
+    fn put_metadata(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        let bytes = encode_metadata(&metadata)?;
+        self.raw_tables
+            .entry(METADATA_TABLE.to_string())
+            .or_default()
+            .insert(metadata_raw_key(id), bytes);
+
+        if let Some(locator) = row_locator_from_metadata(&metadata) {
+            let locator_bytes = encode_row_locator(&locator)?;
+            self.raw_tables
+                .entry(ROW_LOCATOR_TABLE.to_string())
+                .or_default()
+                .insert(metadata_raw_key(id), locator_bytes);
+            self.row_locators.insert(id, locator);
+        } else {
+            if let Some(rows) = self.raw_tables.get_mut(ROW_LOCATOR_TABLE) {
+                rows.remove(&metadata_raw_key(id));
+            }
+            self.row_locators.remove(&id);
+        }
+
+        Ok(())
+    }
+
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        Ok(self.row_locators.get(&id).cloned())
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.raw_tables
             .entry(table.to_string())
