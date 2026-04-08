@@ -1,0 +1,15 @@
+{
+  "id": "R5",
+  "name": "recursive_permission_read_write_mix",
+  "seed": 20260222,
+  "operation_count": 128,
+  "mix": [
+    { "operation": "query_visible_docs", "weight": 60 },
+    { "operation": "update_allowed_doc", "weight": 25 },
+    { "operation": "update_denied_doc", "weight": 15 }
+  ],
+  "recursive_depths": [1, 3, 6],
+  "shared_chain_depth": 4,
+  "docs_per_folder": 24,
+  "denied_docs": 96
+}
