@@ -129,10 +129,8 @@ impl JazzClient {
         let schema_manager = build_client_schema_manager(&storage, &context)?;
         let server_id = ServerId::default();
 
-        // Create runtime with no-op sync callback (WebSocket transport handles sending)
-        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry| {
-            // No-op: outbox entries are sent via TransportHandle channels
-        });
+        // Create runtime (outbox entries are sent via TransportHandle channels)
+        let runtime = TokioRuntime::new(schema_manager, storage);
 
         // Persist schema to catalogue for server sync
         runtime
@@ -534,7 +532,7 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
-    use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+    use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
     use crate::storage::CatalogueManifestOp;
     #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
@@ -638,8 +636,7 @@ mod tests {
             "main",
         )
         .expect("seed schema manager");
-        let mut runtime =
-            RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+        let mut runtime = RuntimeCore::new(schema_manager, storage, NoopScheduler);
         let learned_schema_object_id = runtime.persist_schema();
         let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
         let lens = runtime

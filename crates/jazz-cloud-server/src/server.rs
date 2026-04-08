@@ -1386,8 +1386,8 @@ impl MetaStore {
         let storage = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
-        // Meta app is local-only; no sync callback needed yet.
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+        // Meta app is local-only; no sync needed.
+        let runtime = TokioRuntime::new(schema_manager, storage);
 
         Ok(Self {
             runtime,
@@ -1857,34 +1857,54 @@ impl AppRuntime {
 
         rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
 
+        let runtime = TokioRuntime::new(schema_manager, storage);
+
+        // Set up TransportHandle for outbox → broadcast bridge
+        let (handle, outbox_rx, _inbound_tx) = jazz_tools::runtime_core::TransportHandle::create();
+        {
+            let core = runtime.core_arc();
+            let mut core_guard = core.lock().map_err(|_| "lock poisoned".to_string())?;
+            core_guard.set_transport(handle);
+        }
+
+        // Spawn a blocking bridge task that reads outbox entries, applies
+        // per-client sequence numbering, and broadcasts to SSE/WS clients.
         let sync_tx_clone = sync_broadcast.clone();
         let send_seq_by_client_clone = send_seq_by_client.clone();
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                let mut payload = entry.payload;
+        tokio::task::spawn_blocking(move || {
+            while let Ok(entry) = outbox_rx.recv() {
+                if let Destination::Client(client_id) = entry.destination {
+                    let mut payload = entry.payload;
 
-                let (last_seq, seq) = {
-                    let mut counters = send_seq_by_client_clone
-                        .lock()
-                        .expect("send sequence mutex poisoned");
-                    let last = counters.entry(client_id).or_insert(0);
-                    let last_seq = *last;
-                    *last += 1;
-                    (last_seq, *last)
-                };
+                    let (last_seq, seq) = {
+                        let mut counters = send_seq_by_client_clone
+                            .lock()
+                            .expect("send sequence mutex poisoned");
+                        let last = counters.entry(client_id).or_insert(0);
+                        let last_seq = *last;
+                        *last += 1;
+                        (last_seq, *last)
+                    };
 
-                if let SyncPayload::QuerySettled { through_seq, .. } = &mut payload {
-                    *through_seq = last_seq;
-                }
+                    if let SyncPayload::QuerySettled {
+                        ref mut through_seq,
+                        ..
+                    } = payload
+                    {
+                        *through_seq = last_seq;
+                    }
 
-                if let Some(delay) = test_delay_server_send_object_updated(&payload) {
-                    let tx = sync_tx_clone.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        let _ = tx.send((client_id, seq, payload));
-                    });
-                } else {
-                    let _ = sync_tx_clone.send((client_id, seq, payload));
+                    if let Some(delay) = test_delay_server_send_object_updated(&payload) {
+                        let tx = sync_tx_clone.clone();
+                        // Need a tokio handle for the async spawn
+                        let handle = tokio::runtime::Handle::current();
+                        handle.spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            let _ = tx.send((client_id, seq, payload));
+                        });
+                    } else {
+                        let _ = sync_tx_clone.send((client_id, seq, payload));
+                    }
                 }
             }
         });

@@ -364,26 +364,51 @@ fn build_catalogue_runtime(
     in_flight_pushes: Arc<AtomicUsize>,
     push_errors: Arc<Mutex<Vec<String>>>,
 ) -> TokioRuntime<MemoryStorage> {
-    TokioRuntime::new(schema_manager, storage, move |entry: OutboxEntry| {
-        let OutboxEntry {
-            destination,
-            payload,
-        } = entry;
-        if let Destination::Server(_) = destination {
-            in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let connection = connection.clone();
-            let push_errors = push_errors.clone();
-            let in_flight_pushes = in_flight_pushes.clone();
-            tokio::spawn(async move {
-                if let Err(error) = connection.push_sync(payload, client_id).await
-                    && let Ok(mut errors) = push_errors.lock()
-                {
-                    errors.push(error.to_string());
+    let runtime = TokioRuntime::new(schema_manager, storage);
+
+    // Set up a TransportHandle that bridges outbox entries to HTTP POST
+    // (used by catalogue_sync tests that push schema directly via SyncServerClient)
+    let (handle, outbox_rx) = {
+        let (outbox_tx, outbox_rx) = std::sync::mpsc::channel();
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let handle = jazz_tools::runtime_core::TransportHandle {
+            outbox_tx,
+            inbound_rx,
+        };
+        (handle, outbox_rx)
+    };
+    runtime.core_arc().lock().unwrap().set_transport(handle);
+
+    // Spawn a task that reads outbox entries and pushes via HTTP
+    tokio::spawn(async move {
+        loop {
+            match outbox_rx.try_recv() {
+                Ok(entry) => {
+                    if let Destination::Server(_) = entry.destination {
+                        in_flight_pushes.fetch_add(1, Ordering::AcqRel);
+                        let connection = connection.clone();
+                        let push_errors = push_errors.clone();
+                        let in_flight_pushes = in_flight_pushes.clone();
+                        let payload = entry.payload;
+                        tokio::spawn(async move {
+                            if let Err(error) = connection.push_sync(payload, client_id).await
+                                && let Ok(mut errors) = push_errors.lock()
+                            {
+                                errors.push(error.to_string());
+                            }
+                            in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
+                        });
+                    }
                 }
-                in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
-            });
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
         }
-    })
+    });
+
+    runtime
 }
 
 async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {

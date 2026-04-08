@@ -23,7 +23,7 @@ runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
 transport-ws = ["transport", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio"]
-client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "transport-ws", "rocksdb", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",

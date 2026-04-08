@@ -1,14 +1,13 @@
 //! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
-//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
+//! `RuntimeCore<S, TokioScheduler<S>>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
 //!
 //! - `S: Storage + Send + 'static` provides synchronous storage
 //! - `TokioScheduler<S>` implements `Scheduler` using tokio::spawn for batched ticks
-//! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
@@ -23,19 +22,19 @@ use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
-    SubscriptionDelta, SyncSender,
+    SubscriptionDelta,
 };
 use crate::schema_manager::manager::PermissionsHeadSummary;
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
+use crate::sync_manager::{ClientId, InboxEntry, QueryPropagation, ServerId};
 
 // ============================================================================
 // TokioScheduler
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 
 /// Scheduler implementation for Tokio.
 ///
@@ -93,32 +92,6 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
 }
 
 // ============================================================================
-// CallbackSyncSender
-// ============================================================================
-
-/// SyncSender implementation using a callback.
-pub struct CallbackSyncSender {
-    callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
-}
-
-impl CallbackSyncSender {
-    fn new<F>(callback: F) -> Self
-    where
-        F: Fn(OutboxEntry) + Send + Sync + 'static,
-    {
-        Self {
-            callback: Arc::new(callback),
-        }
-    }
-}
-
-impl SyncSender for CallbackSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        (self.callback)(message);
-    }
-}
-
-// ============================================================================
 // Errors
 // ============================================================================
 
@@ -160,7 +133,7 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Jazz, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
@@ -182,16 +155,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
     /// - `storage` - The storage backend (e.g., MemoryStorage, FjallStorage)
-    /// - `sync_callback` - Called when sync messages need to be sent
-    pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
-    where
-        F: Fn(OutboxEntry) + Send + Sync + 'static,
-    {
+    pub fn new(schema_manager: SchemaManager, storage: S) -> Self {
         let scheduler = TokioScheduler::new();
-        let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let core = RuntimeCore::new(schema_manager, storage, scheduler);
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
@@ -205,6 +173,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         }
 
         Self { core: core_arc }
+    }
+
+    /// Access the underlying core Arc for direct manipulation (e.g. setting transport).
+    pub fn core_arc(&self) -> &Arc<Mutex<TokioCoreType<S>>> {
+        &self.core
     }
 
     /// Persist the current schema to the catalogue for server sync.
@@ -669,7 +642,6 @@ mod tests {
     use crate::schema_manager::AppId;
     use crate::storage::MemoryStorage;
     use crate::sync_manager::SyncManager;
-    use std::sync::atomic::AtomicUsize;
 
     fn test_schema() -> Schema {
         SchemaBuilder::new()
@@ -700,12 +672,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let sync_count = Arc::new(AtomicUsize::new(0));
-        let sync_count_clone = sync_count.clone();
-
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), move |_msg| {
-            sync_count_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Insert a row
         let user_id = ObjectId::new();
@@ -734,7 +701,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Insert
         let (object_id, _row_values) = runtime
@@ -775,7 +742,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Track callback invocations
         let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));

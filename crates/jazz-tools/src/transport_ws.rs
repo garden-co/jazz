@@ -71,18 +71,8 @@ pub trait TickNotifier: Send {
     fn notify(&self);
 }
 
-// ============================================================================
-// TransportHandle
-// ============================================================================
-
-/// Channel endpoints held by `RuntimeCore`. Concrete type on all platforms.
-///
-/// - `outbox_tx`: `batched_tick()` pushes outgoing messages here
-/// - `inbound_rx`: `batched_tick()` drains incoming messages from here
-pub struct TransportHandle {
-    pub outbox_tx: tokio::sync::mpsc::UnboundedSender<OutboxEntry>,
-    pub inbound_rx: tokio::sync::mpsc::UnboundedReceiver<InboxEntry>,
-}
+// Re-export TransportHandle from runtime_core (the canonical definition).
+pub use crate::runtime_core::TransportHandle;
 
 /// Signal that fires once the WebSocket handshake completes (server sends `Connected`).
 /// Carries the server's catalogue_state_hash for delta sync.
@@ -319,8 +309,12 @@ impl<W: StreamAdapter, T: TickNotifier> TransportManager<W, T> {
 
 /// Create a transport pair: `TransportHandle` for RuntimeCore, `TransportManager` to spawn.
 ///
+/// The `TransportHandle` uses `std::sync::mpsc` (synchronous, works on all platforms).
+/// The `TransportManager` uses `tokio::sync::mpsc` internally (async-compatible).
+/// Bridging tasks are spawned to forward messages between the two channel types.
+///
 /// ```ignore
-/// let (handle, manager) = transport_ws::create::<NativeWsStream, MyTickNotifier>(
+/// let (handle, manager, signal) = transport_ws::create::<NativeWsStream, MyTickNotifier>(
 ///     "ws://localhost:1625/ws".into(),
 ///     auth_config,
 ///     tick_notifier,
@@ -333,20 +327,46 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     auth: WsAuthConfig,
     tick: T,
 ) -> (TransportHandle, TransportManager<W, T>, ConnectedSignal) {
-    let (outbox_tx, outbox_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    // RuntimeCore-facing channels (std::sync::mpsc — synchronous, always available)
+    let (std_outbox_tx, std_outbox_rx) = std::sync::mpsc::channel::<OutboxEntry>();
+    let (std_inbound_tx, std_inbound_rx) = std::sync::mpsc::channel::<InboxEntry>();
+
+    // TransportManager-facing channels (tokio::sync::mpsc — async-compatible)
+    let (tokio_outbox_tx, tokio_outbox_rx) = tokio::sync::mpsc::unbounded_channel::<OutboxEntry>();
+    let (tokio_inbound_tx, tokio_inbound_rx) = tokio::sync::mpsc::unbounded_channel::<InboxEntry>();
+
     let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
 
+    // Bridge: std outbox → tokio outbox (RuntimeCore sends → Manager receives)
+    // Uses spawn_blocking because std::sync::mpsc::recv() is a blocking call.
+    tokio::task::spawn_blocking(move || {
+        while let Ok(entry) = std_outbox_rx.recv() {
+            if tokio_outbox_tx.send(entry).is_err() {
+                break; // Manager dropped
+            }
+        }
+    });
+
+    // Bridge: tokio inbound → std inbound (Manager sends → RuntimeCore receives)
+    tokio::spawn(async move {
+        let mut rx = tokio_inbound_rx;
+        while let Some(entry) = rx.recv().await {
+            if std_inbound_tx.send(entry).is_err() {
+                break; // RuntimeCore dropped the TransportHandle
+            }
+        }
+    });
+
     let handle = TransportHandle {
-        outbox_tx,
-        inbound_rx,
+        outbox_tx: std_outbox_tx,
+        inbound_rx: std_inbound_rx,
     };
 
     let manager = TransportManager {
         url,
         auth,
-        outbox_rx,
-        inbound_tx,
+        outbox_rx: tokio_outbox_rx,
+        inbound_tx: tokio_inbound_tx,
         tick,
         reconnect: ReconnectState::new(),
         connected_tx: Some(connected_tx),

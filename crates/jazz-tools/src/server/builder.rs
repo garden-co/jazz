@@ -161,13 +161,29 @@ impl ServerBuilder {
         String,
     > {
         let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(SYNC_BROADCAST_CAPACITY);
-        let sync_tx_clone = sync_tx.clone();
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                let _ = sync_tx_clone.send((client_id, entry.payload));
+        let runtime = TokioRuntime::new(schema_manager, storage);
+
+        // Create a TransportHandle for the server runtime.
+        // The outbox_rx is consumed by a spawned task that broadcasts
+        // Destination::Client entries to the sync_broadcast channel.
+        let (handle, outbox_rx, _inbound_tx) = crate::runtime_core::TransportHandle::create();
+        {
+            let core = runtime.core_arc();
+            let mut core_guard = core.lock().map_err(|_| "lock poisoned".to_string())?;
+            core_guard.set_transport(handle);
+        }
+
+        // Spawn a blocking task that reads outbox entries and broadcasts client-destined ones.
+        // Uses spawn_blocking because std::sync::mpsc::recv() is a blocking call.
+        let sync_tx_clone = sync_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Ok(entry) = outbox_rx.recv() {
+                if let Destination::Client(client_id) = entry.destination {
+                    let _ = sync_tx_clone.send((client_id, entry.payload));
+                }
             }
         });
 

@@ -60,7 +60,7 @@ impl ExternalIdentityStore {
         )
         .map_err(|e| format!("failed to initialize meta schema manager: {e:?}"))?;
 
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+        let runtime = TokioRuntime::new(schema_manager, storage);
         Ok(Self {
             runtime,
             insert_descriptor,

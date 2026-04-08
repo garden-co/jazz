@@ -9,7 +9,7 @@
 //!
 //! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
-//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
+//! - Outbox entries go through `TransportHandle` channels (no callback needed)
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
 
 use std::cell::RefCell;
@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use js_sys::Function;
 use js_sys::Uint8Array;
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
@@ -65,7 +64,7 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
-use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -76,8 +75,7 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -288,7 +286,7 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 
 // ============================================================================
 // WasmScheduler
@@ -359,64 +357,6 @@ impl Scheduler for WasmScheduler {
 }
 
 // ============================================================================
-// JsSyncSender
-// ============================================================================
-
-/// SyncSender implementation bridging to a JS callback.
-///
-/// The callback is set lazily via `on_sync_message_to_send()`.
-pub struct JsSyncSender {
-    callback: RefCell<Option<Function>>,
-    use_binary_encoding: bool,
-}
-
-impl JsSyncSender {
-    fn new(use_binary_encoding: bool) -> Self {
-        Self {
-            callback: RefCell::new(None),
-            use_binary_encoding,
-        }
-    }
-
-    fn set_callback(&self, callback: Function) {
-        *self.callback.borrow_mut() = Some(callback);
-    }
-}
-
-impl SyncSender for JsSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        if let Some(ref callback) = *self.callback.borrow() {
-            let is_catalogue = message.payload.is_catalogue();
-            let (destination_kind, destination_id) = match message.destination {
-                Destination::Server(server_id) => ("server", server_id.0.to_string()),
-                Destination::Client(client_id) => ("client", client_id.0.to_string()),
-            };
-            if self.use_binary_encoding || destination_kind == "client" {
-                if let Ok(payload_bytes) = message.payload.to_bytes() {
-                    let payload_js = Uint8Array::from(payload_bytes.as_slice());
-                    let _ = callback.call4(
-                        &JsValue::NULL,
-                        &JsValue::from_str(destination_kind),
-                        &JsValue::from_str(&destination_id),
-                        &payload_js.into(),
-                        &JsValue::from_bool(is_catalogue),
-                    );
-                }
-            } else {
-                let payload_json = message.payload.to_json().unwrap();
-                let _ = callback.call4(
-                    &JsValue::NULL,
-                    &JsValue::from_str(destination_kind),
-                    &JsValue::from_str(&destination_id),
-                    &JsValue::from_str(&payload_json),
-                    &JsValue::from_bool(is_catalogue),
-                );
-            }
-        }
-    }
-}
-
-// ============================================================================
 // WasmRuntime
 // ============================================================================
 
@@ -446,8 +386,8 @@ impl WasmRuntime {
     /// * `user_branch` - User's branch name (e.g., "main")
     /// * `tier` - Optional node durability tier ("worker", "edge", "global").
     ///            Set for server nodes to enable ack emission.
-    /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
-    ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
+    /// * `use_binary_encoding` - Unused (kept for API backward compatibility).
+    ///   Outbox entries now go through `TransportHandle` channels.
     #[wasm_bindgen(constructor)]
     pub fn new(
         schema_json: &str,
@@ -455,7 +395,7 @@ impl WasmRuntime {
         env: &str,
         user_branch: &str,
         tier: Option<String>,
-        use_binary_encoding: Option<bool>,
+        _use_binary_encoding: Option<bool>,
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
@@ -495,10 +435,9 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
@@ -586,12 +525,6 @@ impl WasmRuntime {
                 "Invalid sync payload type: expected Uint8Array or JSON string",
             ))
         }
-    }
-
-    /// Register a callback for outgoing sync messages.
-    #[wasm_bindgen(js_name = onSyncMessageToSend)]
-    pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core.borrow().sync_sender().set_callback(callback);
     }
 
     // =========================================================================
@@ -1347,10 +1280,9 @@ impl WasmRuntime {
         schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>

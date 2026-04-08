@@ -1,8 +1,8 @@
 //! RuntimeCore - Unified synchronous runtime logic for both native and WASM.
 //!
 //! This module provides the shared core logic that both jazz-tokio
-//! and jazz-wasm wrap. RuntimeCore is generic over `Storage`, `Scheduler`,
-//! and `SyncSender` which provide platform-specific behavior.
+//! and jazz-wasm wrap. RuntimeCore is generic over `Storage` and `Scheduler`
+//! which provide platform-specific behavior.
 //!
 //! ## Design
 //!
@@ -10,11 +10,12 @@
 //! - `batched_tick()` - sends sync messages, applies parked responses/messages, calls immediate_tick
 //! - Queries return `QueryFuture` for cross-platform awaiting
 //! - Sync messages are "parked" and processed in batched_tick
+//! - Outbox entries are sent via `TransportHandle` channels (the only outbox path)
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler);
 //! runtime.insert(
 //!     "users",
 //!     std::collections::HashMap::from([
@@ -50,7 +51,7 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
-// Scheduler and SyncSender traits
+// Scheduler trait
 // ============================================================================
 
 /// Schedules batched ticks on the platform's event loop.
@@ -61,12 +62,42 @@ pub trait Scheduler {
     fn schedule_batched_tick(&self);
 }
 
-/// Sends sync messages to the network.
+// ============================================================================
+// TransportHandle — channel-based outbox/inbox for all platforms
+// ============================================================================
+
+/// Channel endpoints held by `RuntimeCore`. Concrete type on all platforms.
 ///
-/// No `Send` bound — WASM types are `!Send`. Send is enforced
-/// by the concrete wrapping type where needed.
-pub trait SyncSender {
-    fn send_sync_message(&self, message: OutboxEntry);
+/// - `outbox_tx`: `batched_tick()` pushes outgoing messages here
+/// - `inbound_rx`: `batched_tick()` drains incoming messages from here
+///
+/// Uses `std::sync::mpsc` so it works everywhere (tokio, WASM, NAPI, RN).
+pub struct TransportHandle {
+    pub outbox_tx: std::sync::mpsc::Sender<OutboxEntry>,
+    pub inbound_rx: std::sync::mpsc::Receiver<InboxEntry>,
+}
+
+impl TransportHandle {
+    /// Create a new transport handle pair: (handle_for_runtime, outbox_rx, inbound_tx).
+    ///
+    /// The caller keeps `outbox_rx` (to consume outbox entries) and `inbound_tx`
+    /// (to push inbound entries). RuntimeCore gets the `TransportHandle`.
+    pub fn create() -> (
+        Self,
+        std::sync::mpsc::Receiver<OutboxEntry>,
+        std::sync::mpsc::Sender<InboxEntry>,
+    ) {
+        let (outbox_tx, outbox_rx) = std::sync::mpsc::channel();
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        (
+            Self {
+                outbox_tx,
+                inbound_rx,
+            },
+            outbox_rx,
+            inbound_tx,
+        )
+    }
 }
 
 // ============================================================================
@@ -80,34 +111,27 @@ impl Scheduler for NoopScheduler {
     fn schedule_batched_tick(&self) {}
 }
 
-/// Collects sync messages for test inspection.
-pub struct VecSyncSender {
-    messages: std::sync::Mutex<Vec<OutboxEntry>>,
+/// Collects outbox messages for test inspection via a TransportHandle.
+pub struct TestOutbox {
+    rx: std::sync::mpsc::Receiver<OutboxEntry>,
 }
 
-impl Default for VecSyncSender {
-    fn default() -> Self {
-        Self {
-            messages: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl VecSyncSender {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Take all collected messages.
+impl TestOutbox {
+    /// Take all collected messages (drains the channel).
     pub fn take(&self) -> Vec<OutboxEntry> {
-        std::mem::take(&mut self.messages.lock().unwrap())
+        let mut messages = Vec::new();
+        while let Ok(msg) = self.rx.try_recv() {
+            messages.push(msg);
+        }
+        messages
     }
 }
 
-impl SyncSender for VecSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        self.messages.lock().unwrap().push(message);
-    }
+/// Create a `TransportHandle` and a `TestOutbox` for test use.
+/// The `TestOutbox` collects all outbox entries sent through the handle.
+pub fn test_transport() -> (TransportHandle, TestOutbox) {
+    let (handle, outbox_rx, _inbound_tx) = TransportHandle::create();
+    (handle, TestOutbox { rx: outbox_rx })
 }
 
 /// Handle to a subscription managed by RuntimeCore.
@@ -222,19 +246,18 @@ struct PendingOneShotQuery {
 
 /// Unified runtime core for both native and WASM platforms.
 ///
-/// Generic over `Storage` for data persistence, `Scheduler` for tick scheduling,
-/// and `SyncSender` for network message dispatch.
-/// All business logic is synchronous.
-pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
+/// Generic over `Storage` for data persistence and `Scheduler` for tick scheduling.
+/// All business logic is synchronous. Outbox entries are sent via `TransportHandle`
+/// channels (the only outbox path).
+pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     schema_manager: SchemaManager,
     pub(crate) storage: S,
     scheduler: Sch,
-    sync_sender: Sy,
 
-    /// Channel-based transport (replaces SyncSender when set).
-    /// When `Some`, `batched_tick()` uses channels instead of `sync_sender`.
-    #[cfg(feature = "transport-ws")]
-    transport: Option<crate::transport_ws::TransportHandle>,
+    /// Channel-based transport for outbox/inbox I/O.
+    /// When `Some`, `batched_tick()` sends outbox entries through here and drains inbound.
+    /// When `None`, outbox entries are silently dropped (no server connected).
+    transport: Option<TransportHandle>,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -260,17 +283,19 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
+
+    /// Buffer for outbox entries (populated by `send_outbox()`).
+    /// Used by tests and benchmarks to inspect outbox entries without a real transport.
+    outbox_tap: Vec<OutboxEntry>,
 }
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
-    pub fn new(schema_manager: SchemaManager, storage: S, scheduler: Sch, sync_sender: Sy) -> Self {
+    pub fn new(schema_manager: SchemaManager, storage: S, scheduler: Sch) -> Self {
         Self {
             schema_manager,
             storage,
             scheduler,
-            sync_sender,
-            #[cfg(feature = "transport-ws")]
             transport: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
@@ -282,6 +307,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
+            outbox_tap: Vec::new(),
         }
     }
 
@@ -316,21 +342,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage
     }
 
-    /// Get reference to the SyncSender.
-    pub fn sync_sender(&self) -> &Sy {
-        &self.sync_sender
-    }
-
-    /// Set the channel-based transport (replaces SyncSender for I/O).
-    #[cfg(feature = "transport-ws")]
-    pub fn set_transport(&mut self, transport: crate::transport_ws::TransportHandle) {
+    /// Set the channel-based transport.
+    pub fn set_transport(&mut self, transport: TransportHandle) {
         self.transport = Some(transport);
     }
 
     /// Clear the channel-based transport.
-    #[cfg(feature = "transport-ws")]
     pub fn clear_transport(&mut self) {
         self.transport = None;
+    }
+
+    /// Take all buffered outbox entries. Returns entries accumulated since the last call.
+    /// Used by tests and benchmarks to inspect outbox entries.
+    pub fn take_outbox_tap(&mut self) -> Vec<OutboxEntry> {
+        std::mem::take(&mut self.outbox_tap)
     }
 
     /// Get reference to the Scheduler.

@@ -30,7 +30,7 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use jazz_tools::storage::FjallStorage;
@@ -48,7 +48,7 @@ use serde::Deserialize;
 ))]
 use tempfile::TempDir;
 
-type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler>;
 const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
@@ -340,7 +340,7 @@ impl Lcg {
 }
 
 struct R1State<S: Storage = MemoryStorage> {
-    runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: RuntimeCore<S, NoopScheduler>,
     rng: Lcg,
     users: Vec<ObjectId>,
     organizations: Vec<ObjectId>,
@@ -426,7 +426,7 @@ impl R1State<MemoryStorage> {
 
 impl<S: Storage> R1State<S> {
     fn with_runtime(
-        runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+        runtime: RuntimeCore<S, NoopScheduler>,
         profile: &ProfileConfig,
         seed: u64,
     ) -> Self {
@@ -815,7 +815,7 @@ impl<S: Storage> R1State<S> {
     all(feature = "rocksdb", not(target_arch = "wasm32"))
 ))]
 fn seed_project_board_dataset<S: Storage>(
-    runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: &mut RuntimeCore<S, NoopScheduler>,
     profile: &ProfileConfig,
     seed: u64,
 ) -> SeededProjectBoard {
@@ -1102,7 +1102,7 @@ impl SingleHopR1State {
         let mut server_to_client = 0usize;
 
         self.client.runtime.batched_tick();
-        for entry in self.client.runtime.sync_sender().take() {
+        for entry in self.client.runtime.take_outbox_tap() {
             if entry.destination == Destination::Server(self.server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.client_id_on_server),
@@ -1113,7 +1113,7 @@ impl SingleHopR1State {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self.server.take_outbox_tap() {
             if entry.destination == Destination::Client(self.client_id_on_server) {
                 self.client.runtime.park_sync_message(InboxEntry {
                     source: Source::Server(self.server_id_on_client),
@@ -1253,7 +1253,7 @@ impl FanoutR4State {
         let mut routed = 0usize;
 
         self.writer.runtime.batched_tick();
-        for entry in self.writer.runtime.sync_sender().take() {
+        for entry in self.writer.runtime.take_outbox_tap() {
             if entry.destination == Destination::Server(self.writer_server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.writer_client_id_on_server),
@@ -1265,7 +1265,7 @@ impl FanoutR4State {
 
         for reader in &mut self.readers {
             reader.runtime.batched_tick();
-            for entry in reader.runtime.sync_sender().take() {
+            for entry in reader.runtime.take_outbox_tap() {
                 if entry.destination == Destination::Server(reader.server_id_on_client) {
                     self.server.park_sync_message(InboxEntry {
                         source: Source::Client(reader.client_id_on_server),
@@ -1277,7 +1277,7 @@ impl FanoutR4State {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self.server.take_outbox_tap() {
             match entry.destination {
                 Destination::Client(client_id) if client_id == self.writer_client_id_on_server => {
                     self.writer.runtime.park_sync_message(InboxEntry {
@@ -2719,12 +2719,7 @@ fn create_runtime(schema: Schema) -> BenchRuntime {
     )
     .expect("create schema manager");
 
-    RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    )
+    RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler)
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
@@ -2732,7 +2727,7 @@ fn create_fjall_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<FjallStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<FjallStorage, NoopScheduler> {
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(
         sync_manager,
@@ -2747,7 +2742,6 @@ fn create_fjall_runtime(
         schema_manager,
         FjallStorage::open(db_path, cache_size_bytes).expect("open fjall for benchmark"),
         NoopScheduler,
-        VecSyncSender::new(),
     )
 }
 
@@ -2756,7 +2750,7 @@ fn create_rocksdb_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<RocksDBStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<RocksDBStorage, NoopScheduler> {
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(
         sync_manager,
@@ -2771,7 +2765,6 @@ fn create_rocksdb_runtime(
         schema_manager,
         RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
         NoopScheduler,
-        VecSyncSender::new(),
     )
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     // =========================================================================
     // Tick Methods
     // =========================================================================
@@ -158,16 +158,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Batched tick - handles all I/O, then processes parked messages.
     ///
     /// Called by the platform when the scheduled tick fires. This:
-    /// 1. Sends all outgoing sync messages via SyncSender
+    /// 1. Sends all outgoing sync messages via TransportHandle
     /// 2. Processes parked sync messages
     ///
     /// Each step is followed by an immediate_tick to process results.
     pub fn batched_tick(&mut self) {
         let _span = debug_span!("batched_tick", tier = self.tier_label).entered();
 
-        // 0. Drain inbound channel if transport is set (WebSocket path)
-        #[cfg(feature = "transport-ws")]
-        if let Some(ref mut transport) = self.transport {
+        // 0. Drain inbound channel if transport is set
+        if let Some(ref transport) = self.transport {
             while let Ok(msg) = transport.inbound_rx.try_recv() {
                 self.parked_sync_messages.push(msg);
             }
@@ -207,20 +206,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
     }
 
-    /// Send outbox entries via TransportHandle (if set) or SyncSender (fallback).
+    /// Send outbox entries via TransportHandle. If no transport is set, entries are dropped.
     fn send_outbox(&mut self, outbox: Vec<OutboxEntry>) {
-        #[cfg(feature = "transport-ws")]
+        // Buffer entries for inspection via take_outbox_tap() (tests/benchmarks).
+        self.outbox_tap.extend(outbox.iter().cloned());
+
         if let Some(ref transport) = self.transport {
             for msg in outbox {
                 let _ = transport.outbox_tx.send(msg);
             }
-            return;
         }
-
-        // Legacy path: SyncSender callback
-        for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
-        }
+        // No transport set — silently drop (no server connected).
     }
 
     /// Apply parked sync messages and tick.

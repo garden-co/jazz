@@ -8,7 +8,7 @@
 //! - `RocksDBStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
-//! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
+//! - Outbox entries go through `TransportHandle` channels (no callback needed)
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
 
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_outbox_entry, subscription_delta_to_json,
+    subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -36,14 +36,13 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::TestingServer as JazzTestingServer;
 use jazz_tools::storage::{MemoryStorage, RocksDBStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
@@ -178,7 +177,7 @@ fn make_subscription_callback(
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,59 +235,6 @@ impl Scheduler for NapiScheduler {
     }
 }
 
-// ============================================================================
-// NapiSyncSender
-// ============================================================================
-
-/// Arguments for the sync message callback
-/// (destinationKind, destinationId, payloadJson, isCatalogue)
-type SyncCallbackParams = (String, String, String, bool);
-
-pub struct NapiSyncSender {
-    callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
-}
-
-impl NapiSyncSender {
-    fn new() -> Self {
-        Self {
-            callback: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn set_callback(&self, tsfn: ThreadsafeFunction<SyncCallbackParams>) {
-        if let Ok(mut cb) = self.callback.lock() {
-            *cb = Some(tsfn);
-        }
-    }
-}
-
-impl SyncSender for NapiSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let cb = match self.callback.lock() {
-            Ok(cb) => cb,
-            Err(_) => return,
-        };
-        let tsfn = match cb.as_ref() {
-            Some(tsfn) => tsfn,
-            None => return,
-        };
-        let serialized = match serialize_outbox_entry(&message) {
-            Ok(serialized) => serialized,
-            Err(_) => return,
-        };
-
-        tsfn.call(
-            Ok((
-                serialized.destination_kind,
-                serialized.destination_id,
-                serialized.payload_json,
-                serialized.is_catalogue,
-            )),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
-    }
-}
-
 fn build_napi_runtime(
     env: Env,
     schema_json: String,
@@ -324,10 +270,9 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let core = RuntimeCore::new(schema_manager, storage, scheduler);
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -997,21 +942,6 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.park_sync_message(entry);
-        Ok(())
-    }
-
-    #[napi(js_name = "onSyncMessageToSend")]
-    pub fn on_sync_message_to_send(
-        &self,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] callback: ThreadsafeFunction<
-            SyncCallbackParams,
-        >,
-    ) -> napi::Result<()> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(callback);
         Ok(())
     }
 

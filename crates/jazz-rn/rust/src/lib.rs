@@ -16,7 +16,7 @@ use jazz_tools::binding_support::{
     default_read_durability_options as default_binding_read_durability_options,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -24,13 +24,12 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
-    SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 // ============================================================================
@@ -166,25 +165,13 @@ pub trait BatchedTickCallback: Send + Sync {
 }
 
 #[uniffi::export(callback_interface)]
-pub trait SyncMessageCallback: Send + Sync {
-    /// Called by Rust when it has an outbox message to send.
-    fn on_sync_message(
-        &self,
-        destination_kind: String,
-        destination_id: String,
-        payload_json: String,
-        is_catalogue: bool,
-    );
-}
-
-#[uniffi::export(callback_interface)]
 pub trait SubscriptionCallback: Send + Sync {
     /// Called when a subscription produces an update.
     fn on_update(&self, delta_json: String);
 }
 
 // ============================================================================
-// RnScheduler + RnSyncSender
+// RnScheduler
 // ============================================================================
 
 #[derive(Clone, Default)]
@@ -230,45 +217,11 @@ impl Scheduler for RnScheduler {
     }
 }
 
-#[derive(Clone, Default)]
-struct RnSyncSender {
-    callback: Arc<Mutex<Option<Box<dyn SyncMessageCallback>>>>,
-}
-
-impl RnSyncSender {
-    fn set_callback(&self, cb: Option<Box<dyn SyncMessageCallback>>) {
-        if let Ok(mut slot) = self.callback.lock() {
-            *slot = cb;
-        }
-    }
-}
-
-impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let Ok(serialized) = serialize_outbox_entry(&message) else {
-            return;
-        };
-
-        if let Ok(guard) = self.callback.lock() {
-            if let Some(cb) = guard.as_ref() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cb.on_sync_message(
-                        serialized.destination_kind,
-                        serialized.destination_id,
-                        serialized.payload_json,
-                        serialized.is_catalogue,
-                    );
-                }));
-            }
-        }
-    }
-}
-
 // ============================================================================
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<FjallStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<FjallStorage, RnScheduler>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -334,9 +287,8 @@ impl RnRuntime {
                     }
                 })?;
             let scheduler = RnScheduler::default();
-            let sync_sender = RnSyncSender::default();
 
-            let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -358,20 +310,6 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             core.scheduler_mut().set_callback(callback);
-            Ok(())
-        })
-    }
-
-    /// Register a JS callback for outbound sync messages.
-    pub fn on_sync_message_to_send(
-        &self,
-        callback: Option<Box<dyn SyncMessageCallback>>,
-    ) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_to_send", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.sync_sender().set_callback(callback);
             Ok(())
         })
     }
