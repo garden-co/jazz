@@ -1761,7 +1761,7 @@ function compileCondition(
     return undefined;
   }
   if (isPolicyExpr(condition)) {
-    assertInheritsColumns(condition, table, fkReferencesByTable);
+    resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
   }
   if (isSessionWhereCondition(condition)) {
@@ -1775,7 +1775,7 @@ function compileCondition(
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    assertInheritsColumns(compiledCondition, table, fkReferencesByTable);
+    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
@@ -1803,7 +1803,16 @@ function compileCondition(
   throw new Error("Unsupported condition in permissions compiler.");
 }
 
-function assertInheritsColumns(
+function resolveFkColumn(name: string, fkColumns: Map<string, string>): string | undefined {
+  if (fkColumns.has(name)) return name;
+  const withId = name + "Id";
+  if (fkColumns.has(withId)) return withId;
+  const withUnderId = name + "_id";
+  if (fkColumns.has(withUnderId)) return withUnderId;
+  return undefined;
+}
+
+function resolveAndAssertInheritsColumns(
   expr: PolicyExpr,
   table: string,
   fkReferencesByTable: Map<string, Map<string, string>>,
@@ -1818,7 +1827,8 @@ function assertInheritsColumns(
               `table metadata is missing in app.wasmSchema.`,
           );
         }
-        if (!fkColumns.has(node.via_column)) {
+        const resolved = resolveFkColumn(node.via_column, fkColumns);
+        if (!resolved) {
           const fkList = [...fkColumns.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
@@ -1826,28 +1836,32 @@ function assertInheritsColumns(
               `column is not a foreign key reference. Available FK columns: ${available}.`,
           );
         }
+        node.via_column = resolved;
         break;
       }
       case "InheritsReferencing": {
+        const originalColumn = node.via_column;
         const sourceFks = fkReferencesByTable.get(node.source_table);
         if (!sourceFks) {
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `source table metadata is missing in app.wasmSchema.`,
           );
         }
-        const referenced = sourceFks.get(node.via_column);
-        if (!referenced) {
+        const resolved = resolveFkColumn(originalColumn, sourceFks);
+        if (!resolved) {
           const fkList = [...sourceFks.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `column is not a foreign key reference on source table. Available FK columns: ${available}.`,
           );
         }
+        node.via_column = resolved;
+        const referenced = sourceFks.get(resolved);
         if (referenced !== currentTable) {
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `source FK references "${referenced}" but this rule is for "${currentTable}".`,
           );
         }
