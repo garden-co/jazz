@@ -9,7 +9,7 @@ use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
-use crate::storage::Storage;
+use crate::storage::{IndexMutation, Storage};
 use crate::sync_manager::DurabilityTier;
 
 /// Factory type for persistence tests that reopen storage at a given path.
@@ -369,6 +369,48 @@ pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) 
     );
 }
 
+pub fn test_apply_row_mutation_combines_row_and_index_effects(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let version = make_row_version(row_id, "main", 10, b"alice");
+    let visible_entry = make_visible_entry(version.clone(), std::slice::from_ref(&version));
+    let index_mutations = [IndexMutation::Insert {
+        table: "users",
+        column: "name",
+        branch: "main",
+        value: Value::Text("alice".to_string()),
+        row_id,
+    }];
+
+    storage
+        .apply_row_mutation(
+            "users",
+            std::slice::from_ref(&version),
+            std::slice::from_ref(&visible_entry),
+            &index_mutations,
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage
+            .load_history_row_version("users", row_id, version.version_id())
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+        vec![row_id]
+    );
+}
+
 // ============================================================================
 // Catalogue tests
 // ============================================================================
@@ -683,6 +725,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn row_region_branch_isolation() {
                 conformance::test_row_region_branch_isolation(&$factory);
+            }
+
+            #[test]
+            fn apply_row_mutation_combines_row_and_index_effects() {
+                conformance::test_apply_row_mutation_combines_row_and_index_effects(&$factory);
             }
 
             #[test]

@@ -102,6 +102,24 @@ pub struct RowLocator {
     pub origin_schema_hash: Option<SchemaHash>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexMutation<'a> {
+    Insert {
+        table: &'a str,
+        column: &'a str,
+        branch: &'a str,
+        value: Value,
+        row_id: ObjectId,
+    },
+    Remove {
+        table: &'a str,
+        column: &'a str,
+        branch: &'a str,
+        value: Value,
+        row_id: ObjectId,
+    },
+}
+
 fn metadata_raw_key(id: ObjectId) -> String {
     hex::encode(id.uuid().as_bytes())
 }
@@ -381,6 +399,25 @@ pub trait Storage {
         ))
     }
 
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if !history_rows.is_empty() {
+            self.append_history_region_rows(table, history_rows)?;
+        }
+        if !visible_entries.is_empty() {
+            self.upsert_visible_region_rows(table, visible_entries)?;
+        }
+        if !index_mutations.is_empty() {
+            self.apply_index_mutations(index_mutations)?;
+        }
+        Ok(())
+    }
+
     fn scan_visible_region(
         &self,
         _table: &str,
@@ -613,6 +650,31 @@ pub trait Storage {
         self.raw_table_delete(&raw_table, &key)
     }
 
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::Insert {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => self.index_insert(table, column, branch, value, *row_id)?,
+                IndexMutation::Remove {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => self.index_remove(table, column, branch, value, *row_id)?,
+            }
+        }
+        Ok(())
+    }
+
     fn index_lookup(
         &self,
         table: &str,
@@ -818,6 +880,16 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).apply_row_mutation(table, history_rows, visible_entries, index_mutations)
+    }
+
     fn scan_visible_region(
         &self,
         table: &str,
@@ -918,6 +990,13 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         (**self).index_remove(table, column, branch, value, row_id)
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).apply_index_mutations(mutations)
     }
 
     fn index_lookup(

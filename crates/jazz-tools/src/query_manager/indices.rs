@@ -1,5 +1,5 @@
 use crate::object::ObjectId;
-use crate::storage::{Storage, StorageError, validate_index_value_size};
+use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_size};
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
@@ -71,36 +71,42 @@ impl QueryManager {
         Ok(())
     }
 
-    fn insert_column_index_values(
-        storage: &mut dyn Storage,
-        table: &str,
-        column: &ColumnDescriptor,
-        branch: &str,
+    fn push_insert_column_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        column: &'a ColumnDescriptor,
+        branch: &'a str,
         value: &Value,
         object_id: ObjectId,
-    ) -> Result<(), QueryError> {
+    ) {
         for index_value in Self::expand_index_values(column, value) {
-            storage
-                .index_insert(table, column.name.as_str(), branch, &index_value, object_id)
-                .map_err(Self::map_index_storage_error)?;
+            mutations.push(IndexMutation::Insert {
+                table,
+                column: column.name.as_str(),
+                branch,
+                value: index_value,
+                row_id: object_id,
+            });
         }
-        Ok(())
     }
 
-    fn remove_column_index_values(
-        storage: &mut dyn Storage,
-        table: &str,
-        column: &ColumnDescriptor,
-        branch: &str,
+    fn push_remove_column_index_values<'a>(
+        mutations: &mut Vec<IndexMutation<'a>>,
+        table: &'a str,
+        column: &'a ColumnDescriptor,
+        branch: &'a str,
         value: &Value,
         object_id: ObjectId,
-    ) -> Result<(), QueryError> {
+    ) {
         for index_value in Self::expand_index_values(column, value) {
-            storage
-                .index_remove(table, column.name.as_str(), branch, &index_value, object_id)
-                .map_err(Self::map_index_storage_error)?;
+            mutations.push(IndexMutation::Remove {
+                table,
+                column: column.name.as_str(),
+                branch,
+                value: index_value,
+                row_id: object_id,
+            });
         }
-        Ok(())
     }
 
     /// Update indices when a row is inserted on a specific branch.
@@ -112,21 +118,33 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Update "_id" index
-        storage
-            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
+        let mut mutations = vec![IndexMutation::Insert {
+            table,
+            column: "_id",
+            branch,
+            value: Value::Uuid(object_id),
+            row_id: object_id,
+        }];
 
         // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
             {
-                Self::insert_column_index_values(storage, table, col, branch, &value, object_id)?;
+                Self::push_insert_column_index_values(
+                    &mut mutations,
+                    table,
+                    col,
+                    branch,
+                    &value,
+                    object_id,
+                );
             }
         }
 
-        Ok(())
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
     }
 
     /// Update indices when a row is updated on a specific branch.
@@ -139,6 +157,7 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        let mut mutations = Vec::new();
         // "_id" index doesn't change on update
 
         // Update column indices (remove old value, add new value)
@@ -155,18 +174,30 @@ impl QueryManager {
             }
 
             if old_value != Value::Null {
-                Self::remove_column_index_values(
-                    storage, table, col, branch, &old_value, object_id,
-                )?;
+                Self::push_remove_column_index_values(
+                    &mut mutations,
+                    table,
+                    col,
+                    branch,
+                    &old_value,
+                    object_id,
+                );
             }
             if new_value != Value::Null {
-                Self::insert_column_index_values(
-                    storage, table, col, branch, &new_value, object_id,
-                )?;
+                Self::push_insert_column_index_values(
+                    &mut mutations,
+                    table,
+                    col,
+                    branch,
+                    &new_value,
+                    object_id,
+                );
             }
         }
 
-        Ok(())
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
     }
 
     /// Update indices for soft delete on a specific branch.
@@ -178,32 +209,41 @@ impl QueryManager {
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Remove from "_id" index
-        storage
-            .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
+        let mut mutations = vec![IndexMutation::Remove {
+            table,
+            column: "_id",
+            branch,
+            value: Value::Uuid(object_id),
+            row_id: object_id,
+        }];
 
         // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, old_data, col_idx)
                 && value != Value::Null
             {
-                Self::remove_column_index_values(storage, table, col, branch, &value, object_id)?;
+                Self::push_remove_column_index_values(
+                    &mut mutations,
+                    table,
+                    col,
+                    branch,
+                    &value,
+                    object_id,
+                );
             }
         }
 
-        // Add to "_id_deleted" index
-        storage
-            .index_insert(
-                table,
-                "_id_deleted",
-                branch,
-                &Value::Uuid(object_id),
-                object_id,
-            )
-            .map_err(Self::map_index_storage_error)?;
+        mutations.push(IndexMutation::Insert {
+            table,
+            column: "_id_deleted",
+            branch,
+            value: Value::Uuid(object_id),
+            row_id: object_id,
+        });
 
-        Ok(())
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
     }
 
     /// Update indices for hard delete on a specific branch.
@@ -215,10 +255,13 @@ impl QueryManager {
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Remove from "_id" index (may not be present if already soft-deleted)
-        storage
-            .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
+        let mut mutations = vec![IndexMutation::Remove {
+            table,
+            column: "_id",
+            branch,
+            value: Value::Uuid(object_id),
+            row_id: object_id,
+        }];
 
         // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
@@ -226,25 +269,29 @@ impl QueryManager {
                 if let Ok(value) = decode_column(descriptor, data, col_idx)
                     && value != Value::Null
                 {
-                    Self::remove_column_index_values(
-                        storage, table, col, branch, &value, object_id,
-                    )?;
+                    Self::push_remove_column_index_values(
+                        &mut mutations,
+                        table,
+                        col,
+                        branch,
+                        &value,
+                        object_id,
+                    );
                 }
             }
         }
 
-        // Remove from "_id_deleted" index (handles soft→hard upgrade)
-        storage
-            .index_remove(
-                table,
-                "_id_deleted",
-                branch,
-                &Value::Uuid(object_id),
-                object_id,
-            )
-            .map_err(Self::map_index_storage_error)?;
+        mutations.push(IndexMutation::Remove {
+            table,
+            column: "_id_deleted",
+            branch,
+            value: Value::Uuid(object_id),
+            row_id: object_id,
+        });
 
-        Ok(())
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
     }
 
     /// Update indices for undelete on a specific branch.
@@ -256,31 +303,40 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Remove from "_id_deleted" index
-        storage
-            .index_remove(
+        let mut mutations = vec![
+            IndexMutation::Remove {
                 table,
-                "_id_deleted",
+                column: "_id_deleted",
                 branch,
-                &Value::Uuid(object_id),
-                object_id,
-            )
-            .map_err(Self::map_index_storage_error)?;
+                value: Value::Uuid(object_id),
+                row_id: object_id,
+            },
+            IndexMutation::Insert {
+                table,
+                column: "_id",
+                branch,
+                value: Value::Uuid(object_id),
+                row_id: object_id,
+            },
+        ];
 
-        // Add to "_id" index
-        storage
-            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
-
-        // Add to all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, new_data, col_idx)
                 && value != Value::Null
             {
-                Self::insert_column_index_values(storage, table, col, branch, &value, object_id)?;
+                Self::push_insert_column_index_values(
+                    &mut mutations,
+                    table,
+                    col,
+                    branch,
+                    &value,
+                    object_id,
+                );
             }
         }
 
-        Ok(())
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
     }
 }

@@ -501,20 +501,20 @@ impl ObjectManager {
             });
         }
 
-        io.append_history_region_rows(&table, std::slice::from_ref(&row))
-            .map_err(Error::StorageError)?;
         let current_entry =
             self.visible_entry_after_append(io, &table, previous_entry.as_ref(), &row)?;
         let current_visible = current_entry
             .as_ref()
             .map(|entry| entry.current_row.clone());
-
-        if current_entry.as_ref() != previous_entry.as_ref()
-            && let Some(entry) = current_entry.as_ref()
-        {
-            io.upsert_visible_region_rows(&table, std::slice::from_ref(entry))
-                .map_err(Error::StorageError)?;
-        }
+        let visible_entry_changed = current_entry.as_ref() != previous_entry.as_ref();
+        let visible_entries: &[VisibleRowEntry] =
+            match (visible_entry_changed, current_entry.as_ref()) {
+                (true, Some(entry)) => std::slice::from_ref(entry),
+                _ => &[],
+            };
+        let visible_changed = previous_visible != current_visible;
+        io.apply_row_mutation(&table, std::slice::from_ref(&row), visible_entries, &[])
+            .map_err(Error::StorageError)?;
 
         #[cfg(test)]
         {
@@ -529,7 +529,7 @@ impl ObjectManager {
             previous_visible: previous_visible.clone(),
             current_visible: current_visible.clone(),
             is_new_object: previous_visible.is_none(),
-            visible_changed: previous_visible != current_visible,
+            visible_changed,
         })
     }
 
@@ -630,9 +630,6 @@ impl ObjectManager {
             (None, incoming) => incoming,
         };
 
-        io.append_history_region_rows(&table, std::slice::from_ref(&patched_row))
-            .ok()?;
-
         let patched_entry = match previous_entry {
             Some(entry) if state.is_none() => self
                 .visible_entry_after_tier_upgrade(io, &table, entry, &patched_row)
@@ -641,9 +638,13 @@ impl ObjectManager {
                 .rebuild_visible_entry_from_history(io, &table, object_id, branch_name)
                 .ok()??,
         };
-
-        io.upsert_visible_region_rows(&table, std::slice::from_ref(&patched_entry))
-            .ok()?;
+        io.apply_row_mutation(
+            &table,
+            std::slice::from_ref(&patched_row),
+            std::slice::from_ref(&patched_entry),
+            &[],
+        )
+        .ok()?;
 
         let current_visible = patched_entry.current_row;
         if previous_visible.as_ref() == Some(&current_visible) {
