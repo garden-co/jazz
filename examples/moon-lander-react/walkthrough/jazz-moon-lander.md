@@ -9,7 +9,7 @@ paginate: true
 
 # How Moon Lander uses Jazz
 
-A walkthrough of real-time multiplayer in a browser game — built with Jazz, React, and a canvas physics engine.
+A walkthrough of real-time multiplayer in a browser game, built with Jazz, React, and a canvas physics engine.
 
 Players share a moon surface: they collect fuel deposits, trade fuel with each other, and see each other's landers moving in real time.
 
@@ -42,14 +42,14 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 </svg>
 
 - No REST API. No WebSockets to manage. No manual state reconciliation.
-- Writes are **instant locally** — sync happens in the background.
+- Writes are **instant locally**. Sync happens in the background.
 - Every client is always readable, even offline.
 
 ---
 
 ## The schema
 
-Three tables define the entire multiplayer state. Written in a TypeScript DSL in [`schema.ts`](../schema.ts); `jazz build` generates a SQL migration and typed interfaces.
+Three tables define the entire multiplayer state. Written in a TypeScript DSL in [`schema.ts`](../schema.ts).
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:0.5rem">
 <div>
@@ -62,14 +62,16 @@ table("players", {
   name: col.string(),
   color: col.string(),
   mode: col.string(),
+  online: col.boolean(),
+  lastSeen: col.int(),
   positionX: col.int(),
   positionY: col.int(),
   velocityX: col.int(),
   velocityY: col.int(),
-  landerFuelLevel: col.int(),
   requiredFuelType: col.string(),
+  landerFuelLevel: col.int(),
+  landerSpawnX: col.int(),
   thrusting: col.boolean(),
-  lastSeen: col.int(),
 });
 ```
 
@@ -80,9 +82,9 @@ table("players", {
 table("fuel_deposits", {
   fuelType: col.string(),
   positionX: col.int(),
+  createdAt: col.int(),
   collected: col.boolean(),
   collectedBy: col.string(),
-  createdAt: col.int(),
 });
 
 table("chat_messages", {
@@ -99,33 +101,27 @@ table("chat_messages", {
 
 ## Client setup
 
-`createJazzClient` initialises the WASM worker, opens the OPFS database, and begins syncing. `JazzProvider` makes `db` available to every component in the tree.
+`JazzProvider` accepts a `config` object and handles the WASM worker, OPFS database, and sync connection internally. It makes `db` available to every component in the tree.
 
 **[`src/App.tsx`](../src/App.tsx)**
 
 ```typescript
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 
-export function App({ config, playerId, ... }: AppProps) {
-  const [client, setClient] = useState<JazzClient | null>(null);
-
-  useEffect(() => {
-    let active = true, jazzClient: JazzClient | null = null;
-    createJazzClient(config).then((c) => {   // WASM + OPFS + sync, once
-      if (active) { jazzClient = c; setClient(c); } else c.shutdown();
-    });
-    return () => { active = false; jazzClient?.shutdown(); };
-  }, [config.appId, config.serverUrl]);
+export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: AppProps) {
+  if (!config) {
+    return <Game physicsSpeed={physicsSpeed} initialMode={initialMode} spawnX={spawnX} />;
+  }
 
   return (
-    <JazzProvider client={client}>
-      <GameWithSync playerId={playerId} />
+    <JazzProvider config={config}>
+      <GameWithSync playerId={playerId ?? crypto.randomUUID()} />
     </JazzProvider>
   );
 }
 ```
 
-Without a config, `<Game>` mounts directly — no Jazz layer, useful for offline play and tests.
+Without a config, `<Game>` mounts directly with no Jazz layer, useful for offline play and tests.
 
 ---
 
@@ -137,10 +133,10 @@ All Jazz integration is in one folder:
 src/jazz/
 ├── GameWithSync.tsx   ← bridge: Jazz data → Game props + write callbacks
 ├── useSync.ts         ← all Jazz reads (subscriptions to 3 tables)
-└── SyncManager.ts     ← all Jazz writes (batched on a 200 ms interval)
+└── SyncManager.ts     ← all Jazz writes (immediate fire-and-forget)
 ```
 
-`src/game/` and `src/Game.tsx` are pure game engine code — they receive data via props and callbacks and know nothing about Jazz.
+`src/game/` and `src/Game.tsx` are pure game engine code. They receive data via props and callbacks and know nothing about Jazz.
 
 This separation means you can read the entire Jazz integration by looking at three files, without touching any physics or rendering code.
 
@@ -156,12 +152,12 @@ This separation means you can read the entire Jazz integration by looking at thr
 import { useAll, useDb } from "jazz-tools/react";
 
 export function useSync(playerId: string): SyncResult {
-  // Other players' positions, modes, fuel levels — live from the server
+  // Other players' positions, modes, fuel levels - live from the server
   const remotePlayers = useAll(
     app.players.where({ playerId: { ne: playerId } }),
   );
 
-  // Deposits on the surface — drives the game's collectible objects
+  // Deposits on the surface - drives the game's collectible objects
   const uncollectedDeposits = useAll(
     app.fuel_deposits.where({ collected: false }),
   );
@@ -174,7 +170,7 @@ export function useSync(playerId: string): SyncResult {
 }
 ```
 
-Results stream from the sync server. When any client writes, every subscriber re-renders automatically — no polling, no manual invalidation.
+Results stream from the sync server. When any client writes, every subscriber re-renders automatically. No polling, no manual invalidation.
 
 ---
 
@@ -191,14 +187,14 @@ const settled = allUncollected !== undefined;
 
 `settled` gates two things:
 
-1. **Deposit reconciliation** — ensuring the surface has the right number of deposits for the current player count (runs once, after settle).
-2. **Player row insert** — the local player is only written to the DB after settle, preventing duplicate rows from concurrent joins.
+1. **Deposit reconciliation**: ensuring the surface has the right number of deposits for the current player count (runs once, after settle).
+2. **Player row insert**: the local player is only written to the DB after settle, preventing duplicate rows from concurrent joins.
 
 ---
 
 ## Durability tiers
 
-The tier on a write controls where the promise resolves. All writes eventually propagate everywhere — the tier controls how far it must travel before the promise resolves.
+The tier on a write controls where the promise resolves. All writes eventually propagate everywhere; the tier controls how far it must travel before the promise resolves.
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 238" width="960" height="357" style="display:block;margin:0.5rem auto">
   <defs>
@@ -255,38 +251,47 @@ The tier on a write controls where the promise resolves. All writes eventually p
   <polyline points="368,215 362,220 368,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
   <polyline points="268,215 262,220 268,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
   <polyline points="168,215 162,220 168,225" stroke="#146aff" stroke-width="1.5" fill="none"/>
-  <text x="316" y="212" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#146aff">useAll(q) — re-renders as writes propagate</text>
+  <text x="316" y="212" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#146aff">useAll(q): re-renders as writes propagate</text>
 </svg>
 
 ---
 
-## Why batch writes? The SyncManager
+## Immediate writes: the SyncManager
 
-The game engine runs at **60 fps**. Writing on every frame would generate thousands of DB calls per second — far more than anything needs to sync in real time.
+Game callbacks fire Jazz writes directly. `SyncManager` owns every write and uses a `releasingIds` guard to prevent double-releasing the same deposit across concurrent async operations.
 
 **[`src/jazz/SyncManager.ts`](../src/jazz/SyncManager.ts)**
 
 ```typescript
 export class SyncManager {
-  private pendingCollections: string[] = [];
-  private pendingRefuels: FuelType[] = [];
-  private pendingShares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
-  private pendingBursts: string[] = [];
-  private pendingMessages: string[] = [];
+  private collectedByThis = new Map<string, { fuelType: string; positionX: number }>();
+  private releasingIds = new Set<string>(); // guards against double-release
+  private dbRowId: string | null = null;
 
-  constructor(private db: ReturnType<typeof useDb>, private playerId: string) {
-    // Drain all queues every 200 ms — 5 writes/s instead of 60
-    this.intervalId = setInterval(() => this.flush(), DB_SYNC_INTERVAL_MS);
+  constructor(
+    private db: ReturnType<typeof useDb>,
+    private playerId: string,
+  ) {}
+
+  collectDeposit(id: string) {
+    /* db.update immediately */
   }
-
-  collectDeposit(id: string) { this.pendingCollections.push(id); }
-  refuel(fuelType: FuelType)  { this.pendingRefuels.push(fuelType); }
-  sendMessage(text: string)   { this.pendingMessages.push(text); }
-  ...
+  refuel(fuelType: FuelType) {
+    /* releaseDeposit - delete + insert */
+  }
+  shareFuel(fuelType: string, receiverPlayerId: string) {
+    /* db.update */
+  }
+  sendMessage(text: string) {
+    /* db.insertDurable with tier: "edge" */
+  }
+  updateState(state: PlayerInit) {
+    /* db.updateDurable if changed */
+  }
 }
 ```
 
-The game engine calls `collectDeposit()`, `refuel()`, etc. synchronously — they push to a queue. The writes to Jazz happen asynchronously in `flush()`, 5 times per second.
+The game engine calls these methods synchronously. Writes that need durability guarantees use `insertDurable`/`updateDurable` with `tier: "edge"`. Hot-path writes like `collectDeposit` use eventually consistent `db.update` for instant local-store updates.
 
 ---
 
@@ -295,25 +300,23 @@ The game engine calls `collectDeposit()`, `refuel()`, etc. synchronously —�
 <div style="display:grid;grid-template-columns:3fr 2fr;gap:1.5rem;margin-top:0.4rem">
 <div>
 
-When the player walks over a fuel deposit, `collectDeposit` is queued. On the next flush:
+When the player walks over a fuel deposit, `collectDeposit` fires immediately:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
-await db.update(
-  app.fuel_deposits,
-  depId,
-  { collected: true, collectedBy: playerId },
-  { tier: "edge" },
-);
+// src/jazz/SyncManager.ts - collectDeposit()
+this.db.update(app.fuel_deposits, id, {
+  collected: true,
+  collectedBy: this.playerId,
+});
 ```
 
-Every other client's `useAll(fuel_deposits.where({ collected: false }), "edge")` subscription updates automatically — the deposit disappears from their surface and into the collector's inventory.
+This uses eventually consistent `db.update` so the local store updates instantly. The write still propagates to the server and fans out to every other client's `useAll(fuel_deposits.where({ collected: false }))` subscription, and the deposit disappears from their surface.
 
 </div>
 <div>
 <img src="screenshots/03-player-walking.png" style="width:100%;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">
 <blockquote>
-<strong>Concurrent collect?</strong> Both writes go through with <code>collected: true</code>. Last-write-wins resolves <code>collectedBy</code> to whichever timestamp arrived at the edge later — one player wins, the other's collection is silently overwritten on sync. No locks, no errors.
+<strong>Concurrent collect?</strong> Both writes go through with <code>collected: true</code>. Last-write-wins resolves <code>collectedBy</code> to whichever timestamp arrived at the edge later. One player wins, the other's collection is silently overwritten on sync. No locks, no errors.
 </blockquote>
 </div>
 </div>
@@ -325,16 +328,13 @@ Every other client's `useAll(fuel_deposits.where({ collected: false }), "edge")`
 When Player A gives a deposit to Player B, no new row is created. A updates `collectedBy`:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
-await this.db.update(
-  app.fuel_deposits,
-  shareId,
-  { collectedBy: share.receiverPlayerId },
-  { tier: "edge" },
-);
+// src/jazz/SyncManager.ts - shareFuel()
+this.db.update(app.fuel_deposits, shareId, {
+  collectedBy: receiverPlayerId,
+});
 ```
 
-Player B's `useAll(app.fuel_deposits.where({ collected: true }), "edge")` subscription already contains the row. The `collectedBy` update propagates as a plain row update — Player B's inventory reflects the share immediately.
+Player B's `useAll(app.fuel_deposits.where({ collected: true }))` subscription already contains the row. The `collectedBy` update propagates as a plain row update, so Player B's inventory reflects the share immediately.
 
 ---
 
@@ -343,16 +343,18 @@ Player B's `useAll(app.fuel_deposits.where({ collected: true }), "edge")` subscr
 When a player refuels their lander, the deposit is returned to the surface. Rather than updating `collected: false` on the existing row, the code deletes it and inserts a fresh one:
 
 ```typescript
-// src/jazz/SyncManager.ts — releaseDeposit()
-await this.db.deleteFrom(app.fuel_deposits, depId);
-await this.db.insert(
-  app.fuel_deposits,
-  { fuelType, positionX, collected: false, collectedBy: "", createdAt: Date.now() },
-  { tier: "edge" },
-);
+// src/jazz/SyncManager.ts - releaseDeposit()
+this.db.delete(app.fuel_deposits, depId);
+this.db.insert(app.fuel_deposits, {
+  fuelType,
+  positionX,
+  createdAt: Math.floor(Date.now() / 1000),
+  collected: false,
+  collectedBy: "",
+});
 ```
 
-The fresh INSERT is picked up by all clients' `where({ collected: false })` subscriptions — the deposit reappears on everyone's surface.
+The eventually consistent `delete` + `insert` updates the local store immediately. The fresh INSERT is picked up by all clients' `where({ collected: false })` subscriptions, so the deposit reappears on everyone's surface.
 
 ---
 
@@ -363,29 +365,37 @@ The fresh INSERT is picked up by all clients' `where({ collected: false })` subs
 Every player's position, velocity, fuel level, and mode are written to the `players` table. SyncManager skips the write if nothing meaningful has changed, using configurable thresholds:
 
 ```typescript
-// src/jazz/SyncManager.ts — inside doFlush()
-// First flush inserts the row; subsequent flushes update it if state changed
-if (!this.dbRowId && ds.localPlayerSettled) {
-  this.dbRowId = await this.db.insert(app.players, state, { tier: "edge" });
-} else if (this.dbRowId && playerStateChanged(this.lastSynced, state)) {
-  await this.db.update(app.players, this.dbRowId, state, { tier: "edge" });
-}
+// src/jazz/SyncManager.ts - updateState()
+if (!this.dbRowId) return;
+if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
+this.lastSynced = { ...state };
+this.db.updateDurable(app.players, this.dbRowId, state, { tier: "edge" });
 ```
 
-Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` subscription updates automatically — their rendering of the remote lander stays in sync. (`ne` is Jazz's "not equal" operator — the subscription excludes the local player's own row.)
+Player insert happens once, after the edge subscription has settled:
+
+```typescript
+// src/jazz/SyncManager.ts - setInputs(), after settled
+this.db.insertDurable(app.players, state, { tier: "edge" }).then((row) => {
+  this.dbRowId = row.id;
+});
+```
+
+Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` subscription updates automatically, keeping the remote lander in sync. (`ne` is Jazz's "not equal" operator, which excludes the local player's own row.)
 
 ---
 
-## Jazz API surface — used in Moon Lander
+## Jazz API surface used in Moon Lander
 
-| API                                    | Used for                                                       |
-| -------------------------------------- | -------------------------------------------------------------- |
-| `createJazzClient(config)`             | Initialise WASM worker + OPFS database, begin syncing          |
-| `JazzProvider`                         | Provide `db` to every component — no prop drilling             |
-| `useDb()`                              | Access the db write API from any component                     |
-| `useAll(query, tier?)`                 | Live subscription — re-renders on every remote or local change |
-| `db.insert(table, data, { tier })`     | Create a new row; `"edge"` broadcasts to remote subscribers    |
-| `db.update(table, id, data, { tier })` | Update fields on an existing row; `"edge"` broadcasts          |
-| `db.deleteFrom(table, id, { tier? })`  | Delete a row (used before re-inserting a released deposit)     |
+| API                                           | Used for                                                                     |
+| --------------------------------------------- | ---------------------------------------------------------------------------- |
+| `JazzProvider`                                | Wrap the app; handles WASM worker + OPFS + sync internally                   |
+| `useDb()`                                     | Access the db write API from any component                                   |
+| `useAll(query, tier?)`                        | Live subscription; re-renders on every remote or local change                |
+| `db.insert(table, data)`                      | Eventually consistent insert. Instant local update, propagates in background |
+| `db.update(table, id, data)`                  | Eventually consistent update. Instant local update, propagates in background |
+| `db.delete(table, id)`                        | Eventually consistent delete. Used before re-inserting a released deposit    |
+| `db.insertDurable(table, data, { tier })`     | Durable insert. Promise resolves when tier confirms                          |
+| `db.updateDurable(table, id, data, { tier })` | Durable update. Used for player state sync at `"edge"` tier                  |
 
-**Key insight:** the entire multiplayer state of a real-time game — positions, collectibles, inventory, chat — is managed with these seven API calls. No custom server, no WebSocket handlers, no conflict resolution code.
+**Key insight:** the entire multiplayer state of a real-time game (positions, collectibles, inventory, chat) is managed with these eight API calls. No custom server, no WebSocket handlers, no conflict resolution code.
