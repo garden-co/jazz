@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::{ObjectManager, VisibleRowUpdate};
+use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::row_histories::VisibleRowUpdate;
 use crate::storage::Storage;
 
 // Module declarations
@@ -25,7 +26,7 @@ pub use types::*;
 // SyncManager
 // ============================================================================
 
-/// Manages synchronization state atop ObjectManager.
+/// Manages synchronization state atop storage-backed row and catalogue state.
 ///
 /// Coordinates:
 /// - Upstream servers (trusted, receive all our objects)

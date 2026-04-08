@@ -6,8 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::VisibleRowUpdate;
-use crate::row_histories::{QueryRowVersion, StoredRowVersion};
+use crate::row_histories::{QueryRowVersion, StoredRowVersion, VisibleRowUpdate};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
 };
@@ -336,13 +335,11 @@ pub struct CatalogueUpdate {
     pub content: Vec<u8>,
 }
 
-/// Manages reactive SQL queries over object-based storage.
+/// Manages reactive SQL queries over storage-backed relational state.
 ///
-/// No global Setup/Ready state machine - indices and data are loaded lazily
-/// from ObjectManager. Operations work immediately; queries return empty/Pending
-/// results until data is available.
-///
-/// ObjectManager is the source of truth for row data - no caching layer on top.
+/// No global Setup/Ready state machine: indices and rows are loaded lazily from
+/// storage. Operations work immediately; queries return empty/Pending results
+/// until their required data is available.
 pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
@@ -855,8 +852,8 @@ impl QueryManager {
     /// - Settles policy graphs and finalizes completed checks
     /// - Processes object updates from SyncManager
     /// - Flushes pending index updates when indices become ready
-    /// - Marks subscriptions with pending IDs dirty when objects become available
-    /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
+    /// - Marks subscriptions with pending IDs dirty when rows become available
+    /// - Settles all subscription graphs (row data loaded on-demand from storage)
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
         let _span = tracing::trace_span!("QueryManager::process").entered();
 

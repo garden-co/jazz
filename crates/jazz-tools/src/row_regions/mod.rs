@@ -8,11 +8,12 @@ use uuid::Uuid;
 
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
 use crate::row_format::{EncodingError, column_bytes, decode_column, decode_row, encode_row};
+use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,6 +54,30 @@ pub enum HistoryScan {
     Branch,
     Row { row_id: ObjectId },
     AsOf { ts: u64 },
+}
+
+/// Visible row change emitted when a row object's winning version changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleRowUpdate {
+    pub object_id: ObjectId,
+    pub row_locator: RowLocator,
+    pub row: StoredRowVersion,
+    pub previous_row: Option<StoredRowVersion>,
+    pub is_new_object: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddRowVersionResult {
+    pub version_id: CommitId,
+    pub row_locator: RowLocator,
+    pub visible_update: Option<VisibleRowUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowHistoryError {
+    ObjectNotFound(ObjectId),
+    ParentNotFound(CommitId),
+    StorageError(StorageError),
 }
 
 fn tier_satisfies(confirmed_tier: Option<DurabilityTier>, required_tier: DurabilityTier) -> bool {
@@ -941,6 +966,443 @@ impl VisibleRowEntry {
             DurabilityTier::GlobalServer => self.global_version_id,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct RowVersionApply {
+    row_locator: RowLocator,
+    previous_visible: Option<StoredRowVersion>,
+    current_visible: Option<StoredRowVersion>,
+    is_new_object: bool,
+    visible_changed: bool,
+}
+
+fn row_locator_from_storage<H: Storage>(
+    io: &H,
+    object_id: ObjectId,
+) -> Result<RowLocator, RowHistoryError> {
+    io.load_row_locator(object_id)
+        .map_err(RowHistoryError::StorageError)?
+        .ok_or(RowHistoryError::ObjectNotFound(object_id))
+}
+
+fn load_branch_history<H: Storage>(
+    io: &H,
+    table: &str,
+    object_id: ObjectId,
+    branch_name: &SharedString,
+) -> Result<Vec<StoredRowVersion>, RowHistoryError> {
+    io.scan_history_region(
+        table,
+        branch_name.as_str(),
+        HistoryScan::Row { row_id: object_id },
+    )
+    .map_err(RowHistoryError::StorageError)
+}
+
+fn rebuild_visible_entry_from_history<H: Storage>(
+    io: &H,
+    table: &str,
+    object_id: ObjectId,
+    branch_name: &SharedString,
+) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
+    let history_rows = load_branch_history(io, table, object_id, branch_name)?;
+    let Some(current_row) = history_rows
+        .iter()
+        .filter(|row| row.state.is_visible())
+        .max_by_key(|row| (row.updated_at, row.version_id()))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
+}
+
+fn load_previous_visible_entry<H: Storage>(
+    io: &H,
+    table: &str,
+    object_id: ObjectId,
+    branch_name: &SharedString,
+) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
+    match io.load_visible_region_entry(table, branch_name.as_str(), object_id) {
+        Ok(entry) => Ok(entry),
+        Err(_) => rebuild_visible_entry_from_history(io, table, object_id, branch_name),
+    }
+}
+
+fn latest_row_wins(candidate: &StoredRowVersion, current: &StoredRowVersion) -> bool {
+    (candidate.updated_at, candidate.version_id()) > (current.updated_at, current.version_id())
+}
+
+fn branch_frontier_after_append(
+    previous_frontier: &[CommitId],
+    appended_row: &StoredRowVersion,
+) -> Vec<CommitId> {
+    let appended_version_id = appended_row.version_id();
+    let mut frontier = previous_frontier
+        .iter()
+        .copied()
+        .filter(|version_id| !appended_row.parents.contains(version_id))
+        .collect::<Vec<_>>();
+    if !frontier.contains(&appended_version_id) {
+        frontier.push(appended_version_id);
+    }
+    frontier.sort();
+    frontier.dedup();
+    frontier
+}
+
+fn latest_visible_version_after_append<H: Storage>(
+    io: &H,
+    table: &str,
+    appended_row: &StoredRowVersion,
+    previous_winner_id: Option<CommitId>,
+) -> Result<Option<CommitId>, RowHistoryError> {
+    if !appended_row.state.is_visible() {
+        return Ok(previous_winner_id);
+    }
+
+    let appended_version_id = appended_row.version_id();
+    let Some(previous_winner_id) = previous_winner_id else {
+        return Ok(Some(appended_version_id));
+    };
+
+    if previous_winner_id == appended_version_id {
+        return Ok(Some(appended_version_id));
+    }
+
+    let Some(previous_winner) = io
+        .load_history_row_version(table, appended_row.row_id, previous_winner_id)
+        .map_err(RowHistoryError::StorageError)?
+    else {
+        return Err(RowHistoryError::StorageError(StorageError::IoError(
+            format!(
+                "missing history row {previous_winner_id:?} for row {}",
+                appended_row.row_id
+            ),
+        )));
+    };
+
+    if latest_row_wins(appended_row, &previous_winner) {
+        Ok(Some(appended_version_id))
+    } else {
+        Ok(Some(previous_winner_id))
+    }
+}
+
+fn visible_entry_after_append<H: Storage>(
+    io: &H,
+    table: &str,
+    previous_entry: Option<&VisibleRowEntry>,
+    appended_row: &StoredRowVersion,
+) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
+    let Some(previous_entry) = previous_entry else {
+        return Ok(appended_row
+            .state
+            .is_visible()
+            .then(|| VisibleRowEntry::new(appended_row.clone())));
+    };
+
+    let branch_frontier =
+        branch_frontier_after_append(&previous_entry.branch_frontier, appended_row);
+
+    if !appended_row.state.is_visible() {
+        let mut next = previous_entry.clone();
+        next.branch_frontier = branch_frontier;
+        return Ok(Some(next));
+    }
+
+    let current_row = if latest_row_wins(appended_row, &previous_entry.current_row) {
+        appended_row.clone()
+    } else {
+        previous_entry.current_row.clone()
+    };
+    let current_version_id = current_row.version_id();
+
+    let worker_version_id = latest_visible_version_after_append(
+        io,
+        table,
+        appended_row,
+        previous_entry.version_id_for_tier(DurabilityTier::Worker),
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+    let edge_version_id = latest_visible_version_after_append(
+        io,
+        table,
+        appended_row,
+        previous_entry.version_id_for_tier(DurabilityTier::EdgeServer),
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+    let global_version_id = latest_visible_version_after_append(
+        io,
+        table,
+        appended_row,
+        previous_entry.version_id_for_tier(DurabilityTier::GlobalServer),
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+
+    Ok(Some(VisibleRowEntry {
+        current_row,
+        branch_frontier,
+        worker_version_id,
+        edge_version_id,
+        global_version_id,
+    }))
+}
+
+fn winner_after_tier_upgrade<H: Storage>(
+    io: &H,
+    table: &str,
+    entry: &VisibleRowEntry,
+    current_row: &StoredRowVersion,
+    patched_row: &StoredRowVersion,
+    required_tier: DurabilityTier,
+) -> Result<Option<CommitId>, RowHistoryError> {
+    let patched_version_id = patched_row.version_id();
+    if !patched_row.state.is_visible()
+        || patched_row
+            .confirmed_tier
+            .is_none_or(|tier| tier < required_tier)
+    {
+        return Ok(entry.version_id_for_tier(required_tier));
+    }
+
+    if current_row.version_id() == patched_version_id
+        || current_row
+            .confirmed_tier
+            .is_some_and(|tier| tier >= required_tier)
+    {
+        return Ok(Some(current_row.version_id()));
+    }
+
+    let Some(previous_winner_id) = entry.version_id_for_tier(required_tier) else {
+        return Ok(Some(patched_version_id));
+    };
+
+    if previous_winner_id == patched_version_id {
+        return Ok(Some(patched_version_id));
+    }
+
+    let Some(previous_winner) = io
+        .load_history_row_version(table, patched_row.row_id, previous_winner_id)
+        .map_err(RowHistoryError::StorageError)?
+    else {
+        return Err(RowHistoryError::StorageError(StorageError::IoError(
+            format!(
+                "missing tier winner {previous_winner_id:?} for row {}",
+                patched_row.row_id
+            ),
+        )));
+    };
+
+    if latest_row_wins(patched_row, &previous_winner) {
+        Ok(Some(patched_version_id))
+    } else {
+        Ok(Some(previous_winner_id))
+    }
+}
+
+fn visible_entry_after_tier_upgrade<H: Storage>(
+    io: &H,
+    table: &str,
+    entry: VisibleRowEntry,
+    patched_row: &StoredRowVersion,
+) -> Result<VisibleRowEntry, RowHistoryError> {
+    let current_row = if entry.current_row.version_id() == patched_row.version_id() {
+        patched_row.clone()
+    } else {
+        entry.current_row.clone()
+    };
+    let current_version_id = current_row.version_id();
+
+    let worker_version_id = winner_after_tier_upgrade(
+        io,
+        table,
+        &entry,
+        &current_row,
+        patched_row,
+        DurabilityTier::Worker,
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+    let edge_version_id = winner_after_tier_upgrade(
+        io,
+        table,
+        &entry,
+        &current_row,
+        patched_row,
+        DurabilityTier::EdgeServer,
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+    let global_version_id = winner_after_tier_upgrade(
+        io,
+        table,
+        &entry,
+        &current_row,
+        patched_row,
+        DurabilityTier::GlobalServer,
+    )?
+    .filter(|version_id| *version_id != current_version_id);
+
+    Ok(VisibleRowEntry {
+        current_row,
+        branch_frontier: entry.branch_frontier,
+        worker_version_id,
+        edge_version_id,
+        global_version_id,
+    })
+}
+
+fn visible_update_from_applied(
+    object_id: ObjectId,
+    applied: RowVersionApply,
+) -> Option<VisibleRowUpdate> {
+    if !applied.visible_changed {
+        return None;
+    }
+
+    let current_visible = applied.current_visible?;
+    Some(VisibleRowUpdate {
+        object_id,
+        row_locator: applied.row_locator,
+        row: current_visible,
+        previous_row: applied.previous_visible,
+        is_new_object: applied.is_new_object,
+    })
+}
+
+pub fn apply_row_version<H: Storage>(
+    io: &mut H,
+    object_id: ObjectId,
+    branch_name: &BranchName,
+    row: StoredRowVersion,
+    index_mutations: &[IndexMutation<'_>],
+) -> Result<AddRowVersionResult, RowHistoryError> {
+    let row_locator = row_locator_from_storage(io, object_id)?;
+    let table = row_locator.table.to_string();
+    let version_id = row.version_id();
+    let branch = SharedString::from(branch_name.as_str().to_string());
+    let previous_entry = load_previous_visible_entry(io, &table, object_id, &branch)?;
+    let previous_visible = previous_entry
+        .as_ref()
+        .map(|entry| entry.current_row.clone());
+
+    for parent in &row.parents {
+        if io
+            .load_history_row_version(&table, object_id, *parent)
+            .map_err(RowHistoryError::StorageError)?
+            .is_none()
+        {
+            return Err(RowHistoryError::ParentNotFound(*parent));
+        }
+    }
+
+    if io
+        .load_history_row_version(&table, object_id, version_id)
+        .map_err(RowHistoryError::StorageError)?
+        .is_some()
+    {
+        return Ok(AddRowVersionResult {
+            version_id,
+            row_locator,
+            visible_update: None,
+        });
+    }
+
+    let current_entry = visible_entry_after_append(io, &table, previous_entry.as_ref(), &row)?;
+    let current_visible = current_entry
+        .as_ref()
+        .map(|entry| entry.current_row.clone());
+    let visible_entry_changed = current_entry.as_ref() != previous_entry.as_ref();
+    let visible_entries: &[VisibleRowEntry] = match (visible_entry_changed, current_entry.as_ref())
+    {
+        (true, Some(entry)) => std::slice::from_ref(entry),
+        _ => &[],
+    };
+    let visible_changed = previous_visible != current_visible;
+    io.apply_row_mutation(
+        &table,
+        std::slice::from_ref(&row),
+        visible_entries,
+        index_mutations,
+    )
+    .map_err(RowHistoryError::StorageError)?;
+
+    let applied = RowVersionApply {
+        row_locator: row_locator.clone(),
+        previous_visible: previous_visible.clone(),
+        current_visible,
+        is_new_object: previous_visible.is_none(),
+        visible_changed,
+    };
+
+    Ok(AddRowVersionResult {
+        version_id,
+        row_locator,
+        visible_update: visible_update_from_applied(object_id, applied),
+    })
+}
+
+pub fn patch_row_version_state<H: Storage>(
+    io: &mut H,
+    object_id: ObjectId,
+    branch_name: &BranchName,
+    version_id: CommitId,
+    state: Option<RowState>,
+    confirmed_tier: Option<DurabilityTier>,
+) -> Result<Option<VisibleRowUpdate>, RowHistoryError> {
+    let row_locator = row_locator_from_storage(io, object_id)?;
+    let table = row_locator.table.to_string();
+    let branch = SharedString::from(branch_name.as_str().to_string());
+    let previous_entry = load_previous_visible_entry(io, &table, object_id, &branch)?;
+    let previous_visible = previous_entry
+        .as_ref()
+        .map(|entry| entry.current_row.clone());
+
+    let mut patched_row = io
+        .load_history_row_version(&table, object_id, version_id)
+        .map_err(RowHistoryError::StorageError)?
+        .ok_or(RowHistoryError::ObjectNotFound(object_id))?;
+    if patched_row.branch.as_str() != branch_name.as_str() {
+        return Ok(None);
+    }
+
+    if let Some(state) = state {
+        patched_row.state = state;
+    }
+    patched_row.confirmed_tier = match (patched_row.confirmed_tier, confirmed_tier) {
+        (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+        (Some(existing), None) => Some(existing),
+        (None, incoming) => incoming,
+    };
+
+    let patched_entry = match previous_entry {
+        Some(entry) if state.is_none() => {
+            visible_entry_after_tier_upgrade(io, &table, entry, &patched_row)?
+        }
+        _ => rebuild_visible_entry_from_history(io, &table, object_id, &branch)?
+            .ok_or(RowHistoryError::ObjectNotFound(object_id))?,
+    };
+    io.apply_row_mutation(
+        &table,
+        std::slice::from_ref(&patched_row),
+        std::slice::from_ref(&patched_entry),
+        &[],
+    )
+    .map_err(RowHistoryError::StorageError)?;
+
+    let current_visible = patched_entry.current_row;
+    if previous_visible.as_ref() == Some(&current_visible) {
+        return Ok(None);
+    }
+
+    Ok(Some(VisibleRowUpdate {
+        object_id,
+        row_locator,
+        row: current_visible,
+        previous_row: previous_visible.clone(),
+        is_new_object: previous_visible.is_none(),
+    }))
 }
 
 fn latest_visible_version_for_tier(

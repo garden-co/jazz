@@ -306,7 +306,7 @@ impl PolicyFilterNode {
 
     /// Evaluate INHERITS without context - fails closed.
     ///
-    /// INHERITS requires ObjectManager access to load parent rows.
+    /// INHERITS requires storage-backed access to load parent rows.
     /// When called without context (via regular process()), we fail closed
     /// for security. Use process_with_context() for proper INHERITS evaluation.
     ///
