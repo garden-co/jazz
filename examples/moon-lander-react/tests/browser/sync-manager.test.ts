@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { PlayerInit, FuelDeposit } from "../../schema/app.js";
+import type { PlayerInit, FuelDeposit } from "../../schema.js";
 import type { FuelType } from "../../src/game/constants.js";
 import { SyncManager, DEPOSITS_PER_TYPE, type SyncInputs } from "../../src/jazz/SyncManager.js";
 import { FUEL_TYPES } from "../../src/game/constants.js";

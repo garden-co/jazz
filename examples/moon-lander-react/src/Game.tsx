@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
-import type { ChatMessage, Player, PlayerInit } from "../schema/app";
+import type { ChatMessage, Player, PlayerInit } from "../schema.js";
 import styles from "./Game.module.css";
 import type { FuelType, PlayerMode } from "./game/constants";
 import type { Deposit } from "./game/engine";
