@@ -14,11 +14,13 @@ use crate::sync_manager::{ClientId, SyncPayload};
 
 mod builder;
 mod external_identity_store;
+mod hosted;
 #[cfg(feature = "test-utils")]
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder};
 pub use external_identity_store::{ExternalIdentityRow, ExternalIdentityStore};
+pub use hosted::HostedServer;
 #[cfg(feature = "test-utils")]
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 

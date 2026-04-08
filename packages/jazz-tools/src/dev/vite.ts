@@ -1,0 +1,140 @@
+import { randomUUID } from "node:crypto";
+import {
+  startLocalJazzServer,
+  pushSchemaCatalogue,
+  type LocalJazzServerHandle,
+} from "./dev-server.js";
+import { watchSchema } from "./schema-watcher.js";
+
+export interface JazzServerOptions {
+  port?: number;
+  adminSecret?: string;
+  appId?: string;
+  allowAnonymous?: boolean;
+  allowDemo?: boolean;
+  dataDir?: string;
+  inMemory?: boolean;
+  jwksUrl?: string;
+  catalogueAuthority?: "local" | "forward";
+  catalogueAuthorityUrl?: string;
+  catalogueAuthorityAdminSecret?: string;
+}
+
+export interface JazzPluginOptions {
+  server?: boolean | string | JazzServerOptions;
+  adminSecret?: string;
+  schemaDir?: string;
+  appId?: string;
+}
+
+const DEFAULT_PORT = 1625;
+const LOG_PREFIX = "[jazz]";
+
+interface ViteDevServer {
+  config: {
+    root: string;
+    command: string;
+    env?: Record<string, string>;
+  };
+  httpServer: { once(event: string, cb: () => void): void } | null;
+}
+
+export function jazzPlugin(options: JazzPluginOptions = {}) {
+  let serverHandle: LocalJazzServerHandle | null = null;
+  let watcher: { close: () => void } | null = null;
+
+  return {
+    name: "jazz",
+
+    async configureServer(viteServer: ViteDevServer) {
+      if (viteServer.config.command !== "serve") return;
+
+      const schemaDir = options.schemaDir ?? viteServer.config.root;
+      let serverUrl: string;
+      let adminSecret: string;
+      let appId: string;
+
+      const serverOpt = options.server ?? true;
+
+      if (serverOpt === false) {
+        return;
+      }
+
+      if (typeof serverOpt === "string") {
+        serverUrl = serverOpt;
+        adminSecret = options.adminSecret ?? "";
+        if (!adminSecret) {
+          throw new Error(
+            `${LOG_PREFIX} adminSecret is required when connecting to an existing server`,
+          );
+        }
+        appId = options.appId ?? randomUUID();
+      } else {
+        const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
+        adminSecret = serverConfig.adminSecret ?? `jazz-dev-${randomUUID().slice(0, 8)}`;
+        appId = serverConfig.appId ?? options.appId ?? randomUUID();
+        const port = serverConfig.port ?? DEFAULT_PORT;
+
+        serverHandle = await startLocalJazzServer({
+          appId,
+          port,
+          adminSecret,
+          allowAnonymous: serverConfig.allowAnonymous,
+          allowDemo: serverConfig.allowDemo,
+          dataDir: serverConfig.dataDir,
+          inMemory: serverConfig.inMemory,
+          jwksUrl: serverConfig.jwksUrl,
+          catalogueAuthority: serverConfig.catalogueAuthority,
+          catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
+          catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
+        });
+
+        serverUrl = serverHandle.url;
+        console.log(`${LOG_PREFIX} server started on ${serverUrl}`);
+      }
+
+      try {
+        await pushSchemaCatalogue({
+          serverUrl,
+          appId,
+          adminSecret,
+          schemaDir,
+        });
+        console.log(`${LOG_PREFIX} schema published`);
+      } catch (error) {
+        console.error(
+          `${LOG_PREFIX} schema push failed:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+
+      watcher = watchSchema({
+        schemaDir,
+        serverUrl,
+        appId,
+        adminSecret,
+        onPush: (hash) => {
+          console.log(`${LOG_PREFIX} schema updated (${hash.slice(0, 12)})`);
+        },
+        onError: (error) => {
+          console.error(`${LOG_PREFIX} schema push failed:`, error.message);
+        },
+      });
+
+      viteServer.config.env ??= {};
+      viteServer.config.env.VITE_JAZZ_APP_ID = appId;
+      viteServer.config.env.VITE_JAZZ_SERVER_URL = serverUrl;
+      process.env.VITE_JAZZ_APP_ID = appId;
+      process.env.VITE_JAZZ_SERVER_URL = serverUrl;
+
+      viteServer.httpServer?.once("close", async () => {
+        watcher?.close();
+        watcher = null;
+        if (serverHandle) {
+          await serverHandle.stop();
+          serverHandle = null;
+        }
+      });
+    },
+  };
+}
