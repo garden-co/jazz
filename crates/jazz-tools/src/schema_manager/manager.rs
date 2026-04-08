@@ -598,6 +598,16 @@ impl SchemaManager {
         Some(&table_schema.columns)
     }
 
+    /// Return the timestamp when a schema was published.
+    ///
+    /// If the schema was published multiple times, returns the most recent timestamp.
+    /// If the schema has not been published, returns `None`.
+    pub fn schema_published_at(&self, schema_hash: &SchemaHash) -> Option<u64> {
+        let object_id = schema_hash.to_object_id();
+        self.query_manager
+            .load_object_commit_timestamp_on_branch(object_id, "main")
+    }
+
     // =========================================================================
     // Catalogue Persistence
     // =========================================================================
@@ -1827,6 +1837,38 @@ mod tests {
         let hashes: std::collections::HashSet<_> = map.values().collect();
         assert!(hashes.contains(&v1_hash));
         assert!(hashes.contains(&v2_hash));
+    }
+
+    #[test]
+    fn schema_manager_schema_published_at_uses_latest_catalogue_commit_timestamp() {
+        let schema = make_schema_v1();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = crate::storage::MemoryStorage::new();
+        let mut manager = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+
+        assert_eq!(manager.schema_published_at(&schema_hash), None);
+
+        manager.persist_schema_object(&mut storage, &schema);
+        let first_timestamp = manager
+            .schema_published_at(&schema_hash)
+            .expect("schema should expose publish timestamp after first persist");
+
+        manager.persist_schema_object(&mut storage, &schema);
+        let second_timestamp = manager
+            .schema_published_at(&schema_hash)
+            .expect("schema should expose publish timestamp after republish");
+
+        assert!(
+            second_timestamp > first_timestamp,
+            "republishing the same schema should advance the visible publish timestamp"
+        );
     }
 
     #[test]
