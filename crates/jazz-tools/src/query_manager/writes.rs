@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{QueryRowVersion, RowState, StoredRowVersion};
+use crate::row_histories::{QueryRowVersion, RowState, StoredRowVersion};
 use crate::schema_manager::resolve_current_table_name;
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
 

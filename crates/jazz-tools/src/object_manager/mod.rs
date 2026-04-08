@@ -6,7 +6,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 

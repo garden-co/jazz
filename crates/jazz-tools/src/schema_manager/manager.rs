@@ -13,7 +13,6 @@ use blake3::Hasher;
 
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
@@ -21,6 +20,7 @@ use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+use crate::row_format::decode_row;
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 use uuid::Uuid;

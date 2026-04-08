@@ -37,13 +37,13 @@ use tracing::{debug, debug_span, info, trace, trace_span};
 
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
-use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
+use crate::row_format::decode_row;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{

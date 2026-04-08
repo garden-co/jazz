@@ -35,7 +35,7 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
 use crate::query_manager::types::{SchemaHash, SharedString, Value};
-use crate::row_regions::{
+use crate::row_histories::{
     HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
 };
 use crate::sync_manager::DurabilityTier;

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
-use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::row_format::{decode_row, encode_row};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogueEntry {

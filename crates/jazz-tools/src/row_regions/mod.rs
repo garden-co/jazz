@@ -11,12 +11,10 @@ use crate::commit::Commit;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
-use crate::query_manager::encoding::{
-    EncodingError, column_bytes, decode_column, decode_row, encode_row,
-};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
+use crate::row_format::{EncodingError, column_bytes, decode_column, decode_row, encode_row};
 use crate::sync_manager::DurabilityTier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
