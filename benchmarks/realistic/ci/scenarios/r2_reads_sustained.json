@@ -1,0 +1,12 @@
+{
+  "id": "R2",
+  "name": "sustained_read_throughput",
+  "seed": 20260222,
+  "operation_count": 256,
+  "mix": [
+    { "operation": "query_board", "weight": 40 },
+    { "operation": "query_my_work", "weight": 30 },
+    { "operation": "query_task_detail", "weight": 20 },
+    { "operation": "query_activity_feed", "weight": 10 }
+  ]
+}
