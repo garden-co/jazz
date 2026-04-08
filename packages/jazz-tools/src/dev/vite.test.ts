@@ -49,6 +49,7 @@ describe("jazzPlugin", () => {
           closeHandlers.push(cb);
         },
       },
+      ws: { send() {} },
     };
 
     const configureServer = plugin.configureServer as (
@@ -86,6 +87,7 @@ describe("jazzPlugin", () => {
         env: {} as Record<string, string>,
       },
       httpServer: null,
+      ws: { send() {} },
     };
 
     const configureServer = plugin.configureServer as (

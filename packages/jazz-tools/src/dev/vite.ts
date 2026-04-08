@@ -52,18 +52,24 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
     async configureServer(viteServer: ViteDevServer) {
       if (viteServer.config.command !== "serve") return;
 
-      const schemaDir = options.schemaDir ?? viteServer.config.root;
-      let serverUrl: string;
-      let adminSecret: string;
-      let appId: string;
-
       const serverOpt = options.server ?? true;
 
       if (serverOpt === false) {
         return;
       }
 
-      if (typeof serverOpt === "string") {
+      const schemaDir = options.schemaDir ?? viteServer.config.root;
+      const env = viteServer.config.env ?? {};
+      let serverUrl: string;
+      let adminSecret: string;
+      let appId: string;
+
+      if (env.JAZZ_SERVER_URL) {
+        serverUrl = env.JAZZ_SERVER_URL;
+        adminSecret = options.adminSecret ?? "";
+        appId = env.JAZZ_APP_ID ?? options.appId ?? randomUUID();
+        console.log(`${LOG_PREFIX} using server from .env: ${serverUrl}`);
+      } else if (typeof serverOpt === "string") {
         serverUrl = serverOpt;
         adminSecret = options.adminSecret ?? "";
         if (!adminSecret) {
@@ -75,7 +81,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       } else {
         const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
         adminSecret = serverConfig.adminSecret ?? `jazz-dev-${randomUUID().slice(0, 8)}`;
-        appId = serverConfig.appId ?? options.appId ?? randomUUID();
+        appId = env.JAZZ_APP_ID ?? serverConfig.appId ?? options.appId ?? randomUUID();
         const port = serverConfig.port ?? DEFAULT_PORT;
 
         serverHandle = await startLocalJazzServer({
