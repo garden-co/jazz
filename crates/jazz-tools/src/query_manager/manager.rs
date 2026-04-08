@@ -1160,6 +1160,7 @@ impl QueryManager {
         storage: &mut dyn Storage,
         update: VisibleRowUpdate,
         local_update: bool,
+        apply_index_mutations: bool,
     ) {
         let original_table = update.row_locator.table.to_string();
         let branch = update.row.branch.as_str();
@@ -1261,15 +1262,17 @@ impl QueryManager {
         }
 
         if update.row.is_hard_deleted() {
-            let old_data = old_row.map(|row| row.data.as_ref());
-            let _ = Self::update_indices_for_hard_delete_on_branch(
-                storage,
-                &branch_table,
-                branch,
-                update.object_id,
-                old_data,
-                &descriptor,
-            );
+            if apply_index_mutations {
+                let old_data = old_row.map(|row| row.data.as_ref());
+                let _ = Self::update_indices_for_hard_delete_on_branch(
+                    storage,
+                    &branch_table,
+                    branch,
+                    update.object_id,
+                    old_data,
+                    &descriptor,
+                );
+            }
             if local_update {
                 self.mark_subscriptions_dirty_local(&logical_table);
             } else {
@@ -1284,37 +1287,39 @@ impl QueryManager {
         }
 
         if update.row.is_soft_deleted() {
-            if let Some(old_row) = old_row {
-                let _ = Self::update_indices_for_soft_delete_on_branch(
-                    storage,
-                    &branch_table,
-                    branch,
-                    update.object_id,
-                    &old_row.data,
-                    &descriptor,
-                );
-            } else {
-                let _ = storage.index_remove(
-                    &branch_table,
-                    "_id",
-                    branch,
-                    &Value::Uuid(update.object_id),
-                    update.object_id,
-                );
-                if let Err(error) = storage.index_insert(
-                    &branch_table,
-                    "_id_deleted",
-                    branch,
-                    &Value::Uuid(update.object_id),
-                    update.object_id,
-                ) {
-                    tracing::error!(
-                        table = branch_table,
+            if apply_index_mutations {
+                if let Some(old_row) = old_row {
+                    let _ = Self::update_indices_for_soft_delete_on_branch(
+                        storage,
+                        &branch_table,
                         branch,
-                        object_id = %update.object_id,
-                        %error,
-                        "failed to insert synced _id_deleted index entry"
+                        update.object_id,
+                        &old_row.data,
+                        &descriptor,
                     );
+                } else {
+                    let _ = storage.index_remove(
+                        &branch_table,
+                        "_id",
+                        branch,
+                        &Value::Uuid(update.object_id),
+                        update.object_id,
+                    );
+                    if let Err(error) = storage.index_insert(
+                        &branch_table,
+                        "_id_deleted",
+                        branch,
+                        &Value::Uuid(update.object_id),
+                        update.object_id,
+                    ) {
+                        tracing::error!(
+                            table = branch_table,
+                            branch,
+                            object_id = %update.object_id,
+                            %error,
+                            "failed to insert synced _id_deleted index entry"
+                        );
+                    }
                 }
             }
             if local_update {
@@ -1330,14 +1335,16 @@ impl QueryManager {
         let new_data = &update.row.data;
 
         if was_soft_deleted {
-            if let Err(error) = Self::update_indices_for_undelete_on_branch(
-                storage,
-                &branch_table,
-                branch,
-                update.object_id,
-                new_data,
-                &descriptor,
-            ) {
+            if apply_index_mutations
+                && let Err(error) = Self::update_indices_for_undelete_on_branch(
+                    storage,
+                    &branch_table,
+                    branch,
+                    update.object_id,
+                    new_data,
+                    &descriptor,
+                )
+            {
                 tracing::error!(
                     table = branch_table,
                     branch,
@@ -1360,14 +1367,16 @@ impl QueryManager {
         }
 
         if old_row.is_none() || update.is_new_object {
-            if let Err(error) = Self::update_indices_for_insert_on_branch(
-                storage,
-                &branch_table,
-                branch,
-                update.object_id,
-                new_data,
-                &descriptor,
-            ) {
+            if apply_index_mutations
+                && let Err(error) = Self::update_indices_for_insert_on_branch(
+                    storage,
+                    &branch_table,
+                    branch,
+                    update.object_id,
+                    new_data,
+                    &descriptor,
+                )
+            {
                 tracing::error!(
                     table = branch_table,
                     branch,
@@ -1377,6 +1386,7 @@ impl QueryManager {
                 );
             }
         } else if let Some(old_row) = old_row
+            && apply_index_mutations
             && let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
                 &branch_table,
@@ -1413,7 +1423,7 @@ impl QueryManager {
         storage: &mut dyn Storage,
         update: VisibleRowUpdate,
     ) {
-        self.handle_row_update_with_origin(storage, update, false);
+        self.handle_row_update_with_origin(storage, update, false, true);
     }
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {
