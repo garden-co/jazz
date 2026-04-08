@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.20.17
+
+### Patch Changes
+
+- d26dccc: Fix MCP docs server failing to use SQLite/FTS5 backend by preventing bundlers from stripping the `node:` prefix on `node:sqlite` imports.
+- 6572f1f: Add new co.snapshotRef() CoValue that abstracts away cursor-based snapshotting and allows snapshots of values to be seamlessly referenced
+- 754df86: Accept an options object `{ baseURL, valueHint? }` as the third argument to `createInviteLink`, matching the signature already used by the browser and React Native wrappers. The positional form `(value, role, baseURL, valueHint?)` is deprecated but still supported.
+  - cojson@0.20.17
+  - cojson-storage-indexeddb@0.20.17
+  - cojson-transport-ws@0.20.17
+
 ## 0.20.16
 
 ### Patch Changes
