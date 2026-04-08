@@ -1,13 +1,5 @@
 import { spawn } from "node:child_process";
-import {
-  access,
-  mkdtemp,
-  mkdir,
-  readdir,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -51,7 +43,10 @@ function parseArgs(argv) {
     switch (arg) {
       case "--scenario":
       case "--scenarios":
-        args.scenarios = next.split(",").map((value) => value.trim()).filter(Boolean);
+        args.scenarios = next
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
         i += 1;
         break;
       case "--out-dir":
@@ -112,10 +107,7 @@ async function resolveChromiumExecutable() {
   const chromiumDirs = entries
     .filter((entry) => entry.isDirectory() && /^chromium-\d+$/.test(entry.name))
     .map((entry) => entry.name)
-    .sort(
-      (a, b) =>
-        Number.parseInt(b.split("-")[1], 10) - Number.parseInt(a.split("-")[1], 10),
-    );
+    .sort((a, b) => Number.parseInt(b.split("-")[1], 10) - Number.parseInt(a.split("-")[1], 10));
 
   for (const dir of chromiumDirs) {
     const candidate = path.join(
@@ -288,9 +280,7 @@ function summarizeProfile(profileData) {
 function printSummary(title, entries) {
   console.log(`\n=== ${title} ===`);
   for (const entry of entries.slice(0, 15)) {
-    console.log(
-      `${entry.selfMs.toFixed(1)} ms  ${entry.functionName}  ${entry.url}:${entry.line}`,
-    );
+    console.log(`${entry.selfMs.toFixed(1)} ms  ${entry.functionName}  ${entry.url}:${entry.line}`);
   }
 }
 
@@ -653,7 +643,9 @@ async function main() {
       if (activeProfileTargets.has(sessionId)) return;
       try {
         await cdp.send("Profiler.enable", {}, sessionId);
-        await cdp.send("Profiler.setSamplingInterval", { interval: 100 }, sessionId).catch(() => {});
+        await cdp
+          .send("Profiler.setSamplingInterval", { interval: 100 }, sessionId)
+          .catch(() => {});
         await cdp.send("Profiler.start", {}, sessionId);
         activeProfileTargets.set(sessionId, meta);
       } catch (error) {
@@ -699,7 +691,8 @@ async function main() {
     );
     await cdp.send("Page.navigate", { url: pageUrl }, pageSessionId);
     await cdp.waitFor(
-      (msg) => (msg.sessionId === pageSessionId && msg.method === "Page.loadEventFired" ? true : null),
+      (msg) =>
+        msg.sessionId === pageSessionId && msg.method === "Page.loadEventFired" ? true : null,
       10_000,
     );
 
