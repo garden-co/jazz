@@ -1,26 +1,8 @@
 ---
 marp: true
 title: How Wequencer uses Jazz
-theme: default
+theme: jazz
 paginate: true
-style: |
-  section {
-    font-size: 1.4rem;
-  }
-  section.hero h1 {
-    font-size: 2.8rem;
-  }
-  section.hero p {
-    font-size: 1.1rem;
-    color: #555;
-  }
-  pre {
-    font-size: 0.85rem;
-  }
-  img {
-    border-radius: 6px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-  }
 ---
 
 <!-- _class: hero -->
@@ -125,22 +107,22 @@ One call to `createJazzClient` initialises the WASM worker, opens the OPFS datab
 
 **[`src/App.svelte`](../src/App.svelte)**
 
-```svelte
+```html
 <script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-  import Main from './Main.svelte';
+  import { createJazzClient, JazzSvelteProvider } from "jazz-tools/svelte";
+  import Main from "./Main.svelte";
 
   const client = createJazzClient({
-    appId: import.meta.env.VITE_JAZZ_APP_ID ?? 'wequencer',
+    appId: import.meta.env.VITE_JAZZ_APP_ID ?? "wequencer",
     serverUrl: import.meta.env.DEV
-      ? window.location.origin   // Vite proxies /sync and /events in dev
+      ? window.location.origin // Vite proxies /sync and /events in dev
       : import.meta.env.VITE_JAZZ_SERVER_URL,
   });
 </script>
 
 <JazzSvelteProvider {client}>
   {#snippet children()}
-    <Main />
+  <main />
   {/snippet}
 </JazzSvelteProvider>
 ```
@@ -168,21 +150,19 @@ Used in `InstrumentRow`, `InstrumentManager`, and `Participants` — each just c
 
 **[`src/Sequencer.svelte`](../src/Sequencer.svelte)**
 
-```svelte
+```html
 <script lang="ts">
-  import { QuerySubscription } from 'jazz-tools/svelte';
+  import { QuerySubscription } from "jazz-tools/svelte";
 
   // Instrument list — re-renders whenever any instrument changes
-  const instruments = new QuerySubscription(
-    app.instruments.orderBy('display_order'),
-  );
+  const instruments = new QuerySubscription(app.instruments.orderBy("display_order"));
 
   // All beats — used to drive the whole grid
   const allBeats = new QuerySubscription(app.beats);
 </script>
 
 {#each instruments.current ?? [] as instrument (instrument.id)}
-  <InstrumentRow {instrument} beats={beatsForInstrument(instrument.id)} />
+<InstrumentRow {instrument} beats="{beatsForInstrument(instrument.id)}" />
 {/each}
 ```
 

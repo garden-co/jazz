@@ -1,0 +1,25 @@
+.container {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+.canvas {
+  display: block;
+}
+
+.chatInput {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  padding: 6px 12px;
+  font-family: monospace;
+  font-size: 14px;
+  color: #00ffff;
+  background: rgba(10, 10, 15, 0.8);
+  border: 1px solid #ff00ff;
+  border-radius: 4px;
+  outline: none;
+}
