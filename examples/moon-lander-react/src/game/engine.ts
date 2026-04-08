@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Player } from "../../schema/app";
+import type { Player } from "../../schema.js";
 import {
   type FuelType,
   GROUND_LEVEL,

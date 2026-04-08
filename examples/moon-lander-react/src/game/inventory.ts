@@ -1,4 +1,4 @@
-import type { Player } from "../../schema/app";
+import type { Player } from "../../schema.js";
 import type { FuelType } from "./constants";
 import type { ArcAnimation } from "./types";
 import { wrapDistance } from "./world";

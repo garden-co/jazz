@@ -1,32 +1,42 @@
-import { table, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-table("players", {
-  playerId: col.string(),
-  name: col.string(),
-  color: col.string(),
-  mode: col.string(),
-  online: col.boolean(),
-  lastSeen: col.int(),
-  positionX: col.int(),
-  positionY: col.int(),
-  velocityX: col.int(),
-  velocityY: col.int(),
-  requiredFuelType: col.string(),
-  landerFuelLevel: col.int(),
-  landerSpawnX: col.int(),
-  thrusting: col.boolean(),
-});
+const schema = {
+  players: s.table({
+    playerId: s.string(),
+    name: s.string(),
+    color: s.string(),
+    mode: s.string(),
+    online: s.boolean(),
+    lastSeen: s.int(),
+    positionX: s.int(),
+    positionY: s.int(),
+    velocityX: s.int(),
+    velocityY: s.int(),
+    requiredFuelType: s.string(),
+    landerFuelLevel: s.int(),
+    landerSpawnX: s.int(),
+    thrusting: s.boolean(),
+  }),
+  fuel_deposits: s.table({
+    fuelType: s.string(),
+    positionX: s.int(),
+    createdAt: s.int(),
+    collected: s.boolean(),
+    collectedBy: s.string(),
+  }),
+  chat_messages: s.table({
+    playerId: s.string(),
+    message: s.string(),
+    createdAt: s.int(),
+  }),
+};
 
-table("fuel_deposits", {
-  fuelType: col.string(),
-  positionX: col.int(),
-  createdAt: col.int(),
-  collected: col.boolean(),
-  collectedBy: col.string(),
-});
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 
-table("chat_messages", {
-  playerId: col.string(),
-  message: col.string(),
-  createdAt: col.int(),
-});
+export type Player = s.RowOf<typeof app.players>;
+export type PlayerInit = s.InsertOf<typeof app.players>;
+export type FuelDeposit = s.RowOf<typeof app.fuel_deposits>;
+export type FuelDepositInit = s.InsertOf<typeof app.fuel_deposits>;
+export type ChatMessage = s.RowOf<typeof app.chat_messages>;
+export type ChatMessageInit = s.InsertOf<typeof app.chat_messages>;

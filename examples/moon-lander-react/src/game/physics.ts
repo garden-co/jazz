@@ -1,4 +1,4 @@
-import type { Player } from "../../schema/app";
+import type { Player } from "../../schema.js";
 import {
   ASTRONAUT_WIDTH,
   FUEL_BURN_X,

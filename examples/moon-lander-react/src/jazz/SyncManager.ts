@@ -16,8 +16,8 @@
  */
 
 import type { useDb } from "jazz-tools/react";
-import type { FuelDeposit, PlayerInit } from "../../schema/app";
-import { app } from "../../schema/app";
+import type { FuelDeposit, PlayerInit } from "../../schema.js";
+import { app } from "../../schema.js";
 import type { FuelType } from "../game/constants";
 import { FUEL_TYPES, MOON_SURFACE_WIDTH } from "../game/constants";
 import { seededRand } from "../game/world.js";

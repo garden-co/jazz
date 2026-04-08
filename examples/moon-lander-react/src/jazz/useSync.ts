@@ -17,8 +17,8 @@
 
 import { useAll, useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FuelDeposit, Player, PlayerInit, ChatMessage } from "../../schema/app";
-import { app } from "../../schema/app";
+import type { FuelDeposit, Player, PlayerInit, ChatMessage } from "../../schema.js";
+import { app } from "../../schema.js";
 import type { FuelType } from "../game/constants";
 import { FUEL_TYPES, STALE_THRESHOLD_S } from "../game/constants";
 import type { Deposit } from "../game/types";

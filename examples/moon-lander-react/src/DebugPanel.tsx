@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PlayerInit } from "../schema/app";
+import type { PlayerInit } from "../schema.js";
 import styles from "./DebugPanel.module.css";
 import { FUEL_TYPES } from "./game/constants";
 import type { SyncInputs } from "./sync/SyncManager";

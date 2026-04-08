@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { PlayerInit, FuelDeposit } from "../../schema/app.js";
+import type { PlayerInit, FuelDeposit } from "../../schema.js";
 import {
   playerStateChanged,
   reconcileDeposits,

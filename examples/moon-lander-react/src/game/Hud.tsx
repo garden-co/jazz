@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { Player } from "../../schema/app";
+import type { Player } from "../../schema.js";
 import { COLOURS, type FuelType, type PlayerMode } from "./constants";
 import styles from "./Hud.module.css";
 import { getDepositSprite } from "./sprites";

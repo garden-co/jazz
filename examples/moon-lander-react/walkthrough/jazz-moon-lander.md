@@ -55,43 +55,44 @@ Three tables define the entire multiplayer state. Written in a TypeScript DSL in
 <div>
 
 ```typescript
-import { table, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-table("players", {
-  playerId: col.string(),
-  name: col.string(),
-  color: col.string(),
-  mode: col.string(),
-  online: col.boolean(),
-  lastSeen: col.int(),
-  positionX: col.int(),
-  positionY: col.int(),
-  velocityX: col.int(),
-  velocityY: col.int(),
-  requiredFuelType: col.string(),
-  landerFuelLevel: col.int(),
-  landerSpawnX: col.int(),
-  thrusting: col.boolean(),
-});
+const schema = {
+  players: s.table({
+    playerId: s.string(),
+    name: s.string(),
+    color: s.string(),
+    mode: s.string(),
+    online: s.boolean(),
+    lastSeen: s.int(),
+    positionX: s.int(),
+    positionY: s.int(),
+    velocityX: s.int(),
+    velocityY: s.int(),
+    requiredFuelType: s.string(),
+    landerFuelLevel: s.int(),
+    landerSpawnX: s.int(),
+    thrusting: s.boolean(),
+  }),
 ```
 
 </div>
 <div>
 
 ```typescript
-table("fuel_deposits", {
-  fuelType: col.string(),
-  positionX: col.int(),
-  createdAt: col.int(),
-  collected: col.boolean(),
-  collectedBy: col.string(),
-});
-
-table("chat_messages", {
-  playerId: col.string(),
-  message: col.string(),
-  createdAt: col.int(),
-});
+  fuel_deposits: s.table({
+    fuelType: s.string(),
+    positionX: s.int(),
+    createdAt: s.int(),
+    collected: s.boolean(),
+    collectedBy: s.string(),
+  }),
+  chat_messages: s.table({
+    playerId: s.string(),
+    message: s.string(),
+    createdAt: s.int(),
+  }),
+};
 ```
 
 </div>
@@ -152,12 +153,12 @@ This separation means you can read the entire Jazz integration by looking at thr
 import { useAll, useDb } from "jazz-tools/react";
 
 export function useSync(playerId: string): SyncResult {
-  // Other players' positions, modes, fuel levels - live from the server
+  // Other players' positions, modes, fuel levels (live from the server)
   const remotePlayers = useAll(
     app.players.where({ playerId: { ne: playerId } }),
   );
 
-  // Deposits on the surface - drives the game's collectible objects
+  // Deposits on the surface (drives the game's collectible objects)
   const uncollectedDeposits = useAll(
     app.fuel_deposits.where({ collected: false }),
   );
@@ -223,20 +224,20 @@ The tier on a write controls where the promise resolves. All writes eventually p
   <line x1="390" y1="48" x2="390" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <line x1="555" y1="48" x2="555" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
 
-  <!-- write "worker": Client → OPFS Worker -->
+  <!-- write "worker": Client -> OPFS Worker -->
   <line x1="79" y1="90" x2="226" y2="90" stroke="rgba(20,106,255,0.45)" stroke-width="1.5" marker-end="url(#aw)"/>
   <circle cx="230" cy="90" r="5" fill="rgba(20,106,255,0.45)" stroke="#fff" stroke-width="1.5"/>
   <line x1="235" y1="90" x2="386" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <line x1="394" y1="90" x2="551" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <text x="152" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.6)">db.insert({tier:"worker"})</text>
 
-  <!-- write "edge": Client → Edge Node -->
+  <!-- write "edge": Client -> Edge Node -->
   <line x1="79" y1="135" x2="386" y2="135" stroke="rgba(20,106,255,0.7)" stroke-width="1.5" marker-end="url(#ae)"/>
   <circle cx="390" cy="135" r="5" fill="rgba(20,106,255,0.7)" stroke="#fff" stroke-width="1.5"/>
   <line x1="395" y1="135" x2="551" y2="135" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <text x="232" y="127" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.8)">db.insert({tier:"edge"})</text>
 
-  <!-- write "global": Client → Global Core -->
+  <!-- write "global": Client -> Global Core -->
   <line x1="79" y1="180" x2="551" y2="180" stroke="#146aff" stroke-width="1.5" marker-end="url(#ag)"/>
   <circle cx="555" cy="180" r="5" fill="#146aff" stroke="#fff" stroke-width="1.5"/>
   <text x="316" y="172" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#146aff">db.insert({tier:"global"})</text>
