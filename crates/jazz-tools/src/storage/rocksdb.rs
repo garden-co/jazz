@@ -13,7 +13,7 @@ use rocksdb::{
 };
 
 use super::{
-    Storage, StorageError,
+    IndexMutation, Storage, StorageError, key_codec,
     storage_core::{
         append_history_region_rows_core, load_history_query_row_version_core,
         load_history_row_version_core, load_visible_query_row_core,
@@ -227,6 +227,48 @@ impl RocksDBStorage {
         txn.commit()
             .map_err(|e| StorageError::IoError(format!("rocksdb txn commit: {e}")))
     }
+
+    fn apply_index_mutations_on_txn<'a>(
+        txn: &RefCell<Transaction<'a, TransactionDB>>,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::Insert {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => {
+                    let raw_table = key_codec::index_raw_table(table, column, branch);
+                    let key = key_codec::index_entry_key(table, column, branch, value, *row_id)?;
+                    raw_table_put_core(&raw_table, &key, &[0x01], |storage_key, bytes| {
+                        Self::put_on_txn_cell(txn, storage_key, bytes)
+                    })?;
+                }
+                IndexMutation::Remove {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => {
+                    let key =
+                        match key_codec::index_entry_key(table, column, branch, value, *row_id) {
+                            Ok(key) => key,
+                            Err(StorageError::IndexKeyTooLarge { .. }) => continue,
+                            Err(error) => return Err(error),
+                        };
+                    let raw_table = key_codec::index_raw_table(table, column, branch);
+                    raw_table_delete_core(&raw_table, &key, |storage_key| {
+                        Self::delete_on_txn_cell(txn, storage_key)
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Storage for RocksDBStorage {
@@ -255,6 +297,21 @@ impl Storage for RocksDBStorage {
             raw_table_get_core(table, key, |storage_key| {
                 Self::get_from_db(&inner.db, storage_key)
             })
+        })
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            Self::apply_index_mutations_on_txn(&txn, mutations)?;
+            Self::commit_txn(txn.into_inner())
         })
     }
 
@@ -332,6 +389,26 @@ impl Storage for RocksDBStorage {
             upsert_visible_region_rows_core(table, entries, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            append_history_region_rows_core(table, history_rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            upsert_visible_region_rows_core(table, visible_entries, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            Self::apply_index_mutations_on_txn(&txn, index_mutations)?;
             Self::commit_txn(txn.into_inner())
         })
     }
