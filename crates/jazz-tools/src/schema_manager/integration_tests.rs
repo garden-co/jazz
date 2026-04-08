@@ -18,6 +18,7 @@ mod tests {
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
     use crate::storage::{MemoryStorage, Storage};
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -340,8 +341,6 @@ mod tests {
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
     use crate::query_manager::query::{Query, QueryBuilder};
-    use crate::sync_manager::SyncManager;
-
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
     fn execute_query(
         manager: &mut SchemaManager,
@@ -357,7 +356,7 @@ mod tests {
     }
 
     /// Ingest a remote row commit on a specific branch through ObjectManager's sync path.
-    /// QueryManager picks this up during `process()` via global object updates.
+    /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
@@ -387,10 +386,13 @@ mod tests {
             &commit,
             RowState::VisibleDirect,
         );
-        qm.sync_manager_mut()
-            .object_manager
-            .add_row_version(storage, object_id, branch, row)
-            .unwrap();
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::RowVersionCreated {
+                metadata: None,
+                row,
+            },
+        });
     }
 
     /// Ingest a remote catalogue object on the `main` branch through sync path.
@@ -1562,6 +1564,7 @@ mod tests {
             row_data,
             1_000,
         );
+        manager.process(&mut storage);
 
         manager
             .update_with_session(
@@ -3109,10 +3112,7 @@ mod tests {
     // Multi-Client Server Schema Sync Tests
     // ========================================================================
 
-    use crate::sync_manager::{
-        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, ServerId, Source,
-        SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, ClientRole, Destination, DurabilityTier};
 
     /// E2E test: Two clients with same schema, server with empty schema.
     ///
