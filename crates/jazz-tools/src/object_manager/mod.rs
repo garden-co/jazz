@@ -21,6 +21,12 @@ pub struct VisibleRowUpdate {
     pub is_new_object: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddRowVersionResult {
+    pub version_id: CommitId,
+    pub visible_update: Option<VisibleRowUpdate>,
+}
+
 /// Errors that can occur when managing objects and row versions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -39,18 +45,12 @@ struct RowVersionApply {
     visible_changed: bool,
 }
 
-/// Manages metadata plus cached visible row entries.
-///
-/// Row history lives in Storage and remains the source of truth. ObjectManager
-/// only keeps the current visible entry per loaded `(row_id, branch)` so the
-/// hot read path does not mirror the full row-history DAG in memory.
+/// Manages object metadata and row-history helpers.
 #[derive(Debug, Clone, Default)]
 pub struct ObjectManager {
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
-    /// Outbox for visible row changes.
-    pub visible_row_updates: Vec<VisibleRowUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
 }
@@ -394,40 +394,12 @@ impl ObjectManager {
         })
     }
 
-    pub fn add_row_version<H: Storage>(
-        &mut self,
-        io: &mut H,
+    fn visible_update_from_applied<H: Storage>(
+        &self,
+        io: &H,
         object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        row: StoredRowVersion,
-    ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
-        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
-
-        if applied.visible_changed {
-            let metadata = self.load_metadata_from_storage(io, object_id)?;
-            if let Some(current_visible) = applied.current_visible {
-                self.visible_row_updates.push(VisibleRowUpdate {
-                    object_id,
-                    metadata,
-                    row: current_visible,
-                    previous_row: applied.previous_visible,
-                    is_new_object: applied.is_new_object,
-                });
-            }
-        }
-
-        Ok(applied.version_id)
-    }
-
-    pub fn remember_remote_row_version_with_storage<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: BranchName,
-        row: StoredRowVersion,
+        applied: RowVersionApply,
     ) -> Result<Option<VisibleRowUpdate>, Error> {
-        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
         if !applied.visible_changed {
             return Ok(None);
         }
@@ -444,6 +416,46 @@ impl ObjectManager {
             previous_row: applied.previous_visible,
             is_new_object: applied.is_new_object,
         }))
+    }
+
+    pub fn add_row_version_with_update<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        row: StoredRowVersion,
+    ) -> Result<AddRowVersionResult, Error> {
+        let branch_name = branch_name.into();
+        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
+        let version_id = applied.version_id;
+        let visible_update = self.visible_update_from_applied(io, object_id, applied)?;
+        Ok(AddRowVersionResult {
+            version_id,
+            visible_update,
+        })
+    }
+
+    pub fn add_row_version<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        row: StoredRowVersion,
+    ) -> Result<CommitId, Error> {
+        Ok(self
+            .add_row_version_with_update(io, object_id, branch_name, row)?
+            .version_id)
+    }
+
+    pub fn remember_remote_row_version_with_storage<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        row: StoredRowVersion,
+    ) -> Result<Option<VisibleRowUpdate>, Error> {
+        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
+        self.visible_update_from_applied(io, object_id, applied)
     }
 
     pub fn patch_row_version_state_with_storage<H: Storage>(
@@ -582,26 +594,6 @@ impl ObjectManager {
         self.metadata_by_id.entry(object_id).or_insert(metadata);
     }
 
-    /// Take all pending visible row updates.
-    pub fn take_visible_row_updates(&mut self) -> Vec<VisibleRowUpdate> {
-        std::mem::take(&mut self.visible_row_updates)
-    }
-
-    /// Take one pending visible row update for the given concrete row version.
-    pub fn take_visible_row_update_for(
-        &mut self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        version_id: CommitId,
-    ) -> Option<VisibleRowUpdate> {
-        let index = self.visible_row_updates.iter().position(|update| {
-            update.object_id == object_id
-                && update.row.branch == branch_name.as_str()
-                && update.row.version_id() == version_id
-        })?;
-        Some(self.visible_row_updates.remove(index))
-    }
-
     /// Calculate memory usage breakdown for profiling.
     pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
         let mut row_objects = 0usize;
@@ -621,7 +613,7 @@ impl ObjectManager {
         }
 
         let subscriptions = 0usize;
-        let other = self.visible_row_updates.len() * 192;
+        let other = 0;
 
         let total = row_objects + index_objects + subscriptions + other;
         (row_objects, index_objects, subscriptions, other, total)

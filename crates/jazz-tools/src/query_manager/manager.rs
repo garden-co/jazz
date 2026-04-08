@@ -871,7 +871,6 @@ impl QueryManager {
         // 2. Process row updates from SyncManager FIRST so indices are current
         // before subscriptions are processed.
         let mut row_updates = std::mem::take(&mut self.pending_row_updates);
-        row_updates.extend(self.sync_manager.object_manager.take_visible_row_updates());
         row_updates.extend(self.sync_manager.take_pending_row_updates());
         if !row_updates.is_empty() {
             tracing::debug!(count = row_updates.len(), "processing row updates");

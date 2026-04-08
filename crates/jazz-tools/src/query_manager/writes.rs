@@ -162,21 +162,8 @@ impl QueryManager {
         &mut self,
         storage: &mut H,
         row_id: ObjectId,
-        branch_name: &str,
-        version_id: CommitId,
+        update: crate::object_manager::VisibleRowUpdate,
     ) -> Result<StoredRowVersion, QueryError> {
-        let branch_name = BranchName::new(branch_name);
-        let Some(update) = self
-            .sync_manager
-            .object_manager
-            .take_visible_row_update_for(row_id, &branch_name, version_id)
-        else {
-            return Err(QueryError::EncodingError(format!(
-                "missing row update for local row version {:?} on {}",
-                version_id, row_id
-            )));
-        };
-
         let row = update.row.clone();
         let metadata = update.metadata.clone();
         self.handle_row_update_with_origin(storage, update, true);
@@ -437,13 +424,20 @@ impl QueryManager {
             provenance,
             None,
         );
-        let version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, id, branch, row)
+            .add_row_version_with_update(storage, id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                version_id, id
+            ))
+        })?;
 
-        let _ = self.apply_local_row_version(storage, id, branch, version_id)?;
+        let _ = self.apply_local_row_version(storage, id, visible_update)?;
 
         Ok(version_id)
     }
@@ -620,15 +614,21 @@ impl QueryManager {
             &provenance,
             None,
         );
-        let row_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, object_id, &branch, row)
+            .add_row_version_with_update(storage, object_id, &branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+        let row_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                row_version_id, object_id
+            ))
+        })?;
 
         tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
-        let _ =
-            self.apply_local_row_version(storage, object_id, branch.as_str(), row_version_id)?;
+        let _ = self.apply_local_row_version(storage, object_id, visible_update)?;
 
         tracing::debug!(%object_id, ?row_version_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
@@ -756,13 +756,20 @@ impl QueryManager {
         // Add commit with row data to specified branch
         let row =
             self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
-        let row_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, object_id, branch, row)
+            .add_row_version_with_update(storage, object_id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+        let row_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                row_version_id, object_id
+            ))
+        })?;
 
-        let _ = self.apply_local_row_version(storage, object_id, branch, row_version_id)?;
+        let _ = self.apply_local_row_version(storage, object_id, visible_update)?;
 
         Ok(InsertResult {
             row_id: object_id,
@@ -1554,15 +1561,21 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
-        let delete_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, id, self.current_branch(), delete_row)
+            .add_row_version_with_update(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                delete_version_id, id
+            ))
+        })?;
 
-        let branch = self.current_branch();
         tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
-        let _ = self.apply_local_row_version(storage, id, branch.as_str(), delete_version_id)?;
+        let _ = self.apply_local_row_version(storage, id, visible_update)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1687,15 +1700,22 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
-        let delete_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, id, branch, delete_row)
+            .add_row_version_with_update(storage, id, branch, delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                delete_version_id, id
+            ))
+        })?;
 
         let _ = old_branch_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, branch, delete_version_id)?;
+        let _ = self.apply_local_row_version(storage, id, visible_update)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1784,18 +1804,20 @@ impl QueryManager {
             &row_provenance,
             None,
         );
-        let row_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, id, self.current_branch(), row)
+            .add_row_version_with_update(storage, id, self.current_branch(), row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let row_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                row_version_id, id
+            ))
+        })?;
 
-        let _ = self.apply_local_row_version(
-            storage,
-            id,
-            self.current_branch().as_str(),
-            row_version_id,
-        )?;
+        let _ = self.apply_local_row_version(storage, id, visible_update)?;
 
         Ok(InsertResult {
             row_id: id,
@@ -1858,20 +1880,22 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Hard),
         );
-        let delete_version_id = self
+        let applied = self
             .sync_manager
             .object_manager
-            .add_row_version(storage, id, self.current_branch(), delete_row)
+            .add_row_version_with_update(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_version_id = applied.version_id;
+        let visible_update = applied.visible_update.ok_or_else(|| {
+            QueryError::EncodingError(format!(
+                "missing visible-row update for local row version {:?} on {}",
+                delete_version_id, id
+            ))
+        })?;
 
         let _ = old_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(
-            storage,
-            id,
-            self.current_branch().as_str(),
-            delete_version_id,
-        )?;
+        let _ = self.apply_local_row_version(storage, id, visible_update)?;
 
         Ok(DeleteHandle {
             row_id: id,

@@ -18,7 +18,7 @@ use crate::query_manager::types::{
 };
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -195,7 +195,7 @@ fn add_row_commit(
 
 fn receive_row_commit(
     qm: &mut QueryManager,
-    storage: &mut MemoryStorage,
+    _storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
     commit: crate::commit::Commit,
@@ -208,10 +208,13 @@ fn receive_row_commit(
         RowState::VisibleDirect,
     );
     let version_id = row.version_id();
-    qm.sync_manager_mut()
-        .object_manager
-        .add_row_version(storage, object_id, branch, row)
-        .unwrap();
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        },
+    });
     version_id
 }
 
@@ -2852,6 +2855,8 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let commit_a_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_a);
     let commit_b_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_b);
 
+    qm.process(&mut storage);
+
     // Verify we now have concurrent tips
     let tips: Vec<_> = qm
         .sync_manager_mut()
@@ -2864,9 +2869,6 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     assert_eq!(tips.len(), 2, "Should have 2 concurrent tips");
     assert!(tips.contains(&commit_a_id));
     assert!(tips.contains(&commit_b_id));
-
-    // Process updates
-    qm.process(&mut storage);
 
     // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
     let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
