@@ -9,7 +9,7 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
-use crate::storage::{RowLocator, Storage, StorageError};
+use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
 /// Visible row change emitted when a row object's winning version changes.
@@ -466,6 +466,7 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: BranchName,
         row: StoredRowVersion,
+        index_mutations: &[IndexMutation<'_>],
     ) -> Result<RowVersionApply, Error> {
         let row_locator = self.load_row_locator_from_storage(io, object_id)?;
         let table = row_locator.table.to_string();
@@ -513,8 +514,13 @@ impl ObjectManager {
                 _ => &[],
             };
         let visible_changed = previous_visible != current_visible;
-        io.apply_row_mutation(&table, std::slice::from_ref(&row), visible_entries, &[])
-            .map_err(Error::StorageError)?;
+        io.apply_row_mutation(
+            &table,
+            std::slice::from_ref(&row),
+            visible_entries,
+            index_mutations,
+        )
+        .map_err(Error::StorageError)?;
 
         #[cfg(test)]
         {
@@ -562,8 +568,20 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
         row: StoredRowVersion,
     ) -> Result<AddRowVersionResult, Error> {
+        self.add_row_version_with_update_and_indices(io, object_id, branch_name, row, &[])
+    }
+
+    pub fn add_row_version_with_update_and_indices<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        row: StoredRowVersion,
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<AddRowVersionResult, Error> {
         let branch_name = branch_name.into();
-        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
+        let applied =
+            self.apply_row_version_internal(io, object_id, branch_name, row, index_mutations)?;
         let version_id = applied.version_id;
         let visible_update = self.visible_update_from_applied(object_id, applied)?;
         Ok(AddRowVersionResult {
@@ -591,7 +609,7 @@ impl ObjectManager {
         branch_name: BranchName,
         row: StoredRowVersion,
     ) -> Result<Option<VisibleRowUpdate>, Error> {
-        let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
+        let applied = self.apply_row_version_internal(io, object_id, branch_name, row, &[])?;
         self.visible_update_from_applied(object_id, applied)
     }
 

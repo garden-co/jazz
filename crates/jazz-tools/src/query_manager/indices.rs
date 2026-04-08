@@ -109,15 +109,13 @@ impl QueryManager {
         }
     }
 
-    /// Update indices when a row is inserted on a specific branch.
-    pub(super) fn update_indices_for_insert_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+    pub(super) fn index_mutations_for_insert_on_branch<'a>(
+        table: &'a str,
+        branch: &'a str,
         object_id: ObjectId,
         data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+        descriptor: &'a RowDescriptor,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Insert {
             table,
             column: "_id",
@@ -126,7 +124,6 @@ impl QueryManager {
             row_id: object_id,
         }];
 
-        // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
@@ -142,25 +139,19 @@ impl QueryManager {
             }
         }
 
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        mutations
     }
 
-    /// Update indices when a row is updated on a specific branch.
-    pub(super) fn update_indices_for_update_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+    pub(super) fn index_mutations_for_update_on_branch<'a>(
+        table: &'a str,
+        branch: &'a str,
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+        descriptor: &'a RowDescriptor,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = Vec::new();
-        // "_id" index doesn't change on update
 
-        // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             let Ok(old_value) = decode_column(descriptor, old_data, col_idx) else {
                 continue;
@@ -195,20 +186,16 @@ impl QueryManager {
             }
         }
 
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        mutations
     }
 
-    /// Update indices for soft delete on a specific branch.
-    pub(super) fn update_indices_for_soft_delete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+    pub(super) fn index_mutations_for_soft_delete_on_branch<'a>(
+        table: &'a str,
+        branch: &'a str,
         object_id: ObjectId,
         old_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+        descriptor: &'a RowDescriptor,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
             column: "_id",
@@ -217,7 +204,6 @@ impl QueryManager {
             row_id: object_id,
         }];
 
-        // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, old_data, col_idx)
                 && value != Value::Null
@@ -241,20 +227,16 @@ impl QueryManager {
             row_id: object_id,
         });
 
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        mutations
     }
 
-    /// Update indices for hard delete on a specific branch.
-    pub(super) fn update_indices_for_hard_delete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+    pub(super) fn index_mutations_for_hard_delete_on_branch<'a>(
+        table: &'a str,
+        branch: &'a str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+        descriptor: &'a RowDescriptor,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
             column: "_id",
@@ -263,7 +245,6 @@ impl QueryManager {
             row_id: object_id,
         }];
 
-        // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
                 if let Ok(value) = decode_column(descriptor, data, col_idx)
@@ -289,20 +270,16 @@ impl QueryManager {
             row_id: object_id,
         });
 
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        mutations
     }
 
-    /// Update indices for undelete on a specific branch.
-    pub(super) fn update_indices_for_undelete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+    pub(super) fn index_mutations_for_undelete_on_branch<'a>(
+        table: &'a str,
+        branch: &'a str,
         object_id: ObjectId,
         new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+        descriptor: &'a RowDescriptor,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![
             IndexMutation::Remove {
                 table,
@@ -335,6 +312,89 @@ impl QueryManager {
             }
         }
 
+        mutations
+    }
+
+    /// Update indices when a row is inserted on a specific branch.
+    pub(super) fn update_indices_for_insert_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        object_id: ObjectId,
+        data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let mutations =
+            Self::index_mutations_for_insert_on_branch(table, branch, object_id, data, descriptor);
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
+    }
+
+    /// Update indices when a row is updated on a specific branch.
+    pub(super) fn update_indices_for_update_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let mutations = Self::index_mutations_for_update_on_branch(
+            table, branch, object_id, old_data, new_data, descriptor,
+        );
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
+    }
+
+    /// Update indices for soft delete on a specific branch.
+    pub(super) fn update_indices_for_soft_delete_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let mutations = Self::index_mutations_for_soft_delete_on_branch(
+            table, branch, object_id, old_data, descriptor,
+        );
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
+    }
+
+    /// Update indices for hard delete on a specific branch.
+    pub(super) fn update_indices_for_hard_delete_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        object_id: ObjectId,
+        old_data: Option<&[u8]>,
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let mutations = Self::index_mutations_for_hard_delete_on_branch(
+            table, branch, object_id, old_data, descriptor,
+        );
+        storage
+            .apply_index_mutations(&mutations)
+            .map_err(Self::map_index_storage_error)
+    }
+
+    /// Update indices for undelete on a specific branch.
+    pub(super) fn update_indices_for_undelete_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        object_id: ObjectId,
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        let mutations = Self::index_mutations_for_undelete_on_branch(
+            table, branch, object_id, new_data, descriptor,
+        );
         storage
             .apply_index_mutations(&mutations)
             .map_err(Self::map_index_storage_error)

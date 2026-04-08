@@ -29,6 +29,14 @@ pub struct RowBranchWrite<'a> {
 
 struct PreparedUpdateWrite {
     new_data: Vec<u8>,
+    descriptor: RowDescriptor,
+}
+
+struct PreparedUpdateCommit<'a> {
+    table: &'a str,
+    branch: &'a str,
+    id: ObjectId,
+    index_mutations: &'a [crate::storage::IndexMutation<'a>],
 }
 
 pub struct RowBranchDelete<'a> {
@@ -163,7 +171,7 @@ impl QueryManager {
         update: crate::object_manager::VisibleRowUpdate,
     ) -> Result<StoredRowVersion, QueryError> {
         let row = update.row.clone();
-        self.handle_row_update_with_origin(storage, update, true);
+        self.handle_row_update_with_origin(storage, update, true, false);
         if let Ok(Some(row_locator)) = storage.load_row_locator(row_id) {
             self.sync_manager.forward_row_version_to_servers(
                 row_id,
@@ -402,18 +410,25 @@ impl QueryManager {
 
         let _ = table_name;
         let _ = descriptor;
-        Ok(PreparedUpdateWrite { new_data })
+        Ok(PreparedUpdateWrite {
+            new_data,
+            descriptor: descriptor.clone(),
+        })
     }
 
     fn commit_prepared_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
-        table: &str,
-        branch: &str,
-        id: ObjectId,
+        commit: PreparedUpdateCommit<'_>,
         prepared: &PreparedUpdateWrite,
         provenance: &RowProvenance,
     ) -> Result<CommitId, QueryError> {
+        let PreparedUpdateCommit {
+            table,
+            branch,
+            id,
+            index_mutations,
+        } = commit;
         let parents = self.load_branch_tip_ids(storage, table, id, branch);
 
         let row = self.authored_row_version(
@@ -427,7 +442,7 @@ impl QueryManager {
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, id, branch, row)
+            .add_row_version_with_update_and_indices(storage, id, branch, row, index_mutations)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
         let version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -606,6 +621,13 @@ impl QueryManager {
 
         // Add commit with row data
         let branch = self.current_branch();
+        let index_mutations = Self::index_mutations_for_insert_on_branch(
+            table,
+            branch.as_str(),
+            object_id,
+            &data,
+            &descriptor,
+        );
         let row = self.authored_row_version(
             object_id,
             branch.as_str(),
@@ -617,7 +639,13 @@ impl QueryManager {
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, object_id, &branch, row)
+            .add_row_version_with_update_and_indices(
+                storage,
+                object_id,
+                &branch,
+                row,
+                &index_mutations,
+            )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
         let row_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -754,12 +782,25 @@ impl QueryManager {
                 .create_row_with_id(storage, object_id, row_locator);
 
         // Add commit with row data to specified branch
+        let index_mutations = Self::index_mutations_for_insert_on_branch(
+            table,
+            branch,
+            object_id,
+            &data,
+            &descriptor,
+        );
         let row =
             self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, object_id, branch, row)
+            .add_row_version_with_update_and_indices(
+                storage,
+                object_id,
+                branch,
+                row,
+                &index_mutations,
+            )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
         let row_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -1352,11 +1393,22 @@ impl QueryManager {
             write_context,
             &new_provenance,
         )?;
-        let version_id = self.commit_prepared_update_write(
-            storage,
+        let index_mutations = Self::index_mutations_for_update_on_branch(
             &table,
             branch.as_str(),
             id,
+            &old_data,
+            &prepared.new_data,
+            &prepared.descriptor,
+        );
+        let version_id = self.commit_prepared_update_write(
+            storage,
+            PreparedUpdateCommit {
+                table: &table,
+                branch: branch.as_str(),
+                id,
+                index_mutations: &index_mutations,
+            },
             &prepared,
             &new_provenance,
         )?;
@@ -1404,11 +1456,40 @@ impl QueryManager {
             .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
         let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
+        let index_mutations = if was_soft_deleted {
+            Self::index_mutations_for_undelete_on_branch(
+                table,
+                branch,
+                id,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )
+        } else if let Some(old_branch_data) = existing_branch_data.as_deref() {
+            Self::index_mutations_for_update_on_branch(
+                table,
+                branch,
+                id,
+                old_branch_data,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )
+        } else {
+            Self::index_mutations_for_insert_on_branch(
+                table,
+                branch,
+                id,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )
+        };
         let version_id = self.commit_prepared_update_write(
             storage,
-            table,
-            branch,
-            id,
+            PreparedUpdateCommit {
+                table,
+                branch,
+                id,
+                index_mutations: &index_mutations,
+            },
             &prepared,
             &new_provenance,
         )?;
@@ -1547,7 +1628,8 @@ impl QueryManager {
         }
 
         // Get parent commit
-        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
+        let branch = self.current_branch();
+        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
@@ -1556,16 +1638,29 @@ impl QueryManager {
         // Content is copied from previous tip so soft-deleted rows can still be read
         let delete_row = self.authored_row_version(
             id,
-            self.current_branch().as_str(),
+            branch.as_str(),
             parents,
             old_data.to_vec(),
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
+        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            &old_data,
+            &descriptor,
+        );
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, id, self.current_branch(), delete_row)
+            .add_row_version_with_update_and_indices(
+                storage,
+                id,
+                &branch,
+                delete_row,
+                &index_mutations,
+            )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
         let delete_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -1701,10 +1796,23 @@ impl QueryManager {
             &delete_provenance,
             Some(DeleteKind::Soft),
         );
+        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
+            table,
+            branch,
+            id,
+            old_data_for_policy,
+            &descriptor,
+        );
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, id, branch, delete_row)
+            .add_row_version_with_update_and_indices(
+                storage,
+                id,
+                branch,
+                delete_row,
+                &index_mutations,
+            )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
         let delete_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -1787,9 +1895,10 @@ impl QueryManager {
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Get parent commit
-        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
+        let branch = self.current_branch();
+        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
         let old_provenance = self
-            .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, branch.as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1799,16 +1908,23 @@ impl QueryManager {
         // Add commit with row data (no delete metadata = undelete)
         let row = self.authored_row_version(
             id,
-            self.current_branch().as_str(),
+            branch.as_str(),
             parents,
             new_data.clone(),
             &row_provenance,
             None,
         );
+        let index_mutations = Self::index_mutations_for_undelete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            &new_data,
+            &descriptor,
+        );
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, id, self.current_branch(), row)
+            .add_row_version_with_update_and_indices(storage, id, &branch, row, &index_mutations)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
         let row_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {
@@ -1863,9 +1979,10 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
         // Get parent commit
-        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
+        let branch = self.current_branch();
+        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
         let old_provenance = self
-            .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, branch.as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1875,16 +1992,29 @@ impl QueryManager {
         // Add commit with empty content + delete: hard metadata
         let delete_row = self.authored_row_version(
             id,
-            self.current_branch().as_str(),
+            branch.as_str(),
             parents,
             vec![],
             &delete_provenance,
             Some(DeleteKind::Hard),
         );
+        let index_mutations = Self::index_mutations_for_hard_delete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            old_data.as_deref(),
+            &descriptor,
+        );
         let applied = self
             .sync_manager
             .object_manager
-            .add_row_version_with_update(storage, id, self.current_branch(), delete_row)
+            .add_row_version_with_update_and_indices(
+                storage,
+                id,
+                &branch,
+                delete_row,
+                &index_mutations,
+            )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
         let delete_version_id = applied.version_id;
         let visible_update = applied.visible_update.ok_or_else(|| {

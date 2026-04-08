@@ -31,6 +31,17 @@ struct LegacyPersistenceObservingStorage {
     _calls: Arc<Mutex<LegacyStorageCallCounts>>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RowMutationCallCounts {
+    row_mutation_calls: usize,
+    separate_index_mutation_calls: usize,
+}
+
+struct RowMutationObservingStorage {
+    inner: MemoryStorage,
+    calls: Arc<Mutex<RowMutationCallCounts>>,
+}
+
 impl RowRegionReadFailingStorage {
     fn new() -> Self {
         Self {
@@ -44,6 +55,15 @@ impl LegacyPersistenceObservingStorage {
         Self {
             inner: MemoryStorage::new(),
             _calls: calls,
+        }
+    }
+}
+
+impl RowMutationObservingStorage {
+    fn new(calls: Arc<Mutex<RowMutationCallCounts>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            calls,
         }
     }
 }
@@ -398,6 +418,220 @@ impl Storage for LegacyPersistenceObservingStorage {
     ) -> Result<(), StorageError> {
         self.inner
             .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
+
+impl Storage for RowMutationObservingStorage {
+    fn put_metadata(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_metadata(id, metadata)
+    }
+
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
+    }
+
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_regions::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[crate::row_regions::VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_regions::StoredRowVersion],
+        visible_entries: &[crate::row_regions::VisibleRowEntry],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner
+            .apply_row_mutation(table, history_rows, visible_entries, index_mutations)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: Option<crate::row_regions::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.load_visible_region_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: crate::row_regions::HistoryScan,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_region(table, branch, scan)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().separate_index_mutation_calls += 1;
+        self.inner.apply_index_mutations(mutations)
     }
 
     fn index_lookup(
@@ -1893,6 +2127,36 @@ fn rc_row_writes_do_not_touch_legacy_commit_storage() {
         *calls.lock().unwrap(),
         LegacyStorageCallCounts::default(),
         "row writes should persist only via row regions, not legacy branch commit storage"
+    );
+}
+
+#[test]
+fn rc_local_row_writes_batch_row_and_index_mutations() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-storage-mutation",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        RowMutationCallCounts {
+            row_mutation_calls: 3,
+            separate_index_mutation_calls: 0,
+        },
+        "local row writes should persist row history, visible heads, and index changes in one storage mutation"
     );
 }
 
