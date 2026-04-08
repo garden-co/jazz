@@ -13,6 +13,7 @@ use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
 };
+use crate::test_row_history::load_test_row_tip_ids;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -2355,16 +2356,11 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
         .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
-    let row_version_id =
-        *s.a.schema_manager()
-            .query_manager()
-            .sync_manager()
-            .test_object_cache
-            .get_tip_ids(row_id, branch_name)
-            .unwrap()
-            .iter()
-            .next()
-            .expect("insert should create one visible tip");
+    let row_version_id = *load_test_row_tip_ids(s.a.storage(), row_id, branch_name)
+        .unwrap()
+        .iter()
+        .next()
+        .expect("insert should create one visible tip");
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
@@ -3303,7 +3299,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     );
     // NO immediate_tick() here — matches WASM openPersistent flow
 
-    // persist_schema — creates catalogue object in the test cache
+    // persist_schema — stages a catalogue object before the first tick
     let schema_obj_id = core.persist_schema();
 
     // add_server — should call queue_full_sync_to_server which includes the catalogue
