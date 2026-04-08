@@ -20,6 +20,7 @@ use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 use uuid::Uuid;
@@ -612,6 +613,25 @@ impl SchemaManager {
     // Catalogue Persistence
     // =========================================================================
 
+    fn persist_catalogue_object_if_changed<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        content: Vec<u8>,
+    ) {
+        if latest_catalogue_content_matches(storage, object_id, &content) {
+            self.query_manager
+                .sync_manager_mut()
+                .load_catalogue_object_from_storage(storage, object_id, &metadata);
+            return;
+        }
+
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(storage, object_id, metadata, content);
+    }
+
     /// Persist the current schema to the catalogue as an Object.
     ///
     /// The schema is stored on the "main" branch with metadata identifying it
@@ -700,9 +720,12 @@ impl SchemaManager {
             head.parent_bundle_object_id,
             head.bundle_object_id,
         );
-        self.query_manager
-            .sync_manager_mut()
-            .create_object_with_content(storage, head_object_id, head_metadata, head_content);
+        self.persist_catalogue_object_if_changed(
+            storage,
+            head_object_id,
+            head_metadata,
+            head_content,
+        );
 
         Some(head_object_id)
     }
@@ -1505,6 +1528,19 @@ impl SchemaManager {
     }
 }
 
+fn latest_catalogue_content_matches<H: Storage + ?Sized>(
+    storage: &H,
+    object_id: ObjectId,
+    expected: &[u8],
+) -> bool {
+    let latest_content = if let Ok(Some(content)) = latest_catalogue_content(storage, object_id) {
+        content
+    } else {
+        return false;
+    };
+    latest_content == expected
+}
+
 #[allow(dead_code)]
 fn reorder_values_by_column_name(
     source_descriptor: &RowDescriptor,
@@ -1970,6 +2006,58 @@ mod tests {
                 .get(&bundle_object_id)
                 .map(|state| state.permissions.clone()),
             Some(permissions)
+        );
+    }
+
+    #[test]
+    fn materialize_catalogue_objects_does_not_append_duplicate_permissions_head_commit() {
+        let app_id = test_app_id();
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        let mut storage = crate::storage::MemoryStorage::new();
+        let mut previous_run =
+            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
+        previous_run.persist_schema(&mut storage);
+        previous_run
+            .publish_permissions_bundle(&mut storage, schema_hash, permissions, None)
+            .expect("previous run should publish permissions");
+        previous_run.process(&mut storage);
+
+        let head_object_id = SchemaManager::permissions_head_object_id_for(app_id);
+        let branch = crate::object::BranchName::new("main");
+        let commit_count_before = storage
+            .load_branch(head_object_id, &branch)
+            .expect("head branch should load")
+            .expect("head branch should exist")
+            .commits
+            .len();
+        assert_eq!(commit_count_before, 1);
+
+        let mut restarted =
+            SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+        crate::schema_manager::rehydrate_schema_manager_from_manifest(
+            &mut restarted,
+            &storage,
+            app_id,
+        )
+        .expect("rehydrate should succeed");
+
+        restarted.materialize_catalogue_objects(&mut storage);
+
+        let commit_count_after = storage
+            .load_branch(head_object_id, &branch)
+            .expect("head branch should load after materialize")
+            .expect("head branch should still exist")
+            .commits
+            .len();
+        assert_eq!(
+            commit_count_after, commit_count_before,
+            "materializing unchanged permissions head should not append a duplicate commit"
         );
     }
 

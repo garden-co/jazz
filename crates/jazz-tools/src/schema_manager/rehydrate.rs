@@ -9,7 +9,7 @@ use crate::storage::{CatalogueManifest, Storage};
 use super::encoding::decode_permissions_head;
 use super::{AppId, SchemaManager};
 
-fn latest_catalogue_content<S: Storage + ?Sized>(
+pub fn latest_catalogue_content<S: Storage + ?Sized>(
     storage: &S,
     object_id: ObjectId,
 ) -> Result<Option<Vec<u8>>, String> {
