@@ -137,7 +137,7 @@ describe("JazzClient sync auth handling", () => {
       { onAuthFailure },
     );
 
-    await vi.waitFor(() => expect(addServer).toHaveBeenCalledWith(null));
+    await vi.waitFor(() => expect(addServer).toHaveBeenCalledWith(null, null));
 
     sendServerPayload();
 

@@ -169,12 +169,10 @@ describe("svelte/createJazzClient", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(config);
   });
 });
 
