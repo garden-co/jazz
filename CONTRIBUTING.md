@@ -16,38 +16,32 @@ Then add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 export RUSTC_WRAPPER=sccache
 ```
 
-### libclang for RocksDB builds
+### Vendored RocksDB archives
 
-The `rocksdb` feature uses `bindgen` to generate FFI bindings at build time, which requires `libclang`.
+The repo-local `librocksdb-sys` patch now uses checked-in bindings, so `libclang`
+is no longer required for RocksDB builds.
 
-**macOS:**
+Supported server targets can skip rebuilding RocksDB entirely by checking in:
 
-```sh
-brew install llvm
+```text
+vendor/librocksdb-sys/prebuilt/<target-triple>/lib/librocksdb.a
 ```
 
-Then symlink `libclang.dylib` into `/usr/local/lib` so the dynamic linker can
-always find it, regardless of how the build is invoked:
+Supported target triples:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+
+Stage an archive with:
 
 ```sh
-sudo mkdir -p /usr/local/lib
-sudo ln -s "$(brew --prefix llvm)/lib/libclang.dylib" /usr/local/lib/libclang.dylib
+bash scripts/stage-vendored-rocksdb.sh <target-triple> /path/to/librocksdb.a
 ```
 
-> Note: environment variables like `DYLD_LIBRARY_PATH` are stripped by macOS
-> SIP in many process chains, so the symlink approach is more reliable.
-
-**Linux (Debian/Ubuntu):**
-
-```sh
-sudo apt install libclang-dev
-```
-
-**Linux (Fedora/RHEL):**
-
-```sh
-sudo dnf install clang-devel
-```
+If an archive is missing, builds fall back to compiling RocksDB from the
+upstream `rust-rocksdb` checkout, which still needs a working C/C++ toolchain.
 
 ## Testing
 

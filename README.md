@@ -25,7 +25,9 @@ For docs-only builds (for example on Vercel), set `JAZZ_SKIP_RN_DEPS=1` to skip 
 JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
 ```
 
-Vercel builds can use `scripts/install-vercel-deps.sh`, which installs `libclang` for the host distro and then runs the same Rust bootstrap in docs-only mode.
+Vercel builds can use `scripts/install-vercel-deps.sh`, which runs the same Rust bootstrap in docs-only mode without the React Native extras.
+
+Supported server targets can skip rebuilding RocksDB by checking in `librocksdb.a` at `vendor/librocksdb-sys/prebuilt/<target-triple>/lib/librocksdb.a`. The repo now uses checked-in RocksDB bindings, so `libclang` is no longer required for the fallback source-build path either.
 
 ## Package versioning
 
