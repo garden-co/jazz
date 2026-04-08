@@ -269,6 +269,38 @@ fn stale_row_version_does_not_replace_visible_winner() {
 }
 
 #[test]
+fn out_of_order_global_row_updates_tier_pointer_without_becoming_current() {
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let row_id = manager.create(&mut io, Some(row_metadata("users")));
+    let author = ObjectId::new();
+
+    let mut newer = visible_row(row_id, "main", Vec::new(), 2_000, author, b"newer");
+    newer.confirmed_tier = Some(DurabilityTier::Worker);
+    let newer_id = manager
+        .add_row_version(&mut io, row_id, "main", newer)
+        .unwrap();
+
+    let mut older = visible_row(row_id, "main", Vec::new(), 1_000, author, b"older");
+    older.confirmed_tier = Some(DurabilityTier::GlobalServer);
+    let older_id = manager
+        .add_row_version(&mut io, row_id, "main", older)
+        .unwrap();
+
+    let visible = io
+        .load_visible_region_entry("users", "main", row_id)
+        .unwrap()
+        .expect("visible entry should exist");
+
+    assert_eq!(visible.current_row.version_id(), newer_id);
+    assert_eq!(
+        visible.version_id_for_tier(DurabilityTier::GlobalServer),
+        Some(older_id),
+        "older globally settled row should still be the global winner"
+    );
+}
+
+#[test]
 fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();

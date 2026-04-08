@@ -144,8 +144,10 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: &BranchName,
     ) -> Result<Option<VisibleRowEntry>, Error> {
-        io.load_visible_region_entry(table, branch_name.as_str(), object_id)
-            .map_err(Error::StorageError)
+        match io.load_visible_region_entry(table, branch_name.as_str(), object_id) {
+            Ok(entry) => Ok(entry),
+            Err(_) => self.rebuild_visible_entry_from_history(io, table, object_id, branch_name),
+        }
     }
 
     fn load_branch_history<H: Storage>(
@@ -161,13 +163,6 @@ impl ObjectManager {
             HistoryScan::Row { row_id: object_id },
         )
         .map_err(Error::StorageError)
-    }
-
-    fn visible_row_from_history(rows: &[StoredRowVersion]) -> Option<StoredRowVersion> {
-        rows.iter()
-            .filter(|row| row.state.is_visible())
-            .max_by_key(|row| (row.updated_at, row.version_id()))
-            .cloned()
     }
 
     fn rebuild_visible_entry_from_history<H: Storage>(
@@ -192,6 +187,125 @@ impl ObjectManager {
 
     fn latest_row_wins(candidate: &StoredRowVersion, current: &StoredRowVersion) -> bool {
         (candidate.updated_at, candidate.version_id()) > (current.updated_at, current.version_id())
+    }
+
+    fn branch_frontier_after_append(
+        previous_frontier: &[CommitId],
+        appended_row: &StoredRowVersion,
+    ) -> Vec<CommitId> {
+        let appended_version_id = appended_row.version_id();
+        let mut frontier = previous_frontier
+            .iter()
+            .copied()
+            .filter(|version_id| !appended_row.parents.contains(version_id))
+            .collect::<Vec<_>>();
+        if !frontier.contains(&appended_version_id) {
+            frontier.push(appended_version_id);
+        }
+        frontier.sort();
+        frontier.dedup();
+        frontier
+    }
+
+    fn latest_visible_version_after_append<H: Storage>(
+        &self,
+        io: &H,
+        table: &str,
+        appended_row: &StoredRowVersion,
+        previous_winner_id: Option<CommitId>,
+    ) -> Result<Option<CommitId>, Error> {
+        if !appended_row.state.is_visible() {
+            return Ok(previous_winner_id);
+        }
+
+        let appended_version_id = appended_row.version_id();
+        let Some(previous_winner_id) = previous_winner_id else {
+            return Ok(Some(appended_version_id));
+        };
+
+        if previous_winner_id == appended_version_id {
+            return Ok(Some(appended_version_id));
+        }
+
+        let Some(previous_winner) = io
+            .load_history_row_version(table, appended_row.row_id, previous_winner_id)
+            .map_err(Error::StorageError)?
+        else {
+            return Err(Error::StorageError(StorageError::IoError(format!(
+                "missing history row {previous_winner_id:?} for row {}",
+                appended_row.row_id
+            ))));
+        };
+
+        if Self::latest_row_wins(appended_row, &previous_winner) {
+            Ok(Some(appended_version_id))
+        } else {
+            Ok(Some(previous_winner_id))
+        }
+    }
+
+    fn visible_entry_after_append<H: Storage>(
+        &self,
+        io: &H,
+        table: &str,
+        previous_entry: Option<&VisibleRowEntry>,
+        appended_row: &StoredRowVersion,
+    ) -> Result<Option<VisibleRowEntry>, Error> {
+        let Some(previous_entry) = previous_entry else {
+            return Ok(appended_row
+                .state
+                .is_visible()
+                .then(|| VisibleRowEntry::new(appended_row.clone())));
+        };
+
+        let branch_frontier =
+            Self::branch_frontier_after_append(&previous_entry.branch_frontier, appended_row);
+
+        if !appended_row.state.is_visible() {
+            let mut next = previous_entry.clone();
+            next.branch_frontier = branch_frontier;
+            return Ok(Some(next));
+        }
+
+        let current_row = if Self::latest_row_wins(appended_row, &previous_entry.current_row) {
+            appended_row.clone()
+        } else {
+            previous_entry.current_row.clone()
+        };
+        let current_version_id = current_row.version_id();
+
+        let worker_version_id = self
+            .latest_visible_version_after_append(
+                io,
+                table,
+                appended_row,
+                previous_entry.version_id_for_tier(DurabilityTier::Worker),
+            )?
+            .filter(|version_id| *version_id != current_version_id);
+        let edge_version_id = self
+            .latest_visible_version_after_append(
+                io,
+                table,
+                appended_row,
+                previous_entry.version_id_for_tier(DurabilityTier::EdgeServer),
+            )?
+            .filter(|version_id| *version_id != current_version_id);
+        let global_version_id = self
+            .latest_visible_version_after_append(
+                io,
+                table,
+                appended_row,
+                previous_entry.version_id_for_tier(DurabilityTier::GlobalServer),
+            )?
+            .filter(|version_id| *version_id != current_version_id);
+
+        Ok(Some(VisibleRowEntry {
+            current_row,
+            branch_frontier,
+            worker_version_id,
+            edge_version_id,
+            global_version_id,
+        }))
     }
 
     fn winner_after_tier_upgrade<H: Storage>(
@@ -292,6 +406,7 @@ impl ObjectManager {
 
         Ok(VisibleRowEntry {
             current_row,
+            branch_frontier: entry.branch_frontier,
             worker_version_id,
             edge_version_id,
             global_version_id,
@@ -307,7 +422,7 @@ impl ObjectManager {
         branch_name: &BranchName,
         row: &StoredRowVersion,
     ) -> Result<SmolSet<[CommitId; 2]>, Error> {
-        let mut tips = self
+        let previous_frontier = self
             .row_branch_tips
             .get(&(object_id, *branch_name))
             .cloned()
@@ -318,11 +433,12 @@ impl ObjectManager {
                     .collect()
             });
 
-        for parent in &row.parents {
-            tips.remove(parent);
-        }
-        tips.insert(row.version_id());
-        Ok(tips)
+        Ok(Self::branch_frontier_after_append(
+            &previous_frontier.iter().copied().collect::<Vec<_>>(),
+            row,
+        )
+        .into_iter()
+        .collect())
     }
 
     fn apply_row_version_internal<H: Storage>(
@@ -340,6 +456,12 @@ impl ObjectManager {
         );
 
         let table = Self::table_from_metadata(&object_metadata)?;
+        let version_id = row.version_id();
+        let previous_entry =
+            self.load_previous_visible_entry(io, &table, object_id, &branch_name)?;
+        let previous_visible = previous_entry
+            .as_ref()
+            .map(|entry| entry.current_row.clone());
 
         for parent in &row.parents {
             if io
@@ -351,12 +473,10 @@ impl ObjectManager {
             }
         }
 
-        let mut branch_history = self.load_branch_history(io, &table, object_id, &branch_name)?;
-        let version_id = row.version_id();
-        let previous_visible = Self::visible_row_from_history(&branch_history);
-        if branch_history
-            .iter()
-            .any(|existing| existing.version_id() == version_id)
+        if io
+            .load_history_row_version(&table, object_id, version_id)
+            .map_err(Error::StorageError)?
+            .is_some()
         {
             return Ok(RowVersionApply {
                 version_id,
@@ -369,12 +489,16 @@ impl ObjectManager {
 
         io.append_history_region_rows(&table, std::slice::from_ref(&row))
             .map_err(Error::StorageError)?;
-        branch_history.push(row.clone());
-        let current_visible = Self::visible_row_from_history(&branch_history);
+        let current_entry =
+            self.visible_entry_after_append(io, &table, previous_entry.as_ref(), &row)?;
+        let current_visible = current_entry
+            .as_ref()
+            .map(|entry| entry.current_row.clone());
 
-        if let Some(current_row) = current_visible.clone() {
-            let entry = VisibleRowEntry::rebuild(current_row, &branch_history);
-            io.upsert_visible_region_rows(&table, std::slice::from_ref(&entry))
+        if current_entry.as_ref() != previous_entry.as_ref()
+            && let Some(entry) = current_entry.as_ref()
+        {
+            io.upsert_visible_region_rows(&table, std::slice::from_ref(entry))
                 .map_err(Error::StorageError)?;
         }
 

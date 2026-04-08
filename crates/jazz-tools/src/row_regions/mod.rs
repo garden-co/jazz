@@ -180,6 +180,12 @@ fn visible_row_entry_descriptor() -> &'static RowDescriptor {
                     columns: Box::new(stored_row_version_descriptor().clone()),
                 },
             ),
+            ColumnDescriptor::new(
+                "branch_frontier",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Bytea),
+                },
+            ),
             ColumnDescriptor::new("worker_version_id", ColumnType::Bytea).nullable(),
             ColumnDescriptor::new("edge_version_id", ColumnType::Bytea).nullable(),
             ColumnDescriptor::new("global_version_id", ColumnType::Bytea).nullable(),
@@ -287,6 +293,18 @@ fn optional_commit_id_from_value(value: &Value) -> Result<Option<CommitId>, Enco
         Value::Null => Ok(None),
         _ => commit_id_from_value(value).map(Some),
     }
+}
+
+fn commit_ids_to_value(commit_ids: &[CommitId]) -> Value {
+    Value::Array(commit_ids.iter().copied().map(commit_id_to_value).collect())
+}
+
+fn commit_ids_from_value(value: &Value, label: &str) -> Result<Vec<CommitId>, EncodingError> {
+    let Value::Array(values) = value else {
+        return Err(malformed(format!("expected {label} array, got {value:?}")));
+    };
+
+    values.iter().map(commit_id_from_value).collect()
 }
 
 fn metadata_to_value(metadata: &HashMap<String, String>) -> Value {
@@ -477,6 +495,7 @@ pub(crate) fn encode_visible_row_entry(entry: &VisibleRowEntry) -> Result<Vec<u8
         visible_row_entry_descriptor(),
         &[
             stored_row_version_to_value(&entry.current_row),
+            commit_ids_to_value(&entry.branch_frontier),
             optional_commit_id_to_value(entry.worker_version_id),
             optional_commit_id_to_value(entry.edge_version_id),
             optional_commit_id_to_value(entry.global_version_id),
@@ -496,9 +515,10 @@ pub(crate) fn decode_visible_row_entry(data: &[u8]) -> Result<VisibleRowEntry, E
 
     Ok(VisibleRowEntry {
         current_row: stored_row_version_from_value(&values[0])?,
-        worker_version_id: optional_commit_id_from_value(&values[1])?,
-        edge_version_id: optional_commit_id_from_value(&values[2])?,
-        global_version_id: optional_commit_id_from_value(&values[3])?,
+        branch_frontier: commit_ids_from_value(&values[1], "branch_frontier")?,
+        worker_version_id: optional_commit_id_from_value(&values[2])?,
+        edge_version_id: optional_commit_id_from_value(&values[3])?,
+        global_version_id: optional_commit_id_from_value(&values[4])?,
     })
 }
 
@@ -658,6 +678,7 @@ impl StoredRowVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibleRowEntry {
     pub current_row: StoredRowVersion,
+    pub branch_frontier: Vec<CommitId>,
     pub worker_version_id: Option<CommitId>,
     pub edge_version_id: Option<CommitId>,
     pub global_version_id: Option<CommitId>,
@@ -666,6 +687,7 @@ pub struct VisibleRowEntry {
 impl VisibleRowEntry {
     pub fn new(current_row: StoredRowVersion) -> Self {
         Self {
+            branch_frontier: vec![current_row.version_id()],
             current_row,
             worker_version_id: None,
             edge_version_id: None,
@@ -675,6 +697,7 @@ impl VisibleRowEntry {
 
     pub fn rebuild(current_row: StoredRowVersion, history_rows: &[StoredRowVersion]) -> Self {
         let current_version_id = current_row.version_id();
+        let branch_frontier = branch_frontier(history_rows);
         let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Worker);
         let worker_version_id = worker.filter(|version_id| *version_id != current_version_id);
 
@@ -686,6 +709,7 @@ impl VisibleRowEntry {
 
         Self {
             current_row,
+            branch_frontier,
             worker_version_id,
             edge_version_id,
             global_version_id,
@@ -719,6 +743,24 @@ fn latest_visible_version_for_tier(
         .filter(|row| row.state.is_visible() && tier_satisfies(row.confirmed_tier, required_tier))
         .max_by_key(|row| (row.updated_at, row.version_id()))
         .map(StoredRowVersion::version_id)
+}
+
+fn branch_frontier(history_rows: &[StoredRowVersion]) -> Vec<CommitId> {
+    let mut non_tips = std::collections::BTreeSet::new();
+    for row in history_rows {
+        for parent in &row.parents {
+            non_tips.insert(*parent);
+        }
+    }
+
+    let mut tips: Vec<_> = history_rows
+        .iter()
+        .map(StoredRowVersion::version_id)
+        .filter(|version_id| !non_tips.contains(version_id))
+        .collect();
+    tips.sort();
+    tips.dedup();
+    tips
 }
 
 #[cfg(test)]
@@ -772,6 +814,7 @@ mod tests {
         let current = visible_row(30, Some(DurabilityTier::Worker));
         let entry = VisibleRowEntry {
             current_row: current,
+            branch_frontier: vec![global.version_id()],
             worker_version_id: None,
             edge_version_id: Some(global.version_id()),
             global_version_id: Some(global.version_id()),
@@ -788,6 +831,7 @@ mod tests {
         let current = visible_row(30, Some(DurabilityTier::GlobalServer));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
+        assert_eq!(entry.branch_frontier, vec![current.version_id()]);
         assert_eq!(entry.worker_version_id, None);
         assert_eq!(entry.edge_version_id, None);
         assert_eq!(entry.global_version_id, None);
@@ -796,12 +840,31 @@ mod tests {
     #[test]
     fn visible_row_entry_resolves_tier_fallback_chain() {
         let global = visible_row(10, Some(DurabilityTier::GlobalServer));
-        let edge = visible_row(20, Some(DurabilityTier::EdgeServer));
-        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let edge = StoredRowVersion::new(
+            global.row_id,
+            "main",
+            vec![global.version_id()],
+            vec![2],
+            RowProvenance::for_update(&global.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let current = StoredRowVersion::new(
+            global.row_id,
+            "main",
+            vec![edge.version_id()],
+            vec![3],
+            RowProvenance::for_update(&edge.row_provenance(), "alice".to_string(), 30),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
         let history = vec![global.clone(), edge.clone(), current.clone()];
 
         let entry = VisibleRowEntry::rebuild(current.clone(), &history);
 
+        assert_eq!(entry.branch_frontier, vec![current.version_id()]);
         assert_eq!(entry.worker_version_id, None);
         assert_eq!(entry.edge_version_id, Some(edge.version_id()));
         assert_eq!(entry.global_version_id, Some(global.version_id()));
@@ -824,10 +887,43 @@ mod tests {
         let current = visible_row(30, Some(DurabilityTier::Worker));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
+        assert_eq!(entry.branch_frontier, vec![current.version_id()]);
         assert_eq!(entry.version_id_for_tier(DurabilityTier::EdgeServer), None);
         assert_eq!(
             entry.version_id_for_tier(DurabilityTier::GlobalServer),
             None
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_preserves_multiple_branch_tips() {
+        let base = visible_row(10, Some(DurabilityTier::Worker));
+        let left = StoredRowVersion::new(
+            base.row_id,
+            "main",
+            vec![base.version_id()],
+            vec![1],
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+        let right = StoredRowVersion::new(
+            base.row_id,
+            "main",
+            vec![base.version_id()],
+            vec![2],
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+
+        let entry = VisibleRowEntry::rebuild(right.clone(), &[base, left.clone(), right.clone()]);
+
+        assert_eq!(
+            entry.branch_frontier,
+            vec![left.version_id(), right.version_id()]
         );
     }
 }
