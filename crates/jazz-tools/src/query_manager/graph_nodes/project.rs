@@ -209,7 +209,7 @@ impl ProjectNode {
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id,
-                content: projected_content,
+                content: projected_content.into(),
                 version_id,
                 row_provenance,
             }])
@@ -307,7 +307,7 @@ mod tests {
         let data = encode_row(&descriptor, values).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: data,
+            content: data.into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
@@ -483,13 +483,13 @@ mod tests {
         let tuple = Tuple::new(vec![
             TupleElement::Row {
                 id: user_id,
-                content: user_row,
+                content: user_row.into(),
                 version_id: CommitId([1; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: post_id,
-                content: post_row,
+                content: post_row.into(),
                 version_id: CommitId([2; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },

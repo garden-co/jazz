@@ -22,7 +22,7 @@ pub enum TupleElement {
     /// Fully materialized row with ID, content, and version reference.
     Row {
         id: ObjectId,
-        content: Vec<u8>,
+        content: RowBytes,
         version_id: CommitId,
         row_provenance: RowProvenance,
     },
@@ -105,7 +105,7 @@ pub type TupleProvenance = AHashSet<ScopedObject>;
 
 #[derive(Clone, Debug)]
 pub struct LoadedRow {
-    pub data: Vec<u8>,
+    pub data: RowBytes,
     pub version_id: CommitId,
     pub row_provenance: RowProvenance,
     pub provenance: TupleProvenance,
@@ -113,13 +113,13 @@ pub struct LoadedRow {
 
 impl LoadedRow {
     pub fn new(
-        data: Vec<u8>,
+        data: impl Into<RowBytes>,
         version_id: CommitId,
         row_provenance: RowProvenance,
         provenance: TupleProvenance,
     ) -> Self {
         Self {
-            data,
+            data: data.into(),
             version_id,
             row_provenance,
             provenance,
@@ -246,7 +246,7 @@ impl Tuple {
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id: first_id,
-                content: combined_content,
+                content: combined_content.into(),
                 version_id,
                 row_provenance,
             }])

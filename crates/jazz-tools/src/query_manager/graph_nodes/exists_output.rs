@@ -106,7 +106,7 @@ mod tests {
     fn make_tuple(id: ObjectId) -> Tuple {
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: vec![],
+            content: vec![].into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])

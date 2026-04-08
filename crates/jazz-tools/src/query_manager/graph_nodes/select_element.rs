@@ -184,13 +184,13 @@ mod tests {
         Tuple::new(vec![
             TupleElement::Row {
                 id: left_id,
-                content: left_data,
+                content: left_data.into(),
                 version_id: CommitId([0; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: right_id,
-                content: right_data,
+                content: right_data.into(),
                 version_id: CommitId([0; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },

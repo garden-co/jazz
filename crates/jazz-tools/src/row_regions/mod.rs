@@ -12,7 +12,7 @@ use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{EncodingError, decode_row, encode_row};
-use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, Value};
 use crate::sync_manager::DurabilityTier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -417,7 +417,7 @@ fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
             .map(durability_tier_to_value)
             .unwrap_or(Value::Null),
         Value::Boolean(row.is_deleted),
-        Value::Bytea(row.data.clone()),
+        Value::Bytea(row.data.to_vec()),
         metadata_to_value(&row.metadata),
     ]
 }
@@ -454,7 +454,7 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
         state: row_state_from_value(&values[9])?,
         confirmed_tier: durability_tier_from_value(&values[10])?,
         is_deleted: expect_bool(&values[11], "is_deleted")?,
-        data: expect_bytea(&values[12], "data")?,
+        data: expect_bytea(&values[12], "data")?.into(),
         metadata: metadata_from_value(&values[13])?,
     })
 }
@@ -534,7 +534,7 @@ pub struct StoredRowVersion {
     pub state: RowState,
     pub confirmed_tier: Option<DurabilityTier>,
     pub is_deleted: bool,
-    pub data: Vec<u8>,
+    pub data: RowBytes,
     pub metadata: RowMetadata,
 }
 
@@ -614,7 +614,7 @@ impl StoredRowVersion {
             state,
             confirmed_tier,
             is_deleted,
-            data,
+            data: data.into(),
             metadata,
         }
     }
@@ -665,7 +665,7 @@ impl StoredRowVersion {
             state,
             confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
             is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
-            data: commit.content.clone(),
+            data: commit.content.clone().into(),
             metadata,
         }
     }
