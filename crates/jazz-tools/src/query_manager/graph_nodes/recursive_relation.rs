@@ -109,7 +109,7 @@ impl RecursiveRelationNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         self.apply_seed_delta(input);
 
@@ -158,7 +158,7 @@ impl RecursiveRelationNode {
     fn recompute(
         &self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
         if self.hop.is_some() {
             return self.recompute_with_hop(io, row_loader);
@@ -220,7 +220,7 @@ impl RecursiveRelationNode {
     fn recompute_with_object_id(
         &self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
         let mut seen_rows =
             AHashMap::<ObjectId, (Vec<u8>, CommitId, RowProvenance, TupleProvenance)>::new();
@@ -357,7 +357,7 @@ impl RecursiveRelationNode {
     fn recompute_with_hop(
         &self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
         let Some(hop) = &self.hop else {
             return AHashSet::new();
@@ -436,9 +436,7 @@ impl RecursiveRelationNode {
                     else {
                         continue;
                     };
-                    let Some(target_row) =
-                        row_loader(*target_id, Some(hop.table.as_str().to_string()))
-                    else {
+                    let Some(target_row) = row_loader(*target_id, Some(hop.table)) else {
                         continue;
                     };
                     if decode_row(&self.output_descriptor, &target_row.data).is_err() {
@@ -553,7 +551,7 @@ impl RecursiveRelationNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Vec<(Vec<u8>, TupleProvenance)> {
         let step_desc = self.step_template.output_descriptor().clone();
         self.evaluate_step_rows(correlation_value, io, row_loader)
@@ -575,7 +573,7 @@ impl RecursiveRelationNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Vec<(crate::query_manager::types::Row, TupleProvenance)> {
         let mut instance = match self
             .step_template

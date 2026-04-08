@@ -164,7 +164,7 @@ impl MagicColumnsNode {
                 }
             }
 
-            tables.push((element.table.clone(), descriptor));
+            tables.push((element.table, descriptor));
         }
 
         let output_tuple_descriptor = TupleDescriptor::from_tables(&tables).with_all_materialized();
@@ -203,7 +203,7 @@ impl MagicColumnsNode {
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
 
@@ -278,7 +278,7 @@ impl MagicColumnsNode {
     fn reevaluate_all_with_context(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
         let input_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -320,7 +320,7 @@ impl MagicColumnsNode {
         &self,
         tuple: &Tuple,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Option<Tuple> {
         let mut projected = tuple.clone();
 
@@ -368,7 +368,7 @@ impl MagicColumnsNode {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Value {
         match kind {
             MagicColumnKind::CreatedBy => Value::Text(row.provenance.created_by.clone()),

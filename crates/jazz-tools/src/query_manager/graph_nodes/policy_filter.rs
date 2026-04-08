@@ -16,7 +16,7 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement,
+    LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -131,7 +131,7 @@ impl PolicyFilterNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
 
@@ -211,7 +211,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -244,7 +244,7 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
         let evaluator = PolicyContextEvaluator::new(&self.schema, &self.session, &self.branch);
         let mut visited_referencing = HashSet::new();
@@ -711,7 +711,7 @@ mod tests {
         });
 
         assert!(!allowed);
-        assert_eq!(seen, vec![(parent_id, Some("folders".to_string()))]);
+        assert_eq!(seen, vec![(parent_id, Some(TableName::new("folders")))]);
     }
 
     #[test]
