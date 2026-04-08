@@ -8,35 +8,102 @@ use super::{StorageError, encode_value};
 
 const INDEX_KEY_MAX_BYTES: usize = u16::MAX as usize;
 const INDEX_ENTRY_UUID_HEX_BYTES: usize = 32;
+const COMMIT_ID_HEX_BYTES: usize = 64;
 const OVERFLOW_INDEX_VALUE_MARKER: char = '~';
 const OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES: usize = 16;
 const OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES: usize = blake3::OUT_LEN * 2;
 const OVERFLOW_INDEX_VALUE_TRAILER_BYTES: usize =
     1 + OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES + OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES;
 const RAW_TABLE_KEY_PREFIX: &str = "raw:";
+const INDEX_RAW_TABLE_PREFIX: &str = "idx:";
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+fn append_hex_bytes(dst: &mut String, bytes: &[u8]) {
+    dst.reserve(bytes.len() * 2);
+    for &byte in bytes {
+        dst.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        dst.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+}
+
+fn append_hex_prefix(dst: &mut String, bytes: &[u8], hex_len: usize) {
+    let full_bytes = hex_len / 2;
+    append_hex_bytes(dst, &bytes[..full_bytes]);
+    if hex_len % 2 == 1 {
+        dst.push(HEX_DIGITS[(bytes[full_bytes] >> 4) as usize] as char);
+    }
+}
+
+fn append_fixed_u64_hex(dst: &mut String, value: u64) {
+    dst.reserve(OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES);
+    for shift in (0..OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES).rev() {
+        let nibble = ((value >> (shift * 4)) & 0x0f) as usize;
+        dst.push(HEX_DIGITS[nibble] as char);
+    }
+}
+
+fn append_uuid_hex(dst: &mut String, id: ObjectId) {
+    append_hex_bytes(dst, id.uuid().as_bytes());
+}
+
+fn append_commit_id_hex(dst: &mut String, version_id: CommitId) {
+    append_hex_bytes(dst, &version_id.0);
+}
 
 fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
     RAW_TABLE_KEY_PREFIX.len() + table.len() + 1 + key_len
 }
 
+fn raw_table_prefix_len(table: &str) -> usize {
+    RAW_TABLE_KEY_PREFIX.len() + table.len() + 1
+}
+
 pub(super) fn raw_table_entry_key(table: &str, key: &str) -> String {
-    format!("{RAW_TABLE_KEY_PREFIX}{table}:{key}")
+    let mut storage_key = String::with_capacity(raw_table_prefix_len(table) + key.len());
+    storage_key.push_str(RAW_TABLE_KEY_PREFIX);
+    storage_key.push_str(table);
+    storage_key.push(':');
+    storage_key.push_str(key);
+    storage_key
 }
 
 pub(super) fn raw_table_prefix(table: &str) -> String {
-    format!("{RAW_TABLE_KEY_PREFIX}{table}:")
+    let mut prefix = String::with_capacity(raw_table_prefix_len(table));
+    prefix.push_str(RAW_TABLE_KEY_PREFIX);
+    prefix.push_str(table);
+    prefix.push(':');
+    prefix
 }
 
 pub(super) fn raw_table_scan_prefix(table: &str, prefix: &str) -> String {
-    format!("{}{prefix}", raw_table_prefix(table))
+    let mut storage_prefix = String::with_capacity(raw_table_prefix_len(table) + prefix.len());
+    storage_prefix.push_str(RAW_TABLE_KEY_PREFIX);
+    storage_prefix.push_str(table);
+    storage_prefix.push(':');
+    storage_prefix.push_str(prefix);
+    storage_prefix
 }
 
 pub(super) fn strip_raw_table_key<'a>(table: &str, storage_key: &'a str) -> Option<&'a str> {
-    storage_key.strip_prefix(&raw_table_prefix(table))
+    storage_key
+        .strip_prefix(RAW_TABLE_KEY_PREFIX)?
+        .strip_prefix(table)?
+        .strip_prefix(':')
+}
+
+fn index_raw_table_len(table: &str, column: &str, branch: &str) -> usize {
+    INDEX_RAW_TABLE_PREFIX.len() + table.len() + 1 + column.len() + 1 + branch.len()
 }
 
 pub(super) fn index_raw_table(table: &str, column: &str, branch: &str) -> String {
-    format!("idx:{table}:{column}:{branch}")
+    let mut raw_table = String::with_capacity(index_raw_table_len(table, column, branch));
+    raw_table.push_str(INDEX_RAW_TABLE_PREFIX);
+    raw_table.push_str(table);
+    raw_table.push(':');
+    raw_table.push_str(column);
+    raw_table.push(':');
+    raw_table.push_str(branch);
+    raw_table
 }
 
 fn index_entry_key_bytes(
@@ -45,11 +112,14 @@ fn index_entry_key_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    let raw_table = index_raw_table(table, column, branch);
     raw_table_key_bytes(
-        &raw_table,
-        value_segment_len + 1 + INDEX_ENTRY_UUID_HEX_BYTES,
-    )
+        "",
+        index_raw_table_len(table, column, branch)
+            + value_segment_len
+            + 1
+            + INDEX_ENTRY_UUID_HEX_BYTES,
+    ) - RAW_TABLE_KEY_PREFIX.len()
+        - 1
 }
 
 fn index_value_prefix_bytes(
@@ -58,8 +128,11 @@ fn index_value_prefix_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    let raw_table = index_raw_table(table, column, branch);
-    raw_table_key_bytes(&raw_table, value_segment_len + 1)
+    raw_table_key_bytes(
+        "",
+        index_raw_table_len(table, column, branch) + value_segment_len + 1,
+    ) - RAW_TABLE_KEY_PREFIX.len()
+        - 1
 }
 
 fn index_key_too_large_error(
@@ -81,20 +154,14 @@ fn max_index_value_segment_len(table: &str, column: &str, branch: &str) -> Optio
     INDEX_KEY_MAX_BYTES.checked_sub(index_entry_key_bytes(table, column, branch, 0))
 }
 
-fn overflow_index_value_segment(
-    encoded_value: &[u8],
-    encoded_hex: &str,
-    prefix_hex_len: usize,
-) -> String {
+fn overflow_index_value_segment(encoded_value: &[u8], prefix_hex_len: usize) -> String {
     let hash = blake3::hash(encoded_value);
-    let prefix = &encoded_hex[..prefix_hex_len];
-    format!(
-        "{}{}{:016x}{}",
-        prefix,
-        OVERFLOW_INDEX_VALUE_MARKER,
-        encoded_value.len() as u64,
-        hex::encode(hash.as_bytes())
-    )
+    let mut segment = String::with_capacity(prefix_hex_len + OVERFLOW_INDEX_VALUE_TRAILER_BYTES);
+    append_hex_prefix(&mut segment, encoded_value, prefix_hex_len);
+    segment.push(OVERFLOW_INDEX_VALUE_MARKER);
+    append_fixed_u64_hex(&mut segment, encoded_value.len() as u64);
+    append_hex_bytes(&mut segment, hash.as_bytes());
+    segment
 }
 
 fn encode_index_value_segment(
@@ -104,7 +171,6 @@ fn encode_index_value_segment(
     value: &Value,
 ) -> Result<String, StorageError> {
     let encoded_value = encode_value(value);
-    let encoded_hex = hex::encode(&encoded_value);
     let Some(max_segment_len) = max_index_value_segment_len(table, column, branch) else {
         return Err(index_key_too_large_error(
             table,
@@ -113,8 +179,11 @@ fn encode_index_value_segment(
             index_entry_key_bytes(table, column, branch, 0),
         ));
     };
+    let encoded_hex_len = encoded_value.len() * 2;
 
-    if encoded_hex.len() <= max_segment_len {
+    if encoded_hex_len <= max_segment_len {
+        let mut encoded_hex = String::with_capacity(encoded_hex_len);
+        append_hex_bytes(&mut encoded_hex, &encoded_value);
         return Ok(encoded_hex);
     }
 
@@ -128,11 +197,7 @@ fn encode_index_value_segment(
         ));
     };
 
-    Ok(overflow_index_value_segment(
-        &encoded_value,
-        &encoded_hex,
-        prefix_hex_len,
-    ))
+    Ok(overflow_index_value_segment(&encoded_value, prefix_hex_len))
 }
 
 pub(super) fn validate_index_entry_size(
@@ -144,52 +209,83 @@ pub(super) fn validate_index_entry_size(
     encode_index_value_segment(table, column, branch, value).map(|_| ())
 }
 
-/// Format an ObjectId as compact hex (no dashes).
-pub(super) fn format_uuid(id: ObjectId) -> String {
-    hex::encode(id.uuid().as_bytes())
-}
-
 #[allow(dead_code)]
 pub(super) fn visible_row_key(table: &str, branch: &str, row_id: ObjectId) -> String {
-    format!("row:{table}:0:{branch}:{}", format_uuid(row_id))
+    let mut key =
+        String::with_capacity(4 + table.len() + 3 + branch.len() + INDEX_ENTRY_UUID_HEX_BYTES);
+    key.push_str("row:");
+    key.push_str(table);
+    key.push_str(":0:");
+    key.push_str(branch);
+    key.push(':');
+    append_uuid_hex(&mut key, row_id);
+    key
 }
 
 #[allow(dead_code)]
 pub(super) fn visible_row_prefix(table: &str, branch: &str) -> String {
-    format!("row:{table}:0:{branch}:")
+    let mut prefix = String::with_capacity(4 + table.len() + 3 + branch.len() + 1);
+    prefix.push_str("row:");
+    prefix.push_str(table);
+    prefix.push_str(":0:");
+    prefix.push_str(branch);
+    prefix.push(':');
+    prefix
 }
 
 #[allow(dead_code)]
 pub(super) fn visible_table_prefix(table: &str) -> String {
-    format!("row:{table}:0:")
+    let mut prefix = String::with_capacity(4 + table.len() + 3);
+    prefix.push_str("row:");
+    prefix.push_str(table);
+    prefix.push_str(":0:");
+    prefix
 }
 
 #[allow(dead_code)]
 pub(super) fn history_row_key(table: &str, row_id: ObjectId, version_id: CommitId) -> String {
-    format!(
-        "row:{table}:1:{}:{}",
-        format_uuid(row_id),
-        hex::encode(version_id.0)
-    )
+    let mut key = String::with_capacity(
+        4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + COMMIT_ID_HEX_BYTES,
+    );
+    key.push_str("row:");
+    key.push_str(table);
+    key.push_str(":1:");
+    append_uuid_hex(&mut key, row_id);
+    key.push(':');
+    append_commit_id_hex(&mut key, version_id);
+    key
 }
 
 #[allow(dead_code)]
 pub(super) fn history_row_prefix(table: &str) -> String {
-    format!("row:{table}:1:")
+    let mut prefix = String::with_capacity(4 + table.len() + 3);
+    prefix.push_str("row:");
+    prefix.push_str(table);
+    prefix.push_str(":1:");
+    prefix
 }
 
 #[allow(dead_code)]
 pub(super) fn history_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
-    format!("row:{table}:1:{}:", format_uuid(row_id))
+    let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
+    prefix.push_str("row:");
+    prefix.push_str(table);
+    prefix.push_str(":1:");
+    append_uuid_hex(&mut prefix, row_id);
+    prefix.push(':');
+    prefix
 }
 
 #[allow(dead_code)]
 pub(super) fn history_table_prefix(table: &str) -> String {
-    format!("row:{table}:1:")
+    history_row_prefix(table)
 }
 
 pub(super) fn catalogue_entry_key(object_id: ObjectId) -> String {
-    format!("catrow:{}", format_uuid(object_id))
+    let mut key = String::with_capacity(7 + INDEX_ENTRY_UUID_HEX_BYTES);
+    key.push_str("catrow:");
+    append_uuid_hex(&mut key, object_id);
+    key
 }
 
 pub(super) fn catalogue_entry_prefix() -> &'static str {
@@ -203,11 +299,12 @@ pub(super) fn index_entry_key(
     value: &Value,
     row_id: ObjectId,
 ) -> Result<String, StorageError> {
-    Ok(format!(
-        "{}:{}",
-        encode_index_value_segment(table, column, branch, value)?,
-        format_uuid(row_id)
-    ))
+    let value_segment = encode_index_value_segment(table, column, branch, value)?;
+    let mut key = String::with_capacity(value_segment.len() + 1 + INDEX_ENTRY_UUID_HEX_BYTES);
+    key.push_str(&value_segment);
+    key.push(':');
+    append_uuid_hex(&mut key, row_id);
+    Ok(key)
 }
 
 pub(super) fn index_value_prefix(
@@ -221,7 +318,10 @@ pub(super) fn index_value_prefix(
     if key_bytes > INDEX_KEY_MAX_BYTES {
         return Err(index_key_too_large_error(table, column, branch, key_bytes));
     }
-    Ok(format!("{value_segment}:"))
+    let mut prefix = String::with_capacity(value_segment.len() + 1);
+    prefix.push_str(&value_segment);
+    prefix.push(':');
+    Ok(prefix)
 }
 
 /// Compute lexicographic scan bounds for index range queries.
