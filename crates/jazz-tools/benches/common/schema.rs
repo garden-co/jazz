@@ -15,10 +15,10 @@ use jazz_tools::query_manager::types::{
 };
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::MemoryStorage;
+use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::SyncManager;
 
-pub type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs
@@ -120,7 +120,11 @@ pub struct BenchmarkData {
 /// - 100_000 documents: 1000 teams, 10000 folders
 ///
 /// The session user owns 10% of teams and authors 50% of documents.
-pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> BenchmarkData {
+pub fn setup_data<S: Storage>(
+    core: &mut BenchRuntime<S>,
+    scale: usize,
+    user_id: &str,
+) -> BenchmarkData {
     let (num_teams, num_folders) = match scale {
         10_000 => (100, 1000),
         100_000 => (1000, 10000),
@@ -257,11 +261,7 @@ pub fn create_session(user_id: &str) -> Session {
     Session::new(user_id)
 }
 
-/// Create a new RuntimeCore with MemoryStorage for benchmarking.
-///
-/// Uses MemoryStorage which drops all storage requests, allowing
-/// benchmarks to measure pure in-memory performance without storage overhead.
-pub fn create_runtime() -> BenchRuntime {
+pub fn create_runtime_with_storage<S: Storage>(storage: S) -> BenchRuntime<S> {
     let sync_manager = SyncManager::new();
     let schema = create_schema();
     let schema_manager = SchemaManager::new(
@@ -272,12 +272,15 @@ pub fn create_runtime() -> BenchRuntime {
         "main",
     )
     .expect("schema manager");
-    RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    )
+    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+}
+
+/// Create a new RuntimeCore with MemoryStorage for benchmarking.
+///
+/// Uses MemoryStorage which drops all storage requests, allowing
+/// benchmarks to measure pure in-memory performance without storage overhead.
+pub fn create_runtime() -> BenchRuntime {
+    create_runtime_with_storage(MemoryStorage::new())
 }
 
 /// Get the current timestamp in microseconds.

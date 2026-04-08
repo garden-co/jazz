@@ -9,32 +9,11 @@ use crate::row_histories::{
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
 
-fn short_hash(hash: &impl ToString) -> String {
-    hash.to_string().chars().take(12).collect()
-}
-
-fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
-    tracing::warn!(
-        origin,
-        query_id = warning.query_id.0,
-        table = warning.table_name,
-        row_count = warning.row_count,
-        from_hash = %warning.from_hash,
-        to_hash = %warning.to_hash,
-        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools@alpha migrations create {} {}`",
-        warning.row_count,
-        warning.table_name,
-        short_hash(&warning.from_hash),
-        short_hash(&warning.to_hash),
-    );
-}
-
 struct AppliedRowVersion {
     metadata: HashMap<String, String>,
     row: StoredRowVersion,
     visibility_change: Option<RowVisibilityChange>,
 }
-
 impl SyncManager {
     fn ensure_object_metadata<H: Storage>(
         &mut self,
@@ -272,7 +251,7 @@ impl SyncManager {
                 }
             }
             SyncPayload::SchemaWarning(warning) => {
-                log_schema_warning("server", &warning);
+                super::log_schema_warning(&warning, Some("server"), None);
 
                 if let Some(clients) = self.query_origin.get(&warning.query_id) {
                     for &cid in clients {

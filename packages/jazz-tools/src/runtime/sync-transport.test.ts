@@ -564,10 +564,7 @@ describe("sync-transport", () => {
     );
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[client] Detected 3 rows of todos with differing schema versions."),
-    );
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("npx jazz-tools@alpha migrations create aaaaaaaaaaaa bbbbbbbbbbbb"),
+      "[client] Detected 3 rows of todos with differing schema versions. To ensure data visibility and forward/backward compatibility, run `npx jazz-tools@alpha schema export --schema-hash aaaaaaaaaaaa`. Then generate a migration with `npx jazz-tools@alpha migrations create --fromHash aaaaaaaaaaaa --toHash <targetHash>`",
     );
     expect(onSyncMessage).toHaveBeenCalledWith(
       JSON.stringify({
