@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
+    SyncPayloadResult, UnauthenticatedResponse,
 };
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
@@ -311,11 +311,19 @@ async fn events_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Query(params): Query<EventsParams>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, Response> {
     // Parse client_id from query param - error if malformed, generate if missing
     let client_id = match params.client_id {
-        Some(s) => ClientId::parse(&s)
-            .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
+        Some(s) => ClientId::parse(&s).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "Invalid client_id: {}",
+                    s
+                ))),
+            )
+                .into_response()
+        })?,
         None => ClientId::new(),
     };
 
@@ -340,7 +348,7 @@ async fn events_handler(
 
     let setup = if backend_secret.is_some() && !has_session_header {
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
-            return Err((status, msg.to_string()));
+            return Err((status, Json(ErrorResponse::unauthorized(msg))).into_response());
         }
         ClientSetup::Backend
     } else {
@@ -357,8 +365,8 @@ async fn events_handler(
             .await
             {
                 Ok(s) => s,
-                Err((status, msg)) => {
-                    return Err((status, msg.to_string()));
+                Err(error) => {
+                    return Err((StatusCode::UNAUTHORIZED, Json(error)).into_response());
                 }
             }
         };
@@ -373,9 +381,11 @@ async fn events_handler(
                 );
                 return Err((
                     StatusCode::UNAUTHORIZED,
-                    "Session required for event stream. Provide JWT, local auth headers, or backend secret."
-                        .to_string(),
-                ));
+                    Json(UnauthenticatedResponse::missing(
+                        "Session required for event stream. Provide JWT, local auth headers, or backend secret.",
+                    )),
+                )
+                    .into_response());
             }
         };
 
@@ -483,6 +493,7 @@ async fn events_handler(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to build SSE response: {e}"),
             )
+                .into_response()
         })
 }
 
@@ -566,15 +577,13 @@ async fn sync_handler(
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
-                        Json(ErrorResponse::unauthorized(
+                        Json(UnauthenticatedResponse::missing(
                             "Session required for sync. Provide JWT, local auth headers, or backend secret.",
                         )),
                     )
                         .into_response();
                 }
-                Err((status, msg)) => {
-                    return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-                }
+                Err(error) => return (StatusCode::UNAUTHORIZED, Json(error)).into_response(),
             }
         };
 
@@ -1469,17 +1478,24 @@ async fn link_external_handler(
         Ok(verified) => verified,
         Err(crate::middleware::auth::JwtError::NoKeyConfigured) => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(
-                    "JWT validation not configured".to_string(),
+                StatusCode::UNAUTHORIZED,
+                Json(UnauthenticatedResponse::disabled(
+                    "JWT auth is not enabled for this app",
                 )),
+            )
+                .into_response();
+        }
+        Err(crate::middleware::auth::JwtError::Expired) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(UnauthenticatedResponse::expired("JWT has expired")),
             )
                 .into_response();
         }
         Err(crate::middleware::auth::JwtError::Invalid(_)) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::unauthorized("Invalid JWT")),
+                Json(UnauthenticatedResponse::invalid("Invalid JWT")),
             )
                 .into_response();
         }
@@ -1798,6 +1814,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "unauthenticated");
+        assert_eq!(json["code"], "missing");
     }
 
     #[tokio::test]

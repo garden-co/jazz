@@ -8,6 +8,8 @@
 
 import { fetchWithTimeout } from "./utils.js";
 
+export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
+
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
@@ -52,6 +54,7 @@ export interface SyncStreamControllerOptions {
   onConnected(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   onDisconnected(): void;
   onSyncMessage(payloadJson: string, seq?: number | null): void;
+  onAuthFailure?(reason: AuthFailureReason): void;
 }
 
 /**
@@ -69,6 +72,25 @@ export interface RuntimeSyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
+  onAuthFailure?(reason: AuthFailureReason): void;
+}
+
+type UnauthenticatedPayload = {
+  error?: unknown;
+  code?: unknown;
+  message?: unknown;
+};
+
+export class SyncAuthError extends Error {
+  readonly name = "SyncAuthError";
+
+  constructor(
+    readonly reason: AuthFailureReason,
+    message: string,
+    readonly status = 401,
+  ) {
+    super(message);
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -121,6 +143,38 @@ function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
   );
 }
 
+export async function readSyncAuthError(response: Response): Promise<SyncAuthError | null> {
+  if (response.status !== 401) {
+    return null;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
+  }
+
+  try {
+    const body = (await response.json()) as UnauthenticatedPayload;
+    if (body.error !== "unauthenticated") {
+      return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
+    }
+
+    const reason: AuthFailureReason =
+      body.code === "expired" ||
+      body.code === "missing" ||
+      body.code === "invalid" ||
+      body.code === "disabled"
+        ? body.code
+        : "invalid";
+
+    const message = typeof body.message === "string" ? body.message : `Unauthenticated (${reason})`;
+
+    return new SyncAuthError(reason, message, response.status);
+  } catch {
+    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
+  }
+}
+
 /**
  * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
  *
@@ -137,6 +191,7 @@ export class SyncStreamController {
   private activeServerUrl: string | null = null;
   private activeServerPathPrefix: string | undefined;
   private stopped = true;
+  private pausedForAuthFailure = false;
 
   constructor(private readonly options: SyncStreamControllerOptions) {
     this.logPrefix = options.logPrefix ?? "";
@@ -145,6 +200,7 @@ export class SyncStreamController {
   start(serverUrl: string, pathPrefix?: string): void {
     this.stop();
     this.stopped = false;
+    this.pausedForAuthFailure = false;
     this.activeServerUrl = serverUrl;
     this.activeServerPathPrefix = pathPrefix;
     this.connectStream();
@@ -152,6 +208,7 @@ export class SyncStreamController {
 
   stop(): void {
     this.stopped = true;
+    this.pausedForAuthFailure = false;
     this.activeServerUrl = null;
     this.activeServerPathPrefix = undefined;
     this.clearReconnectTimer();
@@ -160,11 +217,19 @@ export class SyncStreamController {
   }
 
   updateAuth(): void {
+    this.pausedForAuthFailure = false;
     this.abortStream();
     this.detachServer();
     if (this.activeServerUrl && !this.stopped) {
       this.scheduleReconnect();
     }
+  }
+
+  notifyAuthFailure(reason: AuthFailureReason): void {
+    this.pausedForAuthFailure = true;
+    this.abortStream();
+    this.detachServer();
+    this.options.onAuthFailure?.(reason);
   }
 
   notifyTransportFailure(): void {
@@ -209,7 +274,7 @@ export class SyncStreamController {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || !this.activeServerUrl) return;
+    if (this.stopped || this.pausedForAuthFailure || !this.activeServerUrl) return;
     if (this.reconnectTimer) return;
 
     const baseMs = 300;
@@ -225,7 +290,14 @@ export class SyncStreamController {
   }
 
   private async connectStream(): Promise<void> {
-    if (this.streamConnecting || this.stopped || !this.activeServerUrl) return;
+    if (
+      this.streamConnecting ||
+      this.stopped ||
+      this.pausedForAuthFailure ||
+      !this.activeServerUrl
+    ) {
+      return;
+    }
     this.streamConnecting = true;
 
     const serverUrl = this.activeServerUrl;
@@ -247,6 +319,11 @@ export class SyncStreamController {
       });
 
       if (!response.ok) {
+        const authError = await readSyncAuthError(response);
+        if (authError) {
+          this.notifyAuthFailure(authError.reason);
+          return;
+        }
         console.error(`${this.logPrefix}Stream connect failed: ${response.status}`);
         this.detachServer();
         this.streamConnecting = false;
@@ -306,6 +383,7 @@ export function createRuntimeSyncStreamController(
       options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq),
     onDisconnected: () => options.getRuntime()?.removeServer(),
     onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
+    onAuthFailure: options.onAuthFailure,
   });
 }
 
@@ -544,6 +622,10 @@ async function postSyncBatch(
   }
 
   if (!response.ok) {
+    const authError = await readSyncAuthError(response);
+    if (authError) {
+      throw authError;
+    }
     const statusText = response.statusText ? ` ${response.statusText}` : "";
     throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
   }

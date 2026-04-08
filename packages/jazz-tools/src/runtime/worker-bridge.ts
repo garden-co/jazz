@@ -8,6 +8,7 @@
 
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
+import type { AuthFailureReason } from "./sync-transport.js";
 import type {
   InitMessage,
   WorkerLifecycleEvent,
@@ -59,6 +60,7 @@ interface WorkerBridgeState {
   pendingSyncPayloadsForWorker: Uint8Array[];
   syncBatchFlushQueued: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
+  authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
@@ -101,6 +103,7 @@ export class WorkerBridge {
       pendingSyncPayloadsForWorker: [],
       syncBatchFlushQueued: false,
       peerSyncListener: null,
+      authFailureListener: null,
       serverPayloadForwarder: null,
     };
 
@@ -115,6 +118,8 @@ export class WorkerBridge {
         this.markUpstreamServerConnected();
       } else if (msg.type === "upstream-disconnected") {
         this.markUpstreamServerDisconnected();
+      } else if (msg.type === "auth-failed") {
+        this.state.authFailureListener?.(msg.reason);
       } else if (msg.type === "peer-sync") {
         this.state.peerSyncListener?.({
           peerId: msg.peerId,
@@ -308,6 +313,10 @@ export class WorkerBridge {
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
+  }
+
+  onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
+    this.state.authFailureListener = listener;
   }
 
   openPeer(peerId: string): void {

@@ -114,6 +114,7 @@ impl ServerEvent {
 
 /// Error codes for server errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// Invalid request format.
     BadRequest,
@@ -185,6 +186,58 @@ impl ErrorResponse {
         Self {
             error: message.into(),
             code: ErrorCode::Internal,
+        }
+    }
+}
+
+/// Auth failure reasons returned by runtime-facing HTTP endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnauthenticatedCode {
+    Expired,
+    Missing,
+    Invalid,
+    Disabled,
+}
+
+/// Structured unauthenticated response for `/sync` and `/events`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnauthenticatedResponse {
+    pub error: &'static str,
+    pub code: UnauthenticatedCode,
+    pub message: String,
+}
+
+impl UnauthenticatedResponse {
+    pub fn expired(message: impl Into<String>) -> Self {
+        Self {
+            error: "unauthenticated",
+            code: UnauthenticatedCode::Expired,
+            message: message.into(),
+        }
+    }
+
+    pub fn missing(message: impl Into<String>) -> Self {
+        Self {
+            error: "unauthenticated",
+            code: UnauthenticatedCode::Missing,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            error: "unauthenticated",
+            code: UnauthenticatedCode::Invalid,
+            message: message.into(),
+        }
+    }
+
+    pub fn disabled(message: impl Into<String>) -> Self {
+        Self {
+            error: "unauthenticated",
+            code: UnauthenticatedCode::Disabled,
+            message: message.into(),
         }
     }
 }
@@ -280,6 +333,11 @@ mod tests {
 
         let err = ErrorResponse::forbidden("not allowed");
         assert_eq!(err.code, ErrorCode::Forbidden);
+
+        let err = UnauthenticatedResponse::expired("JWT expired");
+        assert_eq!(err.error, "unauthenticated");
+        assert_eq!(err.code, UnauthenticatedCode::Expired);
+        assert_eq!(err.message, "JWT expired");
     }
 
     #[test]

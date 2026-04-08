@@ -6,7 +6,6 @@ import { createJazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => {
   const resolveLocalAuthDefaults = vi.fn();
   const createDb = vi.fn();
-  const resolveClientSession = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
   const orchestratorInstances: Array<{
     config: { appId: string };
@@ -22,6 +21,7 @@ const mocks = vi.hoisted(() => {
         throw initError;
       }
     });
+    readonly setSession = vi.fn();
     readonly shutdown = vi.fn(async () => undefined);
 
     constructor(
@@ -35,7 +35,6 @@ const mocks = vi.hoisted(() => {
   return {
     resolveLocalAuthDefaults,
     createDb,
-    resolveClientSession,
     trackPromise,
     orchestratorInstances,
     MockSubscriptionsOrchestrator,
@@ -45,7 +44,6 @@ const mocks = vi.hoisted(() => {
     reset() {
       resolveLocalAuthDefaults.mockReset();
       createDb.mockReset();
-      resolveClientSession.mockReset();
       trackPromise.mockReset();
       orchestratorInstances.length = 0;
       initError = null;
@@ -62,17 +60,32 @@ vi.mock("../runtime/db.js", () => ({
   createDb: mocks.createDb,
 }));
 
-vi.mock("../runtime/client-session.js", () => ({
-  resolveClientSession: mocks.resolveClientSession,
-}));
-
 vi.mock("../subscriptions-orchestrator.js", () => ({
   SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
   trackPromise: mocks.trackPromise,
 }));
 
-function createMockDb() {
+function createMockDb(session: Session | null = null) {
+  let authSession = session;
+  const listeners = new Set<(state: { session: Session | null }) => void>();
+
   return {
+    getAuthState: vi.fn(() => ({
+      status: authSession ? "authenticated" : "unauthenticated",
+      session: authSession,
+    })),
+    onAuthChanged: vi.fn((listener: (state: { session: Session | null }) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    }),
+    emitAuthChange(nextSession: Session | null) {
+      authSession = nextSession;
+      for (const listener of listeners) {
+        listener({ session: authSession });
+      }
+    },
     shutdown: vi.fn(async () => undefined),
   };
 }
@@ -94,18 +107,16 @@ describe("react/create-jazz-client unit", () => {
       user_id: "local:test",
       claims: { auth_mode: "local", local_mode: "anonymous" },
     };
-    const db = createMockDb();
+    const db = createMockDb(session);
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(resolvedConfig);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(session);
 
     const client = await createJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
     expect(mocks.resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
     expect(mocks.createDb).toHaveBeenCalledWith(resolvedConfig);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
@@ -131,23 +142,37 @@ describe("react/create-jazz-client unit", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockRejectedValue(dbError);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await expect(createJazzClient(config)).rejects.toBe(dbError);
     expect(mocks.orchestratorInstances).toHaveLength(0);
   });
 
-  it("RC-U03: rejects when session resolution fails", async () => {
+  it("RC-U03: tracks auth session updates from the db", async () => {
     const config: DbConfig = { appId: "react-client-unit-3" };
-    const sessionError = new Error("resolveClientSession failed");
-    const db = createMockDb();
+    const db = createMockDb({
+      user_id: "alice",
+      claims: { role: "reader" },
+    });
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockRejectedValue(sessionError);
 
-    await expect(createJazzClient(config)).rejects.toBe(sessionError);
-    expect(mocks.orchestratorInstances).toHaveLength(0);
+    const client = await createJazzClient(config);
+
+    expect(client.session).toEqual({
+      user_id: "alice",
+      claims: { role: "reader" },
+    });
+
+    db.emitAuthChange({
+      user_id: "alice",
+      claims: { role: "writer" },
+    });
+
+    expect(client.session).toEqual({
+      user_id: "alice",
+      claims: { role: "writer" },
+    });
   });
 
   it("RC-U04: rejects when orchestrator init fails", async () => {
@@ -157,7 +182,6 @@ describe("react/create-jazz-client unit", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
     mocks.setInitError(initError);
 
     await expect(createJazzClient(config)).rejects.toBe(initError);
@@ -178,11 +202,9 @@ describe("react/create-jazz-client unit", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(config);
   });
 });
