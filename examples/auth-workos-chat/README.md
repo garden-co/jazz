@@ -8,7 +8,7 @@ What it demonstrates:
 - Pointing the Jazz sync server at WorkOS's hosted JWKS endpoint — no local auth server needed
 - Calling `getAccessToken()` from the AuthKit hook and passing the WorkOS access token directly to `JazzProvider`
 - Falling back to anonymous `localAuth` when no WorkOS session exists
-- Role-based UI gating derived from JWT claims (`admin` posts to Announcements; `member` posts to the general chat)
+- Role-based UI gating derived from JWT claims (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `permissions.ts`
 
 There is no local auth server in this example. WorkOS issues and signs all tokens;
 the JWKS is fetched from `https://api.workos.com/sso/jwks/<clientId>`.
