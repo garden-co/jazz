@@ -8,6 +8,7 @@
 
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
+import type { AuthFailureReason } from "./sync-transport.js";
 import type {
   InitMessage,
   WorkerLifecycleEvent,
@@ -52,14 +53,27 @@ interface WorkerBridgeState {
   phase: BridgePhase;
   workerClientId: string | null;
   initPromise: Promise<string> | null;
+  expectsUpstreamServer: boolean;
+  upstreamServerConnected: boolean;
+  upstreamServerReady: Promise<void>;
+  resolveUpstreamServerReady: (() => void) | null;
   pendingSyncPayloadsForWorker: Uint8Array[];
   syncBatchFlushQueued: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
+  authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
+
+function createDeferredPromise(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
 
 /**
  * Bridge between main-thread runtime and dedicated worker.
@@ -75,15 +89,21 @@ export class WorkerBridge {
   private state: WorkerBridgeState;
 
   constructor(worker: Worker, runtime: Runtime) {
+    const upstreamReady = createDeferredPromise();
     this.worker = worker;
     this.runtime = runtime;
     this.state = {
       phase: "idle",
       workerClientId: null,
       initPromise: null,
+      expectsUpstreamServer: false,
+      upstreamServerConnected: false,
+      upstreamServerReady: upstreamReady.promise,
+      resolveUpstreamServerReady: upstreamReady.resolve,
       pendingSyncPayloadsForWorker: [],
       syncBatchFlushQueued: false,
       peerSyncListener: null,
+      authFailureListener: null,
       serverPayloadForwarder: null,
     };
 
@@ -94,6 +114,12 @@ export class WorkerBridge {
         for (const payload of msg.payload) {
           this.runtime.onSyncMessageReceived(payload);
         }
+      } else if (msg.type === "upstream-connected") {
+        this.markUpstreamServerConnected();
+      } else if (msg.type === "upstream-disconnected") {
+        this.markUpstreamServerDisconnected();
+      } else if (msg.type === "auth-failed") {
+        this.state.authFailureListener?.(msg.reason);
       } else if (msg.type === "peer-sync") {
         this.state.peerSyncListener?.({
           peerId: msg.peerId,
@@ -157,6 +183,13 @@ export class WorkerBridge {
       logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };
+
+    this.state.expectsUpstreamServer = Boolean(options.serverUrl);
+    if (!this.state.expectsUpstreamServer) {
+      this.markUpstreamServerConnected();
+    } else {
+      this.markUpstreamServerDisconnected();
+    }
 
     const responsePromise = waitForMessage<WorkerToMainMessage>(
       this.worker,
@@ -260,6 +293,13 @@ export class WorkerBridge {
     this.state.serverPayloadForwarder = forwarder;
   }
 
+  async waitForUpstreamServerConnection(): Promise<void> {
+    if (!this.state.expectsUpstreamServer) return;
+    if (this.state.serverPayloadForwarder) return;
+    if (this.state.upstreamServerConnected) return;
+    await this.state.upstreamServerReady;
+  }
+
   applyIncomingServerPayload(payload: Uint8Array): void {
     if (this.isDisposedLike()) return;
     this.runtime.onSyncMessageReceived(payload);
@@ -273,6 +313,10 @@ export class WorkerBridge {
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
+  }
+
+  onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
+    this.state.authFailureListener = listener;
   }
 
   openPeer(peerId: string): void {
@@ -330,6 +374,27 @@ export class WorkerBridge {
     };
     const transfer = collectPayloadTransferables(payloads);
     this.worker.postMessage(message, transfer);
+  }
+
+  private markUpstreamServerConnected(): void {
+    this.state.upstreamServerConnected = true;
+    const resolver = this.state.resolveUpstreamServerReady;
+    this.state.resolveUpstreamServerReady = null;
+    resolver?.();
+  }
+
+  private markUpstreamServerDisconnected(): void {
+    if (!this.state.expectsUpstreamServer) {
+      this.state.upstreamServerConnected = true;
+      return;
+    }
+    if (!this.state.upstreamServerConnected && this.state.resolveUpstreamServerReady) {
+      return;
+    }
+    const deferred = createDeferredPromise();
+    this.state.upstreamServerConnected = false;
+    this.state.upstreamServerReady = deferred.promise;
+    this.state.resolveUpstreamServerReady = deferred.resolve;
   }
 
   private isDisposedLike(): boolean {

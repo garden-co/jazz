@@ -2150,10 +2150,12 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
             b.iter(|| {
                 let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
                     .expect("open rocksdb for many-branches cold-load benchmark");
-                let mut manager = ObjectManager::new();
-                manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
+                black_box(
+                    storage
+                        .load_metadata(seeded.object_id)
+                        .expect("load metadata for many-branches cold-load benchmark")
+                        .expect("cold-load many-branches object"),
+                );
                 let scan = scan_branch_heads(
                     &storage,
                     seeded.object_id,
@@ -2196,10 +2198,12 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
             b.iter(|| {
                 let storage = SqliteStorage::open(&seeded.db_path)
                     .expect("open sqlite for many-branches cold-load benchmark");
-                let mut manager = ObjectManager::new();
-                manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
+                black_box(
+                    storage
+                        .load_metadata(seeded.object_id)
+                        .expect("load metadata for many-branches cold-load benchmark")
+                        .expect("cold-load many-branches object"),
+                );
                 let scan = scan_branch_heads(
                     &storage,
                     seeded.object_id,

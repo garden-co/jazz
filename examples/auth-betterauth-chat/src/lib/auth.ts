@@ -38,7 +38,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
           keyPairConfig: { alg: "ES256" },
         },
         jwt: {
-          expirationTime: "30d",
+          expirationTime: "10s",
           issuer,
           definePayload: ({ user }: { user: { name: string; role?: string | string[] } }) => ({
             claims: {

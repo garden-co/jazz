@@ -4,26 +4,14 @@
 
 Failed lens transforms fall back to original data and continue, silently propagating schema mismatches.
 
-## Where
-
-`crates/jazz-tools/src/query_manager/manager.rs`
-
-## Steps to reproduce
-
-N/A — requires a lens transform failure during row processing.
-
-## Expected
-
-Fail closed for that row/subscription and surface deterministic errors.
-
-## Actual
-
-Falls back to original (potentially mismatched) data silently.
-
 ## Priority
 
 medium
 
 ## Notes
 
-Direction: fail closed and surface deterministic errors.
+- Where: `crates/jazz-tools/src/query_manager/manager.rs`
+- This requires a lens transform failure during row processing.
+- Expected: fail closed for the affected row or subscription and surface deterministic errors.
+- Actual: processing falls back to the original, potentially mismatched data silently.
+- Direction: fail closed and surface deterministic errors.

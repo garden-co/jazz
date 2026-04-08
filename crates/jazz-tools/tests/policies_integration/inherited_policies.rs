@@ -173,19 +173,11 @@ fn inherited_non_null_policy_with_depth(
 // -- Value constructors --
 
 fn folder_input(title: &str, owners: &[&str], archived: bool) -> HashMap<String, Value> {
-    HashMap::from([
-        ("title".to_string(), Value::Text(title.to_string())),
-        (
-            "owners".to_string(),
-            Value::Array(
-                owners
-                    .iter()
-                    .map(|owner| Value::Text((*owner).to_string()))
-                    .collect(),
-            ),
-        ),
-        ("archived".to_string(), Value::Boolean(archived)),
-    ])
+    row_input!(
+        "title" => title,
+        "owners" => Value::Array(owners.iter().map(|owner| (*owner).into()).collect()),
+        "archived" => archived
+    )
 }
 
 fn folder_document_values(
@@ -195,10 +187,10 @@ fn folder_document_values(
     folder_id: Option<ObjectId>,
 ) -> Vec<Value> {
     vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-        Value::Boolean(archived),
-        folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+        owner_id.into(),
+        title.into(),
+        archived.into(),
+        folder_id.into(),
     ]
 }
 
@@ -208,15 +200,12 @@ fn folder_document_input(
     archived: bool,
     folder_id: Option<ObjectId>,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        ("archived".to_string(), Value::Boolean(archived)),
-        (
-            "folder_id".to_string(),
-            folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
-    ])
+    row_input!(
+        "owner_id" => owner_id,
+        "title" => title,
+        "archived" => archived,
+        "folder_id" => folder_id
+    )
 }
 
 fn multi_folder_document_values(
@@ -227,11 +216,11 @@ fn multi_folder_document_values(
     secondary_folder_id: Option<ObjectId>,
 ) -> Vec<Value> {
     vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-        Value::Boolean(archived),
-        primary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        secondary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+        owner_id.into(),
+        title.into(),
+        archived.into(),
+        primary_folder_id.into(),
+        secondary_folder_id.into(),
     ]
 }
 
@@ -242,33 +231,24 @@ fn multi_folder_document_input(
     primary_folder_id: Option<ObjectId>,
     secondary_folder_id: Option<ObjectId>,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        ("archived".to_string(), Value::Boolean(archived)),
-        (
-            "primary_folder_id".to_string(),
-            primary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
-        (
-            "secondary_folder_id".to_string(),
-            secondary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
-    ])
+    row_input!(
+        "owner_id" => owner_id,
+        "title" => title,
+        "archived" => archived,
+        "primary_folder_id" => primary_folder_id,
+        "secondary_folder_id" => secondary_folder_id
+    )
 }
 
 fn file_input(owner_id: &str, name: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("name".to_string(), Value::Text(name.to_string())),
-    ])
+    row_input!(
+        "owner_id" => owner_id,
+        "name" => name
+    )
 }
 
 fn file_values(owner_id: &str, name: &str) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(name.to_string()),
-    ]
+    vec![owner_id.into(), name.into()]
 }
 
 fn todo_scalar_ref_input(
@@ -276,14 +256,11 @@ fn todo_scalar_ref_input(
     title: &str,
     image: Option<ObjectId>,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        (
-            "image".to_string(),
-            image.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
-    ])
+    row_input!(
+        "owner_id" => owner_id,
+        "title" => title,
+        "image" => image
+    )
 }
 
 fn todo_array_ref_input(
@@ -291,14 +268,11 @@ fn todo_array_ref_input(
     title: &str,
     images: &[ObjectId],
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        (
-            "images".to_string(),
-            Value::Array(images.iter().copied().map(Value::Uuid).collect()),
-        ),
-    ])
+    row_input!(
+        "owner_id" => owner_id,
+        "title" => title,
+        "images" => Value::Array(images.iter().copied().map(Value::Uuid).collect())
+    )
 }
 
 fn file_row_count(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId) -> usize {
@@ -1643,10 +1617,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     update_row(
         &alice,
         doc_id,
-        vec![(
-            "title".to_string(),
-            Value::Text("Edited By Folder Owner".into()),
-        )],
+        vec![("title".to_string(), "Edited By Folder Owner".into())],
     )
     .await;
     let rows_after_alice = wait_for_rows(
@@ -1677,7 +1648,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     update_row(
         &bob,
         doc_id,
-        vec![("title".to_string(), Value::Text("Edited By Bob".into()))],
+        vec![("title".to_string(), "Edited By Bob".into())],
     )
     .await;
     let rows_after_bob = wait_for_query(
@@ -2007,10 +1978,10 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     let file_id = admin
         .create(
             "files",
-            HashMap::from([
-                ("title".to_string(), Value::Text("Spec.pdf".into())),
-                ("folder_id".to_string(), Value::Uuid(folder_id)),
-            ]),
+            row_input!(
+                "title" => "Spec.pdf",
+                "folder_id" => Value::Uuid(folder_id)
+            ),
         )
         .await
         .expect("create file")
@@ -2018,10 +1989,10 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     let part_id = admin
         .create(
             "file_parts",
-            HashMap::from([
-                ("title".to_string(), Value::Text("Page 1".into())),
-                ("file_id".to_string(), Value::Uuid(file_id)),
-            ]),
+            row_input!(
+                "title" => "Page 1",
+                "file_id" => Value::Uuid(file_id)
+            ),
         )
         .await
         .expect("create file part")
@@ -2036,7 +2007,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
             has_row(
                 &rows,
                 part_id,
-                &[Value::Text("Page 1".into()), Value::Uuid(file_id)],
+                &["Page 1".into(), Value::Uuid(file_id)],
             )
             .then_some(rows)
         },
@@ -2045,7 +2016,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     assert!(has_row(
         &alice_rows,
         part_id,
-        &[Value::Text("Page 1".into()), Value::Uuid(file_id)],
+        &["Page 1".into(), Value::Uuid(file_id)],
     ));
 
     let dave_rows = wait_for_query(
@@ -2128,10 +2099,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     update_row(
         &admin,
         folder_id,
-        vec![(
-            "owners".to_string(),
-            Value::Array(vec![Value::Text("alice".into())]),
-        )],
+        vec![("owners".to_string(), Value::Array(vec!["alice".into()]))],
     )
     .await;
 

@@ -18,7 +18,7 @@ export function ChatImage({ attachment }: ChatImageProps) {
     let objectUrl: string | null = null;
 
     async function loadImage() {
-      const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
+      const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "worker" });
       if (!isActive) return;
 
       objectUrl = URL.createObjectURL(blob);

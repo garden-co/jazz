@@ -6,8 +6,9 @@ What it demonstrates:
 
 - A local Express auth server that issues ES256 JWTs and exposes a JWKS endpoint
 - Passing a JWT token directly to `JazzProvider` to authenticate as a named user
+- Recreating `JazzProvider` on login and logout instead of mutating a live client across principal changes
 - Falling back to anonymous `localAuth` when no token is present
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts).
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
 
 Passwords are stored in plain text in memory for example simplicity only.
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.

@@ -119,6 +119,15 @@ impl RowVersionKey {
     }
 }
 
+/// Deferred query settlement waiting for stream sequencing prerequisites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingQuerySettled {
+    pub server_id: Option<ServerId>,
+    pub query_id: QueryId,
+    pub tier: DurabilityTier,
+    pub through_seq: u64,
+}
+
 // ============================================================================
 // Client Roles
 // ============================================================================
@@ -282,6 +291,7 @@ pub enum SyncPayload {
     /// themselves via `RowVersionStateChanged`.
     QuerySettled {
         query_id: QueryId,
+        tier: DurabilityTier,
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },

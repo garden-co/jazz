@@ -335,9 +335,11 @@ describe("TableDataGrid", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
 
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-    expect(screen.queryByDisplayValue("row-2")).toBeNull();
-    expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+      expect(screen.queryByDisplayValue("row-2")).toBeNull();
+      expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
+    });
   });
 
   it("queues inline cell edits on double click and saves them from the banner", async () => {

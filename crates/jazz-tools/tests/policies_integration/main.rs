@@ -1,5 +1,8 @@
 #![cfg(feature = "test")]
 
+#[macro_use]
+extern crate jazz_tools;
+
 #[path = "../support/mod.rs"]
 mod support;
 

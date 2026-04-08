@@ -318,6 +318,16 @@ const socialApp = {
   },
 };
 
+const creatorCondition = {
+  type: "Cmp",
+  column: "$createdBy",
+  op: "Eq",
+  value: {
+    type: "SessionRef",
+    path: ["user_id"],
+  },
+};
+
 describe("permissions DSL", () => {
   it("compiles read/insert/update/delete policies", () => {
     const compiled = definePermissions(app, ({ policy, allOf, allowedTo, session }) => [
@@ -416,6 +426,66 @@ describe("permissions DSL", () => {
         type: "SessionRef",
         path: ["userId"],
       },
+    });
+  });
+
+  it("exposes isCreator as creator-based condition sugar", () => {
+    const compiled = definePermissions(app, ({ policy, isCreator }) => [
+      policy.todos.allowRead.where(isCreator),
+      policy.todos.allowUpdate.where(isCreator),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
+  });
+
+  it("compiles managedByCreator() to creator-scoped CRUD rules", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      policy.todos.managedByCreator();
+    });
+
+    expect(compiled.todos!.select?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.insert?.with_check).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
+    expect(compiled.todos!.delete?.using).toEqual(creatorCondition);
+  });
+
+  it("composes isCreator inside anyOf()", () => {
+    const compiled = definePermissions(app, ({ policy, anyOf, isCreator }) => [
+      policy.todos.allowUpdate.where(anyOf([isCreator, { done: true }])),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Or",
+      exprs: [
+        creatorCondition,
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: true,
+          },
+        },
+      ],
+    });
+    expect(compiled.todos!.update?.with_check).toEqual({
+      type: "Or",
+      exprs: [
+        creatorCondition,
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: true,
+          },
+        },
+      ],
     });
   });
 
@@ -929,6 +999,69 @@ describe("permissions DSL", () => {
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
     ).toThrow(/where condition bound to current/i);
+  });
+
+  it("resolves allowedTo without Id suffix to the FK column", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where(allowedTo.read("project")),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Inherits",
+      operation: "Select",
+      via_column: "projectId",
+    });
+  });
+
+  it("resolves allowedTo without Id suffix for insert/update/delete", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowInsert.where(allowedTo.insert("project")),
+      policy.todos.allowDelete.where(allowedTo.delete("project")),
+      policy.todos.allowUpdate
+        .whereOld(allowedTo.update("project"))
+        .whereNew(allowedTo.update("project")),
+    ]);
+
+    expect(compiled.todos!.insert?.with_check).toEqual({
+      type: "Inherits",
+      operation: "Insert",
+      via_column: "projectId",
+    });
+    expect(compiled.todos!.delete?.using).toEqual({
+      type: "Inherits",
+      operation: "Delete",
+      via_column: "projectId",
+    });
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Inherits",
+      operation: "Update",
+      via_column: "projectId",
+    });
+  });
+
+  it("resolves readReferencing without Id suffix", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
+    ]);
+
+    expect(compiled.projects!.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+    });
+  });
+
+  it("still accepts the full FK column name with Id suffix", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where(allowedTo.read("projectId")),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Inherits",
+      operation: "Select",
+      via_column: "projectId",
+    });
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {

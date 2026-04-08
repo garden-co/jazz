@@ -15,9 +15,10 @@ import { app } from "../../../schema.js";
 interface ActionMenuProps {
   chatId: string;
   onAttachment?: (attachment: AttachmentData) => Promise<void>;
+  disabled?: boolean;
 }
 
-export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
+export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMenuProps) {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id;
@@ -44,7 +45,7 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
     <>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" size="icon-lg" className="rounded-full">
+          <Button variant="outline" size="icon-lg" className="rounded-full" disabled={disabled}>
             <PlusIcon />
           </Button>
         </DropdownMenuTrigger>

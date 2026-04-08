@@ -201,8 +201,8 @@ function criterionBenchmarkId(benchmark) {
   if (groupId === "realistic_phase1/reads_sustained_with_write_churn") {
     return "native-criterion:r2_reads_with_write_churn";
   }
-  if (groupId === "realistic_phase1/cold_load_fjall") {
-    return "native-criterion:r3_cold_load_fjall";
+  if (groupId === "realistic_phase1/cold_load_rocksdb") {
+    return "native-criterion:r3_cold_load_rocksdb";
   }
   if (groupId === "realistic_phase1/fanout_updates") {
     return "native-criterion:r4_fanout_updates";

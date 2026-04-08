@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   deriveLocalPrincipalId,
   deriveLocalPrincipalIdSync,
-  resolveClientSession,
   resolveClientSessionSync,
+  resolveClientSessionStateSync,
 } from "./client-session.js";
 
 function toBase64Url(value: string): string {
@@ -21,7 +21,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("client session resolution", () => {
-  it("prefers jazz_principal_id from JWT when present", async () => {
+  it("prefers jazz_principal_id from JWT when present", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       jazz_principal_id: "principal-123",
@@ -29,7 +29,7 @@ describe("client session resolution", () => {
       claims: { role: "editor" },
     });
 
-    const session = await resolveClientSession({
+    const session = resolveClientSessionSync({
       appId: "app-jwt-principal",
       jwtToken: jwt,
       localAuthMode: "demo",
@@ -47,13 +47,13 @@ describe("client session resolution", () => {
     });
   });
 
-  it("falls back to JWT sub when principal claim is absent", async () => {
+  it("falls back to JWT sub when principal claim is absent", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       claims: { team: "eng" },
     });
 
-    const session = await resolveClientSession({
+    const session = resolveClientSessionSync({
       appId: "app-jwt-sub",
       jwtToken: jwt,
     });
@@ -80,7 +80,7 @@ describe("client session resolution", () => {
     expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
     expect(deriveLocalPrincipalIdSync(appId, mode, token)).toBe(expected);
 
-    const session = await resolveClientSession({
+    const session = resolveClientSessionSync({
       appId,
       localAuthMode: mode,
       localAuthToken: token,
@@ -93,23 +93,41 @@ describe("client session resolution", () => {
       },
     });
     expect(
-      resolveClientSessionSync({
-        appId,
-        localAuthMode: mode,
-        localAuthToken: token,
-      }),
+      resolveClientSessionStateSync({ appId, localAuthMode: mode, localAuthToken: token }),
     ).toEqual({
-      user_id: expected,
-      claims: {
-        auth_mode: "local",
-        local_mode: mode,
+      transport: "local",
+      session: {
+        user_id: expected,
+        claims: {
+          auth_mode: "local",
+          local_mode: mode,
+        },
       },
     });
   });
 
-  it("returns null when no auth is configured", async () => {
-    const session = await resolveClientSession({ appId: "no-auth" });
-    expect(session).toBeNull();
+  it("falls back to local auth when jwt cannot be parsed", () => {
+    const state = resolveClientSessionStateSync({
+      appId: "fallback-app",
+      jwtToken: "not-a-jwt",
+      localAuthMode: "demo",
+      localAuthToken: "device-token",
+    });
+
+    expect(state.transport).toBe("local");
+    expect(state.session).toMatchObject({
+      claims: {
+        auth_mode: "local",
+        local_mode: "demo",
+      },
+    });
+  });
+
+  it("returns null when no auth is configured", () => {
     expect(resolveClientSessionSync({ appId: "no-auth" })).toBeNull();
+    expect(resolveClientSessionStateSync({ appId: "no-auth" })).toEqual({
+      transport: null,
+      session: null,
+    });
   });
 });

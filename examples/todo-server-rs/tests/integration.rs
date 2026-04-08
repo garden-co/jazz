@@ -2,7 +2,6 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -137,12 +136,11 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     })
 }
 
-fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
-    HashMap::from([
-        ("title".to_string(), Value::Text(title.into())),
-        ("done".to_string(), Value::Boolean(false)),
-        ("description".to_string(), Value::Text(description.into())),
-    ])
+fn todo_values(
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> std::collections::HashMap<String, Value> {
+    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 /// Broadcast current todos to all SSE connections.

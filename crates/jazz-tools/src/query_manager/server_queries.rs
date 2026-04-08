@@ -8,7 +8,9 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
+use crate::sync_manager::{
+    ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, QueryId, SyncPayload,
+};
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
@@ -900,7 +902,7 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
-        let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
+        let mut settled_notifications: Vec<(ClientId, QueryId, DurabilityTier)> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -952,7 +954,11 @@ impl QueryManager {
                 // Emit QuerySettled on first settlement
                 if !sub.settled_once {
                     sub.settled_once = true;
-                    settled_notifications.push((client_id, query_id));
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Worker);
+                    settled_notifications.push((client_id, query_id, settled_tier));
                 }
 
                 // Check if scope changed
@@ -998,8 +1004,9 @@ impl QueryManager {
         }
 
         // Emit QuerySettled notifications
-        for (client_id, query_id) in settled_notifications {
-            self.sync_manager.emit_query_settled(client_id, query_id);
+        for (client_id, query_id, tier) in settled_notifications {
+            self.sync_manager
+                .emit_query_settled(client_id, query_id, tier);
         }
     }
 

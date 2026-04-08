@@ -99,6 +99,14 @@ impl TestServer {
         Self::start_on_port(port).await
     }
 
+    /// Start a test server without JWT validation configured.
+    pub async fn start_without_jwks() -> Self {
+        let port = get_free_port();
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
+        Self::start_inner(port, data_dir, jwks_server, false, vec![]).await
+    }
+
     /// Start a test server with programmable JWKS responses.
     ///
     /// The JWKS server returns `responses[N]` for the Nth request,
@@ -107,7 +115,7 @@ impl TestServer {
         let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start_with_responses(responses).await;
-        Self::start_inner(port, data_dir, jwks_server, vec![]).await
+        Self::start_inner(port, data_dir, jwks_server, true, vec![]).await
     }
 
     /// Start a test server with programmable JWKS responses and custom cache timing.
@@ -128,6 +136,7 @@ impl TestServer {
             port,
             data_dir,
             jwks_server,
+            true,
             vec![
                 ("JAZZ_JWKS_CACHE_TTL_SECS", ttl_secs.to_string()),
                 ("JAZZ_JWKS_MAX_STALE_SECS", max_stale_secs.to_string()),
@@ -145,13 +154,14 @@ impl TestServer {
     pub async fn start_on_port(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
-        Self::start_inner(port, data_dir, jwks_server, vec![]).await
+        Self::start_inner(port, data_dir, jwks_server, true, vec![]).await
     }
 
     async fn start_inner(
         port: u16,
         data_dir: TempDir,
         jwks_server: JwksServer,
+        enable_jwks: bool,
         extra_env: Vec<(&str, String)>,
     ) -> Self {
         // Use a deterministic UUID app ID for testing
@@ -159,7 +169,8 @@ impl TestServer {
 
         let jazz_binary = Self::find_jazz_binary();
 
-        let process = Command::new(&jazz_binary)
+        let mut command = Command::new(&jazz_binary);
+        command
             .args([
                 "server",
                 app_id,
@@ -173,10 +184,15 @@ impl TestServer {
                 "backend-secret-for-integration-tests",
             )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
-            .env("JAZZ_JWKS_URL", &jwks_server.url)
             .envs(extra_env)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if enable_jwks {
+            command.env("JAZZ_JWKS_URL", &jwks_server.url);
+        }
+
+        let process = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to spawn jazz server at {:?}: {}", jazz_binary, e));
 

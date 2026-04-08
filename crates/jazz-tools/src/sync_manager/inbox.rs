@@ -248,11 +248,17 @@ impl SyncManager {
             }
             SyncPayload::QuerySettled {
                 query_id,
+                tier,
                 through_seq,
             } => {
                 tracing::debug!(?query_id, "server→QuerySettled");
                 // Queue for local QueryManager to process
-                self.pending_query_settled.push(query_id);
+                self.pending_query_settled.push(PendingQuerySettled {
+                    server_id: Some(server_id),
+                    query_id,
+                    tier,
+                    through_seq,
+                });
 
                 // Relay to interested clients
                 if let Some(clients) = self.query_origin.get(&query_id) {
@@ -261,6 +267,7 @@ impl SyncManager {
                             destination: Destination::Client(cid),
                             payload: SyncPayload::QuerySettled {
                                 query_id,
+                                tier,
                                 through_seq,
                             },
                         });
@@ -553,10 +560,16 @@ impl SyncManager {
             }
             SyncPayload::QuerySettled {
                 query_id,
-                through_seq: _,
+                tier,
+                through_seq,
             } => {
                 // Client relaying a QuerySettled from downstream
-                self.pending_query_settled.push(*query_id);
+                self.pending_query_settled.push(PendingQuerySettled {
+                    server_id: None,
+                    query_id: *query_id,
+                    tier: *tier,
+                    through_seq: *through_seq,
+                });
             }
             SyncPayload::SchemaWarning(warning) => {
                 tracing::warn!(

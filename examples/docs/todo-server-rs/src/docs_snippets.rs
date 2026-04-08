@@ -1,8 +1,6 @@
 //! Documentation snippet sources compiled with the example crate.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
@@ -10,18 +8,18 @@ use jazz_tools::{
     DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
 };
 use serde_json::json;
+use std::collections::HashMap;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
     // Replace with your auth provider's JWT verification logic.
     ("replace-with-verified-sub".to_string(), json!({}))
 }
 
-fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
-    HashMap::from([
-        ("title".to_string(), Value::Text(title.into())),
-        ("done".to_string(), Value::Boolean(false)),
-        ("description".to_string(), Value::Text(description.into())),
-    ])
+fn todo_values(
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> std::collections::HashMap<String, Value> {
+    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 // #region backend-request-session-rust
@@ -414,3 +412,176 @@ pub async fn clear_nullable_fields(
     Ok(())
 }
 // #endregion writing-nullable-update-rust
+
+const CHUNK_SIZE: usize = 64 * 1024;
+
+// #region files-create-from-bytes-rust
+pub async fn create_file_from_bytes(
+    client: &JazzClient,
+    data: &[u8],
+    name: Option<&str>,
+    mime_type: &str,
+) -> jazz_tools::Result<ObjectId> {
+    let mut part_ids = Vec::new();
+    let mut part_sizes = Vec::new();
+
+    for chunk in data.chunks(CHUNK_SIZE) {
+        let (part_id, _) = client
+            .create(
+                "file_parts",
+                HashMap::from([("data".to_string(), Value::Bytea(chunk.to_vec()))]),
+            )
+            .await?;
+        part_ids.push(Value::Uuid(part_id));
+        part_sizes.push(Value::Integer(chunk.len() as i32));
+    }
+
+    let mut file_values = HashMap::from([
+        ("mimeType".to_string(), Value::Text(mime_type.into())),
+        ("partIds".to_string(), Value::Array(part_ids)),
+        ("partSizes".to_string(), Value::Array(part_sizes)),
+    ]);
+    if let Some(name) = name {
+        file_values.insert("name".to_string(), Value::Text(name.into()));
+    }
+
+    let (file_id, _) = client.create("files", file_values).await?;
+    Ok(file_id)
+}
+// #endregion files-create-from-bytes-rust
+
+// #region files-create-upload-rust
+pub async fn create_upload_from_bytes(
+    client: &JazzClient,
+    data: &[u8],
+    owner_id: &str,
+) -> jazz_tools::Result<ObjectId> {
+    let file_id = create_file_from_bytes(client, data, Some("photo.jpg"), "image/jpeg").await?;
+
+    let (upload_id, _) = client
+        .create(
+            "uploads",
+            HashMap::from([
+                ("owner_id".to_string(), Value::Text(owner_id.into())),
+                ("label".to_string(), Value::Text("Profile photo".into())),
+                ("fileId".to_string(), Value::Uuid(file_id)),
+            ]),
+        )
+        .await?;
+
+    Ok(upload_id)
+}
+// #endregion files-create-upload-rust
+
+// #region files-load-rust
+pub async fn load_file_bytes(
+    client: &JazzClient,
+    upload_id: ObjectId,
+) -> jazz_tools::Result<Option<Vec<u8>>> {
+    let uploads = client
+        .query(
+            QueryBuilder::new("uploads")
+                .select(&["fileId"])
+                .filter_eq("_id", Value::Uuid(upload_id))
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await?;
+
+    let Some((_, row)) = uploads.first() else {
+        return Ok(None);
+    };
+    let Value::Uuid(file_id) = &row[0] else {
+        return Ok(None);
+    };
+
+    let files = client
+        .query(
+            QueryBuilder::new("files")
+                .select(&["partIds"])
+                .filter_eq("_id", Value::Uuid(*file_id))
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await?;
+
+    let Some((_, row)) = files.first() else {
+        return Ok(None);
+    };
+    let Value::Array(part_ids) = &row[0] else {
+        return Ok(None);
+    };
+
+    let mut data = Vec::new();
+    for part_ref in part_ids {
+        let Value::Uuid(part_id) = part_ref else {
+            continue;
+        };
+        let parts = client
+            .query(
+                QueryBuilder::new("file_parts")
+                    .select(&["data"])
+                    .filter_eq("_id", Value::Uuid(*part_id))
+                    .build(),
+                Some(DurabilityTier::EdgeServer),
+            )
+            .await?;
+        if let Some((_, row)) = parts.first()
+            && let Value::Bytea(chunk) = &row[0]
+        {
+            data.extend_from_slice(chunk);
+        }
+    }
+
+    Ok(Some(data))
+}
+// #endregion files-load-rust
+
+// #region files-delete-rust
+pub async fn delete_upload_with_file(
+    client: &JazzClient,
+    upload_id: ObjectId,
+) -> jazz_tools::Result<()> {
+    let uploads = client
+        .query(
+            QueryBuilder::new("uploads")
+                .select(&["fileId"])
+                .filter_eq("_id", Value::Uuid(upload_id))
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await?;
+
+    let Some((_, row)) = uploads.first() else {
+        return Ok(());
+    };
+    let Value::Uuid(file_id) = &row[0] else {
+        return Ok(());
+    };
+
+    let files = client
+        .query(
+            QueryBuilder::new("files")
+                .select(&["partIds"])
+                .filter_eq("_id", Value::Uuid(*file_id))
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await?;
+
+    if let Some((file_row_id, row)) = files.first() {
+        if let Value::Array(part_ids) = &row[0] {
+            // Delete chunks while the parent file row still exists.
+            for part_ref in part_ids {
+                if let Value::Uuid(part_id) = part_ref {
+                    client.delete(*part_id).await?;
+                }
+            }
+        }
+        client.delete(*file_row_id).await?;
+    }
+
+    client.delete(upload_id).await?;
+    Ok(())
+}
+// #endregion files-delete-rust

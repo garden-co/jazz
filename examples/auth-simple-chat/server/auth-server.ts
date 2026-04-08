@@ -51,6 +51,7 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
     return new SignJWT({ username, claims: { role } })
       .setProtectedHeader({ alg: JWA_ALGORITHM, kid })
       .setSubject(userId)
+      .setExpirationTime("10m")
       .setIssuer(issuer)
       .setIssuedAt()
       .sign(privateKey);
