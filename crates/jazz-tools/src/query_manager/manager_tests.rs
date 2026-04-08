@@ -20,6 +20,36 @@ use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
+#[derive(Debug, Clone)]
+struct IncomingRowVersion {
+    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: String,
+}
+
+impl IncomingRowVersion {
+    fn row_provenance(&self) -> RowProvenance {
+        RowProvenance::for_insert(self.author.clone(), self.timestamp)
+    }
+
+    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowVersion {
+        let metadata = row_provenance_metadata(&self.row_provenance(), None)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        StoredRowVersion::new(
+            object_id,
+            branch,
+            self.parents.iter().copied().collect::<Vec<_>>(),
+            self.content.clone(),
+            self.row_provenance(),
+            metadata,
+            state,
+            None,
+        )
+    }
+}
+
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
@@ -135,19 +165,12 @@ fn stored_row_commit(
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
-) -> crate::commit::Commit {
-    let author = author.into();
-    crate::commit::Commit {
+) -> IncomingRowVersion {
+    IncomingRowVersion {
         parents,
         content,
         timestamp,
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(author.clone(), timestamp),
-            None,
-        )),
-        author,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
+        author: author.into(),
     }
 }
 
@@ -195,15 +218,9 @@ fn receive_row_commit(
     _storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
-    commit: crate::commit::Commit,
+    commit: IncomingRowVersion,
 ) -> crate::commit::CommitId {
-    let row = StoredRowVersion::from_commit(
-        object_id,
-        branch,
-        commit.id(),
-        &commit,
-        RowState::VisibleDirect,
-    );
+    let row = commit.to_row(object_id, branch, RowState::VisibleDirect);
     let version_id = row.version_id();
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
@@ -1704,13 +1721,7 @@ fn synced_update_is_visible_in_query() {
         base_timestamp + 1,
         author.to_string(),
     );
-    let row = StoredRowVersion::from_commit(
-        row_id,
-        branch.clone(),
-        update_commit.id(),
-        &update_commit,
-        RowState::VisibleDirect,
-    );
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::RowVersionCreated {
@@ -2012,13 +2023,7 @@ fn synced_update_emits_subscription_delta() {
         base_timestamp + 1,
         author.to_string(),
     );
-    let row = StoredRowVersion::from_commit(
-        row_id,
-        branch.clone(),
-        update_commit.id(),
-        &update_commit,
-        RowState::VisibleDirect,
-    );
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::RowVersionCreated {
@@ -2421,13 +2426,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     .unwrap();
 
     let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
-    let row = StoredRowVersion::from_commit(
-        row_id,
-        branch.clone(),
-        commit.id(),
-        &commit,
-        RowState::VisibleDirect,
-    );
+    let row = commit.to_row(row_id, &branch, RowState::VisibleDirect);
 
     // Object metadata marking it as a "users" table row
     let mut obj_metadata = std::collections::HashMap::new();
@@ -2519,13 +2518,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
         base_timestamp + 1,
         row_id.to_string(),
     );
-    let row = StoredRowVersion::from_commit(
-        row_id,
-        branch.clone(),
-        update_commit.id(),
-        &update_commit,
-        RowState::VisibleDirect,
-    );
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
 
     // Push the update through SyncManager inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -2767,7 +2760,6 @@ fn delete_already_deleted_row_fails() {
 fn soft_delete_with_concurrent_tips_uses_lww() {
     // Test that soft deleting an object with two concurrent tips results
     // in a soft delete commit with content from the LWW winner (highest timestamp).
-    use crate::commit::{Commit, StoredState};
     use crate::object::BranchName;
     use crate::query_manager::encoding::encode_row;
 
@@ -2815,18 +2807,12 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         &[Value::Text("TipA".into()), Value::Integer(100)],
     )
     .unwrap();
-    let commit_a = Commit {
-        author: handle.row_id.to_string(),
-        parents: smallvec![parent],
-        content: content_a,
-        timestamp: base_timestamp + 1,
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(handle.row_id.to_string(), base_timestamp + 1),
-            None,
-        )),
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
+    let commit_a = stored_row_commit(
+        smallvec![parent],
+        content_a,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
 
     // Commit B: higher timestamp, content "TipB" - this should win
     let content_b = encode_row(
@@ -2834,18 +2820,12 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         &[Value::Text("TipB".into()), Value::Integer(200)],
     )
     .unwrap();
-    let commit_b = Commit {
-        author: handle.row_id.to_string(),
-        parents: smallvec![parent],
-        content: content_b.clone(),
-        timestamp: base_timestamp + 2,
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(handle.row_id.to_string(), base_timestamp + 2),
-            None,
-        )),
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
+    let commit_b = stored_row_commit(
+        smallvec![parent],
+        content_b.clone(),
+        base_timestamp + 2,
+        handle.row_id.to_string(),
+    );
 
     // Add both commits to create concurrent tips
     // We need to receive these as synced commits
@@ -8972,13 +8952,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         base_timestamp + 1,
         author.to_string(),
     );
-    let row = StoredRowVersion::from_commit(
-        handle.row_id,
-        branch_str.clone(),
-        commit.id(),
-        &commit,
-        RowState::VisibleDirect,
-    );
+    let row = commit.to_row(handle.row_id, &branch_str, RowState::VisibleDirect);
 
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(upstream_id),

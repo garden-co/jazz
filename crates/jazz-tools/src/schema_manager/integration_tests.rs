@@ -4,7 +4,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::commit::{Commit, CommitId, StoredState};
+    use crate::commit::CommitId;
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
@@ -28,19 +28,43 @@ mod tests {
         AppId::from_name("integration-test-app")
     }
 
-    fn stored_row_commit(content: Vec<u8>, timestamp: u64, author: impl Into<String>) -> Commit {
-        let author = author.into();
-        Commit {
-            parents: Default::default(),
+    #[derive(Debug, Clone)]
+    struct IncomingRowVersion {
+        content: Vec<u8>,
+        timestamp: u64,
+        author: String,
+    }
+
+    impl IncomingRowVersion {
+        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowVersion {
+            let metadata = row_provenance_metadata(
+                &RowProvenance::for_insert(self.author.clone(), self.timestamp),
+                None,
+            )
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+            StoredRowVersion::new(
+                object_id,
+                branch,
+                Vec::<CommitId>::new(),
+                self.content.clone(),
+                RowProvenance::for_insert(self.author.clone(), self.timestamp),
+                metadata,
+                RowState::VisibleDirect,
+                None,
+            )
+        }
+    }
+
+    fn stored_row_commit(
+        content: Vec<u8>,
+        timestamp: u64,
+        author: impl Into<String>,
+    ) -> IncomingRowVersion {
+        IncomingRowVersion {
             content,
             timestamp,
-            metadata: Some(row_provenance_metadata(
-                &RowProvenance::for_insert(author.clone(), timestamp),
-                None,
-            )),
-            author,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
+            author: author.into(),
         }
     }
 
@@ -378,14 +402,7 @@ mod tests {
             .receive_metadata(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
-        let version_id = commit.id();
-        let row = StoredRowVersion::from_commit(
-            object_id,
-            branch,
-            version_id,
-            &commit,
-            RowState::VisibleDirect,
-        );
+        let row = commit.to_row(object_id, branch);
         qm.sync_manager_mut().push_inbox(InboxEntry {
             source: Source::Server(ServerId::new()),
             payload: SyncPayload::RowVersionCreated {
@@ -707,9 +724,6 @@ mod tests {
             &[Value::Uuid(row_id), Value::Text("Alice".to_string())],
         )
         .unwrap();
-        let _original_commit =
-            stored_row_commit(original_content.clone(), 1_000, row_id.to_string());
-
         ingest_remote_row(
             writer.query_manager_mut(),
             &mut storage,
