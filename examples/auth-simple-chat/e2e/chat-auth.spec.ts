@@ -67,6 +67,16 @@ test.describe("auth-simple-chat", () => {
     await expect(messageItem(genericChat.list, memberGenericMessage)).toBeVisible({
       timeout: 20_000,
     });
+
+    await page.reload();
+    await expect(page.getByTestId("auth-status")).toContainText("member", { timeout: 20_000 });
+
+    await page.getByTestId("logout-button").click();
+    await expect(page.getByTestId("auth-status")).toContainText("Anonymous", { timeout: 20_000 });
+    await expect(messageItem(genericChat.list, memberGenericMessage)).toHaveCount(0, {
+      timeout: 20_000,
+    });
+    await expect(genericChat.readOnlyNotice).toBeVisible();
   });
 });
 

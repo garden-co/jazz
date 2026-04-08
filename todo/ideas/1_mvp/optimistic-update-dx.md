@@ -4,18 +4,9 @@
 
 Developer-facing API for mutation settlement state — show pending/confirmed/rejected status on rows and filter queries by settlement tier.
 
-## Why
-
-Settlement tracking internals exist (PersistenceAck) but there's no way for app developers to surface pending/rejected states in their UI or handle rollbacks explicitly.
-
-## Who
-
-App developers building UIs that need to show sync status or handle permission rejections gracefully.
-
-## Rough appetite
-
-medium
-
 ## Notes
 
-Already done: ReBAC policies, sync settlement tracking internals, scoped backend clients. What remains: exposing settlement state in the API, query filters for "only confirmed" / "include pending", rejection reason communication, and offline-duration handling patterns.
+- Settlement tracking internals already exist (`PersistenceAck`), but there is no developer-facing way to surface pending or rejected states in UI or handle rollbacks explicitly.
+- Main consumers are app developers building UIs that need sync status and permission-rejection handling.
+- Already done: ReBAC policies, sync settlement tracking internals, and scoped backend clients.
+- Remaining work: expose settlement state in the API, add query filters for confirmed vs pending data, communicate rejection reasons, and define offline-duration handling patterns.

@@ -25,10 +25,12 @@ import {
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
+import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import { createAuthStateStore, type AuthState } from "./auth-state.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -347,6 +349,7 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
   private wasmModule: WasmModule | null;
+  private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private bridgeReady: Promise<void> | null = null;
@@ -395,6 +398,37 @@ export class Db {
   protected constructor(config: DbConfig, wasmModule: WasmModule | null) {
     this.config = config;
     this.wasmModule = wasmModule;
+    this.authStateStore = createAuthStateStore(config);
+  }
+
+  protected markUnauthenticated(reason: AuthFailureReason): void {
+    this.authStateStore.markUnauthenticated(reason);
+  }
+
+  protected applyAuthUpdate(token: string | null): boolean {
+    const jwtToken = token ?? undefined;
+    const previousToken = this.config.jwtToken;
+    const previousState = this.authStateStore.getState();
+    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const tokenChanged = previousToken !== jwtToken;
+
+    if (!tokenChanged && nextState === previousState) {
+      return false;
+    }
+
+    this.config.jwtToken = jwtToken;
+
+    for (const client of this.clients.values()) {
+      client.updateAuthToken(jwtToken);
+    }
+
+    this.workerBridge?.updateAuth({
+      jwtToken,
+      localAuthMode: this.config.localAuthMode,
+      localAuthToken: this.config.localAuthToken,
+    });
+
+    return true;
   }
 
   /**
@@ -515,6 +549,9 @@ export class Db {
           // Worker-bridged runtimes exchange postcard payloads with peers;
           // direct browser/server routing keeps JSON payloads.
           useBinaryEncoding: this.worker !== null,
+          onAuthFailure: (reason) => {
+            this.markUnauthenticated(reason);
+          },
         },
       );
 
@@ -533,11 +570,22 @@ export class Db {
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
    */
-  private async ensureBridgeReady(): Promise<void> {
+  protected async ensureBridgeReady(): Promise<void> {
     await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
+  }
+
+  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl) {
+      return;
+    }
+    if (!options?.tier || options.tier === "worker") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -551,8 +599,15 @@ export class Db {
       this.handleWorkerPeerSync(batch);
     });
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
+    bridge.onAuthFailure((reason) => {
+      this.markUnauthenticated(reason);
+    });
     this.workerBridge = bridge;
-    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+    const bridgeReady = bridge
+      .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => undefined);
+    bridgeReady.catch(() => undefined);
+    this.bridgeReady = bridgeReady;
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -973,6 +1028,20 @@ export class Db {
     return worker;
   }
 
+  updateAuthToken(jwtToken: string | null): void {
+    this.applyAuthUpdate(jwtToken);
+  }
+
+  getAuthState(): AuthState {
+    return this.authStateStore.getState();
+  }
+
+  onAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.authStateStore.onChange((state) => {
+      listener(state);
+    });
+  }
+
   getConfig(): DbConfig {
     // Return a copy of the config to avoid editing the original config.
     return structuredClone(this.config);
@@ -1168,6 +1237,7 @@ export class Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
@@ -1441,6 +1511,14 @@ class ClientBackedDb extends Db {
     super(config, null);
   }
 
+  override updateAuthToken(jwtToken: string | null): void {
+    if (!this.applyAuthUpdate(jwtToken)) {
+      return;
+    }
+
+    this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
+  }
+
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -1519,6 +1597,7 @@ class ClientBackedDb extends Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,

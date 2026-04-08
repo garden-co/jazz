@@ -45,47 +45,27 @@ fn make_claim_compound_schema(table_name: &str, policies: TablePolicies) -> Tabl
 // -- Value constructors --
 
 fn title_document_values(title: &str) -> Vec<Value> {
-    vec![Value::Text(title.to_string())]
+    vec![title.into()]
 }
 
 fn title_document_input(title: &str) -> HashMap<String, Value> {
-    HashMap::from([("title".to_string(), Value::Text(title.to_string()))])
+    row_input!("title" => title.to_string())
 }
 
 fn group_document_values(group_slug: &str, title: &str) -> Vec<Value> {
-    vec![
-        Value::Text(group_slug.to_string()),
-        Value::Text(title.to_string()),
-    ]
+    vec![group_slug.into(), title.into()]
 }
 
 fn group_document_input(group_slug: &str, title: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        (
-            "group_slug".to_string(),
-            Value::Text(group_slug.to_string()),
-        ),
-        ("title".to_string(), Value::Text(title.to_string())),
-    ])
+    row_input!("group_slug" => group_slug.to_string(), "title" => title.to_string())
 }
 
 fn claim_compound_values(group_slug: &str, published: bool, title: &str) -> Vec<Value> {
-    vec![
-        Value::Text(group_slug.to_string()),
-        Value::Boolean(published),
-        Value::Text(title.to_string()),
-    ]
+    vec![group_slug.into(), published.into(), title.into()]
 }
 
 fn claim_compound_input(group_slug: &str, published: bool, title: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        (
-            "group_slug".to_string(),
-            Value::Text(group_slug.to_string()),
-        ),
-        ("published".to_string(), Value::Boolean(published)),
-        ("title".to_string(), Value::Text(title.to_string())),
-    ])
+    row_input!("group_slug" => group_slug.to_string(), "published" => published, "title" => title.to_string())
 }
 
 // -- Seed helpers --
@@ -214,10 +194,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
     admin
         .update(
             admin_doc,
-            vec![(
-                "title".to_string(),
-                Value::Text("admin updated".to_string()),
-            )],
+            vec![("title".to_string(), "admin updated".into())],
         )
         .await
         .expect("admin update");
@@ -392,10 +369,7 @@ async fn admin_role_claims_reject_member_mutations() {
     member
         .update(
             admin_doc,
-            vec![(
-                "title".to_string(),
-                Value::Text("member hacked".to_string()),
-            )],
+            vec![("title".to_string(), "member hacked".into())],
         )
         .await
         .expect("optimistic local member update");

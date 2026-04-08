@@ -8,7 +8,7 @@ mod tests {
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::manager::{LocalUpdates, QueryError};
+    use crate::query_manager::manager::LocalUpdates;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -4199,7 +4199,232 @@ mod tests {
         assert_eq!(total_added, 1, "Should deliver the accumulated row");
     }
 
-    /// Test 4: Data accumulates while waiting for tier. First delivery contains all rows.
+    /// Test 4: A subscribes with settled_tier=EdgeServer through B (Worker) to C (EdgeServer).
+    /// C's QuerySettled(EdgeServer) should relay through B back to A.
+    #[test]
+    fn query_settled_relays_edge_tier_through_worker() {
+        use crate::query_manager::manager::LocalUpdates;
+        use crate::sync_manager::{
+            ClientId, ClientRole, Destination, InboxEntry, QueryId, ServerId, Source, SyncPayload,
+        };
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        // A = end client, B = worker tier mid-tier, C = edge tier upstream.
+        let mut client_a = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_a = MemoryStorage::new();
+
+        let mut worker_b = SchemaManager::new(
+            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_b = MemoryStorage::new();
+
+        let mut edge_c = SchemaManager::new(
+            SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_c = MemoryStorage::new();
+
+        let a_id_on_b = ClientId::new();
+        let b_server_id_for_a = ServerId::new();
+        let b_id_on_c = ClientId::new();
+        let c_server_id_for_b = ServerId::new();
+
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_client(a_id_on_b);
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(a_id_on_b, ClientRole::Peer);
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(b_server_id_for_a);
+
+        edge_c
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_client(b_id_on_c);
+        edge_c
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(b_id_on_c, ClientRole::Peer);
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(c_server_id_for_b);
+
+        let row_id = ObjectId::new();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("edge".into())),
+        ]);
+        edge_c.insert(&mut io_c, "items", values).unwrap();
+        edge_c.process(&mut io_c);
+
+        // Ignore bootstrap traffic from initial connect.
+        let _ = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let _ = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let _ = edge_c.query_manager_mut().sync_manager_mut().take_outbox();
+
+        let query = QueryBuilder::new("items")
+            .branch(client_a.branch_name().to_string())
+            .build();
+        let sub_id = client_a
+            .query_manager_mut()
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::EdgeServer),
+                LocalUpdates::Deferred,
+            )
+            .unwrap();
+        client_a.process(&mut io_a);
+
+        let outbox_a = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        for entry in &outbox_a {
+            if matches!(entry.destination, Destination::Server(id) if id == b_server_id_for_a) {
+                worker_b
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Client(a_id_on_b),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        worker_b.process(&mut io_b);
+
+        let outbox_b = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        for entry in &outbox_b {
+            match entry.destination {
+                Destination::Client(cid) if cid == a_id_on_b => {
+                    client_a
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .push_inbox(InboxEntry {
+                            source: Source::Server(b_server_id_for_a),
+                            payload: entry.payload.clone(),
+                        });
+                }
+                Destination::Server(id) if id == c_server_id_for_b => {
+                    edge_c
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .push_inbox(InboxEntry {
+                            source: Source::Client(b_id_on_c),
+                            payload: entry.payload.clone(),
+                        });
+                }
+                _ => {}
+            }
+        }
+        client_a.process(&mut io_a);
+        edge_c.process(&mut io_c);
+
+        let outbox_c = edge_c.query_manager_mut().sync_manager_mut().take_outbox();
+        for entry in &outbox_c {
+            if matches!(entry.destination, Destination::Client(cid) if cid == b_id_on_c) {
+                worker_b
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Server(c_server_id_for_b),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        worker_b.process(&mut io_b);
+
+        let relayed_from_b = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let edge_settled = relayed_from_b.iter().find(|entry| {
+            matches!(
+                (&entry.destination, &entry.payload),
+                (
+                    Destination::Client(cid),
+                    SyncPayload::QuerySettled {
+                        query_id,
+                        tier: DurabilityTier::EdgeServer,
+                        ..
+                    }
+                ) if *cid == a_id_on_b && *query_id == QueryId(sub_id.0)
+            )
+        });
+        assert!(
+            edge_settled.is_some(),
+            "Worker tier should relay QuerySettled(EdgeServer) from upstream to client"
+        );
+
+        for entry in &relayed_from_b {
+            if matches!(entry.destination, Destination::Client(cid) if cid == a_id_on_b) {
+                client_a
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Server(b_server_id_for_a),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        client_a.process(&mut io_a);
+        client_a.process(&mut io_a);
+
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Client should deliver after relayed QuerySettled(EdgeServer)"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(
+            total_added, 1,
+            "Expected the upstream edge row to be delivered"
+        );
+    }
+
+    /// Test 5: Data accumulates while waiting for tier. First delivery contains all rows.
     #[test]
     fn query_settled_data_accumulates() {
         let schema = SchemaBuilder::new()

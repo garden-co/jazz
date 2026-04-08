@@ -17,7 +17,7 @@ export type JazzRnNormalizedError = Error & {
 
 export interface JazzRnRuntimeBinding {
   addClient(): string;
-  addServer(serverCatalogueStateHash?: string | null): void;
+  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
   delete_(objectId: string): void;
@@ -37,7 +37,7 @@ export interface JazzRnRuntimeBinding {
         }
       | undefined,
   ): void;
-  onSyncMessageReceived(messageJson: string): void;
+  onSyncMessageReceived(messageJson: string, seq?: number | null): void;
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
   onSyncMessageToSend(
     callback:
@@ -421,9 +421,9 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve();
   }
 
-  onSyncMessageReceived(message_json: string): void {
+  onSyncMessageReceived(message_json: string, seq?: number | null): void {
     if (this.closed) return;
-    this.binding.onSyncMessageReceived(message_json);
+    this.binding.onSyncMessageReceived(message_json, seq);
   }
 
   onSyncMessageToSend(callback: Function): void {
@@ -444,7 +444,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  addServer(_serverCatalogueStateHash?: string | null): void {
+  addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {
     if (this.closed) return;
     this.binding.addServer();
   }

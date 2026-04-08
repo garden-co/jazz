@@ -5,7 +5,6 @@ import type { DbConfig } from "../runtime/db.js";
 const mocks = vi.hoisted(() => {
   const resolveLocalAuthDefaults = vi.fn();
   const createDb = vi.fn();
-  const resolveClientSession = vi.fn();
   const createDbFromInspectedPage = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
   const orchestratorInstances: Array<{
@@ -22,6 +21,7 @@ const mocks = vi.hoisted(() => {
         throw initError;
       }
     });
+    readonly setSession = vi.fn();
     readonly shutdown = vi.fn(async () => undefined);
 
     constructor(
@@ -35,7 +35,6 @@ const mocks = vi.hoisted(() => {
   return {
     resolveLocalAuthDefaults,
     createDb,
-    resolveClientSession,
     createDbFromInspectedPage,
     trackPromise,
     orchestratorInstances,
@@ -46,7 +45,6 @@ const mocks = vi.hoisted(() => {
     reset() {
       resolveLocalAuthDefaults.mockReset();
       createDb.mockReset();
-      resolveClientSession.mockReset();
       createDbFromInspectedPage.mockReset();
       trackPromise.mockReset();
       orchestratorInstances.length = 0;
@@ -64,10 +62,6 @@ vi.mock("../runtime/db.js", () => ({
   createDb: mocks.createDb,
 }));
 
-vi.mock("../runtime/client-session.js", () => ({
-  resolveClientSession: mocks.resolveClientSession,
-}));
-
 vi.mock("../subscriptions-orchestrator.js", () => ({
   SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
   trackPromise: mocks.trackPromise,
@@ -79,8 +73,13 @@ vi.mock("../dev-tools/index.js", () => ({
 
 import { createJazzClient, createExtensionJazzClient } from "./create-jazz-client.js";
 
-function createMockDb(appId = "test-app") {
+function createMockDb(appId = "test-app", session: Session | null = null) {
   return {
+    getAuthState: vi.fn(() => ({
+      status: session ? "authenticated" : "unauthenticated",
+      session,
+    })),
+    onAuthChanged: vi.fn(() => () => {}),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => ({ appId })),
   };
@@ -103,18 +102,16 @@ describe("svelte/createJazzClient", () => {
       user_id: "local:alice",
       claims: { auth_mode: "local", local_mode: "anonymous" },
     };
-    const db = createMockDb();
+    const db = createMockDb("test-app", session);
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(resolvedConfig);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(session);
 
     const client = await createJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
     expect(mocks.resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
     expect(mocks.createDb).toHaveBeenCalledWith(resolvedConfig);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
@@ -140,7 +137,6 @@ describe("svelte/createJazzClient", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockRejectedValue(dbError);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await expect(createJazzClient(config)).rejects.toBe(dbError);
     expect(mocks.orchestratorInstances).toHaveLength(0);
@@ -153,7 +149,6 @@ describe("svelte/createJazzClient", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
     mocks.setInitError(initError);
 
     await expect(createJazzClient(config)).rejects.toBe(initError);
@@ -174,12 +169,10 @@ describe("svelte/createJazzClient", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(config);
   });
 });
 

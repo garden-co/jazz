@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 
 [dev-dependencies]
+jazz_tools = { package = "jazz-tools", path = "../../crates/jazz-tools", features = ["sqlite"] }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }

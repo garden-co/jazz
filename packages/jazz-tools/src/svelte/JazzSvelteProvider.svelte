@@ -16,27 +16,46 @@
 
 	$effect(() => {
 		let cancelled = false;
-		let resolved: JazzClient | null = null;
+		let resolvedClient: JazzClient | null = null;
+		let stopSessionSync: (() => void) | null = null;
+
+		error = null;
+		ctx.db = null;
+		ctx.session = null;
+		ctx.manager = null;
 
 		Promise.resolve(client)
-			.then((c) => {
+			.then((resolved) => {
 				if (cancelled) {
-					c.shutdown();
+					void resolved.shutdown();
 					return;
 				}
-				resolved = c;
-				ctx.db = c.db;
-				ctx.session = c.session;
-				ctx.manager = c.manager;
+
+				resolvedClient = resolved;
+				ctx.db = resolved.db;
+				ctx.session = resolved.session ?? null;
+				ctx.manager = resolved.manager;
+				stopSessionSync = resolved.db.onAuthChanged(({ session }) => {
+					if (cancelled) {
+						return;
+					}
+
+					ctx.session = session ?? null;
+				});
 			})
 			.catch((reason) => {
+				if (cancelled) {
+					return;
+				}
+
 				error = reason instanceof Error ? reason : new Error(String(reason));
 			});
 
 		return () => {
 			cancelled = true;
-			if (resolved) {
-				resolved.shutdown();
+			stopSessionSync?.();
+			if (resolvedClient) {
+				void resolvedClient.shutdown();
 			}
 		};
 	});

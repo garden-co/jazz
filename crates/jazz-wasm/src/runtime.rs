@@ -528,16 +528,37 @@ impl WasmRuntime {
     /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
     ///   or JSON-encoded SyncPayload (`string`)
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
+    pub fn on_sync_message_received(
+        &self,
+        payload: JsValue,
+        sequence: Option<f64>,
+    ) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload = self.parse_sync_payload(payload)?;
+        let mut payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
+        let server_id = (*self.upstream_server_id.borrow()).ok_or_else(|| {
+            JsError::new("No upstream server registered; call addServer() before sync delivery")
+        })?;
 
         let entry = InboxEntry {
-            source: Source::Server(ServerId::new()),
+            source: Source::Server(server_id),
             payload,
         };
 
-        self.core.borrow_mut().park_sync_message(entry);
+        let mut core = self.core.borrow_mut();
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
         Ok(())
     }
 
@@ -586,6 +607,23 @@ impl WasmRuntime {
                 "Invalid sync payload type: expected Uint8Array or JSON string",
             ))
         }
+    }
+
+    fn parse_optional_sequence(sequence: Option<f64>) -> Result<Option<u64>, JsError> {
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
+            return Err(JsError::new(
+                "Invalid stream sequence: expected a non-negative integer",
+            ));
+        }
+        if sequence > u64::MAX as f64 {
+            return Err(JsError::new(
+                "Invalid stream sequence: value exceeds u64 range",
+            ));
+        }
+        Ok(Some(sequence as u64))
     }
 
     /// Register a callback for outgoing sync messages.
@@ -1094,7 +1132,11 @@ impl WasmRuntime {
     /// catalogue sync messages (from queue_full_sync_to_server) are sent
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) {
+    pub fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> Result<(), JsError> {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
@@ -1114,7 +1156,11 @@ impl WasmRuntime {
             server_id,
             server_catalogue_state_hash.as_deref(),
         );
+        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
         core.batched_tick();
+        Ok(())
     }
 
     /// Remove the current upstream server connection.
