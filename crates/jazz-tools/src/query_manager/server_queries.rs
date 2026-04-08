@@ -654,13 +654,11 @@ impl QueryManager {
         }
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        let Ok(objects) = storage.scan_metadata() else {
+        let Ok(objects) = storage.scan_row_locators() else {
             return scope;
         };
-        for (object_id, metadata) in objects {
-            let Some(table_name) = metadata.get(MetadataKey::Table.as_str()) else {
-                continue;
-            };
+        for (object_id, row_locator) in objects {
+            let table_name = row_locator.table.as_str();
             if !policy_tables
                 .iter()
                 .any(|table| table.as_str() == table_name)

@@ -15,7 +15,7 @@ use super::key_codec::{
     increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
     strip_raw_table_key, visible_row_key, visible_row_prefix, visible_table_prefix,
 };
-use super::{RawTableRows, StorageError};
+use super::{RawTableKeys, RawTableRows, StorageError};
 
 fn storage_codec_error(action: &str, label: &str, err: impl std::fmt::Display) -> StorageError {
     StorageError::IoError(format!("{action} {label}: {err}"))
@@ -95,6 +95,18 @@ pub(super) fn raw_table_scan_prefix_core(
         .collect())
 }
 
+pub(super) fn raw_table_scan_prefix_keys_core(
+    table: &str,
+    prefix: &str,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Result<RawTableKeys, StorageError> {
+    let storage_prefix = raw_table_scan_prefix(table, prefix);
+    Ok(scan_prefix_keys(&storage_prefix)?
+        .into_iter()
+        .filter_map(|key| strip_raw_table_key(table, &key).map(str::to_string))
+        .collect())
+}
+
 pub(super) fn raw_table_scan_range_core(
     table: &str,
     start: Option<&str>,
@@ -115,6 +127,27 @@ pub(super) fn raw_table_scan_range_core(
         .filter_map(|(key, value)| {
             strip_raw_table_key(table, &key).map(|local_key| (local_key.to_string(), value))
         })
+        .collect())
+}
+
+pub(super) fn raw_table_scan_range_keys_core(
+    table: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    mut scan_range_keys: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,
+) -> Result<RawTableKeys, StorageError> {
+    let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+    let end_key = if let Some(end) = end {
+        raw_table_entry_key(table, end)
+    } else {
+        let mut table_end = raw_table_prefix(table);
+        increment_string(&mut table_end);
+        table_end
+    };
+
+    Ok(scan_range_keys(&start_key, &end_key)?
+        .into_iter()
+        .filter_map(|key| strip_raw_table_key(table, &key).map(str::to_string))
         .collect())
 }
 

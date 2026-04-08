@@ -1,13 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::commit::CommitId;
-use crate::metadata::{
-    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
-};
+use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{QueryRowVersion, RowState, StoredRowVersion};
 use crate::schema_manager::resolve_current_table_name;
-use crate::storage::Storage;
+use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
 
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
@@ -166,9 +164,12 @@ impl QueryManager {
     ) -> Result<StoredRowVersion, QueryError> {
         let row = update.row.clone();
         self.handle_row_update_with_origin(storage, update, true);
-        if let Ok(Some(metadata)) = storage.load_metadata(row_id) {
-            self.sync_manager
-                .forward_row_version_to_servers(row_id, metadata, row.clone());
+        if let Ok(Some(row_locator)) = storage.load_row_locator(row_id) {
+            self.sync_manager.forward_row_version_to_servers(
+                row_id,
+                metadata_from_row_locator(&row_locator),
+                row.clone(),
+            );
         }
         Ok(row)
     }
@@ -196,15 +197,11 @@ impl QueryManager {
         self.find_schema_by_short_hash(&composed.schema_hash)
     }
 
-    fn row_object_metadata_for_branch(&self, table: &str, branch: &str) -> HashMap<String, String> {
-        let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), table.to_string())]);
-        if let Some(origin_schema_hash) = self.origin_schema_hash_for_branch(branch) {
-            metadata.insert(
-                MetadataKey::OriginSchemaHash.to_string(),
-                origin_schema_hash.to_string(),
-            );
+    fn row_locator_for_branch(&self, table: &str, branch: &str) -> RowLocator {
+        RowLocator {
+            table: table.to_string().into(),
+            origin_schema_hash: self.origin_schema_hash_for_branch(branch),
         }
-        metadata
     }
 
     fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
@@ -599,13 +596,13 @@ impl QueryManager {
             }
         }
 
-        // Create object with table metadata
-        let metadata = self.row_object_metadata_for_branch(table, self.current_branch().as_str());
+        // Create row locator for the new row object
+        let row_locator = self.row_locator_for_branch(table, self.current_branch().as_str());
 
         let object_id =
             self.sync_manager
                 .object_manager
-                .create_with_id(storage, object_id, Some(metadata));
+                .create_row_with_id(storage, object_id, row_locator);
 
         // Add commit with row data
         let branch = self.current_branch();
@@ -748,13 +745,13 @@ impl QueryManager {
             }
         }
 
-        // Create object with table metadata
-        let metadata = self.row_object_metadata_for_branch(table, branch);
+        // Create row locator for the new row object
+        let row_locator = self.row_locator_for_branch(table, branch);
 
         let object_id =
             self.sync_manager
                 .object_manager
-                .create_with_id(storage, object_id, Some(metadata));
+                .create_row_with_id(storage, object_id, row_locator);
 
         // Add commit with row data to specified branch
         let row =

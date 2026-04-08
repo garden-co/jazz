@@ -5,9 +5,9 @@ use smolset::SmolSet;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::CommitId;
+#[cfg(test)]
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::SchemaHash;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
@@ -113,34 +113,30 @@ impl ObjectManager {
         id
     }
 
+    pub fn create_row_with_id<H: Storage>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+        row_locator: RowLocator,
+    ) -> ObjectId {
+        let _ = io.put_row_locator(id, Some(&row_locator));
+        #[cfg(test)]
+        self.metadata_by_id
+            .insert(id, crate::storage::metadata_from_row_locator(&row_locator));
+        id
+    }
+
+    #[cfg(test)]
     fn is_row_metadata(metadata: &HashMap<String, String>) -> bool {
         metadata.contains_key(MetadataKey::Table.as_str())
     }
 
-    fn table_from_metadata(metadata: &HashMap<String, String>) -> Result<String, Error> {
-        metadata
-            .get(MetadataKey::Table.as_str())
-            .cloned()
-            .ok_or(Error::StorageError(StorageError::IoError(
-                "row metadata missing table".to_string(),
-            )))
-    }
-
-    fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Result<RowLocator, Error> {
-        Ok(RowLocator {
-            table: Self::table_from_metadata(metadata)?.into(),
-            origin_schema_hash: metadata
-                .get(MetadataKey::OriginSchemaHash.as_str())
-                .and_then(|raw_hash| SchemaHash::from_hex(raw_hash)),
-        })
-    }
-
-    fn load_metadata_from_storage<H: Storage>(
+    fn load_row_locator_from_storage<H: Storage>(
         &self,
         io: &H,
         object_id: ObjectId,
-    ) -> Result<HashMap<String, String>, Error> {
-        io.load_metadata(object_id)
+    ) -> Result<RowLocator, Error> {
+        io.load_row_locator(object_id)
             .map_err(Error::StorageError)?
             .ok_or(Error::ObjectNotFound(object_id))
     }
@@ -471,15 +467,8 @@ impl ObjectManager {
         branch_name: BranchName,
         row: StoredRowVersion,
     ) -> Result<RowVersionApply, Error> {
-        let object_metadata = self.load_metadata_from_storage(io, object_id)?;
-        let row_locator = Self::row_locator_from_metadata(&object_metadata)?;
-
-        debug_assert!(
-            Self::is_row_metadata(&object_metadata),
-            "apply_row_version_internal should only be used for row-backed objects"
-        );
-
-        let table = Self::table_from_metadata(&object_metadata)?;
+        let row_locator = self.load_row_locator_from_storage(io, object_id)?;
+        let table = row_locator.table.to_string();
         let version_id = row.version_id();
         let previous_entry =
             self.load_previous_visible_entry(io, &table, object_id, &branch_name)?;
@@ -615,9 +604,8 @@ impl ObjectManager {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Option<VisibleRowUpdate> {
-        let metadata = self.load_metadata_from_storage(io, object_id).ok()?;
-        let table = Self::table_from_metadata(&metadata).ok()?;
-        let row_locator = Self::row_locator_from_metadata(&metadata).ok()?;
+        let row_locator = self.load_row_locator_from_storage(io, object_id).ok()?;
+        let table = row_locator.table.to_string();
         let previous_entry = self
             .load_previous_visible_entry(io, &table, object_id, branch_name)
             .ok()?;
@@ -688,7 +676,14 @@ impl ObjectManager {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.metadata_by_id.entry(id) {
             let metadata = match storage.load_metadata(id) {
                 Ok(Some(metadata)) => metadata,
-                Ok(None) => return None,
+                Ok(None) => match storage.load_row_locator(id) {
+                    Ok(Some(locator)) => crate::storage::metadata_from_row_locator(&locator),
+                    Ok(None) => return None,
+                    Err(error) => {
+                        tracing::warn!(%id, error = ?error, "get_or_load: storage error");
+                        return None;
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(%id, error = ?error, "get_or_load: storage error");
                     return None;

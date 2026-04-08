@@ -17,8 +17,9 @@ use super::{
         load_visible_query_row_for_tier_core, load_visible_region_entry_core,
         load_visible_region_frontier_core, load_visible_region_row_core,
         patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
-        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_core,
+        scan_history_row_versions_core, scan_visible_region_core,
         scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
@@ -197,6 +198,32 @@ impl SqliteStorage {
         Ok(out)
     }
 
+    fn scan_prefix_keys(
+        conn: &rusqlite::Connection,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let prefix_bytes = prefix.as_bytes();
+        let upper = Self::prefix_upper_bound(prefix_bytes)
+            .ok_or_else(|| StorageError::IoError("prefix upper bound overflow".to_string()))?;
+        let mut stmt = conn
+            .prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_prefix_keys: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![prefix_bytes, upper.as_slice()], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .map_err(|e| StorageError::IoError(format!("sqlite scan_prefix_keys: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let key_bytes = row
+                .map_err(|e| StorageError::IoError(format!("sqlite scan_prefix_keys row: {e}")))?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|e| StorageError::IoError(format!("sqlite key utf8: {e}")))?;
+            out.push(key);
+        }
+        Ok(out)
+    }
+
     fn scan_range(
         conn: &rusqlite::Connection,
         start: &str,
@@ -217,6 +244,30 @@ impl SqliteStorage {
             let key = String::from_utf8(key_bytes)
                 .map_err(|e| StorageError::IoError(format!("sqlite key utf8: {e}")))?;
             out.push((key, value));
+        }
+        Ok(out)
+    }
+
+    fn scan_range_keys(
+        conn: &rusqlite::Connection,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut stmt = conn
+            .prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_range_keys: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![start.as_bytes(), end.as_bytes()], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .map_err(|e| StorageError::IoError(format!("sqlite scan_range_keys: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let key_bytes =
+                row.map_err(|e| StorageError::IoError(format!("sqlite scan_range_keys row: {e}")))?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|e| StorageError::IoError(format!("sqlite key utf8: {e}")))?;
+            out.push(key);
         }
         Ok(out)
     }
@@ -281,6 +332,18 @@ impl Storage for SqliteStorage {
         })
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_keys(&inner.conn, storage_prefix)
+            })
+        })
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -290,6 +353,19 @@ impl Storage for SqliteStorage {
         self.with_inner(|inner| {
             raw_table_scan_range_core(table, start, end, |start_key, end_key| {
                 Self::scan_range(&inner.conn, start_key, end_key)
+            })
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_keys(&inner.conn, start_key, end_key)
             })
         })
     }
