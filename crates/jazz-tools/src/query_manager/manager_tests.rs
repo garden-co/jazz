@@ -19,6 +19,10 @@ use crate::query_manager::types::{
 use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
+use crate::test_row_history::{
+    apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
+    put_test_row_metadata,
+};
 
 #[derive(Debug, Clone)]
 struct IncomingRowVersion {
@@ -175,7 +179,7 @@ fn stored_row_commit(
 }
 
 fn add_row_commit(
-    qm: &mut QueryManager,
+    _qm: &mut QueryManager,
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
@@ -206,11 +210,21 @@ fn add_row_commit(
         None,
     );
     let version_id = row.version_id();
-    qm.sync_manager_mut()
-        .test_object_cache
-        .add_row_version(storage, object_id, branch, row)
-        .unwrap();
+    apply_test_row_version(storage, object_id, branch, row).unwrap();
     version_id
+}
+
+fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> HashMap<String, String> {
+    load_test_row_metadata(storage, row_id).expect("row metadata should be available")
+}
+
+fn test_row_tip_ids(
+    storage: &MemoryStorage,
+    row_id: ObjectId,
+    branch: impl AsRef<str>,
+) -> Vec<crate::commit::CommitId> {
+    load_test_row_tip_ids(storage, row_id, branch.as_ref())
+        .expect("row branch tips should be available")
 }
 
 fn receive_row_commit(
@@ -1365,9 +1379,7 @@ fn synced_update_updates_column_indices() {
     // Receive object with table metadata
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     // Encode the initial row data (name="Alice", score=100)
     let descriptor = RowDescriptor::new(vec![
@@ -1497,9 +1509,7 @@ fn synced_insert_materializes_visible_and_history_rows() {
 
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     let row_data = encode_row(
         &descriptor,
@@ -1568,9 +1578,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     let row_id = ObjectId::new();
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     let live_data = encode_row(
         &live_descriptor,
@@ -1621,9 +1629,7 @@ fn synced_insert_appears_in_subscription_delta() {
     // Receive object with table metadata
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     // Subscribe before the synced row arrives.
     let query = qm.query("users").build();
@@ -1793,9 +1799,7 @@ fn synced_row_visible_in_filtered_subscription() {
 
     let mut metadata_1 = HashMap::new();
     metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id_1, metadata_1);
+    put_test_row_metadata(&mut storage, row_id_1, metadata_1);
 
     let data_1 = encode_row(
         &descriptor,
@@ -1834,9 +1838,7 @@ fn synced_row_visible_in_filtered_subscription() {
 
     let mut metadata_2 = HashMap::new();
     metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id_2, metadata_2);
+    put_test_row_metadata(&mut storage, row_id_2, metadata_2);
 
     let data_2 = encode_row(
         &descriptor,
@@ -2589,15 +2591,10 @@ fn two_peer_sync_insert_reaches_subscription() {
         .unwrap();
     let row_id = handle.row_id;
 
-    // Get the actual row-version data from Peer A's test cache.
+    // Read the actual row metadata and visible version from storage.
     // This simulates "what would be sent over the wire"
     let branch_name = get_branch(&peer_a);
-    let metadata = peer_a
-        .sync_manager()
-        .test_object_cache
-        .get(row_id)
-        .expect("row metadata should be available")
-        .clone();
+    let metadata = test_row_metadata(&storage_a, row_id);
     let row = load_visible_row(&storage_a, row_id, &branch_name);
 
     // Send to Peer B via SyncManager inbox
@@ -2782,11 +2779,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     // Get the initial commit as the common parent
     let branch = get_branch(&qm);
     let branch_name = BranchName::new(&branch);
-    let initial_tips: Vec<_> = qm
-        .sync_manager_mut()
-        .test_object_cache
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
+    let initial_tips: Vec<_> = test_row_tip_ids(&storage, handle.row_id, &branch)
         .iter()
         .copied()
         .collect();
@@ -2837,11 +2830,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     qm.process(&mut storage);
 
     // Verify we now have concurrent tips
-    let tips: Vec<_> = qm
-        .sync_manager_mut()
-        .test_object_cache
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
+    let tips: Vec<_> = test_row_tip_ids(&storage, handle.row_id, &branch)
         .iter()
         .copied()
         .collect();
@@ -7138,10 +7127,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
 
     let mut user_metadata = HashMap::new();
     user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    let user_id = server_qm
-        .sync_manager_mut()
-        .test_object_cache
-        .create(&mut storage, Some(user_metadata));
+    let user_id = create_test_row(&mut storage, Some(user_metadata));
     add_row_commit(
         &mut server_qm,
         &mut storage,
@@ -7159,10 +7145,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
 
     let mut post_metadata = HashMap::new();
     post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
-    let post_id = server_qm
-        .sync_manager_mut()
-        .test_object_cache
-        .create(&mut storage, Some(post_metadata));
+    let post_id = create_test_row(&mut storage, Some(post_metadata));
     add_row_commit(
         &mut server_qm,
         &mut storage,
@@ -7444,9 +7427,7 @@ fn handle_object_update_respects_branch() {
 
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("name", ColumnType::Text),
@@ -7477,9 +7458,7 @@ fn handle_object_update_respects_branch() {
     let row_id2 = crate::object::ObjectId::new();
     let mut metadata2 = HashMap::new();
     metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .test_object_cache
-        .receive_metadata(&mut storage, row_id2, metadata2);
+    put_test_row_metadata(&mut storage, row_id2, metadata2);
 
     let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
     receive_row_commit(&mut qm, &mut storage, row_id2, &schema_branch, commit2);

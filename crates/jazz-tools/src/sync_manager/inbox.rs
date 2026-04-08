@@ -51,17 +51,6 @@ impl SyncManager {
                 let _ = storage.put_metadata(object_id, metadata.clone());
             }
         }
-
-        #[cfg(test)]
-        {
-            let cached = if !metadata.is_empty() {
-                metadata
-            } else {
-                existing_metadata.unwrap_or_default()
-            };
-            self.test_object_cache
-                .cache_metadata_for_tests(object_id, cached);
-        }
     }
 
     fn row_metadata_from_payload<H: Storage>(
@@ -101,17 +90,7 @@ impl SyncManager {
         let visibility_change =
             apply_row_version(storage, row.row_id, &branch_name, row.clone(), &[])
                 .ok()
-                .and_then(|applied| {
-                    #[cfg(test)]
-                    self.test_object_cache.refresh_row_branch_tips_for_tests(
-                        storage,
-                        applied.row_locator.table.as_str(),
-                        row.row_id,
-                        branch_name.clone(),
-                    );
-
-                    applied.visibility_change
-                });
+                .and_then(|applied| applied.visibility_change);
 
         Some(AppliedRowVersion {
             metadata,

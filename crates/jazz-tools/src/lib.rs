@@ -19,7 +19,7 @@ pub mod storage;
 pub mod sync_manager;
 pub mod sync_tracer;
 #[cfg(test)]
-mod test_object_cache;
+mod test_row_history;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]

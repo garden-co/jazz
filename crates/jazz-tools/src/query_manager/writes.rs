@@ -191,10 +191,6 @@ impl QueryManager {
         row_locator: &RowLocator,
     ) {
         let _ = storage.put_row_locator(row_id, Some(row_locator));
-        #[cfg(test)]
-        self.sync_manager
-            .test_object_cache
-            .cache_metadata_for_tests(row_id, metadata_from_row_locator(row_locator));
     }
 
     fn apply_local_row_history_write<H: Storage>(
@@ -208,11 +204,6 @@ impl QueryManager {
     ) -> Result<(CommitId, RowVisibilityChange), QueryError> {
         let applied = apply_row_version(storage, row_id, branch_name, row, index_mutations)
             .map_err(|_| QueryError::ObjectNotFound(row_id))?;
-
-        #[cfg(test)]
-        self.sync_manager
-            .test_object_cache
-            .refresh_row_branch_tips_for_tests(storage, _table, row_id, branch_name.clone());
 
         let version_id = applied.version_id;
         let visibility_change = applied.visibility_change.ok_or_else(|| {

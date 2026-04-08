@@ -3,6 +3,7 @@ use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::query::QueryBuilder;
 use crate::row_histories::{StoredRowVersion, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
+use crate::test_row_history::create_test_row_with_id;
 use std::collections::{HashMap, HashSet};
 
 fn row_metadata(table: &str) -> HashMap<String, String> {
@@ -29,13 +30,12 @@ fn visible_row(
 }
 
 fn seed_visible_row(
-    sm: &mut SyncManager,
+    _sm: &mut SyncManager,
     io: &mut MemoryStorage,
     table: &str,
     row: crate::row_histories::StoredRowVersion,
 ) {
-    sm.test_object_cache
-        .create_with_id(io, row.row_id, Some(row_metadata(table)));
+    create_test_row_with_id(io, row.row_id, Some(row_metadata(table)));
     io.append_history_region_rows(table, std::slice::from_ref(&row))
         .unwrap();
     io.upsert_visible_region_rows(
@@ -520,8 +520,7 @@ fn forward_update_to_servers_with_storage_replays_row_history_without_visible_re
 
     add_server(&mut sm, &io, server_id);
     sm.take_outbox();
-    sm.test_object_cache
-        .create_with_id(&mut io, row_id, Some(row_metadata("users")));
+    create_test_row_with_id(&mut io, row_id, Some(row_metadata("users")));
     io.append_history_region_rows("users", std::slice::from_ref(&row))
         .unwrap();
 

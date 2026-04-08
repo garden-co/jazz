@@ -7,8 +7,6 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
-#[cfg(test)]
-use crate::test_object_cache::TestObjectCache;
 
 // Module declarations
 pub mod forwarding;
@@ -34,8 +32,6 @@ pub use types::*;
 /// - Downstream clients (untrusted, receive query-filtered subsets)
 #[derive(Clone)]
 pub struct SyncManager {
-    #[cfg(test)]
-    pub(crate) test_object_cache: TestObjectCache,
     pub(super) clock: MonotonicClock,
     pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
@@ -74,11 +70,7 @@ pub struct SyncManager {
 
 impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("SyncManager");
-        #[cfg(test)]
-        debug.field("test_object_cache", &self.test_object_cache);
-
-        debug
+        f.debug_struct("SyncManager")
             .field("clock", &self.clock)
             .field("catalogue_entries", &self.catalogue_entries)
             .field(
@@ -122,8 +114,6 @@ impl Default for SyncManager {
 impl SyncManager {
     pub fn new() -> Self {
         Self {
-            #[cfg(test)]
-            test_object_cache: TestObjectCache::new(),
             clock: MonotonicClock::new(),
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,

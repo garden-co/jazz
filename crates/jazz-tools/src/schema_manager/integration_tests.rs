@@ -365,6 +365,7 @@ mod tests {
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
     use crate::query_manager::query::{Query, QueryBuilder};
+    use crate::test_row_history::put_test_row_metadata;
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
     fn execute_query(
         manager: &mut SchemaManager,
@@ -379,7 +380,7 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row version on a specific branch through the test cache sync path.
+    /// Ingest a remote row version on a specific branch through the storage-backed sync path.
     /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
@@ -397,9 +398,7 @@ mod tests {
             MetadataKey::OriginSchemaHash.to_string(),
             schema_hash.to_string(),
         );
-        qm.sync_manager_mut()
-            .test_object_cache
-            .receive_metadata(storage, object_id, metadata);
+        put_test_row_metadata(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
         let row = commit.to_row(object_id, branch);
