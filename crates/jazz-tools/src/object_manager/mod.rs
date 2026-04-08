@@ -48,6 +48,7 @@ struct RowVersionApply {
 /// Manages object metadata and row-history helpers.
 #[derive(Debug, Clone, Default)]
 pub struct ObjectManager {
+    #[cfg(test)]
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
@@ -91,6 +92,7 @@ impl ObjectManager {
         let metadata = metadata.unwrap_or_default();
         let id = ObjectId::new();
         let _ = io.put_metadata(id, metadata.clone());
+        #[cfg(test)]
         self.metadata_by_id.insert(id, metadata);
         id
     }
@@ -104,6 +106,7 @@ impl ObjectManager {
     ) -> ObjectId {
         let metadata = metadata.unwrap_or_default();
         let _ = io.put_metadata(id, metadata.clone());
+        #[cfg(test)]
         self.metadata_by_id.insert(id, metadata);
         id
     }
@@ -135,6 +138,15 @@ impl ObjectManager {
     fn cache_tips(&mut self, object_id: ObjectId, branch_name: BranchName, tips: &[CommitId]) {
         self.row_branch_tips
             .insert((object_id, branch_name), tips.iter().copied().collect());
+    }
+
+    #[cfg(test)]
+    pub fn cache_metadata_for_tests(
+        &mut self,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) {
+        self.metadata_by_id.insert(object_id, metadata);
     }
 
     fn load_previous_visible_entry<H: Storage>(
@@ -646,12 +658,14 @@ impl ObjectManager {
         })
     }
 
-    /// Get an object by id.
+    /// Get object metadata by id.
+    #[cfg(test)]
     pub fn get(&self, id: ObjectId) -> Option<&HashMap<String, String>> {
         self.metadata_by_id.get(&id)
     }
 
-    /// Get an object, loading from storage if not in memory (lazy cold-start load).
+    /// Get object metadata, loading from storage if not in memory.
+    #[cfg(test)]
     pub fn get_or_load(
         &mut self,
         id: ObjectId,
@@ -715,10 +729,12 @@ impl ObjectManager {
         metadata: HashMap<String, String>,
     ) {
         let _ = io.put_metadata(object_id, metadata.clone());
+        #[cfg(test)]
         self.metadata_by_id.entry(object_id).or_insert(metadata);
     }
 
     /// Calculate memory usage breakdown for profiling.
+    #[cfg(test)]
     pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
         let mut row_objects = 0usize;
         let mut index_objects = 0usize;
@@ -744,6 +760,7 @@ impl ObjectManager {
     }
 
     /// Estimate memory size of an object's metadata map.
+    #[cfg(test)]
     fn estimate_object_size(&self, metadata: &HashMap<String, String>) -> usize {
         let mut size = std::mem::size_of::<HashMap<String, String>>();
 

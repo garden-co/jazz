@@ -41,21 +41,20 @@ impl SyncManager {
         object_id: ObjectId,
         metadata: HashMap<String, String>,
     ) {
-        if self.object_manager.get(object_id).is_none() {
-            if storage.load_metadata(object_id).ok().flatten().is_none() {
-                let _ = storage.put_metadata(object_id, metadata.clone());
-            }
-
-            self.object_manager
-                .metadata_by_id
-                .insert(object_id, metadata);
-            return;
+        let existing_metadata = storage.load_metadata(object_id).ok().flatten();
+        if existing_metadata.is_none() {
+            let _ = storage.put_metadata(object_id, metadata.clone());
         }
 
-        if let Some(object_metadata) = self.object_manager.metadata_by_id.get_mut(&object_id)
-            && !metadata.is_empty()
+        #[cfg(test)]
         {
-            *object_metadata = metadata;
+            let cached = if !metadata.is_empty() {
+                metadata
+            } else {
+                existing_metadata.unwrap_or_default()
+            };
+            self.object_manager
+                .cache_metadata_for_tests(object_id, cached);
         }
     }
 
