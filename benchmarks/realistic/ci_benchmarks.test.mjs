@@ -68,9 +68,7 @@ test("native benchmark catalog targets storage-backed engine-specific Criterion 
 });
 
 test("native example command opts into the RocksDB storage backend", () => {
-  const benchmark = NATIVE_BENCHMARKS.find(
-    (entry) => entry.id === "native:rocksdb:w1_interactive",
-  );
+  const benchmark = NATIVE_BENCHMARKS.find((entry) => entry.id === "native:rocksdb:w1_interactive");
   assert.ok(benchmark, "expected the RocksDB W1 native example benchmark");
 
   const command = buildNativeExampleBaseCommand(benchmark, { profile: "s" });
@@ -88,9 +86,7 @@ test("native example command opts into the RocksDB storage backend", () => {
 });
 
 test("native example command opts into the SQLite storage backend", () => {
-  const benchmark = NATIVE_BENCHMARKS.find(
-    (entry) => entry.id === "native:sqlite:w1_interactive",
-  );
+  const benchmark = NATIVE_BENCHMARKS.find((entry) => entry.id === "native:sqlite:w1_interactive");
   assert.ok(benchmark, "expected the SQLite W1 native example benchmark");
 
   const command = buildNativeExampleBaseCommand(benchmark, { profile: "s" });
