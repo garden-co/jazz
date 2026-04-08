@@ -72,6 +72,8 @@ export interface RuntimeSyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
+  onConnected?(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
+  onDisconnected?(): void;
   onAuthFailure?(reason: AuthFailureReason): void;
 }
 
@@ -381,9 +383,14 @@ export function createRuntimeSyncStreamController(
     getAuth: options.getAuth,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
-    onConnected: (catalogueStateHash, nextSyncSeq) =>
-      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq),
-    onDisconnected: () => options.getRuntime()?.removeServer(),
+    onConnected: (catalogueStateHash, nextSyncSeq) => {
+      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq);
+      options.onConnected?.(catalogueStateHash, nextSyncSeq);
+    },
+    onDisconnected: () => {
+      options.getRuntime()?.removeServer();
+      options.onDisconnected?.();
+    },
     onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
     onAuthFailure: options.onAuthFailure,
   });
