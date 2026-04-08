@@ -405,29 +405,6 @@ impl QueryManager {
         new_warnings
     }
 
-    pub(super) fn log_schema_warning(
-        warning: &SchemaWarning,
-        subscription_id: Option<QuerySubscriptionId>,
-    ) {
-        fn short_hash(hash: &impl ToString) -> String {
-            hash.to_string().chars().take(12).collect()
-        }
-
-        tracing::warn!(
-            sub_id = subscription_id.map(|id| id.0),
-            query_id = warning.query_id.0,
-            table = warning.table_name,
-            row_count = warning.row_count,
-            from_hash = %warning.from_hash,
-            to_hash = %warning.to_hash,
-            "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools@alpha migrations create {} {}`",
-            warning.row_count,
-            warning.table_name,
-            short_hash(&warning.from_hash),
-            short_hash(&warning.to_hash),
-        );
-    }
-
     pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
 
@@ -1060,7 +1037,7 @@ impl QueryManager {
                 schema_warnings.warnings_for_query(QueryId(sub_id.0)),
             );
             for warning in &new_schema_warnings {
-                Self::log_schema_warning(warning, Some(sub_id));
+                crate::sync_manager::log_schema_warning(warning, None, Some(sub_id.0));
             }
             if !delta.added.is_empty() || !delta.removed.is_empty() {
                 tracing::debug!(
@@ -1228,14 +1205,14 @@ impl QueryManager {
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
     }
-    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
+    /// Resolve the LWW winner for a branch.
     /// When timestamps tie, CommitId provides a deterministic secondary ordering.
-    pub(super) fn load_row_from_object_on_branch(
+    fn newest_branch_commit(
         &self,
-        row_id: ObjectId,
+        object_id: ObjectId,
         branch_name: &str,
-    ) -> Option<(Vec<u8>, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
+    ) -> Option<(&crate::commit::Commit, CommitId)> {
+        let obj = self.sync_manager.object_manager.get(object_id)?;
         let branch = obj.branches.get(&BranchName::new(branch_name))?;
         // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
@@ -1247,7 +1224,17 @@ impl QueryManager {
         });
         let tip_id = tips.last()?;
         let commit = branch.commits.get(tip_id)?;
-        Some((commit.content.clone(), *tip_id))
+        Some((commit, *tip_id))
+    }
+
+    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
+    pub(super) fn load_row_from_object_on_branch(
+        &self,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<(Vec<u8>, CommitId)> {
+        self.newest_branch_commit(row_id, branch_name)
+            .map(|(commit, tip_id)| (commit.content.clone(), tip_id))
     }
 
     /// Load a row's data from ObjectManager using the default branch.
@@ -1261,6 +1248,16 @@ impl QueryManager {
     pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
+    }
+
+    /// Load the winning commit timestamp from a catalogue object's branch.
+    pub(crate) fn load_object_commit_timestamp_on_branch(
+        &self,
+        object_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<u64> {
+        self.newest_branch_commit(object_id, branch_name)
+            .map(|(commit, _)| commit.timestamp)
     }
 
     fn catalogue_manifest_append(

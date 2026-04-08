@@ -102,6 +102,31 @@ impl Default for SyncManager {
     }
 }
 
+fn short_hash(hash: &impl ToString) -> String {
+    hash.to_string().chars().take(12).collect()
+}
+
+pub(crate) fn log_schema_warning(
+    warning: &SchemaWarning,
+    origin: Option<&str>,
+    subscription_id: Option<u64>,
+) {
+    tracing::warn!(
+        origin = origin,
+        sub_id = subscription_id,
+        query_id = warning.query_id.0,
+        table = warning.table_name,
+        row_count = warning.row_count,
+        from_hash = %warning.from_hash,
+        to_hash = %warning.to_hash,
+        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility, run `npx jazz-tools@alpha schema export --schema-hash {}`. Then generate a migration with `npx jazz-tools@alpha migrations create --fromHash {} --toHash <targetHash>`.",
+        warning.row_count,
+        warning.table_name,
+        short_hash(&warning.from_hash),
+        short_hash(&warning.from_hash),
+    );
+}
+
 impl SyncManager {
     pub fn new() -> Self {
         Self::with_object_manager(ObjectManager::new())
