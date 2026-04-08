@@ -2207,10 +2207,11 @@ impl QueryGraph {
                     if let Some(GraphNode::RecursiveRelation(recursive_node)) =
                         self.get_node_mut(node_id)
                     {
-                        let delta =
-                            recursive_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id, None)
-                            });
+                        let delta = recursive_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut |id, hint| row_loader(id, hint),
+                        );
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2260,10 +2261,11 @@ impl QueryGraph {
                         .unwrap_or_default();
 
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
-                        let delta =
-                            magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id, None)
-                            });
+                        let delta = magic_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut |id, hint| row_loader(id, hint),
+                        );
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2303,9 +2305,11 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id, None)
-                            })
+                            policy_node.process_with_context(
+                                input_delta,
+                                storage,
+                                &mut |id, hint| row_loader(id, hint),
+                            )
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -2378,16 +2382,18 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id, None))
+                            subquery_node
+                                .reevaluate_all(storage, &mut |id, hint| row_loader(id, hint))
                         } else {
                             TupleDelta::new()
                         };
 
                         // Process outer input changes
-                        let outer_delta =
-                            subquery_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id, None)
-                            });
+                        let outer_delta = subquery_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut |id, hint| row_loader(id, hint),
+                        );
 
                         // Merge outer delta into combined delta
                         delta.merge(outer_delta);

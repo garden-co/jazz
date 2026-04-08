@@ -347,7 +347,7 @@ impl QueryManager {
         );
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId| {
+        let mut row_loader = |related_id: ObjectId, _table_hint: Option<String>| {
             self.load_row_for_authorization_context(
                 storage,
                 related_id,
@@ -1573,10 +1573,11 @@ impl QueryManager {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-            let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version_from_storage(
+            let mut row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
+                let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
                     storage,
                     id,
+                    table_hint.as_deref(),
                     &branches,
                     None,
                     &self.schema_context,

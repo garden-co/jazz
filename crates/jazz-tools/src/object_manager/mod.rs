@@ -8,14 +8,14 @@ use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
-use crate::storage::{Storage, StorageError};
+use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
 /// Visible row change emitted when a row object's winning version changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleRowUpdate {
     pub object_id: ObjectId,
-    pub metadata: HashMap<String, String>,
+    pub row_locator: RowLocator,
     pub row: StoredRowVersion,
     pub previous_row: Option<StoredRowVersion>,
     pub is_new_object: bool,
@@ -39,6 +39,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 struct RowVersionApply {
     version_id: CommitId,
+    row_locator: RowLocator,
     previous_visible: Option<StoredRowVersion>,
     current_visible: Option<StoredRowVersion>,
     is_new_object: bool,
@@ -122,6 +123,16 @@ impl ObjectManager {
             .ok_or(Error::StorageError(StorageError::IoError(
                 "row metadata missing table".to_string(),
             )))
+    }
+
+    fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Result<RowLocator, Error> {
+        Ok(RowLocator {
+            table: Self::table_from_metadata(metadata)?.into(),
+            origin_schema_hash: metadata
+                .get(MetadataKey::OriginSchemaHash.as_str())
+                .cloned()
+                .map(Into::into),
+        })
     }
 
     fn load_metadata_from_storage<H: Storage>(
@@ -461,6 +472,7 @@ impl ObjectManager {
         row: StoredRowVersion,
     ) -> Result<RowVersionApply, Error> {
         let object_metadata = self.load_metadata_from_storage(io, object_id)?;
+        let row_locator = Self::row_locator_from_metadata(&object_metadata)?;
 
         debug_assert!(
             Self::is_row_metadata(&object_metadata),
@@ -492,6 +504,7 @@ impl ObjectManager {
         {
             return Ok(RowVersionApply {
                 version_id,
+                row_locator,
                 current_visible: previous_visible.clone(),
                 previous_visible,
                 is_new_object: false,
@@ -523,6 +536,7 @@ impl ObjectManager {
 
         Ok(RowVersionApply {
             version_id,
+            row_locator,
             previous_visible: previous_visible.clone(),
             current_visible: current_visible.clone(),
             is_new_object: previous_visible.is_none(),
@@ -530,9 +544,8 @@ impl ObjectManager {
         })
     }
 
-    fn visible_update_from_applied<H: Storage>(
+    fn visible_update_from_applied(
         &self,
-        io: &H,
         object_id: ObjectId,
         applied: RowVersionApply,
     ) -> Result<Option<VisibleRowUpdate>, Error> {
@@ -540,14 +553,13 @@ impl ObjectManager {
             return Ok(None);
         }
 
-        let metadata = self.load_metadata_from_storage(io, object_id)?;
         let Some(current_visible) = applied.current_visible else {
             return Ok(None);
         };
 
         Ok(Some(VisibleRowUpdate {
             object_id,
-            metadata,
+            row_locator: applied.row_locator,
             row: current_visible,
             previous_row: applied.previous_visible,
             is_new_object: applied.is_new_object,
@@ -564,7 +576,7 @@ impl ObjectManager {
         let branch_name = branch_name.into();
         let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
         let version_id = applied.version_id;
-        let visible_update = self.visible_update_from_applied(io, object_id, applied)?;
+        let visible_update = self.visible_update_from_applied(object_id, applied)?;
         Ok(AddRowVersionResult {
             version_id,
             visible_update,
@@ -591,7 +603,7 @@ impl ObjectManager {
         row: StoredRowVersion,
     ) -> Result<Option<VisibleRowUpdate>, Error> {
         let applied = self.apply_row_version_internal(io, object_id, branch_name, row)?;
-        self.visible_update_from_applied(io, object_id, applied)
+        self.visible_update_from_applied(object_id, applied)
     }
 
     pub fn patch_row_version_state_with_storage<H: Storage>(
@@ -605,6 +617,7 @@ impl ObjectManager {
     ) -> Option<VisibleRowUpdate> {
         let metadata = self.load_metadata_from_storage(io, object_id).ok()?;
         let table = Self::table_from_metadata(&metadata).ok()?;
+        let row_locator = Self::row_locator_from_metadata(&metadata).ok()?;
         let previous_entry = self
             .load_previous_visible_entry(io, &table, object_id, branch_name)
             .ok()?;
@@ -651,7 +664,7 @@ impl ObjectManager {
 
         Some(VisibleRowUpdate {
             object_id,
-            metadata,
+            row_locator,
             row: current_visible,
             previous_row: previous_visible.clone(),
             is_new_object: previous_visible.is_none(),
