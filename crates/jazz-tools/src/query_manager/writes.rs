@@ -84,7 +84,7 @@ impl QueryManager {
         &self,
         row_id: ObjectId,
         branch_name: &str,
-        parents: Vec<CommitId>,
+        parents: impl IntoIterator<Item = CommitId>,
         data: Vec<u8>,
         provenance: &RowProvenance,
         delete_kind: Option<DeleteKind>,

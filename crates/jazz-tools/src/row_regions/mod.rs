@@ -11,7 +11,7 @@ use crate::commit::Commit;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
-use crate::query_manager::encoding::{EncodingError, decode_row, encode_row};
+use crate::query_manager::encoding::{EncodingError, decode_column, decode_row, encode_row};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
@@ -522,6 +522,16 @@ pub(crate) fn decode_visible_row_entry(data: &[u8]) -> Result<VisibleRowEntry, E
     })
 }
 
+pub(crate) fn decode_visible_row_frontier(data: &[u8]) -> Result<Vec<CommitId>, EncodingError> {
+    let value = decode_column(visible_row_entry_descriptor(), data, 1)?;
+    commit_ids_from_value(&value, "branch_frontier")
+}
+
+pub(crate) fn decode_visible_current_row(data: &[u8]) -> Result<StoredRowVersion, EncodingError> {
+    let value = decode_column(visible_row_entry_descriptor(), data, 0)?;
+    stored_row_version_from_value(&value)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
@@ -580,7 +590,7 @@ impl StoredRowVersion {
     pub fn new(
         row_id: ObjectId,
         branch: impl Into<String>,
-        parents: Vec<CommitId>,
+        parents: impl IntoIterator<Item = CommitId>,
         data: Vec<u8>,
         provenance: RowProvenance,
         metadata: HashMap<String, String>,
@@ -594,6 +604,7 @@ impl StoredRowVersion {
             });
         let metadata = RowMetadata::from_hash_map(metadata);
         let branch = SharedString::from(branch.into());
+        let parents = parents.into_iter().collect::<SmallVec<[CommitId; 2]>>();
         let version_id = compute_row_version_id(
             &branch,
             &parents,
@@ -607,7 +618,7 @@ impl StoredRowVersion {
             row_id,
             version_id,
             branch,
-            parents: SmallVec::from_vec(parents),
+            parents,
             updated_at: provenance.updated_at,
             created_by: provenance.created_by.into(),
             created_at: provenance.created_at,

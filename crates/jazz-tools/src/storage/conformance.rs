@@ -1,6 +1,7 @@
 //! Storage conformance test suite for the row-region/raw-table storage model.
 
 use std::collections::HashMap;
+
 use std::ops::Bound;
 
 use crate::catalogue::CatalogueEntry;
@@ -252,6 +253,7 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let row_id = ObjectId::new();
     let version = make_row_version(row_id, "main", 10, b"alice");
+    let version_id = version.version_id();
 
     storage
         .append_history_region_rows("users", std::slice::from_ref(&version))
@@ -281,6 +283,12 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
             .scan_history_region("users", "main", HistoryScan::Row { row_id })
             .unwrap(),
         vec![version]
+    );
+    assert_eq!(
+        storage
+            .load_visible_region_frontier("users", "main", row_id)
+            .unwrap(),
+        Some(vec![version_id])
     );
 }
 

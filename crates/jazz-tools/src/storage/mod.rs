@@ -392,6 +392,17 @@ pub trait Storage {
         Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
     }
 
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+        Ok(self
+            .load_visible_region_entry(table, branch, row_id)?
+            .map(|entry| entry.branch_frontier))
+    }
+
     fn load_history_row_version(
         &self,
         table: &str,
@@ -423,8 +434,8 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Vec<CommitId>, StorageError> {
-        if let Some(entry) = self.load_visible_region_entry(table, branch, row_id)? {
-            return Ok(entry.branch_frontier);
+        if let Some(frontier) = self.load_visible_region_frontier(table, branch, row_id)? {
+            return Ok(frontier);
         }
 
         let branch_rows = self
@@ -440,11 +451,11 @@ pub trait Storage {
             }
         }
 
-        let mut tips = branch_rows
+        let mut tips: Vec<_> = branch_rows
             .into_iter()
             .map(|row| row.version_id())
             .filter(|version_id| !non_tips.contains(version_id))
-            .collect::<Vec<_>>();
+            .collect();
         tips.sort();
         tips.dedup();
         Ok(tips)
@@ -1163,6 +1174,20 @@ impl Storage for MemoryStorage {
             .row_regions
             .get(table)
             .and_then(|regions| regions.visible.get(&(branch.to_string(), row_id)).cloned()))
+    }
+
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+        Ok(self.row_regions.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(&(branch.to_string(), row_id))
+                .map(|entry| entry.branch_frontier.clone())
+        }))
     }
 
     fn load_visible_region_row_for_tier(
