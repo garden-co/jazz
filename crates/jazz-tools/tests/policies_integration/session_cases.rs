@@ -104,10 +104,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
 // -- Value constructors --
 
 fn document_input(owner_id: &str, title: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-    ])
+    row_input!("owner_id" => owner_id, "title" => title)
 }
 
 fn boolean_policy_document_input(
@@ -115,26 +112,16 @@ fn boolean_policy_document_input(
     title: &str,
     archived: bool,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        ("archived".to_string(), Value::Boolean(archived)),
-    ])
+    row_input!("owner_id" => owner_id, "title" => title, "archived" => archived)
 }
 
 fn team_document_input(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        ("team_id".to_string(), Value::Uuid(team_id)),
-        ("title".to_string(), Value::Text(title.to_string())),
-    ])
+    row_input!("team_id" => Value::Uuid(team_id), "title" => title)
 }
 
 /// Returns row values for the 2-column `documents` table used in write policy tests.
 fn document_values(owner_id: &str, title: &str) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-    ]
+    vec![owner_id.into(), title.into()]
 }
 
 fn document_row_values(owner_id: &str, title: &str) -> Vec<Value> {
@@ -142,15 +129,11 @@ fn document_row_values(owner_id: &str, title: &str) -> Vec<Value> {
 }
 
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-        Value::Boolean(archived),
-    ]
+    vec![owner_id.into(), title.into(), archived.into()]
 }
 
 fn team_document_values(team_id: ObjectId, title: &str) -> Vec<Value> {
-    vec![Value::Uuid(team_id), Value::Text(title.to_string())]
+    vec![Value::Uuid(team_id), title.into()]
 }
 
 fn team_document_row_values(team_id: ObjectId, title: &str) -> Vec<Value> {
@@ -186,10 +169,7 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create(
-            "orgs",
-            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
-        )
+        .create("orgs", row_input!("name" => name))
         .await
         .expect("create org")
         .0
@@ -199,10 +179,7 @@ async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> Objec
     client
         .create(
             "teams",
-            HashMap::from([
-                ("name".to_string(), Value::Text(name.to_string())),
-                ("org_id".to_string(), Value::Uuid(org_id)),
-            ]),
+            row_input!("name" => name, "org_id" => Value::Uuid(org_id)),
         )
         .await
         .expect("create team")
@@ -217,10 +194,7 @@ async fn create_team_membership(
     client
         .create(
             "team_memberships",
-            HashMap::from([
-                ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-                ("team_id".to_string(), Value::Uuid(team_id)),
-            ]),
+            row_input!("owner_id" => owner_id, "team_id" => Value::Uuid(team_id)),
         )
         .await
         .expect("create team membership")
@@ -237,10 +211,7 @@ async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &st
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(
-            document_id,
-            vec![("title".to_string(), Value::Text(title.to_string()))],
-        )
+        .update(document_id, vec![("title".to_string(), title.into())])
         .await
         .expect("update document title");
 }
@@ -620,8 +591,8 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
         .update(
             alice_doc,
             vec![
-                ("owner_id".to_string(), Value::Text("bob".to_string())),
-                ("title".to_string(), Value::Text("transferred".to_string())),
+                ("owner_id".to_string(), "bob".into()),
+                ("title".to_string(), "transferred".into()),
             ],
         )
         .await
@@ -711,7 +682,7 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
 #[tokio::test]
 async fn ownership_transfer_allowed_only_for_unarchived_documents() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
-    let unarchived_policy = PolicyExpr::eq_literal("archived", Value::Boolean(false));
+    let unarchived_policy = PolicyExpr::eq_literal("archived", false.into());
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
@@ -767,11 +738,8 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
         .update(
             active_id,
             vec![
-                ("owner_id".to_string(), Value::Text("bob".to_string())),
-                (
-                    "title".to_string(),
-                    Value::Text("active transferred".to_string()),
-                ),
+                ("owner_id".to_string(), "bob".into()),
+                ("title".to_string(), "active transferred".into()),
             ],
         )
         .await
@@ -825,12 +793,9 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
         .update(
             transferable_id,
             vec![
-                ("owner_id".to_string(), Value::Text("bob".to_string())),
-                (
-                    "title".to_string(),
-                    Value::Text("transfer while archiving".to_string()),
-                ),
-                ("archived".to_string(), Value::Boolean(true)),
+                ("owner_id".to_string(), "bob".into()),
+                ("title".to_string(), "transfer while archiving".into()),
+                ("archived".to_string(), true.into()),
             ],
         )
         .await
@@ -860,11 +825,8 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
         .update(
             archived_id,
             vec![
-                ("owner_id".to_string(), Value::Text("bob".to_string())),
-                (
-                    "title".to_string(),
-                    Value::Text("archived transferred".to_string()),
-                ),
+                ("owner_id".to_string(), "bob".into()),
+                ("title".to_string(), "archived transferred".into()),
             ],
         )
         .await
@@ -983,13 +945,13 @@ async fn select_policy_excludes_rows_from_join_results() {
         |rows| (rows.len() == 1 && rows[0].0 == alice_org).then_some(rows),
     )
     .await;
-    assert_eq!(alice_rows[0].1, vec![Value::Text("Alice Org".to_string())]);
+    assert_eq!(alice_rows[0].1, vec![Value::from("Alice Org")]);
 
     let bob_rows = wait_for_rows(&bob, query, "bob visible orgs via membership", |rows| {
         (rows.len() == 1 && rows[0].0 == bob_org).then_some(rows)
     })
     .await;
-    assert_eq!(bob_rows[0].1, vec![Value::Text("Bob Org".to_string())]);
+    assert_eq!(bob_rows[0].1, vec![Value::from("Bob Org")]);
     assert!(
         bob_rows.iter().all(|(id, _)| *id != alice_org),
         "bob should not see org rows reachable only via alice's hidden membership"
@@ -1265,12 +1227,9 @@ async fn update_policies_block_unauthorized_server_mutations() {
     })
     .await;
 
-    bob.update(
-        doc_id,
-        vec![("title".to_string(), Value::Text("hacked".to_string()))],
-    )
-    .await
-    .expect("optimistic local update");
+    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
+        .await
+        .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted update has been accepted or rejected.
@@ -1472,12 +1431,9 @@ async fn update_policy_read_clause_differs_from_write_clause() {
 
     // Bob's update is applied optimistically on his local client but the
     // with_check policy fails on the server: owner_id="alice" ≠ bob's user_id.
-    bob.update(
-        doc_id,
-        vec![("title".to_string(), Value::Text("hacked".to_string()))],
-    )
-    .await
-    .expect("optimistic local update");
+    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
+        .await
+        .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier.
     let rows_after = observer
@@ -1749,10 +1705,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
 
     // Transfer ownership (allowed — USING checks current owner_id = "alice").
     alice
-        .update(
-            doc_id,
-            vec![("owner_id".to_string(), Value::Text("bob".to_string()))],
-        )
+        .update(doc_id, vec![("owner_id".to_string(), "bob".into())])
         .await
         .expect("optimistic local update: transfer ownership");
 
@@ -1767,10 +1720,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
     // order, ownership has already moved to bob.
     for i in 0..500 {
         alice
-            .update(
-                doc_id,
-                vec![("title".to_string(), Value::Text("nope".to_string()))],
-            )
+            .update(doc_id, vec![("title".to_string(), "nope".into())])
             .await
             .expect(&format!(
                 "optimistic local update: title change after lockout {}",
@@ -1871,18 +1821,12 @@ async fn originating_client_receives_rollback_for_rejected_mutation() {
     .await;
 
     alice
-        .update(
-            doc_id,
-            vec![("owner_id".to_string(), Value::Text("bob".to_string()))],
-        )
+        .update(doc_id, vec![("owner_id".to_string(), "bob".into())])
         .await
         .expect("optimistic local update: transfer ownership");
 
     alice
-        .update(
-            doc_id,
-            vec![("title".to_string(), Value::Text("nope".to_string()))],
-        )
+        .update(doc_id, vec![("title".to_string(), "nope".into())])
         .await
         .expect("optimistic local update: title change after lockout");
 

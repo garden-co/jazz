@@ -32,7 +32,7 @@ fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)
 }
 
 fn title_document_values(title: &str) -> Vec<Value> {
-    vec![Value::Text(title.to_string())]
+    vec![title.into()]
 }
 
 fn complex_document_values(
@@ -42,9 +42,9 @@ fn complex_document_values(
     folder_id: Option<ObjectId>,
 ) -> Vec<Value> {
     vec![
-        Value::Text(team_slug.to_string()),
-        Value::Boolean(published),
-        Value::Text(title.to_string()),
+        team_slug.into(),
+        published.into(),
+        title.into(),
         folder_id.into(),
     ]
 }
@@ -175,7 +175,7 @@ fn hop_membership_select_policy() -> PolicyExpr {
 
 fn mixed_complex_select_policy() -> PolicyExpr {
     PolicyExpr::and(vec![
-        PolicyExpr::eq_literal("published", Value::Boolean(true)),
+        PolicyExpr::eq_literal("published", true.into()),
         PolicyExpr::in_session("team_slug", vec!["claims".into(), "team_slugs".into()]),
         PolicyExpr::Exists {
             table: "document_flags".into(),
@@ -185,7 +185,7 @@ fn mixed_complex_select_policy() -> PolicyExpr {
                     op: CmpOp::Eq,
                     value: outer_row_id_ref(),
                 },
-                PolicyExpr::eq_literal("flag", Value::Text("allow".to_string())),
+                PolicyExpr::eq_literal("flag", "allow".into()),
             ])),
         },
         PolicyExpr::and(vec![
@@ -406,10 +406,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     assert_eq!(bob_rows.len(), 1);
 
     admin
-        .update(
-            share_id,
-            row_changes([("user_id", Value::Text("dave".to_string()))]),
-        )
+        .update(share_id, row_changes([("user_id", "dave".into())]))
         .await
         .expect("update document share user");
     wait_for_subscription_update(
@@ -789,12 +786,9 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     )
     .await;
 
-    bob.update(
-        doc_id,
-        row_changes([("title", Value::Text("Hacked".to_string()))]),
-    )
-    .await
-    .expect("optimistic local exists update");
+    bob.update(doc_id, row_changes([("title", "Hacked".into())]))
+        .await
+        .expect("optimistic local exists update");
 
     let rows_after_update = observer
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
