@@ -341,7 +341,9 @@ impl ArraySubqueryNode {
                     continue;
                 };
                 materialized.append(&mut nested);
-                provenance.extend(nested_provenance);
+                for scoped_object in nested_provenance {
+                    provenance.insert(scoped_object);
+                }
             }
             return (Value::Array(materialized), provenance);
         }
@@ -374,7 +376,9 @@ impl ArraySubqueryNode {
             .filter_map(|(row, row_provenance)| {
                 let output_desc = self.subgraph_template.output_descriptor();
                 let values = decode_row(output_desc, &row.data).ok()?;
-                provenance.extend(row_provenance.iter().copied());
+                for scoped_object in row_provenance.iter().copied() {
+                    provenance.insert(scoped_object);
+                }
                 Some(Value::Row {
                     id: Some(row.id),
                     values,
@@ -413,7 +417,9 @@ impl ArraySubqueryNode {
         let output_content = encode_row(&self.output_descriptor, &values).ok()?;
 
         let mut provenance = outer_tuple.provenance().clone();
-        provenance.extend(inner_provenance.iter().copied());
+        for scoped_object in inner_provenance.iter().copied() {
+            provenance.insert(scoped_object);
+        }
 
         Some(Tuple::new_with_provenance(
             vec![TupleElement::Row {

@@ -175,7 +175,9 @@ impl RecursiveRelationNode {
                 let provenance = tuple.provenance().clone();
                 let entry = seen_contents.entry(content.clone()).or_default();
                 let previous_len = entry.len();
-                entry.extend(provenance.iter().copied());
+                for scoped_object in provenance.iter().copied() {
+                    entry.insert(scoped_object);
+                }
                 if previous_len == 0 || entry.len() > previous_len {
                     frontier_contents.push((content, entry.clone()));
                 }
@@ -197,11 +199,15 @@ impl RecursiveRelationNode {
 
                 for (step_content, step_provenance) in self.evaluate_step(&corr, io, row_loader) {
                     let mut combined_provenance = frontier_provenance.clone();
-                    combined_provenance.extend(step_provenance.iter().copied());
+                    for scoped_object in step_provenance.iter().copied() {
+                        combined_provenance.insert(scoped_object);
+                    }
 
                     let entry = seen_contents.entry(step_content.clone()).or_default();
                     let previous_len = entry.len();
-                    entry.extend(combined_provenance.iter().copied());
+                    for scoped_object in combined_provenance.iter().copied() {
+                        entry.insert(scoped_object);
+                    }
                     if previous_len == 0 || entry.len() > previous_len {
                         next_frontier.push((step_content, entry.clone()));
                     }
@@ -239,7 +245,9 @@ impl RecursiveRelationNode {
                         existing_provenance,
                     )) => {
                         let previous_len = existing_provenance.len();
-                        existing_provenance.extend(provenance.iter().copied());
+                        for scoped_object in provenance.iter().copied() {
+                            existing_provenance.insert(scoped_object);
+                        }
                         let changed =
                             *existing_content != content || *existing_commit_id != version_id;
                         if changed {
@@ -292,7 +300,9 @@ impl RecursiveRelationNode {
                     };
 
                     let mut combined_provenance = frontier_provenance.clone();
-                    combined_provenance.extend(step_provenance.iter().copied());
+                    for scoped_object in step_provenance.iter().copied() {
+                        combined_provenance.insert(scoped_object);
+                    }
 
                     let enqueue = match seen_rows.get_mut(&next_id) {
                         Some((
@@ -302,7 +312,9 @@ impl RecursiveRelationNode {
                             existing_provenance,
                         )) => {
                             let previous_len = existing_provenance.len();
-                            existing_provenance.extend(combined_provenance.iter().copied());
+                            for scoped_object in combined_provenance.iter().copied() {
+                                existing_provenance.insert(scoped_object);
+                            }
                             let changed = *existing_content != next_content
                                 || *existing_commit_id != next_commit_id;
                             if changed {
@@ -380,7 +392,9 @@ impl RecursiveRelationNode {
                         existing_provenance,
                     )) => {
                         let previous_len = existing_provenance.len();
-                        existing_provenance.extend(provenance.iter().copied());
+                        for scoped_object in provenance.iter().copied() {
+                            existing_provenance.insert(scoped_object);
+                        }
                         let changed =
                             *existing_content != content || *existing_commit_id != version_id;
                         if changed {
@@ -443,8 +457,12 @@ impl RecursiveRelationNode {
                         continue;
                     }
                     let mut combined_provenance = frontier_provenance.clone();
-                    combined_provenance.extend(step_provenance.iter().copied());
-                    combined_provenance.extend(target_row.provenance.iter().copied());
+                    for scoped_object in step_provenance.iter().copied() {
+                        combined_provenance.insert(scoped_object);
+                    }
+                    for scoped_object in target_row.provenance.iter().copied() {
+                        combined_provenance.insert(scoped_object);
+                    }
 
                     let enqueue = match seen_rows.get_mut(target_id) {
                         Some((
@@ -454,7 +472,9 @@ impl RecursiveRelationNode {
                             existing_provenance,
                         )) => {
                             let previous_len = existing_provenance.len();
-                            existing_provenance.extend(combined_provenance.iter().copied());
+                            for scoped_object in combined_provenance.iter().copied() {
+                                existing_provenance.insert(scoped_object);
+                            }
                             let changed = *existing_content != target_row.data
                                 || *existing_commit_id != target_row.version_id;
                             if changed {

@@ -223,6 +223,20 @@ fn tuple_from_row() {
 }
 
 #[test]
+fn tuple_provenance_merge_deduplicates_scoped_objects() {
+    let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
+    let branch = crate::object::BranchName::new("main");
+
+    let mut tuple = Tuple::from_scoped_id(id, branch);
+    let same_scope: TupleProvenance = [(id, branch)].into_iter().collect();
+
+    tuple.merge_provenance(&same_scope);
+
+    assert_eq!(tuple.provenance().len(), 1);
+    assert!(tuple.provenance().contains(&(id, branch)));
+}
+
+#[test]
 fn tuple_equality_based_on_ids() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
 
