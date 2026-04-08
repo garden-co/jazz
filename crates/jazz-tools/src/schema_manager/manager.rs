@@ -21,6 +21,7 @@ use crate::query_manager::types::{
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
+use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 use uuid::Uuid;
@@ -107,6 +108,7 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    catalogue_publish_timestamps: HashMap<ObjectId, u64>,
     current_permissions_head: Option<PermissionsHeadState>,
     known_permissions_bundles: HashMap<ObjectId, PermissionsBundleState>,
     pending_permissions_head: Option<PermissionsHeadState>,
@@ -152,6 +154,7 @@ impl SchemaManager {
             context,
             query_manager,
             app_id,
+            catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
             pending_permissions_head: None,
@@ -184,6 +187,7 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
+            catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
             pending_permissions_head: None,
@@ -599,9 +603,43 @@ impl SchemaManager {
         Some(&table_schema.columns)
     }
 
+    /// Return the timestamp when a schema was published.
+    ///
+    /// Tracks the most recent publish timestamp observed by this manager.
+    pub fn schema_published_at(&self, schema_hash: &SchemaHash) -> Option<u64> {
+        let object_id = schema_hash.to_object_id();
+        self.catalogue_publish_timestamps.get(&object_id).copied()
+    }
+
     // =========================================================================
     // Catalogue Persistence
     // =========================================================================
+
+    fn persist_catalogue_object_if_changed<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        content: Vec<u8>,
+    ) {
+        if latest_catalogue_content_matches(storage, object_id, &content) {
+            return;
+        }
+
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
+        self.query_manager
+            .sync_manager_mut()
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
+    }
 
     /// Persist the current schema to the catalogue as an Object.
     ///
@@ -616,6 +654,9 @@ impl SchemaManager {
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
         let metadata = self.schema_metadata(&schema_hash);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
             .upsert_catalogue_entry(
@@ -644,6 +685,9 @@ impl SchemaManager {
         let content = encode_schema(&schema);
 
         let metadata = self.schema_metadata(&schema_hash);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
             .upsert_catalogue_entry(
@@ -670,6 +714,9 @@ impl SchemaManager {
         let content = encode_lens_transform(&lens.forward);
 
         let metadata = self.lens_metadata(lens);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
             .upsert_catalogue_entry(
@@ -697,6 +744,9 @@ impl SchemaManager {
             bundle.parent_bundle_object_id,
             &bundle.permissions,
         );
+        let bundle_timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(head.bundle_object_id, bundle_timestamp);
         self.query_manager
             .sync_manager_mut()
             .upsert_catalogue_entry(
@@ -714,16 +764,12 @@ impl SchemaManager {
             head.parent_bundle_object_id,
             head.bundle_object_id,
         );
-        self.query_manager
-            .sync_manager_mut()
-            .upsert_catalogue_entry(
-                storage,
-                CatalogueEntry {
-                    object_id: head_object_id,
-                    metadata: head_metadata,
-                    content: head_content,
-                },
-            );
+        self.persist_catalogue_object_if_changed(
+            storage,
+            head_object_id,
+            head_metadata,
+            head_content,
+        );
 
         Some(head_object_id)
     }
@@ -1497,6 +1543,19 @@ impl SchemaManager {
     }
 }
 
+fn latest_catalogue_content_matches<H: Storage + ?Sized>(
+    storage: &H,
+    object_id: ObjectId,
+    expected: &[u8],
+) -> bool {
+    let latest_content = if let Ok(Some(content)) = latest_catalogue_content(storage, object_id) {
+        content
+    } else {
+        return false;
+    };
+    latest_content == expected
+}
+
 #[allow(dead_code)]
 fn reorder_values_by_column_name(
     source_descriptor: &RowDescriptor,
@@ -1832,6 +1891,38 @@ mod tests {
     }
 
     #[test]
+    fn schema_manager_schema_published_at_uses_latest_catalogue_commit_timestamp() {
+        let schema = make_schema_v1();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = crate::storage::MemoryStorage::new();
+        let mut manager = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+
+        assert_eq!(manager.schema_published_at(&schema_hash), None);
+
+        manager.persist_schema_object(&mut storage, &schema);
+        let first_timestamp = manager
+            .schema_published_at(&schema_hash)
+            .expect("schema should expose publish timestamp after first persist");
+
+        manager.persist_schema_object(&mut storage, &schema);
+        let second_timestamp = manager
+            .schema_published_at(&schema_hash)
+            .expect("schema should expose publish timestamp after republish");
+
+        assert!(
+            second_timestamp > first_timestamp,
+            "republishing the same schema should advance the visible publish timestamp"
+        );
+    }
+
+    #[test]
     fn schema_manager_all_branch_strings() {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
@@ -1930,6 +2021,77 @@ mod tests {
                 .get(&bundle_object_id)
                 .map(|state| state.permissions.clone()),
             Some(permissions)
+        );
+    }
+
+    #[test]
+    fn repersisting_rehydrated_permissions_keeps_unchanged_entries_stable() {
+        let app_id = test_app_id();
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        let mut storage = crate::storage::MemoryStorage::new();
+        let mut previous_run =
+            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
+        previous_run.persist_schema(&mut storage);
+        previous_run
+            .publish_permissions_bundle(&mut storage, schema_hash, permissions, None)
+            .expect("previous run should publish permissions");
+        previous_run.process(&mut storage);
+
+        let head_object_id = SchemaManager::permissions_head_object_id_for(app_id);
+        let head_entry_before = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load")
+            .expect("head entry should exist");
+        let bundle_entry_before = storage
+            .load_catalogue_entry(
+                previous_run
+                    .current_permissions_head
+                    .expect("permissions head should exist")
+                    .bundle_object_id,
+            )
+            .expect("bundle entry should load")
+            .expect("bundle entry should exist");
+
+        let mut restarted =
+            SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+        crate::schema_manager::rehydrate_schema_manager_from_catalogue(
+            &mut restarted,
+            &storage,
+            app_id,
+        )
+        .expect("rehydrate should succeed");
+
+        let republished_head_object_id = restarted
+            .persist_current_permissions(&mut storage)
+            .expect("rehydrated permissions should republish");
+        assert_eq!(republished_head_object_id, head_object_id);
+
+        let head_entry_after = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load after materialize")
+            .expect("head entry should still exist");
+        let bundle_entry_after = storage
+            .load_catalogue_entry(
+                restarted
+                    .current_permissions_head
+                    .expect("rehydrated permissions head should exist")
+                    .bundle_object_id,
+            )
+            .expect("bundle entry should load after materialize")
+            .expect("bundle entry should still exist");
+        assert_eq!(
+            head_entry_after, head_entry_before,
+            "materializing unchanged permissions head should not rewrite the stored head entry"
+        );
+        assert_eq!(
+            bundle_entry_after, bundle_entry_before,
+            "materializing unchanged permissions head should not rewrite the stored bundle entry"
         );
     }
 

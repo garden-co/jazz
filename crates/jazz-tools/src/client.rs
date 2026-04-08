@@ -1082,11 +1082,6 @@ fn handle_server_event(
     server_id: ServerId,
     sync_tracer: Option<&(crate::sync_tracer::SyncTracer, String)>,
 ) -> Result<()> {
-    fn short_hash(hash: &impl ToString) -> String {
-        let hash = hash.to_string();
-        hash.chars().take(12).collect()
-    }
-
     match event {
         ServerEvent::Connected {
             connection_id,
@@ -1108,18 +1103,7 @@ fn handle_server_event(
         }
         ServerEvent::SyncUpdate { seq, payload } => {
             if let SyncPayload::SchemaWarning(warning) = payload.as_ref() {
-                tracing::warn!(
-                    query_id = warning.query_id.0,
-                    table = warning.table_name,
-                    row_count = warning.row_count,
-                    from_hash = %warning.from_hash,
-                    to_hash = %warning.to_hash,
-                    "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools@alpha migrations create {} {}`",
-                    warning.row_count,
-                    warning.table_name,
-                    short_hash(&warning.from_hash),
-                    short_hash(&warning.to_hash),
-                );
+                crate::sync_manager::log_schema_warning(warning, None, None);
             }
             // Record incoming message to tracer if present
             if let Some((tracer, name)) = sync_tracer {

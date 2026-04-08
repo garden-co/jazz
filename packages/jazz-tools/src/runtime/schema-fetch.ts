@@ -197,13 +197,13 @@ export type PublishedMigrationOp =
   | {
       type: "introduce";
       column: string;
-      columnType: ColumnType;
+      column_type: ColumnType;
       value: PublishedMigrationValue;
     }
   | {
       type: "drop";
       column: string;
-      columnType: ColumnType;
+      column_type: ColumnType;
       value: PublishedMigrationValue;
     }
   | {

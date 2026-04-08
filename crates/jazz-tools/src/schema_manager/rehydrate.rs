@@ -1,6 +1,7 @@
 use tracing::{info, warn};
 
 use crate::metadata::{MetadataKey, ObjectType};
+use crate::object::ObjectId;
 use crate::storage::Storage;
 
 use super::encoding::decode_permissions_head;
@@ -8,6 +9,16 @@ use super::{AppId, SchemaManager};
 
 fn entry_matches_app(entry: &crate::catalogue::CatalogueEntry, app_id: AppId) -> bool {
     entry.metadata.get(MetadataKey::AppId.as_str()) == Some(&app_id.uuid().to_string())
+}
+
+pub fn latest_catalogue_content<S: Storage + ?Sized>(
+    storage: &S,
+    object_id: ObjectId,
+) -> Result<Option<Vec<u8>>, String> {
+    storage
+        .load_catalogue_entry(object_id)
+        .map(|entry| entry.map(|entry| entry.content))
+        .map_err(|err| format!("failed to load catalogue entry {object_id}: {err:?}"))
 }
 
 /// Rehydrate server schema state from persisted catalogue rows.
