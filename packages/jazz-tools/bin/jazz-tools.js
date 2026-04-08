@@ -107,6 +107,7 @@ function printWrapperHelp() {
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
   console.log("  migrations push       Push a reviewed migration edge to the server");
+  console.log("  auth init             Scaffold a hosted Jazz Auth Next.js app");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  mcp                   Run the Jazz MCP server");
@@ -137,7 +138,8 @@ if (!command || command === "--help" || command === "-h") {
   command === "validate" ||
   command === "migrations" ||
   command === "permissions" ||
-  command === "schema"
+  command === "schema" ||
+  command === "auth"
 ) {
   const tsCliPath = join(here, "..", "dist", "cli.js");
   if (!existsSync(tsCliPath)) {

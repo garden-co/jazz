@@ -19,6 +19,7 @@ import { loadWasmModule } from "./runtime/client.js";
 import {
   createMigration,
   exportSchema,
+  initAuthApp,
   permissionsStatus,
   pushMigration,
   pushPermissions,
@@ -439,6 +440,51 @@ describe("cli schema export", () => {
       "title",
       "ownerId",
     ]);
+  });
+});
+
+describe("cli auth", () => {
+  it("scaffolds a standalone hosted auth Next app", async () => {
+    const { root } = await createWorkspace();
+    const authAppDir = join(root, "hosted-auth");
+
+    const { logs } = await captureConsoleLogs(() =>
+      initAuthApp({
+        dir: authAppDir,
+        appName: "jazz-auth-hosted",
+      }),
+    );
+
+    expect(await fileExists(join(authAppDir, "package.json"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "README.md"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "components.json"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "layout.tsx"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "globals.css"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "auth", "sign-in", "page.tsx"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "auth", "sign-up", "page.tsx"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "auth", "sign-out", "route.ts"))).toBe(true);
+    expect(await fileExists(join(authAppDir, "app", "api", "auth", "[...all]", "route.ts"))).toBe(
+      true,
+    );
+    expect(await fileExists(join(authAppDir, "src", "lib", "auth.ts"))).toBe(true);
+
+    const routeSource = await readFile(
+      join(authAppDir, "app", "api", "auth", "[...all]", "route.ts"),
+      "utf8",
+    );
+    expect(routeSource).toContain('from "jazz-auth/hosted"');
+
+    const componentConfig = await readFile(join(authAppDir, "components.json"), "utf8");
+    expect(componentConfig).toContain('"ui": "@/components/ui"');
+
+    const packageJson = await readFile(join(authAppDir, "package.json"), "utf8");
+    expect(packageJson).toContain("shadcn:init");
+    expect(packageJson).toContain("b2D0wqNxT");
+
+    expect(logs).toContain(
+      "Remember to merge ...jazzAuthTables() into your main Jazz schema before switching off the in-memory adapter.",
+    );
+    expect(logs).toContain("The scaffold includes a shadcn init script for preset b2D0wqNxT.");
   });
 });
 

@@ -3,7 +3,7 @@
 // CLI for jazz-tools schema tooling
 
 import { access, mkdir, readFile, readdir, writeFile } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
 import { register as registerEsm } from "tsx/esm/api";
 import type {
@@ -40,8 +40,14 @@ export interface SchemaExportOptions {
   adminSecret?: string;
 }
 
+export interface InitAuthAppOptions {
+  appName?: string;
+  dir: string;
+}
+
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
+const SHADCN_PRESET = "b2D0wqNxT";
 
 function parseArgs(): { command: string; options: BuildOptions } {
   const args = process.argv.slice(2);
@@ -105,6 +111,348 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
   const currentSchema = await loadCurrentSchema(options.schemaDir);
   await ensureLocalSnapshot(options.schemaDir, currentSchema);
   process.stdout.write(`${JSON.stringify(currentSchema.schema, null, 2)}\n`);
+}
+
+function createAuthAppPackageJson(appName: string, jazzAuthVersion: string): string {
+  return `${JSON.stringify(
+    {
+      name: appName,
+      private: true,
+      scripts: {
+        build: "next build",
+        dev: "next dev",
+        "shadcn:init": `pnpm dlx shadcn@latest init --preset ${SHADCN_PRESET}`,
+        start: "next start",
+      },
+      type: "module",
+      dependencies: {
+        "better-auth": "1.5.6",
+        "jazz-auth": jazzAuthVersion,
+        next: "16.1.6",
+        react: "19.2.4",
+        "react-dom": "19.2.4",
+      },
+      devDependencies: {
+        "@tailwindcss/postcss": "^4",
+        "@types/node": "^20.0.0",
+        "@types/react": "^19.0.0",
+        "@types/react-dom": "^19.0.0",
+        tailwindcss: "^4",
+        typescript: "^6.0.2",
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+function createAuthAppReadme(appName: string): string {
+  return `# ${appName}
+
+Hosted Jazz Auth app scaffold.
+
+## Included
+
+- Pure SSR Next.js app router scaffold
+- Hosted Jazz Auth pages under \`/auth/*\`
+- Better Auth route handler under \`/api/auth/*\`
+- shadcn-compatible \`components.json\`
+
+## shadcn preset
+
+To refresh the local shadcn layer with the requested preset, run:
+
+\`\`\`bash
+pnpm run shadcn:init
+\`\`\`
+
+This uses preset \`${SHADCN_PRESET}\`.
+`;
+}
+
+function createAuthAppTsconfig(): string {
+  return `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }]
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+`;
+}
+
+function createComponentsJson(): string {
+  return `{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "app/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@/components",
+    "hooks": "@/hooks",
+    "lib": "@/lib",
+    "ui": "@/components/ui",
+    "utils": "@/lib/utils"
+  }
+}
+`;
+}
+
+function createAuthGlobalsCss(): string {
+  return `@import "tailwindcss";
+@source "../node_modules/jazz-auth/dist/**/*.{js,mjs}";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --radius-xl: calc(var(--radius) + 0.25rem);
+  --radius-2xl: calc(var(--radius) + 0.75rem);
+}
+
+:root {
+  --background: oklch(0.985 0.006 95);
+  --foreground: oklch(0.26 0.025 255);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.26 0.025 255);
+  --primary: oklch(0.61 0.14 176);
+  --primary-foreground: oklch(0.99 0.01 180);
+  --secondary: oklch(0.95 0.012 176);
+  --secondary-foreground: oklch(0.3 0.03 255);
+  --muted: oklch(0.95 0.008 230);
+  --muted-foreground: oklch(0.5 0.02 255);
+  --accent: oklch(0.93 0.025 176);
+  --accent-foreground: oklch(0.28 0.03 255);
+  --border: oklch(0.88 0.01 235);
+  --radius: 1rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    "Instrument Sans",
+    "Avenir Next",
+    "Segoe UI",
+    sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+`;
+}
+
+function createAuthLayout(appName: string): string {
+  return `import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: ${JSON.stringify(appName)},
+  description: "Hosted Jazz Auth server and UI",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+`;
+}
+
+function createAuthIndexPage(): string {
+  return `import { redirect } from "next/navigation";
+
+export default function Page() {
+  redirect("/auth/sign-in");
+}
+`;
+}
+
+function createHostedAuthLibFile(): string {
+  return `import { createJazzHostedAuth } from "jazz-auth/hosted";
+
+const baseURL = process.env.JAZZ_AUTH_BASE_URL ?? "http://localhost:3000";
+
+export const hostedAuth = createJazzHostedAuth({
+  baseURL,
+  secret: process.env.JAZZ_AUTH_SECRET ?? "jazz-auth-development-secret",
+});
+
+export const auth = hostedAuth.auth;
+export const authHandlers = hostedAuth.handlers;
+`;
+}
+
+function createHostedAuthRouteFile(): string {
+  return `import { getJazzHostedAuthHandlers } from "jazz-auth/hosted";
+import { hostedAuth } from "../../../../src/lib/auth";
+
+const authHandlers = getJazzHostedAuthHandlers(hostedAuth);
+
+export const GET = authHandlers.GET;
+export const POST = authHandlers.POST;
+export const PATCH = authHandlers.PATCH;
+export const PUT = authHandlers.PUT;
+export const DELETE = authHandlers.DELETE;
+`;
+}
+
+function createHostedPageFile(kind: "sign-in" | "sign-up"): string {
+  const componentName = kind === "sign-in" ? "JazzHostedSignInPage" : "JazzHostedSignUpPage";
+  const actionPath = kind === "sign-in" ? "/auth/sign-in/submit" : "/auth/sign-up/submit";
+
+  return `import { ${componentName} } from "jazz-auth/hosted";
+
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    error?: string;
+    redirectTo?: string;
+  }>;
+}) {
+  const params = await searchParams;
+
+  return (
+    <${componentName}
+      action=${JSON.stringify(actionPath)}
+      error={params.error}
+      redirectTo={params.redirectTo}
+    />
+  );
+}
+`;
+}
+
+function createHostedSubmitRoute(kind: "sign-in" | "sign-up"): string {
+  const handlerName = kind === "sign-in" ? "handleJazzHostedSignIn" : "handleJazzHostedSignUp";
+
+  return `import { ${handlerName} } from "jazz-auth/hosted";
+import { hostedAuth } from "../../../../src/lib/auth";
+
+export async function POST(request: Request) {
+  return ${handlerName}(hostedAuth, request);
+}
+`;
+}
+
+function createHostedSignOutRoute(): string {
+  return `import { handleJazzHostedSignOut } from "jazz-auth/hosted";
+import { hostedAuth } from "../../../src/lib/auth";
+
+export async function GET(request: Request) {
+  return handleJazzHostedSignOut(hostedAuth, request);
+}
+`;
+}
+
+async function writeGeneratedFile(filePath: string, contents: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, contents);
+}
+
+export async function initAuthApp(options: InitAuthAppOptions): Promise<void> {
+  const dir = resolve(process.cwd(), options.dir);
+  const appName = options.appName?.trim() || basename(dir) || "jazz-auth-hosted";
+  const jazzAuthVersion = await packageVersion();
+
+  await mkdir(dir, { recursive: true });
+
+  const files = new Map<string, string>([
+    [join(dir, "package.json"), createAuthAppPackageJson(appName, jazzAuthVersion)],
+    [join(dir, "tsconfig.json"), createAuthAppTsconfig()],
+    [
+      join(dir, "next-env.d.ts"),
+      `/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n`,
+    ],
+    [
+      join(dir, "next.config.mjs"),
+      `/** @type {import("next").NextConfig} */\nconst nextConfig = {};\n\nexport default nextConfig;\n`,
+    ],
+    [
+      join(dir, "postcss.config.mjs"),
+      `export default {\n  plugins: {\n    "@tailwindcss/postcss": {},\n  },\n};\n`,
+    ],
+    [join(dir, "components.json"), createComponentsJson()],
+    [
+      join(dir, ".env.example"),
+      `JAZZ_AUTH_BASE_URL=http://localhost:3000\nJAZZ_AUTH_SECRET=jazz-auth-development-secret\n`,
+    ],
+    [join(dir, "README.md"), createAuthAppReadme(appName)],
+    [join(dir, "app", "globals.css"), createAuthGlobalsCss()],
+    [join(dir, "app", "layout.tsx"), createAuthLayout(appName)],
+    [join(dir, "app", "page.tsx"), createAuthIndexPage()],
+    [join(dir, "app", "auth", "sign-in", "page.tsx"), createHostedPageFile("sign-in")],
+    [join(dir, "app", "auth", "sign-in", "submit", "route.ts"), createHostedSubmitRoute("sign-in")],
+    [join(dir, "app", "auth", "sign-up", "page.tsx"), createHostedPageFile("sign-up")],
+    [join(dir, "app", "auth", "sign-up", "submit", "route.ts"), createHostedSubmitRoute("sign-up")],
+    [join(dir, "app", "auth", "sign-out", "route.ts"), createHostedSignOutRoute()],
+    [join(dir, "app", "api", "auth", "[...all]", "route.ts"), createHostedAuthRouteFile()],
+    [join(dir, "src", "lib", "auth.ts"), createHostedAuthLibFile()],
+  ]);
+
+  await Promise.all(
+    [...files.entries()].map(async ([filePath, contents]) => {
+      await writeGeneratedFile(filePath, contents);
+    }),
+  );
+
+  console.log(`Created Jazz Auth hosted app in ${dir}.`);
+  console.log(`The scaffold includes a shadcn init script for preset ${SHADCN_PRESET}.`);
+  console.log(
+    "Swap the in-memory fallback in src/lib/auth.ts for your Jazz Better Auth adapter when it is ready.",
+  );
+  console.log(
+    "Remember to merge ...jazzAuthTables() into your main Jazz schema before switching off the in-memory adapter.",
+  );
 }
 
 export interface MigrationCommandOptions {
@@ -1556,6 +1904,23 @@ if (isMainModule()) {
       console.error(err.message);
       process.exit(1);
     });
+  } else if (command === "auth") {
+    const subcommand = process.argv[3] ?? "";
+    const args = process.argv.slice(4);
+    const task =
+      subcommand === "init"
+        ? initAuthApp({
+            appName: getFlagValue(args, "--name"),
+            dir: resolve(process.cwd(), getFlagValue(args, "--dir") ?? "jazz-auth-hosted"),
+          })
+        : Promise.reject(
+            new Error("Usage: node dist/cli.js auth init [--dir <path>] [--name <app-name>]"),
+          );
+
+    task.catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
   } else {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
@@ -1569,6 +1934,7 @@ if (isMainModule()) {
       "  migrations create     Generate a typed structural migration stub between two schema versions",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
+    console.log("  auth init             Scaffold a hosted Jazz Auth Next.js app");
     console.log("\nValidation options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");
@@ -1591,6 +1957,9 @@ if (isMainModule()) {
     );
     console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
     console.log("  --name <name>         Optional migration filename label (default: unnamed)");
+    console.log("\nAuth scaffold options:");
+    console.log("  --dir <path>          Output directory for the hosted auth app");
+    console.log("  --name <app-name>     package.json name for the hosted auth app");
     process.exit(command ? 1 : 0);
   }
 }
