@@ -1,7 +1,7 @@
 ---
 title: Files & Blobs
 description: Chunked browser Blob and stream storage using conventional files and file_parts tables.
-reviewedAt: "4059cdef"
+reviewedAt: "f7048c19"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -12,9 +12,9 @@ For larger files, use the chunked storage described below.
 ## Add the conventional tables
 
 `db.createFileFromBlob`, `db.createFileFromStream`, `db.loadFileAsBlob`, and
-`db.loadFileAsStream` currently expect these exact table and column names on `app`:
+`db.loadFileAsStream` expect these exact table and column names on `app`:
 
-<include cwd lang="ts" meta='title="schema.ts"'>
+<include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-files-and-blobs-ts
 </include>
 
@@ -26,7 +26,7 @@ is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when a
 
 ## Add permissions
 
-<include cwd lang="ts" meta='title="files-and-blobs-permissions.ts"'>
+<include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/files-and-blobs-permissions.ts#files-permissions-ts
 </include>
 
@@ -34,62 +34,111 @@ is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when a
 `file_parts` inherit from `files.partIds`.
 
 <Callout type="warn" title="Insert permissions are direct for now">
-  `createFileFromBlob(...)` and `createFileFromStream(...)` create `file_parts` and `files` before
-  your parent row exists, so insert inheritance does not naturally apply yet. Currently, grant
-  direct insert access to the clients that may upload, or perform uploads in a trusted backend
-  context.
+  File parts and files are created before the parent upload row exists, so insert inheritance does
+  not naturally apply yet. Currently, grant direct insert access to the clients that may upload, or
+  perform uploads in a trusted backend context.
 </Callout>
 
-Files are currently write-once, so `files` and `file_parts` normally do not need update
+Files are write-once, so `files` and `file_parts` normally do not need update
 policies.
 
 ## Create from a blob
 
-<include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-blob-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-blob-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#files-create-from-bytes-rust
+    </include>
+
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#files-create-upload-rust
+    </include>
+
+  </Tab>
+</Tabs>
 
 Returns the file row; store its id on your own table.
 
 ## Create from a stream
 
-<include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-stream-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-stream-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    Rust does not have a separate stream helper. Read your stream into chunks and create
+    `file_parts` rows as they arrive, using the same approach shown in [Create from a
+    blob](#create-from-a-blob) above.
+  </Tab>
+</Tabs>
 
 ## Load as a blob
 
-<include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-blob-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-blob-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#files-load-rust
+    </include>
+  </Tab>
+</Tabs>
 
 ## Load as a stream
 
-<include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-stream-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-stream-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    To stream chunks rather than collecting all bytes, walk `files.partIds` and query each
+    `file_parts` row individually, yielding chunks as they arrive instead of concatenating
+    into a single `Vec<u8>`.
+  </Tab>
+</Tabs>
 
-`loadFileAsBlob(...)` and `loadFileAsStream(...)` fetch each chunk sequentially rather than eager-loading every part in one query.
+Both approaches fetch each chunk sequentially rather than eager-loading every part in one query.
 
 ## Durability and incomplete local data
 
 The file helpers forward normal Jazz durability options:
 
-- Pass `tier` to `createFileFromBlob(...)` or `createFileFromStream(...)`.
-- Pass query options like `{ tier: "edge" }` to `loadFileAsBlob(...)` or `loadFileAsStream(...)`.
+- **TypeScript:** pass `tier` to `createFileFromBlob(...)` / `createFileFromStream(...)`, or query options like `{ tier: "edge" }` to `loadFileAsBlob(...)` / `loadFileAsStream(...)`.
+- **Rust:** pass `Some(DurabilityTier::EdgeServer)` or `Some(DurabilityTier::GlobalServer)` to `client.query(...)`.
 
-If the requested tier does not have the full file yet, `loadFileAsBlob(...)` fails the whole
-read and `loadFileAsStream(...)` errors when it reaches the missing part. Use `edge` or `global`
-when you need the read to wait for a more complete remote snapshot than local OPFS currently has.
+If the requested tier does not have the full file yet, the load fails when it reaches the missing
+part. Use `edge` or `global` when you need the read to wait for a more complete remote snapshot
+than the local store currently has.
 
 ## No automatic cascade yet
 
 Until file cascade delete lands, delete the chunk rows and the `files` row before deleting your
 parent app row so the [inherited delete policies](/docs/auth/permissions#inherited-access-allowedto) still match:
 
-<include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-delete-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-delete-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#files-delete-rust
+    </include>
+  </Tab>
+</Tabs>
 
 ## Example app
 
