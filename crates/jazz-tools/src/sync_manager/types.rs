@@ -95,6 +95,15 @@ pub enum QueryPropagation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
 
+/// Deferred query settlement waiting for stream sequencing prerequisites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingQuerySettled {
+    pub server_id: Option<ServerId>,
+    pub query_id: QueryId,
+    pub tier: DurabilityTier,
+    pub through_seq: u64,
+}
+
 /// Data needed to sync a branch: (object_id, metadata, branch_name, tips).
 pub(super) type BranchSyncData = (
     ObjectId,

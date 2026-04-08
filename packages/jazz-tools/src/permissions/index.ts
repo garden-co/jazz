@@ -46,6 +46,15 @@ type PolicyAction = "read" | "insert" | "update" | "delete";
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
+const CREATOR_CONDITION = {
+  type: "Cmp",
+  column: "$createdBy",
+  op: "Eq",
+  value: {
+    type: "SessionRef",
+    path: ["user_id"],
+  },
+} satisfies PolicyExpr;
 
 interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
@@ -466,6 +475,7 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowDeletes: ActionBuilder<WhereInput, Row>;
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
+  managedByCreator(): void;
   exists: ExistsBuilder<WhereInput>;
 }
 
@@ -480,6 +490,7 @@ export type PolicyContext<TApp extends AppLike> = {
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
+  isCreator: Condition;
   allowedTo: AllowedToContext;
   session: SessionContext;
 };
@@ -588,6 +599,7 @@ export function definePermissions<TApp extends AppLike>(
     policy: buildPolicyContext(tableNames, relationsByTable, collectRule),
     anyOf,
     allOf,
+    isCreator: CREATOR_CONDITION,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
@@ -678,6 +690,12 @@ function buildTablePolicyBuilder(
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, collectRule);
+  const managedByCreator = (): void => {
+    read.where(CREATOR_CONDITION);
+    insert.where(CREATOR_CONDITION);
+    updateFactory().where(CREATOR_CONDITION);
+    del.where(CREATOR_CONDITION);
+  };
   const exists: ExistsBuilder<unknown> = {
     where: (input) => ({
       __jazzPermissionKind: "exists",
@@ -701,6 +719,7 @@ function buildTablePolicyBuilder(
     get allowUpdates() {
       return updateFactory();
     },
+    managedByCreator,
     exists,
     where(input: unknown): PermissionRelation {
       return createTableRelation(table, relationsByTable).where(input);
@@ -1761,7 +1780,7 @@ function compileCondition(
     return undefined;
   }
   if (isPolicyExpr(condition)) {
-    assertInheritsColumns(condition, table, fkReferencesByTable);
+    resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
   }
   if (isSessionWhereCondition(condition)) {
@@ -1775,7 +1794,7 @@ function compileCondition(
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    assertInheritsColumns(compiledCondition, table, fkReferencesByTable);
+    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
@@ -1803,7 +1822,16 @@ function compileCondition(
   throw new Error("Unsupported condition in permissions compiler.");
 }
 
-function assertInheritsColumns(
+function resolveFkColumn(name: string, fkColumns: Map<string, string>): string | undefined {
+  if (fkColumns.has(name)) return name;
+  const withId = name + "Id";
+  if (fkColumns.has(withId)) return withId;
+  const withUnderId = name + "_id";
+  if (fkColumns.has(withUnderId)) return withUnderId;
+  return undefined;
+}
+
+function resolveAndAssertInheritsColumns(
   expr: PolicyExpr,
   table: string,
   fkReferencesByTable: Map<string, Map<string, string>>,
@@ -1818,7 +1846,8 @@ function assertInheritsColumns(
               `table metadata is missing in app.wasmSchema.`,
           );
         }
-        if (!fkColumns.has(node.via_column)) {
+        const resolved = resolveFkColumn(node.via_column, fkColumns);
+        if (!resolved) {
           const fkList = [...fkColumns.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
@@ -1826,28 +1855,32 @@ function assertInheritsColumns(
               `column is not a foreign key reference. Available FK columns: ${available}.`,
           );
         }
+        node.via_column = resolved;
         break;
       }
       case "InheritsReferencing": {
+        const originalColumn = node.via_column;
         const sourceFks = fkReferencesByTable.get(node.source_table);
         if (!sourceFks) {
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `source table metadata is missing in app.wasmSchema.`,
           );
         }
-        const referenced = sourceFks.get(node.via_column);
-        if (!referenced) {
+        const resolved = resolveFkColumn(originalColumn, sourceFks);
+        if (!resolved) {
           const fkList = [...sourceFks.keys()].sort();
           const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `column is not a foreign key reference on source table. Available FK columns: ${available}.`,
           );
         }
+        node.via_column = resolved;
+        const referenced = sourceFks.get(resolved);
         if (referenced !== currentTable) {
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${node.via_column}") is invalid for table "${currentTable}": ` +
+            `allowedTo.${node.operation.toLowerCase()}Referencing(policy.${node.source_table}, "${originalColumn}") is invalid for table "${currentTable}": ` +
               `source FK references "${referenced}" but this rule is for "${currentTable}".`,
           );
         }

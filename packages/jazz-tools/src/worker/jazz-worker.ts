@@ -16,6 +16,8 @@ import {
   applyUserAuthHeaders,
   isExpectedFetchAbortError,
   OutboxDestinationKind,
+  SyncAuthError,
+  readSyncAuthError,
 } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 import {
@@ -73,6 +75,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let streamConnecting = false;
 let streamAttached = false;
+let authPaused = false;
 const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
 let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
@@ -108,6 +111,10 @@ const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
       "[worker] ",
     );
   } catch (error) {
+    if (error instanceof SyncAuthError) {
+      handleAuthFailure(error.reason);
+      return;
+    }
     if (!isExpectedFetchAbortError(error)) {
       console.error("[worker] Sync batch POST error:", error);
     }
@@ -270,6 +277,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     reconnectAttempt = 0;
     streamAttached = false;
     streamConnecting = false;
+    authPaused = false;
     serverClientId = generateClientId();
     peerRuntimeClientByPeerId.clear();
     peerIdByRuntimeClient.clear();
@@ -412,41 +420,57 @@ async function sendToServer(
   payloadJson: string,
   isCatalogue: boolean,
 ): Promise<void> {
-  await sendSyncPayload(
-    serverUrl,
-    payloadJson,
-    isCatalogue,
-    {
-      jwtToken,
-      localAuthMode,
-      localAuthToken,
-      adminSecret,
-      clientId: serverClientId,
-      pathPrefix: activeServerPathPrefix,
-    },
-    "[worker] ",
-  );
+  try {
+    await sendSyncPayload(
+      serverUrl,
+      payloadJson,
+      isCatalogue,
+      {
+        jwtToken,
+        localAuthMode,
+        localAuthToken,
+        adminSecret,
+        clientId: serverClientId,
+        pathPrefix: activeServerPathPrefix,
+      },
+      "[worker] ",
+    );
+  } catch (error) {
+    if (error instanceof SyncAuthError) {
+      handleAuthFailure(error.reason);
+      return;
+    }
+    throw error;
+  }
 }
 
-function attachServer(): void {
+function attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
   if (!runtime) return;
-  // Re-attach every time the stream reconnects so query subscriptions replay.
-  if (streamAttached) {
-    runtime.removeServer();
-  }
-  runtime.addServer();
+  runtime.addServer(catalogueStateHash ?? null, nextSyncSeq ?? null);
   streamAttached = true;
   reconnectAttempt = 0;
+  post({ type: "upstream-connected" });
 }
 
 function detachServer(): void {
   if (!runtime || !streamAttached) return;
   runtime.removeServer();
   streamAttached = false;
+  post({ type: "upstream-disconnected" });
+}
+
+function handleAuthFailure(reason: SyncAuthError["reason"]): void {
+  authPaused = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  detachServer();
+  post({ type: "auth-failed", reason });
 }
 
 function scheduleReconnect(): void {
-  if (isShuttingDown || !activeServerUrl) return;
+  if (isShuttingDown || !activeServerUrl || authPaused) return;
   if (reconnectTimer) return;
 
   const baseMs = 300;
@@ -463,7 +487,7 @@ function scheduleReconnect(): void {
 
 /** Connect to the server's binary streaming endpoint. */
 async function connectStream(): Promise<void> {
-  if (streamConnecting || !activeServerUrl || isShuttingDown) return;
+  if (streamConnecting || !activeServerUrl || isShuttingDown || authPaused) return;
   streamConnecting = true;
 
   const headers: Record<string, string> = {
@@ -491,6 +515,12 @@ async function connectStream(): Promise<void> {
     clearTimeout(streamConnectTimeout);
 
     if (!response.ok) {
+      const authError = await readSyncAuthError(response);
+      if (authError) {
+        handleAuthFailure(authError.reason);
+        streamConnecting = false;
+        return;
+      }
       console.error(`[worker] Stream connect failed: ${response.status}`);
       detachServer();
       streamConnecting = false;
@@ -515,13 +545,13 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
-        onConnected: (clientId) => {
-          console.log("[worker] Stream connected", { clientId });
+        onSyncMessage: (payload, seq) => runtime?.onSyncMessageReceived(payload, seq ?? null),
+        onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
+          console.log("[worker] Stream connected", { clientId, nextSyncSeq });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
-            attachServer();
+            attachServer(catalogueStateHash, nextSyncSeq);
           }
         },
       },
@@ -538,9 +568,9 @@ async function connectStream(): Promise<void> {
             "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
           );
         }
-        detachServer();
-        scheduleReconnect();
       }
+      detachServer();
+      scheduleReconnect();
       return;
     }
     console.error("[worker] Stream connect error:", e);
@@ -657,6 +687,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       jwtToken = msg.jwtToken;
       localAuthMode = msg.localAuthMode;
       localAuthToken = msg.localAuthToken;
+      authPaused = false;
       // Reconnect stream to bind the new token.
       if (streamAbortController) {
         streamAbortController.abort();
@@ -671,6 +702,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     case "shutdown":
       isShuttingDown = true;
       initComplete = false;
+      authPaused = false;
       activeServerUrl = null;
       activeServerPathPrefix = undefined;
       if (reconnectTimer) {
@@ -701,6 +733,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       // clean checkpoint happened. Recovery must replay the WAL.
       isShuttingDown = true;
       initComplete = false;
+      authPaused = false;
       activeServerUrl = null;
       activeServerPathPrefix = undefined;
       if (reconnectTimer) {

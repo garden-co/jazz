@@ -58,7 +58,7 @@ pub struct SyncManager {
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
-    pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
+    pub(super) pending_query_settled: Vec<PendingQuerySettled>,
 
     /// Acks received during inbox processing, for RuntimeCore to consume.
     pub(super) received_acks: Vec<(CommitId, DurabilityTier)>,
@@ -519,8 +519,13 @@ impl SyncManager {
     }
 
     /// Take pending QuerySettled notifications for QueryManager to process.
-    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, DurabilityTier)> {
+    pub fn take_pending_query_settled(&mut self) -> Vec<PendingQuerySettled> {
         std::mem::take(&mut self.pending_query_settled)
+    }
+
+    /// Re-queue QuerySettled notifications that are still blocked on stream sequencing.
+    pub fn requeue_pending_query_settled(&mut self, pending: Vec<PendingQuerySettled>) {
+        self.pending_query_settled.extend(pending);
     }
 
     /// Take received persistence acks since last call.

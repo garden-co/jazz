@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
-import { OutboxDestinationKind } from "./sync-transport.js";
+import { OutboxDestinationKind, type AuthFailureReason } from "./sync-transport.js";
 
 class MockWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -339,5 +339,23 @@ describe("WorkerBridge", () => {
     ]);
     expect((worker.posted[0] as any).sentAtMs).toEqual(expect.any(Number));
     expect((worker.posted[1] as any).sentAtMs).toEqual(expect.any(Number));
+  });
+
+  it("forwards worker auth failures to the main thread listener", () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const reasons: AuthFailureReason[] = [];
+
+    bridge.onAuthFailure((reason) => {
+      reasons.push(reason);
+    });
+
+    worker.emitFromWorker({
+      type: "auth-failed",
+      reason: "expired",
+    });
+
+    expect(reasons).toEqual(["expired"]);
   });
 });

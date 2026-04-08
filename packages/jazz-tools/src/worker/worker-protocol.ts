@@ -5,6 +5,7 @@
  */
 
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
+import type { AuthFailureReason } from "../runtime/sync-transport.js";
 
 // ============================================================================
 // Main Thread → Worker Messages
@@ -136,6 +137,16 @@ export interface InitOkMessage {
   clientId: string;
 }
 
+/** Worker runtime attached or re-attached its upstream server connection. */
+export interface UpstreamConnectedMessage {
+  type: "upstream-connected";
+}
+
+/** Worker runtime detached its upstream server connection. */
+export interface UpstreamDisconnectedMessage {
+  type: "upstream-disconnected";
+}
+
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
@@ -154,6 +165,12 @@ export interface PeerSyncToMainMessage {
 export interface ErrorMessage {
   type: "error";
   message: string;
+}
+
+/** Worker encountered an auth failure and paused upstream reconnects. */
+export interface WorkerAuthFailedMessage {
+  type: "auth-failed";
+  reason: AuthFailureReason;
 }
 
 /** Worker has completed shutdown (OPFS handles released). */
@@ -188,9 +205,12 @@ export interface DebugSeedLiveSchemaOkMessage {
 export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
+  | UpstreamConnectedMessage
+  | UpstreamDisconnectedMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
   | ErrorMessage
+  | WorkerAuthFailedMessage
   | ShutdownOkMessage
   | DebugSchemaStateOkMessage
   | DebugSeedLiveSchemaOkMessage;

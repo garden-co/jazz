@@ -6,6 +6,7 @@ use jazz_tools::jazz_transport::{SyncBatchRequest, SyncBatchResponse};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
+use jazz_tools::row_input;
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::TestingServer;
@@ -24,15 +25,11 @@ fn make_notes_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBu
 }
 
 fn note_input(title: &str) -> HashMap<String, Value> {
-    HashMap::from([("title".to_string(), Value::Text(title.to_string()))])
+    row_input!("title" => title)
 }
 
 fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Value> {
-    vec![
-        Value::Text(title.to_string()),
-        Value::Text(created_by.to_string()),
-        Value::Text(updated_by.to_string()),
-    ]
+    vec![title.into(), created_by.into(), updated_by.into()]
 }
 
 async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
@@ -197,10 +194,7 @@ async fn created_by_policies_scope_crud_to_creators() {
 
     let denied_update = bob
         .for_session(Session::new("bob"))
-        .update(
-            alice_note,
-            vec![("title".to_string(), Value::Text("bob edit".into()))],
-        )
+        .update(alice_note, vec![("title".to_string(), "bob edit".into())])
         .await;
     assert!(
         denied_update.is_err(),
@@ -292,10 +286,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution() {
     .await;
     assert_eq!(
         alice_rows[0].1,
-        vec![
-            Value::Text("alice note".into()),
-            Value::Text("alice".into())
-        ]
+        vec![Value::from("alice note"), "alice".into()]
     );
     assert!(
         alice_rows.iter().all(|(id, _)| *id != system_note),
@@ -334,8 +325,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution() {
 #[tokio::test]
 async fn created_by_policies_can_allow_reads_from_system_author() {
     let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
-    let system_author_policy =
-        PolicyExpr::eq_literal("$createdBy", Value::Text("jazz:system".into()));
+    let system_author_policy = PolicyExpr::eq_literal("$createdBy", "jazz:system".into());
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -377,10 +367,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
         .expect("alice-owned row should be visible");
     assert_eq!(
         alice_owned.1,
-        vec![
-            Value::Text("alice note".into()),
-            Value::Text("alice".into())
-        ]
+        vec![Value::from("alice note"), "alice".into()]
     );
     let system_owned = alice_rows
         .iter()
@@ -388,10 +375,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
         .expect("system-authored row should be visible");
     assert_eq!(
         system_owned.1,
-        vec![
-            Value::Text("server-generated".into()),
-            Value::Text("jazz:system".into())
-        ]
+        vec![Value::from("server-generated"), "jazz:system".into()]
     );
 
     let bob_rows = wait_for_rows(
@@ -403,10 +387,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
     .await;
     assert_eq!(
         bob_rows[0].1,
-        vec![
-            Value::Text("server-generated".into()),
-            Value::Text("jazz:system".into())
-        ]
+        vec![Value::from("server-generated"), "jazz:system".into()]
     );
 
     backend.shutdown().await.expect("shutdown backend");
@@ -488,7 +469,7 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user() {
 #[tokio::test]
 async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     let updated_by_policy = PolicyExpr::eq_session("$updatedBy", vec!["user_id".into()]);
-    let shared_policy = PolicyExpr::eq_literal("shared", Value::Boolean(true));
+    let shared_policy = PolicyExpr::eq_literal("shared", true.into());
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("notes")
@@ -517,13 +498,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     // `$updatedBy` handoff on the later update.
     let note_id = alice
         .for_session(Session::new("alice"))
-        .create(
-            "notes",
-            HashMap::from([
-                ("title".to_string(), Value::Text("draft".to_string())),
-                ("shared".to_string(), Value::Boolean(true)),
-            ]),
-        )
+        .create("notes", row_input!("title" => "draft", "shared" => true))
         .await
         .expect("alice creates shared draft")
         .0;
@@ -535,10 +510,10 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
         |rows| (rows.len() == 1 && rows[0].0 == note_id).then_some(rows),
     )
     .await;
-    assert_eq!(initial_rows[0].1[0], Value::Text("draft".into()));
-    assert_eq!(initial_rows[0].1[1], Value::Boolean(true));
-    assert_eq!(initial_rows[0].1[2], Value::Text("alice".into()));
-    assert_eq!(initial_rows[0].1[3], Value::Text("alice".into()));
+    assert_eq!(initial_rows[0].1[0], Value::from("draft"));
+    assert_eq!(initial_rows[0].1[1], Value::from(true));
+    assert_eq!(initial_rows[0].1[2], Value::from("alice"));
+    assert_eq!(initial_rows[0].1[3], Value::from("alice"));
     let Value::Timestamp(initial_created_at) = initial_rows[0].1[4] else {
         panic!("$createdAt should decode as timestamp")
     };
@@ -553,17 +528,17 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
         |rows| (rows.len() == 1 && rows[0].0 == note_id).then_some(rows),
     )
     .await;
-    assert_eq!(bob_rows[0].1[0], Value::Text("draft".into()));
-    assert_eq!(bob_rows[0].1[1], Value::Boolean(true));
-    assert_eq!(bob_rows[0].1[2], Value::Text("alice".into()));
-    assert_eq!(bob_rows[0].1[3], Value::Text("alice".into()));
+    assert_eq!(bob_rows[0].1[0], Value::from("draft"));
+    assert_eq!(bob_rows[0].1[1], Value::from(true));
+    assert_eq!(bob_rows[0].1[2], Value::from("alice"));
+    assert_eq!(bob_rows[0].1[3], Value::from("alice"));
 
     bob.for_session(Session::new("bob"))
         .update(
             note_id,
             vec![
-                ("title".to_string(), Value::Text("revised by bob".into())),
-                ("shared".to_string(), Value::Boolean(false)),
+                ("title".to_string(), "revised by bob".into()),
+                ("shared".to_string(), false.into()),
             ],
         )
         .await
@@ -585,10 +560,10 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
         |rows| (rows.len() == 1 && rows[0].0 == note_id).then_some(rows),
     )
     .await;
-    assert_eq!(bob_rows[0].1[0], Value::Text("revised by bob".into()));
-    assert_eq!(bob_rows[0].1[1], Value::Boolean(false));
-    assert_eq!(bob_rows[0].1[2], Value::Text("alice".into()));
-    assert_eq!(bob_rows[0].1[3], Value::Text("bob".into()));
+    assert_eq!(bob_rows[0].1[0], Value::from("revised by bob"));
+    assert_eq!(bob_rows[0].1[1], Value::from(false));
+    assert_eq!(bob_rows[0].1[2], Value::from("alice"));
+    assert_eq!(bob_rows[0].1[3], Value::from("bob"));
     let Value::Timestamp(updated_created_at) = bob_rows[0].1[4] else {
         panic!("updated $createdAt should decode as timestamp")
     };
@@ -652,9 +627,9 @@ async fn provenance_magic_columns_expose_user_principals_and_insert_timestamps()
         .iter()
         .find(|(id, _)| *id == alice_note)
         .expect("alice-authored row should be present");
-    assert_eq!(alice_row.1[0], Value::Text("alice note".into()));
-    assert_eq!(alice_row.1[1], Value::Text("alice".into()));
-    assert_eq!(alice_row.1[2], Value::Text("alice".into()));
+    assert_eq!(alice_row.1[0], Value::from("alice note"));
+    assert_eq!(alice_row.1[1], Value::from("alice"));
+    assert_eq!(alice_row.1[2], Value::from("alice"));
     let Value::Timestamp(alice_created_at) = alice_row.1[3] else {
         panic!("alice $createdAt should decode as timestamp")
     };
@@ -667,9 +642,9 @@ async fn provenance_magic_columns_expose_user_principals_and_insert_timestamps()
         .iter()
         .find(|(id, _)| *id == bob_note)
         .expect("bob-authored row should be present");
-    assert_eq!(bob_row.1[0], Value::Text("bob note".into()));
-    assert_eq!(bob_row.1[1], Value::Text("bob".into()));
-    assert_eq!(bob_row.1[2], Value::Text("bob".into()));
+    assert_eq!(bob_row.1[0], Value::from("bob note"));
+    assert_eq!(bob_row.1[1], Value::from("bob"));
+    assert_eq!(bob_row.1[2], Value::from("bob"));
     let Value::Timestamp(bob_created_at) = bob_row.1[3] else {
         panic!("bob $createdAt should decode as timestamp")
     };

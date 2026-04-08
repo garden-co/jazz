@@ -12,7 +12,7 @@ export function ChatFile({ attachment }: ChatFileProps) {
   const db = useDb();
 
   const handleDownload = async () => {
-    const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
+    const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "worker" });
     downloadBlob(blob, attachment.name);
   };
 

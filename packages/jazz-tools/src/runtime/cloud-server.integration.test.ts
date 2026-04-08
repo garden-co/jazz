@@ -10,7 +10,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { definePermissions } from "../permissions/index.js";
 import { publishStoredPermissions, publishStoredSchema } from "./schema-fetch.js";
 import { translateQuery } from "./query-adapter.js";
-import { sendSyncPayload } from "./sync-transport.js";
+import { createSyncOutboxRouter, sendSyncPayload, sendSyncPayloadBatch } from "./sync-transport.js";
 import { hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 import type { WasmSchema } from "../drivers/types.js";
 
@@ -106,6 +106,7 @@ type SocialSeed = {
 
 type CloudServerConfig = {
   dataRoot: string;
+  workerThreads?: number;
 };
 
 type CloudServerHandle = {
@@ -269,10 +270,10 @@ async function startCloudServer(config: CloudServerConfig): Promise<CloudServerH
       "--secret-hash-key",
       SECRET_HASH_KEY,
       "--worker-threads",
-      "1",
+      String(config.workerThreads ?? 1),
     ],
     {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "ignore", "ignore"],
       env: process.env,
     },
   );
@@ -383,6 +384,113 @@ async function connectClient(context: AppContext): Promise<JazzClient> {
   });
 
   return clientMod.JazzClient.connectWithRuntime(runtime, context);
+}
+
+async function seedTodosViaSyncBatch(context: AppContext, rowCount: number): Promise<void> {
+  const runtimeUtils = await import("./testing/wasm-runtime-test-utils.js");
+  const runtime = await runtimeUtils.createWasmRuntime(context.schema, {
+    appId: context.appId,
+    env: context.env,
+    userBranch: context.userBranch,
+    tier: "worker",
+  });
+
+  const payloads: string[] = [];
+  runtime.addServer();
+  runtime.onSyncMessageToSend(
+    createSyncOutboxRouter({
+      onServerPayload: async (payload, isCatalogue) => {
+        if (!isCatalogue) {
+          payloads.push(payload as string);
+        }
+      },
+    }),
+  );
+
+  for (let index = 0; index < rowCount; index += 1) {
+    runtime.insert("todos", {
+      title: { type: "Text", value: `bulk-item-${index}` },
+      done: { type: "Boolean", value: false },
+    });
+  }
+
+  await Promise.resolve();
+  await Promise.resolve();
+
+  if (payloads.length !== rowCount) {
+    throw new Error(`expected ${rowCount} seed payloads, got ${payloads.length}`);
+  }
+  if (!context.serverUrl) {
+    throw new Error("seed helper requires a serverUrl");
+  }
+
+  await sendSyncPayloadBatch(
+    context.serverUrl,
+    payloads,
+    {
+      jwtToken: context.jwtToken,
+      localAuthMode: context.localAuthMode,
+      localAuthToken: context.localAuthToken,
+      pathPrefix: context.serverPathPrefix,
+      clientId: randomUUID(),
+    },
+    "[seed] ",
+  );
+}
+
+async function subscribeUntilQuiet(
+  client: JazzClient,
+  queryJson: string,
+  tier: "edge" | "global",
+  quietMs = 500,
+  timeoutMs = 30000,
+): Promise<Row[]> {
+  return await new Promise<Row[]>((resolve, reject) => {
+    const rows = new Map<string, Row>();
+    let settled = false;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    let subscriptionId: number | undefined;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (quietTimer) clearTimeout(quietTimer);
+      clearTimeout(timeoutTimer);
+      if (subscriptionId !== undefined) {
+        client.unsubscribe(subscriptionId);
+      }
+      callback();
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      finish(() => {
+        reject(
+          new Error(
+            `subscription timed out after ${timeoutMs}ms; collected=${JSON.stringify([...rows.values()])}`,
+          ),
+        );
+      });
+    }, timeoutMs);
+
+    subscriptionId = client.subscribe(
+      queryJson,
+      (delta) => {
+        for (const change of delta) {
+          if ((change.kind === 0 || change.kind === 2) && change.row) {
+            rows.set(change.id, { id: change.id, values: change.row.values });
+          } else if (change.kind === 1) {
+            rows.delete(change.id);
+          }
+        }
+
+        if (quietTimer) clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => {
+          finish(() => resolve([...rows.values()]));
+        }, quietMs);
+      },
+      { tier },
+    );
+  });
 }
 
 class JwksServer {
@@ -1291,6 +1399,190 @@ describe("cloud-server integration (Jazz TS)", () => {
     }
   }, 30000);
 
+  it("returns the full first global snapshot for high-limit large-table queries", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-large-query-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const highLimit = 999;
+    const freshReaderAttempts = 2;
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: highLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("large-query-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      for (let attempt = 0; attempt < freshReaderAttempts; attempt += 1) {
+        const reader = await connectClient(
+          makeContext(
+            app.app_id,
+            server.baseUrl,
+            signJwt(`large-query-reader-${attempt}`, JWT_SECRET),
+          ),
+        );
+        try {
+          const rows = await withTimeout(
+            reader.query(queryAllTodos, { tier: "global" }),
+            30000,
+            `global large-table query attempt ${attempt} timed out`,
+          );
+          expect(rows).toHaveLength(rowCount);
+        } finally {
+          await reader.shutdown();
+        }
+      }
+    } finally {
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
+  it("returns the full first global subscription snapshot for high-limit large-table queries", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-large-subscription-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const highLimit = 999;
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: highLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    let reader: JazzClient | null = null;
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("large-subscription-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      reader = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("large-subscription-reader", JWT_SECRET)),
+      );
+
+      const rows = await subscribeUntilQuiet(reader, queryAllTodos, "global");
+      expect(rows).toHaveLength(rowCount);
+    } finally {
+      if (reader) await reader.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
+  it("returns exactly the requested limit for first global snapshots from large tables", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-limited-query-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const requestedLimit = 123;
+    const freshReaderAttempts = 2;
+    const queryLimitedTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: requestedLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-query-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      for (let attempt = 0; attempt < freshReaderAttempts; attempt += 1) {
+        const reader = await connectClient(
+          makeContext(
+            app.app_id,
+            server.baseUrl,
+            signJwt(`limited-query-reader-${attempt}`, JWT_SECRET),
+          ),
+        );
+        try {
+          const rows = await withTimeout(
+            reader.query(queryLimitedTodos, { tier: "global" }),
+            30000,
+            `global limited-table query attempt ${attempt} timed out`,
+          );
+          expect(rows).toHaveLength(requestedLimit);
+        } finally {
+          await reader.shutdown();
+        }
+      }
+    } finally {
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
+  it("returns exactly the requested limit for first global subscription snapshots from large tables", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-limited-subscription-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const requestedLimit = 123;
+    const queryLimitedTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: requestedLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    let reader: JazzClient | null = null;
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      reader = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-reader", JWT_SECRET)),
+      );
+
+      const rows = await subscribeUntilQuiet(reader, queryLimitedTodos, "global");
+      expect(rows).toHaveLength(requestedLimit);
+    } finally {
+      if (reader) await reader.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
   // Skip: flaky due to stale client cache when objects leave query scope
   // See todo/issues/stale-client-cache-after-scope-removal.md
   it.skip("syncs queries and mutations between two TS clients via cloud-server", async () => {
@@ -1430,6 +1722,203 @@ describe("cloud-server integration (Jazz TS)", () => {
       await jwks.stop();
     }
   }, 90000);
+});
+
+// ---------------------------------------------------------------------------
+// Creator shorthand integration
+// ---------------------------------------------------------------------------
+
+interface CreatorManagedItem {
+  id: string;
+  title: string;
+  shared: boolean;
+}
+
+interface CreatorManagedItemWhere {
+  id?: string;
+  title?: string;
+  shared?: boolean;
+}
+
+class CreatorManagedItemQueryBuilder {
+  declare readonly _rowType: CreatorManagedItem;
+  where(_input: CreatorManagedItemWhere): CreatorManagedItemQueryBuilder {
+    return this;
+  }
+}
+
+function buildCreatorManagedItemsSchema(): WasmSchema {
+  const schema: WasmSchema = {
+    creator_items: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "shared", column_type: { type: "Boolean" }, nullable: false },
+      ],
+    },
+  };
+
+  const app = {
+    creator_items: new CreatorManagedItemQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(app, ({ policy, anyOf, isCreator }) => {
+      policy.creator_items.managedByCreator();
+      policy.creator_items.allowRead.where(anyOf([isCreator, { shared: true }]));
+    }),
+  );
+
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return tables;
+}
+
+describe("Creator policy shorthands", () => {
+  beforeAll(() => {
+    assertIntegrationPrerequisites();
+  });
+
+  it("enforces managedByCreator() and composes isCreator with other rules", async () => {
+    function rowTitles(rows: Row[]): string[] {
+      return rows.map((row) => (row.values[0] as { type: "Text"; value: string }).value).sort();
+    }
+
+    const schema = buildCreatorManagedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "creator_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-creator-shorthands-");
+    const server = await startCloudServer({ dataRoot });
+    let aliceClient: JazzClient | null = null;
+    let bobClient: JazzClient | null = null;
+    let systemClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, schema);
+
+      aliceClient = await connectClient(
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("alice", JWT_SECRET, { principalId: "alice" }),
+          schema,
+        ),
+      );
+      bobClient = await connectClient(
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("bob", JWT_SECRET, { principalId: "bob" }),
+          schema,
+        ),
+      );
+      systemClient = (
+        await connectClient({
+          appId: app.app_id,
+          schema,
+          serverUrl: server.baseUrl,
+          serverPathPrefix: `/apps/${app.app_id}`,
+          env: "test",
+          userBranch: "main",
+          backendSecret: BACKEND_SECRET,
+        })
+      ).asBackend();
+
+      const alicePrivateId = (
+        await aliceClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "alice-private" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+      const aliceSharedId = (
+        await aliceClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "alice-shared" },
+            shared: { type: "Boolean", value: true },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+      const bobOwnId = (
+        await bobClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "bob-own" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+
+      const systemRowId = (
+        await systemClient.createDurable(
+          "creator_items",
+          {
+            title: { type: "Text", value: "system-row" },
+            shared: { type: "Boolean", value: false },
+          },
+          { tier: "edge" },
+        )
+      ).id;
+
+      const aliceRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length === 2);
+      expect(rowTitles(aliceRows)).toEqual(["alice-private", "alice-shared"]);
+      expect(aliceRows.some((row) => row.id === systemRowId)).toBe(false);
+
+      const bobRows = await waitForRows(bobClient, queryAllItems, (rows) => rows.length === 2);
+      expect(rowTitles(bobRows)).toEqual(["alice-shared", "bob-own"]);
+
+      expect(bobRows.some((row) => row.id === aliceSharedId)).toBe(true);
+      expect(bobRows.some((row) => row.id === bobOwnId)).toBe(true);
+      expect(bobRows.some((row) => row.id === alicePrivateId)).toBe(false);
+      expect(bobRows.some((row) => row.id === systemRowId)).toBe(false);
+
+      await expect(
+        bobClient.updateDurable(
+          alicePrivateId,
+          { title: { type: "Text", value: "bob-edit" } },
+          { tier: "edge" },
+        ),
+      ).rejects.toBeTruthy();
+      await expect(bobClient.deleteDurable(aliceSharedId, { tier: "edge" })).rejects.toBeTruthy();
+
+      const aliceRowsAfterRejects = await waitForRows(
+        aliceClient,
+        queryAllItems,
+        (rows) =>
+          rows.length === 2 &&
+          rows.some(
+            (row) =>
+              row.id === alicePrivateId &&
+              row.values[0]?.type === "Text" &&
+              row.values[0].value === "alice-private",
+          ) &&
+          rows.some((row) => row.id === aliceSharedId),
+      );
+      expect(aliceRowsAfterRejects.some((row) => row.id === bobOwnId)).toBe(false);
+    } finally {
+      if (aliceClient) await aliceClient.shutdown();
+      if (bobClient) await bobClient.shutdown();
+      if (systemClient) await systemClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------

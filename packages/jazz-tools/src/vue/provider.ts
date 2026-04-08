@@ -4,6 +4,7 @@ import {
   onUnmounted,
   provide,
   shallowRef,
+  triggerRef,
   watch,
   type InjectionKey,
   type PropType,
@@ -13,12 +14,7 @@ import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
-export interface JazzClientContextValue {
-  db: Db;
-  manager: CreatedJazzClient["manager"];
-  session: Session | null;
-  shutdown: CreatedJazzClient["shutdown"];
-}
+export type JazzClientContextValue = CreatedJazzClient;
 
 export interface JazzProviderProps {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
@@ -57,8 +53,10 @@ export const JazzProvider = defineComponent({
         }
 
         let cancelled = false;
+        let stopSessionSync: (() => void) | null = null;
         onCleanup(() => {
           cancelled = true;
+          stopSessionSync?.();
         });
 
         Promise.resolve(nextClient)
@@ -70,6 +68,12 @@ export const JazzProvider = defineComponent({
 
             resolvedClient = client;
             clientRef.value = client;
+            stopSessionSync = client.db.onAuthChanged(() => {
+              if (cancelled || activeRunId !== runId) {
+                return;
+              }
+              triggerRef(clientRef);
+            });
           })
           .catch((reason) => {
             if (cancelled || activeRunId !== runId) {
