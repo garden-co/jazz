@@ -27,11 +27,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
 }
 
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-        Value::Boolean(archived),
-    ]
+    vec![owner_id.into(), title.into(), archived.into()]
 }
 
 fn boolean_policy_document_input(
@@ -39,11 +35,7 @@ fn boolean_policy_document_input(
     title: &str,
     archived: bool,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        ("archived".to_string(), Value::Boolean(archived)),
-    ])
+    row_input!("owner_id" => owner_id, "title" => title, "archived" => archived)
 }
 
 fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)> {
@@ -84,20 +76,14 @@ async fn create_row(
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(
-            document_id,
-            vec![("title".to_string(), Value::Text(title.to_string()))],
-        )
+        .update(document_id, vec![("title".to_string(), title.into())])
         .await
         .expect("update document title");
 }
 
 async fn update_document_archived(client: &JazzClient, document_id: ObjectId, archived: bool) {
     client
-        .update(
-            document_id,
-            vec![("archived".to_string(), Value::Boolean(archived))],
-        )
+        .update(document_id, vec![("archived".to_string(), archived.into())])
         .await
         .expect("update document archived");
 }
@@ -118,7 +104,7 @@ fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchem
 }
 
 fn priority_values(title: &str, priority: i32) -> Vec<Value> {
-    vec![Value::Text(title.to_string()), Value::Integer(priority)]
+    vec![title.into(), priority.into()]
 }
 
 fn make_review_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
@@ -130,10 +116,8 @@ fn make_review_schema(table_name: &str, policies: TablePolicies) -> TableSchemaB
 
 fn review_values(title: &str, reviewer_id: Option<&str>) -> Vec<Value> {
     vec![
-        Value::Text(title.to_string()),
-        reviewer_id
-            .map(|value| Value::Text(value.to_string()))
-            .unwrap_or(Value::Null),
+        title.into(),
+        reviewer_id.map(|value| value.into()).unwrap_or(Value::Null),
     ]
 }
 
@@ -146,11 +130,7 @@ fn make_status_schema(table_name: &str, policies: TablePolicies) -> TableSchemaB
 }
 
 fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
-    vec![
-        Value::Text(title.to_string()),
-        Value::Text(status.to_string()),
-        Value::Boolean(archived),
-    ]
+    vec![title.into(), status.into(), archived.into()]
 }
 
 async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
@@ -336,7 +316,7 @@ async fn select_policies_filter_out_archived_rows() {
             table_name,
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false))),
+                .with_select(PolicyExpr::eq_literal("archived", false.into())),
         ))
         .build();
 
@@ -571,8 +551,8 @@ async fn delete_policies_boolean() {
 /// ```
 #[tokio::test]
 async fn archived_state_policies_gate_insert_update_and_delete() {
-    let incomplete_policy = PolicyExpr::eq_literal("archived", Value::Boolean(false));
-    let archived_policy = PolicyExpr::eq_literal("archived", Value::Boolean(true));
+    let incomplete_policy = PolicyExpr::eq_literal("archived", false.into());
+    let archived_policy = PolicyExpr::eq_literal("archived", true.into());
     let table_name = "documents_archived_lifecycle";
 
     let schema = SchemaBuilder::new()
@@ -703,7 +683,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Ne,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -713,7 +693,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Gt,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -723,7 +703,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Ge,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -733,7 +713,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Lt,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -743,7 +723,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Le,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .build();
@@ -1153,7 +1133,7 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     update_row(
         &alice,
         update_is_null_rejected,
-        row_changes([("reviewer_id", Value::Text("bob".into()))]),
+        row_changes([("reviewer_id", "bob".into())]),
     )
     .await;
 
@@ -1198,7 +1178,7 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
                 .with_insert(PolicyExpr::True)
                 .with_select(PolicyExpr::Contains {
                     column: "title".into(),
-                    value: PolicyValue::Literal(Value::Text("Launch".into())),
+                    value: PolicyValue::Literal("Launch".into()),
                 }),
         ))
         .table(make_status_schema(
@@ -1208,8 +1188,8 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
                 .with_select(PolicyExpr::InList {
                     column: "status".into(),
                     values: vec![
-                        PolicyValue::Literal(Value::Text("active".into())),
-                        PolicyValue::Literal(Value::Text("trial".into())),
+                        PolicyValue::Literal("active".into()),
+                        PolicyValue::Literal("trial".into()),
                     ],
                 }),
         ))
@@ -1346,7 +1326,7 @@ async fn read_and_write_policies_remain_independent() {
             "documents_write_only",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false)))
+                .with_select(PolicyExpr::eq_literal("archived", false.into()))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True),
         ))
         .build();
@@ -1497,7 +1477,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
             table_name,
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false)))
+                .with_select(PolicyExpr::eq_literal("archived", false.into()))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True),
         ))
         .build();
