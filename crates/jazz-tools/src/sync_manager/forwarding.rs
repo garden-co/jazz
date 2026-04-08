@@ -1,6 +1,7 @@
 use super::*;
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{HistoryScan, StoredRowVersion};
+use crate::storage::{RowLocator, metadata_from_row_locator};
 use uuid::Uuid;
 
 impl SyncManager {
@@ -9,9 +10,9 @@ impl SyncManager {
         storage: &H,
         object_id: ObjectId,
         branch_name: &BranchName,
-        metadata: &HashMap<String, String>,
+        row_locator: &RowLocator,
     ) -> Option<StoredRowVersion> {
-        let table = metadata.get(crate::metadata::MetadataKey::Table.as_str())?;
+        let table = row_locator.table.as_str();
 
         if let Ok(Some(row)) =
             storage.load_visible_region_row(table, branch_name.as_str(), object_id)
@@ -43,12 +44,13 @@ impl SyncManager {
             tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
         }
 
-        let Some(metadata) = storage.load_metadata(object_id).ok().flatten() else {
+        let Some(row_locator) = storage.load_row_locator(object_id).ok().flatten() else {
             return;
         };
         if let Some(row) =
-            self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
+            let metadata = metadata_from_row_locator(&row_locator);
             for server_id in server_ids {
                 self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
             }
@@ -107,12 +109,13 @@ impl SyncManager {
 
         let _span = tracing::debug_span!("forward_update_to_clients", %object_id, %branch_name, client_count = client_ids.len()).entered();
 
-        let Some(metadata) = storage.load_metadata(object_id).ok().flatten() else {
+        let Some(row_locator) = storage.load_row_locator(object_id).ok().flatten() else {
             return;
         };
         if let Some(row) =
-            self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
+            let metadata = metadata_from_row_locator(&row_locator);
             for client_id in &client_ids {
                 tracing::trace!(%client_id, "queuing row update to client");
                 self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());

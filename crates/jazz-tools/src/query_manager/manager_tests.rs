@@ -120,15 +120,12 @@ fn connect_query_manager_upstream(
 }
 
 fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowVersion {
-    let metadata = storage
-        .load_metadata(row_id)
+    let row_locator = storage
+        .load_row_locator(row_id)
         .unwrap()
-        .expect("row metadata should exist");
-    let table = metadata
-        .get(MetadataKey::Table.as_str())
-        .expect("row metadata should include table");
+        .expect("row locator should exist");
     storage
-        .load_visible_region_row(table, branch, row_id)
+        .load_visible_region_row(row_locator.table.as_str(), branch, row_id)
         .unwrap()
         .expect("visible row should exist")
 }

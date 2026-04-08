@@ -288,13 +288,26 @@ pub(super) fn index_range_scan_bounds(
 /// Parse a UUID from the last segment of an index key.
 /// Key format: `idx:{table}:{col}:{branch}:{value_segment}:{uuid_hex}`
 pub(super) fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
-    let uuid_hex = key.rsplit(':').next()?;
-    let bytes = hex::decode(uuid_hex).ok()?;
-    if bytes.len() != 16 {
+    fn hex_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let uuid_hex = key.rsplit(':').next()?.as_bytes();
+    if uuid_hex.len() != INDEX_ENTRY_UUID_HEX_BYTES {
         return None;
     }
-    let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
-    Some(ObjectId(internment::Intern::new(uuid)))
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in uuid_hex.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        bytes[i] = (high << 4) | low;
+    }
+    Some(ObjectId::from_uuid(uuid::Uuid::from_bytes(bytes)))
 }
 
 /// Increment the last byte for exclusive upper bounds.

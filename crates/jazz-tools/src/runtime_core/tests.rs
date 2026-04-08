@@ -6,7 +6,9 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
-use crate::storage::{MemoryStorage, MetadataRows, RawTableRows, Storage, StorageError};
+use crate::storage::{
+    MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, Storage, StorageError,
+};
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
@@ -83,6 +85,14 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.raw_table_scan_prefix(table, prefix)
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -90,6 +100,15 @@ impl Storage for RowRegionReadFailingStorage {
         end: Option<&str>,
     ) -> Result<RawTableRows, StorageError> {
         self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
     }
 
     fn append_history_region_rows(
@@ -262,6 +281,14 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.raw_table_scan_prefix(table, prefix)
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -269,6 +296,15 @@ impl Storage for LegacyPersistenceObservingStorage {
         end: Option<&str>,
     ) -> Result<RawTableRows, StorageError> {
         self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
     }
 
     fn append_history_region_rows(

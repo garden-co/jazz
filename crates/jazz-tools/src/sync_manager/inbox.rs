@@ -5,7 +5,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
 use crate::query_manager::policy::Operation;
 use crate::row_regions::{RowState, StoredRowVersion};
-use crate::storage::Storage;
+use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
 
 fn short_hash(hash: &impl ToString) -> String {
@@ -42,8 +42,13 @@ impl SyncManager {
         metadata: HashMap<String, String>,
     ) {
         let existing_metadata = storage.load_metadata(object_id).ok().flatten();
-        if existing_metadata.is_none() {
-            let _ = storage.put_metadata(object_id, metadata.clone());
+        let existing_row_locator = storage.load_row_locator(object_id).ok().flatten();
+        if existing_metadata.is_none() && existing_row_locator.is_none() {
+            if let Some(row_locator) = crate::storage::row_locator_from_metadata(&metadata) {
+                let _ = storage.put_row_locator(object_id, Some(&row_locator));
+            } else {
+                let _ = storage.put_metadata(object_id, metadata.clone());
+            }
         }
 
         #[cfg(test)]
@@ -68,7 +73,12 @@ impl SyncManager {
             return Some(metadata.metadata.clone());
         }
 
-        storage.load_metadata(row.row_id).ok().flatten()
+        storage
+            .load_row_locator(row.row_id)
+            .ok()
+            .flatten()
+            .map(|locator| metadata_from_row_locator(&locator))
+            .or_else(|| storage.load_metadata(row.row_id).ok().flatten())
     }
 
     fn apply_row_updated<H: Storage>(

@@ -89,7 +89,9 @@ pub(crate) fn validate_index_value_size(
 }
 
 pub type MetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
+pub type RowLocatorRows = Vec<(ObjectId, RowLocator)>;
 pub type RawTableRows = Vec<(String, Vec<u8>)>;
+pub type RawTableKeys = Vec<String>;
 
 const METADATA_TABLE: &str = "__metadata";
 const ROW_LOCATOR_TABLE: &str = "__row_locator";
@@ -122,13 +124,24 @@ fn decode_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError
         .map_err(|err| StorageError::IoError(format!("deserialize metadata: {err}")))
 }
 
-fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLocator> {
+pub(crate) fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLocator> {
     Some(RowLocator {
         table: metadata.get(MetadataKey::Table.as_str())?.clone().into(),
         origin_schema_hash: metadata
             .get(MetadataKey::OriginSchemaHash.as_str())
             .and_then(|raw_hash| SchemaHash::from_hex(raw_hash)),
     })
+}
+
+pub(crate) fn metadata_from_row_locator(locator: &RowLocator) -> HashMap<String, String> {
+    let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), locator.table.to_string())]);
+    if let Some(origin_schema_hash) = locator.origin_schema_hash {
+        metadata.insert(
+            MetadataKey::OriginSchemaHash.to_string(),
+            origin_schema_hash.to_string(),
+        );
+    }
+    metadata
 }
 
 fn encode_row_locator(locator: &RowLocator) -> Result<Vec<u8>, StorageError> {
@@ -169,12 +182,7 @@ pub trait Storage {
         let bytes = encode_metadata(&metadata)?;
         self.raw_table_put(METADATA_TABLE, &metadata_raw_key(id), &bytes)?;
 
-        if let Some(locator) = row_locator_from_metadata(&metadata) {
-            let locator_bytes = encode_row_locator(&locator)?;
-            self.raw_table_put(ROW_LOCATOR_TABLE, &metadata_raw_key(id), &locator_bytes)?;
-        } else {
-            let _ = self.raw_table_delete(ROW_LOCATOR_TABLE, &metadata_raw_key(id));
-        }
+        self.put_row_locator(id, row_locator_from_metadata(&metadata).as_ref())?;
 
         Ok(())
     }
@@ -196,10 +204,32 @@ pub trait Storage {
         Ok(rows)
     }
 
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        let mut rows = Vec::new();
+        for (key, bytes) in self.raw_table_scan_prefix(ROW_LOCATOR_TABLE, "")? {
+            rows.push((decode_metadata_raw_key(&key)?, decode_row_locator(&bytes)?));
+        }
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
+    }
+
     fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
         self.raw_table_get(ROW_LOCATOR_TABLE, &metadata_raw_key(id))?
             .map(|bytes| decode_row_locator(&bytes))
             .transpose()
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        if let Some(locator) = locator {
+            let locator_bytes = encode_row_locator(locator)?;
+            self.raw_table_put(ROW_LOCATOR_TABLE, &metadata_raw_key(id), &locator_bytes)
+        } else {
+            self.raw_table_delete(ROW_LOCATOR_TABLE, &metadata_raw_key(id))
+        }
     }
 
     // ================================================================
@@ -248,6 +278,25 @@ pub trait Storage {
         Err(StorageError::IoError(
             "raw table range scans are not implemented for this backend yet".to_string(),
         ))
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.raw_table_scan_prefix(table, prefix)
+            .map(|rows| rows.into_iter().map(|(key, _)| key).collect())
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.raw_table_scan_range(table, start, end)
+            .map(|rows| rows.into_iter().map(|(key, _)| key).collect())
     }
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
@@ -578,8 +627,8 @@ pub trait Storage {
                 let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, zero) else {
                     continue;
                 };
-                if let Ok(keys) = self.raw_table_scan_prefix(&raw_table, &prefix) {
-                    for (key, _) in keys {
+                if let Ok(keys) = self.raw_table_scan_prefix_keys(&raw_table, &prefix) {
+                    for key in keys {
                         if let Some(id) = key_codec::parse_uuid_from_index_key(&key) {
                             result.insert(id);
                         }
@@ -592,10 +641,10 @@ pub trait Storage {
         let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, value) else {
             return Vec::new();
         };
-        self.raw_table_scan_prefix(&raw_table, &prefix)
+        self.raw_table_scan_prefix_keys(&raw_table, &prefix)
             .map(|keys| {
                 keys.into_iter()
-                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
                     .collect()
             })
             .unwrap_or_default()
@@ -616,10 +665,10 @@ pub trait Storage {
             return Vec::new();
         };
 
-        self.raw_table_scan_range(&raw_table, start_key.as_deref(), end_key.as_deref())
+        self.raw_table_scan_range_keys(&raw_table, start_key.as_deref(), end_key.as_deref())
             .map(|keys| {
                 keys.into_iter()
-                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
                     .collect()
             })
             .unwrap_or_default()
@@ -627,10 +676,10 @@ pub trait Storage {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         let raw_table = key_codec::index_raw_table(table, column, branch);
-        self.raw_table_scan_prefix(&raw_table, "")
+        self.raw_table_scan_prefix_keys(&raw_table, "")
             .map(|keys| {
                 keys.into_iter()
-                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
                     .collect()
             })
             .unwrap_or_default()
@@ -666,6 +715,22 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        (**self).scan_row_locators()
+    }
+
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        (**self).load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        (**self).put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         (**self).raw_table_put(table, key, value)
     }
@@ -686,6 +751,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).raw_table_scan_prefix(table, prefix)
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        (**self).raw_table_scan_prefix_keys(table, prefix)
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -693,6 +766,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         end: Option<&str>,
     ) -> Result<RawTableRows, StorageError> {
         (**self).raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        (**self).raw_table_scan_range_keys(table, start, end)
     }
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
@@ -1064,13 +1146,23 @@ impl Storage for MemoryStorage {
             .or_default()
             .insert(metadata_raw_key(id), bytes);
 
-        if let Some(locator) = row_locator_from_metadata(&metadata) {
-            let locator_bytes = encode_row_locator(&locator)?;
+        self.put_row_locator(id, row_locator_from_metadata(&metadata).as_ref())?;
+
+        Ok(())
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        if let Some(locator) = locator {
+            let locator_bytes = encode_row_locator(locator)?;
             self.raw_tables
                 .entry(ROW_LOCATOR_TABLE.to_string())
                 .or_default()
                 .insert(metadata_raw_key(id), locator_bytes);
-            self.row_locators.insert(id, locator);
+            self.row_locators.insert(id, locator.clone());
         } else {
             if let Some(rows) = self.raw_tables.get_mut(ROW_LOCATOR_TABLE) {
                 rows.remove(&metadata_raw_key(id));
@@ -1123,6 +1215,21 @@ impl Storage for MemoryStorage {
             .collect())
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, _)| key.clone())
+            .collect())
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -1153,6 +1260,36 @@ impl Storage for MemoryStorage {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let start = start.map(str::to_string);
+        let end = end.map(str::to_string);
+
+        Ok(match (start.as_ref(), end.as_ref()) {
+            (Some(start), Some(end)) => rows
+                .range(start.clone()..end.clone())
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (Some(start), None) => rows
+                .range(start.clone()..)
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (None, Some(end)) => rows
+                .range(..end.clone())
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (None, None) => rows.keys().cloned().collect(),
         })
     }
 

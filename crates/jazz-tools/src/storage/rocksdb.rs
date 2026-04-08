@@ -20,8 +20,9 @@ use super::{
         load_visible_query_row_for_tier_core, load_visible_region_entry_core,
         load_visible_region_frontier_core, load_visible_region_row_core,
         patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
-        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_core,
+        scan_history_row_versions_core, scan_visible_region_core,
         scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
@@ -120,6 +121,29 @@ impl RocksDBStorage {
         Ok(out)
     }
 
+    fn scan_prefix_keys_from_db(
+        db: &TransactionDB,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let prefix_bytes = prefix.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        if let Some(ub) = Self::prefix_upper_bound(prefix_bytes) {
+            read_opts.set_iterate_upper_bound(ub);
+        }
+        let mut out = Vec::new();
+        let iter = db.iterator_opt(
+            IteratorMode::From(prefix_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
+            let key_str = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
+            out.push(key_str);
+        }
+        Ok(out)
+    }
+
     fn scan_range_from_db(
         db: &TransactionDB,
         start: &str,
@@ -139,6 +163,28 @@ impl RocksDBStorage {
             let key_str = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
             out.push((key_str, value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    fn scan_range_keys_from_db(
+        db: &TransactionDB,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let start_bytes = start.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_upper_bound(end.as_bytes().to_vec());
+        let mut out = Vec::new();
+        let iter = db.iterator_opt(
+            IteratorMode::From(start_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
+            let key_str = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
+            out.push(key_str);
         }
         Ok(out)
     }
@@ -224,6 +270,18 @@ impl Storage for RocksDBStorage {
         })
     }
 
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_keys_from_db(&inner.db, storage_prefix)
+            })
+        })
+    }
+
     fn raw_table_scan_range(
         &self,
         table: &str,
@@ -233,6 +291,19 @@ impl Storage for RocksDBStorage {
         self.with_inner(|inner| {
             raw_table_scan_range_core(table, start, end, |start_key, end_key| {
                 Self::scan_range_from_db(&inner.db, start_key, end_key)
+            })
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_keys_from_db(&inner.db, start_key, end_key)
             })
         })
     }
