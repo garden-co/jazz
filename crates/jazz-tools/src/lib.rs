@@ -11,7 +11,6 @@ pub mod query_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod routes;
 pub mod row_format;
-#[path = "row_regions/mod.rs"]
 pub mod row_histories;
 pub mod row_regions {
     pub use crate::row_histories::*;
