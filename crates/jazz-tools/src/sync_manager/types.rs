@@ -11,7 +11,7 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::row_regions::StoredRowVersion;
+use crate::row_histories::StoredRowVersion;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -266,7 +266,7 @@ pub enum SyncPayload {
         row_id: ObjectId,
         branch_name: BranchName,
         version_id: CommitId,
-        state: Option<crate::row_regions::RowState>,
+        state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     },
 

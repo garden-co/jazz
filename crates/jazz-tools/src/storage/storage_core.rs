@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_regions::{
+use crate::row_histories::{
     BatchId, HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
     decode_query_row_version, decode_stored_row_version, decode_visible_current_row,
     decode_visible_query_row, decode_visible_query_row_version_for_tier, decode_visible_row_entry,

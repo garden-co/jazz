@@ -344,7 +344,7 @@ mod tests {
     fn test_sync_batch_request_serialization() {
         use crate::metadata::RowProvenance;
         use crate::object::ObjectId;
-        use crate::row_regions::{RowState, StoredRowVersion};
+        use crate::row_histories::{RowState, StoredRowVersion};
         use crate::sync_manager::ClientId;
 
         let row_id = ObjectId::new();

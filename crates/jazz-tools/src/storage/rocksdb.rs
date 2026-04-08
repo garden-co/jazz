@@ -28,7 +28,7 @@ use super::{
 };
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_regions::{
+use crate::row_histories::{
     HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
 };
 use crate::sync_manager::DurabilityTier;
@@ -416,7 +416,7 @@ impl Storage for RocksDBStorage {
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
-        batch_id: crate::row_regions::BatchId,
+        batch_id: crate::row_histories::BatchId,
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {

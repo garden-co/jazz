@@ -4,7 +4,7 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
 use crate::query_manager::policy::Operation;
-use crate::row_regions::{RowState, StoredRowVersion};
+use crate::row_histories::{RowState, StoredRowVersion};
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
 
