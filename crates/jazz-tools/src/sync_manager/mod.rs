@@ -351,6 +351,11 @@ impl SyncManager {
             return;
         };
 
+        let old_query_scope = client
+            .queries
+            .get(&query_id)
+            .map(|query| query.scope.clone())
+            .unwrap_or_default();
         let old_scope: HashSet<(ObjectId, BranchName)> = client
             .queries
             .values()
@@ -373,17 +378,18 @@ impl SyncManager {
 
         let no_longer_visible: HashSet<(ObjectId, BranchName)> =
             old_scope.difference(&new_scope).cloned().collect();
-        let newly_visible: Vec<(ObjectId, BranchName)> =
-            new_scope.difference(&old_scope).cloned().collect();
+        let newly_visible_for_query: Vec<(ObjectId, BranchName)> =
+            scope.difference(&old_query_scope).cloned().collect();
 
         self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
-        for (object_id, branch_name) in newly_visible {
+        for (object_id, branch_name) in newly_visible_for_query {
             self.queue_initial_sync_to_client_with_storage(
                 storage,
                 client_id,
                 object_id,
                 branch_name,
+                true,
             );
         }
     }

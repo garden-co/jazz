@@ -884,12 +884,16 @@ impl QueryManager {
             self.handle_row_update(storage, update);
         }
 
-        // 3. Process pending query subscriptions from downstream clients
+        // 3. Process pending query unsubscriptions from downstream clients
+        // before new subscriptions from the same tick. One-shot query helpers
+        // often unsubscribe and immediately resubscribe; draining removals
+        // first prevents stale per-client scope from suppressing the replay
+        // that the new subscription depends on.
+        self.process_pending_query_unsubscriptions();
+
+        // 3b. Process pending query subscriptions from downstream clients
         // (after indices are updated, so initial settle finds existing data)
         self.process_pending_query_subscriptions(storage);
-
-        // 3b. Process pending query unsubscriptions from downstream clients
-        self.process_pending_query_unsubscriptions();
 
         // 4. Pick up new permission check intents from SyncManager
         self.pick_up_pending_permission_checks(storage);
