@@ -4,7 +4,7 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
-    RowState, StoredRowVersion, VisibleRowUpdate, apply_row_version, patch_row_version_state,
+    RowState, RowVisibilityChange, StoredRowVersion, apply_row_version, patch_row_version_state,
 };
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
@@ -32,7 +32,7 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 struct AppliedRowVersion {
     metadata: HashMap<String, String>,
     row: StoredRowVersion,
-    visible_update: Option<VisibleRowUpdate>,
+    visibility_change: Option<RowVisibilityChange>,
 }
 
 impl SyncManager {
@@ -59,7 +59,7 @@ impl SyncManager {
             } else {
                 existing_metadata.unwrap_or_default()
             };
-            self.object_manager
+            self.test_object_cache
                 .cache_metadata_for_tests(object_id, cached);
         }
     }
@@ -98,24 +98,25 @@ impl SyncManager {
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
-        let visible_update = apply_row_version(storage, row.row_id, &branch_name, row.clone(), &[])
-            .ok()
-            .and_then(|applied| {
-                #[cfg(test)]
-                self.object_manager.refresh_row_branch_tips_for_tests(
-                    storage,
-                    applied.row_locator.table.as_str(),
-                    row.row_id,
-                    branch_name.clone(),
-                );
+        let visibility_change =
+            apply_row_version(storage, row.row_id, &branch_name, row.clone(), &[])
+                .ok()
+                .and_then(|applied| {
+                    #[cfg(test)]
+                    self.test_object_cache.refresh_row_branch_tips_for_tests(
+                        storage,
+                        applied.row_locator.table.as_str(),
+                        row.row_id,
+                        branch_name.clone(),
+                    );
 
-                applied.visible_update
-            });
+                    applied.visibility_change
+                });
 
         Some(AppliedRowVersion {
             metadata,
             row,
-            visible_update,
+            visibility_change,
         })
     }
 
@@ -149,7 +150,7 @@ impl SyncManager {
         }
 
         if let Some(update) = row_update {
-            self.pending_row_updates.push(update);
+            self.pending_row_visibility_changes.push(update);
         }
     }
 
@@ -211,8 +212,8 @@ impl SyncManager {
                         });
                     }
 
-                    if let Some(update) = applied.visible_update {
-                        self.pending_row_updates.push(update);
+                    if let Some(update) = applied.visibility_change {
+                        self.pending_row_visibility_changes.push(update);
                         self.forward_update_to_clients_with_storage(
                             storage,
                             object_id,
@@ -644,8 +645,8 @@ impl SyncManager {
 
                     self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
 
-                    if let Some(update) = applied.visible_update {
-                        self.pending_row_updates.push(update);
+                    if let Some(update) = applied.visibility_change {
+                        self.pending_row_visibility_changes.push(update);
                         self.forward_update_to_clients_except_with_storage(
                             storage,
                             object_id,

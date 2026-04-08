@@ -6,16 +6,11 @@ pub mod metadata;
 pub mod middleware;
 mod monotonic_clock;
 pub mod object;
-#[cfg(test)]
-pub mod object_manager;
 pub mod query_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod routes;
 pub mod row_format;
 pub mod row_histories;
-pub mod row_regions {
-    pub use crate::row_histories::*;
-}
 pub mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -23,6 +18,8 @@ pub mod server;
 pub mod storage;
 pub mod sync_manager;
 pub mod sync_tracer;
+#[cfg(test)]
+mod test_object_cache;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]

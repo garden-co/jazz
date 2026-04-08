@@ -13,7 +13,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
-    use crate::row_regions::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowVersion};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
@@ -379,7 +379,7 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row commit on a specific branch through ObjectManager's sync path.
+    /// Ingest a remote row version on a specific branch through the test cache sync path.
     /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
@@ -398,7 +398,7 @@ mod tests {
             schema_hash.to_string(),
         );
         qm.sync_manager_mut()
-            .object_manager
+            .test_object_cache
             .receive_metadata(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
@@ -560,7 +560,7 @@ mod tests {
     }
 
     // ========================================================================
-    // End-to-End ObjectManager Integration Tests
+    // End-to-end test-cache integration tests
     // ========================================================================
 
     /// End-to-end test: Insert rows in old schema format, query with new schema,
@@ -753,7 +753,9 @@ mod tests {
                 ],
                 None,
             )
-            .expect("schema update should succeed from visible row state without legacy commits");
+            .expect(
+                "schema update should succeed from visible row state without legacy object-backed storage",
+            );
 
         let query = reader
             .query("users")
@@ -3817,7 +3819,7 @@ mod tests {
     ///
     /// Scenario:
     /// 1. Client B (v1 schema) receives a row on the v2 branch (unknown schema)
-    /// 2. The row is buffered in pending_row_updates
+    /// 2. The row is buffered in pending_row_visibility_changes
     /// 3. Client B receives schema v2 and lens v1->v2 via catalogue
     /// 4. process() activates v2 and retries pending rows
     /// 5. The row is now queryable with lens transform applied

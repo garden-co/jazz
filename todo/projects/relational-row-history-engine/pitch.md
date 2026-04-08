@@ -6,7 +6,7 @@ Jazz currently has a deep mismatch at its core: the system that stores data thin
 
 The project has three slices, and the first two are intentionally large:
 
-1. replace all current functionality with the new row-region engine
+1. replace all current functionality with the new row-history engine
 2. add cross-row transactions, staging, authorities, and fate
 3. expose public history, time-travel, and branch-view query APIs
 
@@ -122,7 +122,7 @@ As part of the pre-Slice-2 cleanup, the remaining compatibility tissue from the 
 - legacy `StoredState`
 - legacy `CommitAckState`
 - legacy object/branch containers for user rows
-- production `ObjectManager` ownership of row state
+- any production object/cache ownership of row state
 
 The runtime should instead rely on:
 
@@ -161,8 +161,8 @@ alice reconnects after going offline
 ```text
 Before:
   QueryManager
-    -> rows from ObjectManager
-    -> ObjectManager loads objects/branches/commits from Storage
+    -> rows from a separate object/cache layer
+    -> that layer reloads object/branch/commit structure from Storage
     -> SyncManager talks in object/commit terms
 
 After Slice 1:
@@ -291,7 +291,7 @@ pub enum TxSettlement {
 
 ### Slice 3: Public History, Time-Travel, and Branch Views
 
-Once Slice 1 and Slice 2 are both real, Slice 3 exposes the query capabilities that the row-region engine was designed to make natural:
+Once Slice 1 and Slice 2 are both real, Slice 3 exposes the query capabilities that the row-history engine was designed to make natural:
 
 - `query.history()`
 - `query.as_of(ts)`
@@ -325,7 +325,7 @@ alice runs query.as_of(ts).branch_view("draft")
 
 ```text
 Slice 1:
-  row-region engine exists
+  row-history engine exists
   public queries still focus on current visible state
 
 Slice 2:
@@ -339,7 +339,7 @@ Slice 3:
 
 This is not a gradual migration plan. It is a replacement plan with two major semantic steps on top:
 
-- Slice 1 says: all of today's engine responsibilities should already work on row regions
+- Slice 1 says: all of today's engine responsibilities should already work on row histories
 - Slice 2 says: now that the substrate is relational, transactions become a metadata/state problem rather than a storage-graph problem
 - Slice 3 says: once the storage and transactional semantics are stable, public historical query APIs can land cleanly on top
 
@@ -349,16 +349,16 @@ That is the main bet of the project: the new system is simpler because the stora
 
 - Slice 1 is still a large rewrite. If we keep too much object-manager compatibility around, we will lose the simplicity benefit and pay for two engines at once.
 - The visible region is authoritative. If visible/history drift can occur without immediate detection, the design becomes dangerous rather than simplifying.
-- Multi-tier sync currently depends on commit ids, object metadata, and branch-frontier reasoning. Slice 1 needs equally crisp idempotence and replay rules in row-region terms.
+- Multi-tier sync currently depends on commit ids, object metadata, and branch-frontier reasoning. Slice 1 needs equally crisp idempotence and replay rules in row-history terms.
 - Query execution is only simpler if ordinary reads really stay visible-first. If too many queries fall back to reconstructing current state from history, we will rebuild MVCC cost in the hot path.
 - Transaction-level confirmed tiers and fate patching may be expensive for wide transactions. Slice 2 must prove the fan-out cost is acceptable.
 - Time-travel and branch-view queries are conceptually clean here, but Slice 3 still needs access paths that are fast enough to be real features rather than debugging tools.
 
 ## No-gos
 
-- No hybrid forever architecture where some user rows stay object-backed and others become row-region-backed indefinitely.
+- No hybrid forever architecture where some user rows stay object-backed and others become row-history-backed indefinitely.
 - No reintroducing a table-global object DAG under new names. The only preserved commit-like structure should be the row-local version DAG itself.
-- No second write-fate mechanism beside row metadata and row-region settlement state.
+- No second write-fate mechanism beside row metadata and row-history settlement state.
 - No optimizing for tiny review diffs at the cost of a distorted architecture.
 - No appetite-driven compromise where Slice 1 lands as only a toy storage experiment without replacing the real runtime path.
 

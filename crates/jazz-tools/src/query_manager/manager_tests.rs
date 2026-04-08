@@ -16,7 +16,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
@@ -207,7 +207,7 @@ fn add_row_commit(
     );
     let version_id = row.version_id();
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .add_row_version(storage, object_id, branch, row)
         .unwrap();
     version_id
@@ -870,7 +870,7 @@ fn insert_returns_handle_with_version_id() {
 }
 
 #[test]
-fn insert_materializes_visible_and_history_row_regions() {
+fn insert_materializes_visible_and_history_rows() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let descriptor = schema
@@ -1056,7 +1056,7 @@ fn query_reads_visible_region_after_legacy_commit_history_is_removed() {
 
     let query = reader_qm.query("users").build();
     let rows = execute_query(&mut reader_qm, &mut storage, query)
-        .expect("visible-region query should succeed without legacy commit history");
+        .expect("visible-row query should succeed without legacy object-backed storage");
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, handle.row_id);
@@ -1366,7 +1366,7 @@ fn synced_update_updates_column_indices() {
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id, metadata);
 
     // Encode the initial row data (name="Alice", score=100)
@@ -1480,7 +1480,7 @@ fn synced_update_updates_column_indices() {
 }
 
 #[test]
-fn synced_insert_materializes_visible_and_history_row_regions() {
+fn synced_insert_materializes_visible_and_history_rows() {
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
@@ -1498,7 +1498,7 @@ fn synced_insert_materializes_visible_and_history_row_regions() {
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id, metadata);
 
     let row_data = encode_row(
@@ -1569,7 +1569,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id, metadata);
 
     let live_data = encode_row(
@@ -1622,7 +1622,7 @@ fn synced_insert_appears_in_subscription_delta() {
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id, metadata);
 
     // Subscribe before the synced row arrives.
@@ -1794,7 +1794,7 @@ fn synced_row_visible_in_filtered_subscription() {
     let mut metadata_1 = HashMap::new();
     metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id_1, metadata_1);
 
     let data_1 = encode_row(
@@ -1835,7 +1835,7 @@ fn synced_row_visible_in_filtered_subscription() {
     let mut metadata_2 = HashMap::new();
     metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id_2, metadata_2);
 
     let data_2 = encode_row(
@@ -1961,7 +1961,9 @@ fn update_reads_visible_region_after_legacy_commit_history_is_removed() {
             handle.row_id,
             &[Value::Text("Alice Updated".into()), Value::Integer(200)],
         )
-        .expect("update should succeed from visible-row state without legacy commits");
+        .expect(
+            "update should succeed from visible-row state without legacy object-backed storage",
+        );
 
     let query = reader_qm.query("users").build();
     let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
@@ -2587,12 +2589,12 @@ fn two_peer_sync_insert_reaches_subscription() {
         .unwrap();
     let row_id = handle.row_id;
 
-    // Get the actual commit data from Peer A's ObjectManager
+    // Get the actual row-version data from Peer A's test cache.
     // This simulates "what would be sent over the wire"
     let branch_name = get_branch(&peer_a);
     let metadata = peer_a
         .sync_manager()
-        .object_manager
+        .test_object_cache
         .get(row_id)
         .expect("row metadata should be available")
         .clone();
@@ -2782,7 +2784,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let branch_name = BranchName::new(&branch);
     let initial_tips: Vec<_> = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(handle.row_id, &branch)
         .unwrap()
         .iter()
@@ -2837,7 +2839,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     // Verify we now have concurrent tips
     let tips: Vec<_> = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(handle.row_id, &branch)
         .unwrap()
         .iter()
@@ -3495,9 +3497,9 @@ fn delete_reads_visible_region_after_legacy_commit_history_is_removed() {
     let mut reader_qm = QueryManager::new(SyncManager::new());
     reader_qm.set_current_schema(schema, "dev", "main");
 
-    reader_qm
-        .delete(&mut storage, handle.row_id)
-        .expect("delete should succeed from visible-row state without legacy commits");
+    reader_qm.delete(&mut storage, handle.row_id).expect(
+        "delete should succeed from visible-row state without legacy object-backed storage",
+    );
 
     let query = reader_qm.query("users").build();
     let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
@@ -7138,7 +7140,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     let user_id = server_qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(user_metadata));
     add_row_commit(
         &mut server_qm,
@@ -7159,7 +7161,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
     let post_id = server_qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(post_metadata));
     add_row_commit(
         &mut server_qm,
@@ -7443,7 +7445,7 @@ fn handle_object_update_respects_branch() {
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id, metadata);
 
     let descriptor = RowDescriptor::new(vec![
@@ -7476,7 +7478,7 @@ fn handle_object_update_respects_branch() {
     let mut metadata2 = HashMap::new();
     metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .receive_metadata(&mut storage, row_id2, metadata2);
 
     let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
@@ -8009,7 +8011,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
     assert_eq!(
         row_updates.len(),
         1,
-        "server subscription should settle from visible row regions without legacy commits"
+        "server subscription should settle from visible rows without legacy object-backed storage"
     );
     assert_eq!(row_updates[0], handle.row_id);
 }

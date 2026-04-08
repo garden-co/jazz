@@ -135,7 +135,7 @@ impl Storage for RowRegionReadFailingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_regions::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowVersion],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -143,7 +143,7 @@ impl Storage for RowRegionReadFailingStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        entries: &[crate::row_regions::VisibleRowEntry],
+        entries: &[crate::row_histories::VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.inner.upsert_visible_region_rows(table, entries)
     }
@@ -151,8 +151,8 @@ impl Storage for RowRegionReadFailingStorage {
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
-        batch_id: crate::row_regions::BatchId,
-        state: Option<crate::row_regions::RowState>,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         self.inner
@@ -163,7 +163,7 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -172,9 +172,9 @@ impl Storage for RowRegionReadFailingStorage {
         _table: &str,
         _branch: &str,
         _row_id: ObjectId,
-    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region reads deliberately disabled in this test".to_string(),
+            "row-history reads deliberately disabled in this test".to_string(),
         ))
     }
 
@@ -182,7 +182,7 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region_row_versions(table, row_id)
     }
 
@@ -190,7 +190,7 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
     }
 
@@ -198,8 +198,8 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         table: &str,
         branch: &str,
-        scan: crate::row_regions::HistoryScan,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -331,7 +331,7 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_regions::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowVersion],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -339,7 +339,7 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        entries: &[crate::row_regions::VisibleRowEntry],
+        entries: &[crate::row_histories::VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.inner.upsert_visible_region_rows(table, entries)
     }
@@ -347,8 +347,8 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
-        batch_id: crate::row_regions::BatchId,
-        state: Option<crate::row_regions::RowState>,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         self.inner
@@ -359,7 +359,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -368,7 +368,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
@@ -376,7 +376,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region_row_versions(table, row_id)
     }
 
@@ -384,7 +384,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
     }
 
@@ -392,8 +392,8 @@ impl Storage for LegacyPersistenceObservingStorage {
         &self,
         table: &str,
         branch: &str,
-        scan: crate::row_regions::HistoryScan,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -525,7 +525,7 @@ impl Storage for RowMutationObservingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_regions::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowVersion],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -533,7 +533,7 @@ impl Storage for RowMutationObservingStorage {
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
-        entries: &[crate::row_regions::VisibleRowEntry],
+        entries: &[crate::row_histories::VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.inner.upsert_visible_region_rows(table, entries)
     }
@@ -541,8 +541,8 @@ impl Storage for RowMutationObservingStorage {
     fn apply_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[crate::row_regions::StoredRowVersion],
-        visible_entries: &[crate::row_regions::VisibleRowEntry],
+        history_rows: &[crate::row_histories::StoredRowVersion],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(), StorageError> {
         self.calls.lock().unwrap().row_mutation_calls += 1;
@@ -553,8 +553,8 @@ impl Storage for RowMutationObservingStorage {
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
-        batch_id: crate::row_regions::BatchId,
-        state: Option<crate::row_regions::RowState>,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         self.inner
@@ -565,7 +565,7 @@ impl Storage for RowMutationObservingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -574,7 +574,7 @@ impl Storage for RowMutationObservingStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
@@ -582,7 +582,7 @@ impl Storage for RowMutationObservingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_visible_region_row_versions(table, row_id)
     }
 
@@ -590,7 +590,7 @@ impl Storage for RowMutationObservingStorage {
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
     }
 
@@ -598,8 +598,8 @@ impl Storage for RowMutationObservingStorage {
         &self,
         table: &str,
         branch: &str,
-        scan: crate::row_regions::HistoryScan,
-    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -1596,14 +1596,14 @@ fn test_park_sync_message() {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            row: crate::row_regions::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowVersion::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
                 b"alice".to_vec(),
                 RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
                 HashMap::new(),
-                crate::row_regions::RowState::VisibleDirect,
+                crate::row_histories::RowState::VisibleDirect,
                 None,
             ),
         },
@@ -2128,7 +2128,7 @@ fn rc_row_writes_do_not_touch_legacy_commit_storage() {
     assert_eq!(
         *calls.lock().unwrap(),
         LegacyStorageCallCounts::default(),
-        "row writes should persist only via row regions, not legacy branch commit storage"
+        "row writes should persist only via row histories, not legacy branch commit storage"
     );
 }
 
@@ -2338,7 +2338,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
     assert_eq!(
         *calls.lock().unwrap(),
         LegacyStorageCallCounts::default(),
-        "row durability updates should not touch legacy commit ack storage"
+        "row durability updates should not touch legacy durability-ack storage"
     );
 }
 
@@ -2359,7 +2359,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
         *s.a.schema_manager()
             .query_manager()
             .sync_manager()
-            .object_manager
+            .test_object_cache
             .get_tip_ids(row_id, branch_name)
             .unwrap()
             .iter()
@@ -3303,7 +3303,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     );
     // NO immediate_tick() here — matches WASM openPersistent flow
 
-    // persist_schema — creates catalogue object in ObjectManager
+    // persist_schema — creates catalogue object in the test cache
     let schema_obj_id = core.persist_schema();
 
     // add_server — should call queue_full_sync_to_server which includes the catalogue
@@ -3637,14 +3637,14 @@ fn remove_client_blocked_by_parked_sync_messages() {
         source: Source::Client(alice),
         payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            row: crate::row_regions::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowVersion::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
                 b"alice".to_vec(),
                 RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
                 HashMap::new(),
-                crate::row_regions::RowState::VisibleDirect,
+                crate::row_histories::RowState::VisibleDirect,
                 None,
             ),
         },
@@ -3681,14 +3681,14 @@ fn remove_client_succeeds_after_parked_messages_drained() {
         source: Source::Client(alice),
         payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            row: crate::row_regions::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowVersion::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
                 b"alice".to_vec(),
                 RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
                 HashMap::new(),
-                crate::row_regions::RowState::VisibleDirect,
+                crate::row_histories::RowState::VisibleDirect,
                 None,
             ),
         },
@@ -3731,14 +3731,14 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
         source: Source::Client(bob),
         payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            row: crate::row_regions::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowVersion::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
                 b"bob".to_vec(),
                 RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
                 HashMap::new(),
-                crate::row_regions::RowState::VisibleDirect,
+                crate::row_histories::RowState::VisibleDirect,
                 None,
             ),
         },

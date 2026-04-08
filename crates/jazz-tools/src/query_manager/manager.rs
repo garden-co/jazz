@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{QueryRowVersion, StoredRowVersion, VisibleRowUpdate};
+use crate::row_histories::{QueryRowVersion, RowVisibilityChange, StoredRowVersion};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
 };
@@ -376,9 +376,9 @@ pub struct QueryManager {
     /// Used to determine which schema a branch uses.
     pub(super) branch_schema_map: HashMap<String, SchemaHash>,
 
-    /// Buffered row updates for unknown schema branches.
+    /// Buffered row visibility changes for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
-    pub(super) pending_row_updates: Vec<VisibleRowUpdate>,
+    pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
 
     /// Latest locally-authored row version per row id.
     ///
@@ -481,7 +481,7 @@ impl QueryManager {
             server_subscriptions: HashMap::new(),
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
-            pending_row_updates: Vec::new(),
+            pending_row_visibility_changes: Vec::new(),
             pending_local_row_versions: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
         }
@@ -870,14 +870,17 @@ impl QueryManager {
                 }),
         );
 
-        // 2. Process row updates from SyncManager FIRST so indices are current
+        // 2. Process row visibility changes from SyncManager FIRST so indices are current
         // before subscriptions are processed.
-        let mut row_updates = std::mem::take(&mut self.pending_row_updates);
-        row_updates.extend(self.sync_manager.take_pending_row_updates());
-        if !row_updates.is_empty() {
-            tracing::debug!(count = row_updates.len(), "processing row updates");
+        let mut row_visibility_changes = std::mem::take(&mut self.pending_row_visibility_changes);
+        row_visibility_changes.extend(self.sync_manager.take_pending_row_visibility_changes());
+        if !row_visibility_changes.is_empty() {
+            tracing::debug!(
+                count = row_visibility_changes.len(),
+                "processing row visibility changes"
+            );
         }
-        for update in row_updates {
+        for update in row_visibility_changes {
             self.handle_row_update(storage, update);
         }
 
@@ -1155,7 +1158,7 @@ impl QueryManager {
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
-        update: VisibleRowUpdate,
+        update: RowVisibilityChange,
         local_update: bool,
         apply_index_mutations: bool,
     ) {
@@ -1179,7 +1182,7 @@ impl QueryManager {
                             local_update,
                             "buffering row update for unknown schema hash; schema not yet known"
                         );
-                        self.pending_row_updates.push(update);
+                        self.pending_row_visibility_changes.push(update);
                         return;
                     }
                 } else {
@@ -1189,7 +1192,7 @@ impl QueryManager {
                         local_update,
                         "buffering row update for unknown branch; cannot parse schema hash"
                     );
-                    self.pending_row_updates.push(update);
+                    self.pending_row_visibility_changes.push(update);
                     return;
                 }
             }
@@ -1231,7 +1234,7 @@ impl QueryManager {
                 schema_hash = %schema_hash.short(),
                 "buffering row update because schema for branch is not available yet"
             );
-            self.pending_row_updates.push(update);
+            self.pending_row_visibility_changes.push(update);
             return;
         };
 
@@ -1418,7 +1421,7 @@ impl QueryManager {
     pub(super) fn handle_row_update(
         &mut self,
         storage: &mut dyn Storage,
-        update: VisibleRowUpdate,
+        update: RowVisibilityChange,
     ) {
         self.handle_row_update_with_origin(storage, update, false, true);
     }

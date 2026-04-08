@@ -4,7 +4,7 @@ use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{
-    QueryRowVersion, RowState, StoredRowVersion, VisibleRowUpdate, apply_row_version,
+    QueryRowVersion, RowState, RowVisibilityChange, StoredRowVersion, apply_row_version,
 };
 use crate::schema_manager::resolve_current_table_name;
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
@@ -147,7 +147,7 @@ impl QueryManager {
                 branch = branch_name,
                 row_id = %row_id,
                 %error,
-                "failed to append row-region history row"
+                "failed to append row-history version"
             );
         }
 
@@ -159,7 +159,7 @@ impl QueryManager {
                 branch = branch_name,
                 row_id = %row_id,
                 %error,
-                "failed to upsert row-region visible row"
+                "failed to upsert visible row entry"
             );
         }
 
@@ -170,7 +170,7 @@ impl QueryManager {
         &mut self,
         storage: &mut H,
         row_id: ObjectId,
-        update: VisibleRowUpdate,
+        update: RowVisibilityChange,
     ) -> Result<StoredRowVersion, QueryError> {
         let row = update.row.clone();
         self.handle_row_update_with_origin(storage, update, true, false);
@@ -193,7 +193,7 @@ impl QueryManager {
         let _ = storage.put_row_locator(row_id, Some(row_locator));
         #[cfg(test)]
         self.sync_manager
-            .object_manager
+            .test_object_cache
             .cache_metadata_for_tests(row_id, metadata_from_row_locator(row_locator));
     }
 
@@ -205,24 +205,24 @@ impl QueryManager {
         row_id: ObjectId,
         row: StoredRowVersion,
         index_mutations: &[crate::storage::IndexMutation<'_>],
-    ) -> Result<(CommitId, VisibleRowUpdate), QueryError> {
+    ) -> Result<(CommitId, RowVisibilityChange), QueryError> {
         let applied = apply_row_version(storage, row_id, branch_name, row, index_mutations)
             .map_err(|_| QueryError::ObjectNotFound(row_id))?;
 
         #[cfg(test)]
         self.sync_manager
-            .object_manager
+            .test_object_cache
             .refresh_row_branch_tips_for_tests(storage, _table, row_id, branch_name.clone());
 
         let version_id = applied.version_id;
-        let visible_update = applied.visible_update.ok_or_else(|| {
+        let visibility_change = applied.visibility_change.ok_or_else(|| {
             QueryError::EncodingError(format!(
                 "missing visible-row update for local row version {:?} on {}",
                 version_id, row_id
             ))
         })?;
 
-        Ok((version_id, visible_update))
+        Ok((version_id, visibility_change))
     }
 
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
@@ -483,7 +483,7 @@ impl QueryManager {
             None,
         );
         let branch_name = BranchName::new(branch);
-        let (version_id, visible_update) = self.apply_local_row_history_write(
+        let (version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -492,7 +492,7 @@ impl QueryManager {
             index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
 
         Ok(version_id)
     }
@@ -674,7 +674,7 @@ impl QueryManager {
             None,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (row_version_id, visible_update) = self.apply_local_row_history_write(
+        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -684,7 +684,7 @@ impl QueryManager {
         )?;
 
         tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
-        let _ = self.apply_local_row_version(storage, object_id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, object_id, visibility_change)?;
 
         tracing::debug!(%object_id, ?row_version_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
@@ -817,7 +817,7 @@ impl QueryManager {
         let row =
             self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
         let branch_name = BranchName::new(branch);
-        let (row_version_id, visible_update) = self.apply_local_row_history_write(
+        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -826,7 +826,7 @@ impl QueryManager {
             &index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, object_id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, object_id, visibility_change)?;
 
         Ok(InsertResult {
             row_id: object_id,
@@ -1668,7 +1668,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (delete_version_id, visible_update) = self.apply_local_row_history_write(
+        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -1678,7 +1678,7 @@ impl QueryManager {
         )?;
 
         tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
-        let _ = self.apply_local_row_version(storage, id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1811,7 +1811,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch);
-        let (delete_version_id, visible_update) = self.apply_local_row_history_write(
+        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -1822,7 +1822,7 @@ impl QueryManager {
 
         let _ = old_branch_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1920,7 +1920,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (row_version_id, visible_update) = self.apply_local_row_history_write(
+        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -1929,7 +1929,7 @@ impl QueryManager {
             &index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
 
         Ok(InsertResult {
             row_id: id,
@@ -2001,7 +2001,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (delete_version_id, visible_update) = self.apply_local_row_history_write(
+        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -2012,7 +2012,7 @@ impl QueryManager {
 
         let _ = old_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, visible_update)?;
+        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -2047,7 +2047,7 @@ impl QueryManager {
         self.hard_delete(storage, id)
     }
 
-    /// Get a row by ID from storage-backed row regions.
+    /// Get a row by ID from storage-backed row histories.
     pub fn get_row(&self, storage: &dyn Storage, id: ObjectId) -> Option<(String, Vec<Value>)> {
         let table = self.load_row_table_name(storage, id)?;
         let table_name = TableName::new(&table);
