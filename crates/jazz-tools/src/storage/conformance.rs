@@ -369,6 +369,33 @@ pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) 
     );
 }
 
+pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let main_row = make_row_version(row_id, "main", 10, b"main");
+    let draft_row = make_row_version(row_id, "draft", 20, b"draft");
+
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .scan_visible_region_row_versions("users", row_id)
+            .unwrap(),
+        vec![draft_row, main_row]
+    );
+}
+
 pub fn test_apply_row_mutation_combines_row_and_index_effects(
     factory: &dyn Fn() -> Box<dyn Storage>,
 ) {
@@ -725,6 +752,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn row_region_branch_isolation() {
                 conformance::test_row_region_branch_isolation(&$factory);
+            }
+
+            #[test]
+            fn row_region_cross_branch_visible_heads() {
+                conformance::test_row_region_cross_branch_visible_heads(&$factory);
             }
 
             #[test]

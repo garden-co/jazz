@@ -13,7 +13,8 @@ use crate::sync_manager::DurabilityTier;
 use super::key_codec::{
     history_row_key, history_row_prefix, history_row_versions_prefix, history_table_prefix,
     increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
-    strip_raw_table_key, visible_row_key, visible_row_prefix, visible_table_prefix,
+    strip_raw_table_key, visible_row_key, visible_row_prefix, visible_row_versions_key,
+    visible_row_versions_prefix, visible_table_prefix,
 };
 use super::{RawTableKeys, RawTableRows, StorageError};
 
@@ -49,6 +50,23 @@ fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
 fn decode_query_row(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
     decode_query_row_version(bytes)
         .map_err(|err| storage_codec_error("decode", "query row version", err))
+}
+
+fn encode_commit_id(version_id: CommitId) -> [u8; 32] {
+    version_id.0
+}
+
+fn decode_commit_id(bytes: &[u8]) -> Result<CommitId, StorageError> {
+    if bytes.len() != 32 {
+        return Err(storage_codec_error(
+            "decode",
+            "visible row version index",
+            format!("expected 32 bytes, got {}", bytes.len()),
+        ));
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(bytes);
+    Ok(CommitId(id))
 }
 
 fn decode_visible_query(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
@@ -175,6 +193,13 @@ pub(super) fn upsert_visible_region_rows_core(
         let key = visible_row_key(table, &entry.current_row.branch, entry.current_row.row_id);
         let encoded = encode_visible_entry(entry)?;
         set(&key, &encoded)?;
+        let row_versions_key = visible_row_versions_key(
+            table,
+            entry.current_row.row_id,
+            entry.current_row.branch.as_str(),
+        );
+        let version_id = encode_commit_id(entry.current_row.version_id());
+        set(&row_versions_key, &version_id)?;
     }
     Ok(())
 }
@@ -355,15 +380,18 @@ pub(super) fn scan_visible_region_row_versions_core(
     table: &str,
     row_id: ObjectId,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = visible_table_prefix(table);
+    let prefix = visible_row_versions_prefix(table, row_id);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_visible_current(&bytes))
+        .map(|(_, bytes)| decode_commit_id(&bytes))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|row| row.row_id == row_id)
-        .collect();
+        .filter_map(|version_id| {
+            load_history_row_version_core(table, row_id, version_id, &mut get).transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     rows.sort_by_key(|row| row.branch.clone());
     Ok(rows)
 }

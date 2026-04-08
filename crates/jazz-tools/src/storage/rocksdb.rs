@@ -518,9 +518,12 @@ impl Storage for RocksDBStorage {
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
-            scan_visible_region_row_versions_core(table, row_id, |prefix| {
-                Self::scan_prefix_from_db(&inner.db, prefix)
-            })
+            scan_visible_region_row_versions_core(
+                table,
+                row_id,
+                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
+                |key| Self::get_from_db(&inner.db, key),
+            )
         })
     }
 

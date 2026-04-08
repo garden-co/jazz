@@ -500,9 +500,12 @@ impl Storage for SqliteStorage {
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
-            scan_visible_region_row_versions_core(table, row_id, |prefix| {
-                Self::scan_prefix(&inner.conn, prefix)
-            })
+            scan_visible_region_row_versions_core(
+                table,
+                row_id,
+                |prefix| Self::scan_prefix(&inner.conn, prefix),
+                |key| Self::get(&inner.conn, key),
+            )
         })
     }
 
