@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::object_manager::VisibleRowUpdate;
+use crate::row_histories::VisibleRowUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};

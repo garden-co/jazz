@@ -2,9 +2,10 @@ use super::*;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::VisibleRowUpdate;
 use crate::query_manager::policy::Operation;
-use crate::row_histories::{RowState, StoredRowVersion};
+use crate::row_histories::{
+    RowState, StoredRowVersion, VisibleRowUpdate, apply_row_version, patch_row_version_state,
+};
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
 
@@ -96,16 +97,20 @@ impl SyncManager {
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
-        let visible_update = self
-            .object_manager
-            .remember_remote_row_version_with_storage(
-                storage,
-                row.row_id,
-                BranchName::new(&row.branch),
-                row.clone(),
-            )
+        let branch_name = BranchName::new(&row.branch);
+        let visible_update = apply_row_version(storage, row.row_id, &branch_name, row.clone(), &[])
             .ok()
-            .flatten();
+            .and_then(|applied| {
+                #[cfg(test)]
+                self.object_manager.refresh_row_branch_tips_for_tests(
+                    storage,
+                    applied.row_locator.table.as_str(),
+                    row.row_id,
+                    branch_name.clone(),
+                );
+
+                applied.visible_update
+            });
 
         Some(AppliedRowVersion {
             metadata,
@@ -127,14 +132,16 @@ impl SyncManager {
             return;
         }
 
-        let row_update = self.object_manager.patch_row_version_state_with_storage(
+        let row_update = patch_row_version_state(
             storage,
             row_id,
             &branch_name,
             version_id,
             state,
             confirmed_tier,
-        );
+        )
+        .ok()
+        .flatten();
 
         if let Some(tier) = confirmed_tier {
             self.received_row_version_acks
