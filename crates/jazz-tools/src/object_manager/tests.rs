@@ -340,7 +340,7 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
 }
 
 #[test]
-fn get_or_load_hydrates_visible_and_history_rows_from_storage() {
+fn storage_loads_row_metadata_and_branch_tips_without_object_manager_hydration() {
     let mut writer_storage = MemoryStorage::new();
     let mut writer = ObjectManager::new();
     let row_id = writer.create(&mut writer_storage, Some(row_metadata("users")));
@@ -355,10 +355,11 @@ fn get_or_load_hydrates_visible_and_history_rows_from_storage() {
         .add_row_version(&mut writer_storage, row_id, "main", newer)
         .unwrap();
 
-    let mut reader = ObjectManager::new();
-    let loaded = reader
-        .get_or_load(row_id, &writer_storage, &["main".to_string()])
-        .expect("row object should load from storage");
+    let loaded = writer_storage
+        .load_row_locator(row_id)
+        .unwrap()
+        .map(|locator| crate::storage::metadata_from_row_locator(&locator))
+        .expect("row metadata should load from storage");
 
     assert_eq!(
         loaded.get(MetadataKey::Table.as_str()),
@@ -368,7 +369,9 @@ fn get_or_load_hydrates_visible_and_history_rows_from_storage() {
         load_visible_row(&writer_storage, row_id, "main").version_id(),
         newer_id
     );
-    let tips = reader.get_tip_ids(row_id, "main").unwrap();
+    let tips = writer_storage
+        .scan_row_branch_tip_ids("users", "main", row_id)
+        .unwrap();
     assert_eq!(tips.len(), 1);
     assert!(tips.contains(&newer_id));
 }

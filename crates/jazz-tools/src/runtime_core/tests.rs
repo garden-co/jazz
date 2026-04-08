@@ -35,6 +35,7 @@ struct LegacyPersistenceObservingStorage {
 struct RowMutationCallCounts {
     row_mutation_calls: usize,
     separate_index_mutation_calls: usize,
+    flush_wal_calls: usize,
 }
 
 struct RowMutationObservingStorage {
@@ -664,6 +665,7 @@ impl Storage for RowMutationObservingStorage {
     }
 
     fn flush_wal(&self) {
+        self.calls.lock().unwrap().flush_wal_calls += 1;
         self.inner.flush_wal();
     }
 
@@ -2155,8 +2157,73 @@ fn rc_local_row_writes_batch_row_and_index_mutations() {
         RowMutationCallCounts {
             row_mutation_calls: 3,
             separate_index_mutation_calls: 0,
+            flush_wal_calls: 0,
         },
         "local row writes should persist row history, visible heads, and index changes in one storage mutation"
+    );
+}
+
+#[test]
+fn rc_batched_tick_skips_flush_wal_without_storage_writes() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-no-flush",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        0,
+        "read-only batched ticks should not flush the WAL"
+    );
+}
+
+#[test]
+fn rc_batched_tick_flushes_wal_after_local_write() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-flush-after-write",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        1,
+        "a batched tick after a local write should flush the WAL once"
+    );
+}
+
+#[test]
+fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-query-settled",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::QuerySettled {
+            query_id: crate::sync_manager::QueryId(1),
+            tier: DurabilityTier::Worker,
+            through_seq: 1,
+        },
+    });
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        0,
+        "query-settled notifications alone should not flush the WAL"
     );
 }
 

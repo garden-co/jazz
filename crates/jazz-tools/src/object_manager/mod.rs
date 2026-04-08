@@ -5,8 +5,6 @@ use smolset::SmolSet;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::CommitId;
-#[cfg(test)]
-use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
@@ -126,11 +124,6 @@ impl ObjectManager {
         id
     }
 
-    #[cfg(test)]
-    fn is_row_metadata(metadata: &HashMap<String, String>) -> bool {
-        metadata.contains_key(MetadataKey::Table.as_str())
-    }
-
     fn load_row_locator_from_storage<H: Storage>(
         &self,
         io: &H,
@@ -139,12 +132,6 @@ impl ObjectManager {
         io.load_row_locator(object_id)
             .map_err(Error::StorageError)?
             .ok_or(Error::ObjectNotFound(object_id))
-    }
-
-    #[cfg(test)]
-    fn cache_tips(&mut self, object_id: ObjectId, branch_name: BranchName, tips: &[CommitId]) {
-        self.row_branch_tips
-            .insert((object_id, branch_name), tips.iter().copied().collect());
     }
 
     #[cfg(test)]
@@ -681,52 +668,6 @@ impl ObjectManager {
     /// Get object metadata by id.
     #[cfg(test)]
     pub fn get(&self, id: ObjectId) -> Option<&HashMap<String, String>> {
-        self.metadata_by_id.get(&id)
-    }
-
-    /// Get object metadata, loading from storage if not in memory.
-    #[cfg(test)]
-    pub fn get_or_load(
-        &mut self,
-        id: ObjectId,
-        storage: &dyn Storage,
-        _branches: &[String],
-    ) -> Option<&HashMap<String, String>> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.metadata_by_id.entry(id) {
-            let metadata = match storage.load_metadata(id) {
-                Ok(Some(metadata)) => metadata,
-                Ok(None) => match storage.load_row_locator(id) {
-                    Ok(Some(locator)) => crate::storage::metadata_from_row_locator(&locator),
-                    Ok(None) => return None,
-                    Err(error) => {
-                        tracing::warn!(%id, error = ?error, "get_or_load: storage error");
-                        return None;
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(%id, error = ?error, "get_or_load: storage error");
-                    return None;
-                }
-            };
-            entry.insert(metadata);
-        }
-
-        let metadata = self.metadata_by_id.get(&id)?.clone();
-        if Self::is_row_metadata(&metadata) {
-            let Some(_table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
-                return self.metadata_by_id.get(&id);
-            };
-
-            #[cfg(test)]
-            for branch_name in _branches {
-                let branch_name = BranchName::new(branch_name);
-                if let Ok(tips) = storage.scan_row_branch_tip_ids(&_table, branch_name.as_str(), id)
-                {
-                    self.cache_tips(id, branch_name, &tips);
-                }
-            }
-        }
-
         self.metadata_by_id.get(&id)
     }
 
