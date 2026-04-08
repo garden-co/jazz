@@ -318,6 +318,16 @@ const socialApp = {
   },
 };
 
+const creatorCondition = {
+  type: "Cmp",
+  column: "$createdBy",
+  op: "Eq",
+  value: {
+    type: "SessionRef",
+    path: ["user_id"],
+  },
+};
+
 describe("permissions DSL", () => {
   it("compiles read/insert/update/delete policies", () => {
     const compiled = definePermissions(app, ({ policy, allOf, allowedTo, session }) => [
@@ -416,6 +426,66 @@ describe("permissions DSL", () => {
         type: "SessionRef",
         path: ["userId"],
       },
+    });
+  });
+
+  it("exposes isCreator as creator-based condition sugar", () => {
+    const compiled = definePermissions(app, ({ policy, isCreator }) => [
+      policy.todos.allowRead.where(isCreator),
+      policy.todos.allowUpdate.where(isCreator),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
+  });
+
+  it("compiles managedByCreator() to creator-scoped CRUD rules", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      policy.todos.managedByCreator();
+    });
+
+    expect(compiled.todos!.select?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.insert?.with_check).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.using).toEqual(creatorCondition);
+    expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
+    expect(compiled.todos!.delete?.using).toEqual(creatorCondition);
+  });
+
+  it("composes isCreator inside anyOf()", () => {
+    const compiled = definePermissions(app, ({ policy, anyOf, isCreator }) => [
+      policy.todos.allowUpdate.where(anyOf([isCreator, { done: true }])),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Or",
+      exprs: [
+        creatorCondition,
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: true,
+          },
+        },
+      ],
+    });
+    expect(compiled.todos!.update?.with_check).toEqual({
+      type: "Or",
+      exprs: [
+        creatorCondition,
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: true,
+          },
+        },
+      ],
     });
   });
 
