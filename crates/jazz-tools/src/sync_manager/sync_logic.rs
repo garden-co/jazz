@@ -224,19 +224,32 @@ impl SyncManager {
         client_id: ClientId,
         object_id: ObjectId,
         branch_name: BranchName,
+        force_resend: bool,
     ) {
         let Some(row_locator) = storage.load_row_locator(object_id).ok().flatten() else {
             return;
         };
-        if let Some(row) =
-            self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
+        let metadata = metadata_from_row_locator(&row_locator);
+        let Ok(rows) = storage.scan_history_row_versions(row_locator.table.as_str(), object_id)
+        else {
+            return;
+        };
+
+        let mut sent_any = false;
+        for row in rows
+            .into_iter()
+            .filter(|row| row.branch == branch_name.as_str())
+            .filter(|row| !matches!(row.state, RowState::StagingPending))
         {
-            self.queue_row_to_client(
-                client_id,
-                object_id,
-                metadata_from_row_locator(&row_locator),
-                row,
-            );
+            self.queue_row_to_client(client_id, object_id, metadata.clone(), row, force_resend);
+            sent_any = true;
+        }
+
+        if !sent_any
+            && let Some(row) =
+                self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
+        {
+            self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
         }
     }
 
@@ -246,6 +259,7 @@ impl SyncManager {
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         row: StoredRowVersion,
+        force_resend: bool,
     ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -276,7 +290,7 @@ impl SyncManager {
             return;
         }
 
-        if already_sent.contains(&version_id) && !include_metadata {
+        if !force_resend && already_sent.contains(&version_id) && !include_metadata {
             return;
         }
 

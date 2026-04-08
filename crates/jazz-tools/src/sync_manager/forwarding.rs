@@ -118,7 +118,13 @@ impl SyncManager {
             let metadata = metadata_from_row_locator(&row_locator);
             for client_id in &client_ids {
                 tracing::trace!(%client_id, "queuing row update to client");
-                self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
+                self.queue_row_to_client(
+                    *client_id,
+                    object_id,
+                    metadata.clone(),
+                    row.clone(),
+                    false,
+                );
             }
         }
     }

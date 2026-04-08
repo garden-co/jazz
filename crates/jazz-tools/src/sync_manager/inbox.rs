@@ -505,9 +505,6 @@ impl SyncManager {
             // Handle query unsubscription
             // Queue for QueryManager to process (remove server-side QueryGraph, forward upstream)
             SyncPayload::QueryUnsubscription { query_id } => {
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client.queries.remove(query_id);
-                }
                 // Clean up query origin
                 if let Some(clients) = self.query_origin.get_mut(query_id) {
                     clients.remove(&client_id);

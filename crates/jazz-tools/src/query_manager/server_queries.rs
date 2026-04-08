@@ -693,6 +693,7 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_subscriptions();
         let mut deferred = Vec::new();
         let mut schema_warning_notifications = Vec::new();
+        let mut settled_notifications = Vec::new();
 
         for sub in pending {
             let Some((schema_for_compile, subscription_context)) =
@@ -825,6 +826,12 @@ impl QueryManager {
                 session_for_policy.clone(),
             );
 
+            let settled_tier = self
+                .sync_manager
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Worker);
+            settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
+
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
             if sub.propagation == crate::sync_manager::QueryPropagation::Full {
@@ -847,7 +854,7 @@ impl QueryManager {
                     branches,
                     last_scope: scope,
                     needs_recompile: false,
-                    settled_once: false,
+                    settled_once: true,
                     propagation: sub.propagation,
                     reported_schema_warnings,
                 },
@@ -856,6 +863,11 @@ impl QueryManager {
 
         for (client_id, warning) in schema_warning_notifications {
             self.sync_manager.emit_schema_warning(client_id, warning);
+        }
+
+        for (client_id, query_id, tier) in settled_notifications {
+            self.sync_manager
+                .emit_query_settled(client_id, query_id, tier);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
