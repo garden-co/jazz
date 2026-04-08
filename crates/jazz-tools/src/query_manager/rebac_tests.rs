@@ -33,7 +33,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_regions::{RowState, StoredRowVersion};
+use crate::row_histories::{RowState, StoredRowVersion};
 
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
@@ -169,7 +169,7 @@ fn add_row_commit(
     );
     let version_id = row.version_id();
     qm.sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .add_row_version(storage, object_id, branch, row)
         .unwrap();
     version_id
@@ -456,7 +456,7 @@ fn seed_folder_on_branch(
 ) -> ObjectId {
     let folder_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(storage, Some(folder_metadata()));
     let folder_content = encode_folder(owner_id, name);
     add_row_commit(
@@ -595,7 +595,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
     let object_metadata = qm
         .sync_manager()
-        .object_manager
+        .test_object_cache
         .get(grand_id)
         .cloned()
         .unwrap_or_default();
@@ -628,7 +628,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(grand_id, &branch)
         .unwrap();
     let applied = tips.contains(&row_version_id_for_commit(
@@ -657,7 +657,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     // Create an object for the row
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(document_metadata()));
 
     // Register a query scope so the update is in-scope
@@ -697,7 +697,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     // Commit should be applied (owner matches session user)
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
@@ -723,7 +723,7 @@ fn rebac_insert_denied_by_simple_policy() {
     // Create an object for the row
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(document_metadata()));
 
     // Register a query scope
@@ -780,7 +780,7 @@ fn rebac_insert_denied_by_simple_policy() {
     // Commit should NOT be applied
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main");
     assert!(
         tips.is_err()
@@ -827,7 +827,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
     let metadata = document_metadata();
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(metadata.clone()));
 
     let mut scope = HashSet::new();
@@ -875,7 +875,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err()
@@ -909,7 +909,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     qm.sync_manager_mut()
         .set_client_session(client_id, Session::new("alice"));
 
-    // New row object: metadata exists only in payload, not in ObjectManager.
+    // New row object: metadata exists only in payload, not in the test cache.
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
     let commit = stored_row_commit(
@@ -952,7 +952,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err()
@@ -991,7 +991,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
     );
     let doc_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(document_metadata()));
 
     let mut scope = HashSet::new();
@@ -1029,7 +1029,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
@@ -1094,7 +1094,7 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
@@ -1121,7 +1121,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
 
     let _folder_commit_id = *seed_qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(folder_id, &branch)
         .unwrap()
         .iter()
@@ -1163,7 +1163,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
@@ -1261,7 +1261,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(doc_id, &branch)
         .unwrap();
     assert!(
@@ -1331,7 +1331,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err()
@@ -1437,7 +1437,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err()
@@ -1510,7 +1510,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main");
     assert!(
         tips.is_err()
@@ -1596,7 +1596,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main");
     assert!(
         tips.is_err()
@@ -1631,7 +1631,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     metadata.insert(MetadataKey::Table.to_string(), "notes".to_string());
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(metadata.clone()));
 
     // Register a query scope
@@ -1672,7 +1672,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     // Commit should be applied
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
@@ -1704,11 +1704,11 @@ fn rebac_two_clients_different_sessions() {
     // Create objects for both clients
     let obj1 = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(document_metadata()));
     let obj2 = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(document_metadata()));
 
     // Register query scopes
@@ -1775,7 +1775,7 @@ fn rebac_two_clients_different_sessions() {
     // Both commits should be applied (each owner matches their session)
     let tips1 = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj1, "main")
         .unwrap();
     assert!(
@@ -1785,7 +1785,7 @@ fn rebac_two_clients_different_sessions() {
 
     let tips2 = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj2, "main")
         .unwrap();
     assert!(
@@ -1840,7 +1840,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     metadata.insert(MetadataKey::Table.to_string(), "protected".to_string());
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(metadata.clone()));
 
     // Register query scope
@@ -1898,12 +1898,15 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Commit should NOT be applied to the branch.
     assert!(
-        qm.sync_manager_mut().object_manager.get(obj_id).is_some(),
+        qm.sync_manager_mut()
+            .test_object_cache
+            .get(obj_id)
+            .is_some(),
         "Object should still exist after denied insert"
     );
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main");
     assert!(
         tips.is_err(),
@@ -1952,7 +1955,7 @@ fn rebac_update_denied_by_using_policy() {
     metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
     let obj_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(metadata.clone()));
 
     let alice_content = encode_row(
@@ -2043,7 +2046,7 @@ fn rebac_update_denied_by_using_policy() {
     // Update should NOT be applied
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(obj_id, "main")
         .unwrap();
     assert!(
@@ -2122,7 +2125,7 @@ fn rebac_inherits_filters_select_query_results() {
     folder_meta.insert(MetadataKey::Table.to_string(), "folders".to_string());
     let folder_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(folder_meta));
 
     let folder_content = encode_row(
@@ -2150,7 +2153,7 @@ fn rebac_inherits_filters_select_query_results() {
     doc_meta.insert(MetadataKey::Table.to_string(), "documents".to_string());
     let doc_id = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .create(&mut storage, Some(doc_meta));
 
     let doc_content = encode_row(
@@ -2502,7 +2505,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Get object metadata for later use in update payloads
     let protected_metadata = qm
         .sync_manager()
-        .object_manager
+        .test_object_cache
         .get(protected_obj)
         .cloned()
         .unwrap_or_default();
@@ -2572,7 +2575,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Bob's update should NOT be applied
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
@@ -2652,7 +2655,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Alice's update SHOULD be applied
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
@@ -3290,7 +3293,7 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     let protected_metadata = qm
         .sync_manager()
-        .object_manager
+        .test_object_cache
         .get(protected.row_id)
         .cloned()
         .expect("protected row metadata");
@@ -3347,7 +3350,7 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     let tips = qm
         .sync_manager_mut()
-        .object_manager
+        .test_object_cache
         .get_tip_ids(protected.row_id, &branch)
         .unwrap();
     assert!(

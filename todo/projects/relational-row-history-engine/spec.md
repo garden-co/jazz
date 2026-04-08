@@ -286,7 +286,7 @@ History-aware and time-travel paths may query the history region, but those are 
 
 ### Runtime ownership
 
-The production row path should not keep a separate semantic authority like today's transitional `ObjectManager`.
+The production row path should not keep any separate semantic authority or metadata mirror beside storage-backed row histories.
 
 The target ownership is:
 
@@ -420,7 +420,7 @@ This spec intentionally breaks the current `Row = Object` assumption from [query
 
 Major consequences:
 
-- MaterializeNode no longer lazy-loads row objects from ObjectManager for ordinary user tables.
+- MaterializeNode no longer lazy-loads row objects from any separate object-cache layer for ordinary user tables.
 - Table indices point to visible row ids / physical row locations, not ObjectIds.
 - Branch awareness becomes `$branch` columns and indices, not object-branch lookups.
 - Query/sync scope becomes row/table oriented rather than object oriented for user data.

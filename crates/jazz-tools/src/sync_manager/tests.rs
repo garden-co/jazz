@@ -1,7 +1,7 @@
 use super::*;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::query::QueryBuilder;
-use crate::row_regions::{StoredRowVersion, VisibleRowEntry};
+use crate::row_histories::{StoredRowVersion, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
 use std::collections::{HashMap, HashSet};
 
@@ -15,15 +15,15 @@ fn visible_row(
     parents: Vec<crate::commit::CommitId>,
     updated_at: u64,
     data: &[u8],
-) -> crate::row_regions::StoredRowVersion {
-    crate::row_regions::StoredRowVersion::new(
+) -> crate::row_histories::StoredRowVersion {
+    crate::row_histories::StoredRowVersion::new(
         row_id,
         branch,
         parents,
         data.to_vec(),
         RowProvenance::for_insert(row_id.to_string(), updated_at),
         HashMap::new(),
-        crate::row_regions::RowState::VisibleDirect,
+        crate::row_histories::RowState::VisibleDirect,
         None,
     )
 }
@@ -32,9 +32,9 @@ fn seed_visible_row(
     sm: &mut SyncManager,
     io: &mut MemoryStorage,
     table: &str,
-    row: crate::row_regions::StoredRowVersion,
+    row: crate::row_histories::StoredRowVersion,
 ) {
-    sm.object_manager
+    sm.test_object_cache
         .create_with_id(io, row.row_id, Some(row_metadata(table)));
     io.append_history_region_rows(table, std::slice::from_ref(&row))
         .unwrap();
@@ -279,7 +279,7 @@ fn row_version_created_stamps_local_durability_into_storage() {
         .scan_history_region(
             "users",
             "main",
-            crate::row_regions::HistoryScan::Row { row_id },
+            crate::row_histories::HistoryScan::Row { row_id },
         )
         .unwrap();
 
@@ -329,7 +329,7 @@ fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
         .scan_history_region(
             "users",
             "main",
-            crate::row_regions::HistoryScan::Row { row_id },
+            crate::row_histories::HistoryScan::Row { row_id },
         )
         .unwrap();
     assert_eq!(visible.len(), 1);
@@ -359,7 +359,7 @@ fn row_version_state_changed_enqueues_pending_row_update_for_visible_row() {
         },
     );
 
-    let updates = sm.take_pending_row_updates();
+    let updates = sm.take_pending_row_visibility_changes();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].object_id, row_id);
     assert_eq!(
@@ -520,7 +520,7 @@ fn forward_update_to_servers_with_storage_replays_row_history_without_visible_re
 
     add_server(&mut sm, &io, server_id);
     sm.take_outbox();
-    sm.object_manager
+    sm.test_object_cache
         .create_with_id(&mut io, row_id, Some(row_metadata("users")));
     io.append_history_region_rows("users", std::slice::from_ref(&row))
         .unwrap();

@@ -1492,7 +1492,8 @@ impl SchemaManager {
         self.activate_pending_and_sync_to_query_manager();
 
         // Retry any pending row updates that might now be processable
-        self.query_manager.retry_pending_row_updates(storage);
+        self.query_manager
+            .retry_pending_row_visibility_changes(storage);
     }
 }
 

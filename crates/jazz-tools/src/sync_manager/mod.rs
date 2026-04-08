@@ -3,12 +3,12 @@ use std::collections::{HashMap, HashSet};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
-#[cfg(test)]
-use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::VisibleRowUpdate;
+use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
+#[cfg(test)]
+use crate::test_object_cache::TestObjectCache;
 
 // Module declarations
 pub mod forwarding;
@@ -35,7 +35,7 @@ pub use types::*;
 #[derive(Clone)]
 pub struct SyncManager {
     #[cfg(test)]
-    pub object_manager: ObjectManager,
+    pub(crate) test_object_cache: TestObjectCache,
     pub(super) clock: MonotonicClock,
     pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
@@ -51,8 +51,8 @@ pub struct SyncManager {
     pub(super) pending_query_subscriptions: Vec<PendingQuerySubscription>,
     /// Pending query unsubscriptions awaiting cleanup by QueryManager.
     pub(super) pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
-    /// Row updates applied through row-region-native sync.
-    pub(super) pending_row_updates: Vec<VisibleRowUpdate>,
+    /// Row visibility changes applied through row-history sync.
+    pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
     /// Catalogue/system entry updates awaiting SchemaManager processing.
     pub(super) pending_catalogue_updates: Vec<CatalogueEntry>,
 
@@ -76,7 +76,7 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("SyncManager");
         #[cfg(test)]
-        debug.field("object_manager", &self.object_manager);
+        debug.field("test_object_cache", &self.test_object_cache);
 
         debug
             .field("clock", &self.clock)
@@ -98,7 +98,10 @@ impl std::fmt::Debug for SyncManager {
                 "pending_query_unsubscriptions",
                 &self.pending_query_unsubscriptions,
             )
-            .field("pending_row_updates", &self.pending_row_updates)
+            .field(
+                "pending_row_visibility_changes",
+                &self.pending_row_visibility_changes,
+            )
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
@@ -120,7 +123,7 @@ impl SyncManager {
     pub fn new() -> Self {
         Self {
             #[cfg(test)]
-            object_manager: ObjectManager::new(),
+            test_object_cache: TestObjectCache::new(),
             clock: MonotonicClock::new(),
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
@@ -131,7 +134,7 @@ impl SyncManager {
             pending_permission_checks: Vec::new(),
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
-            pending_row_updates: Vec::new(),
+            pending_row_visibility_changes: Vec::new(),
             pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
@@ -140,14 +143,6 @@ impl SyncManager {
             pending_query_settled: Vec::new(),
             received_row_version_acks: Vec::new(),
         }
-    }
-
-    /// Create with an existing ObjectManager.
-    #[cfg(test)]
-    pub fn with_object_manager(object_manager: ObjectManager) -> Self {
-        let mut manager = Self::new();
-        manager.object_manager = object_manager;
-        manager
     }
 
     pub fn reserve_timestamp(&mut self) -> u64 {
@@ -353,7 +348,7 @@ impl SyncManager {
     }
 
     /// Storage-backed version of `set_client_query_scope` that can replay row
-    /// objects directly from visible row regions.
+    /// objects directly from storage-backed visible rows.
     pub fn set_client_query_scope_with_storage<H: Storage + ?Sized>(
         &mut self,
         storage: &H,
@@ -543,10 +538,10 @@ impl SyncManager {
         std::mem::take(&mut self.received_row_version_acks)
     }
 
-    /// Take pending row updates for QueryManager to materialize into indices
-    /// and subscriptions.
-    pub fn take_pending_row_updates(&mut self) -> Vec<VisibleRowUpdate> {
-        std::mem::take(&mut self.pending_row_updates)
+    /// Take pending row visibility changes for QueryManager to materialize
+    /// into indices and subscriptions.
+    pub fn take_pending_row_visibility_changes(&mut self) -> Vec<RowVisibilityChange> {
+        std::mem::take(&mut self.pending_row_visibility_changes)
     }
 
     /// Take pending catalogue/system entry updates for QueryManager/SchemaManager.
@@ -554,10 +549,10 @@ impl SyncManager {
         std::mem::take(&mut self.pending_catalogue_updates)
     }
 
-    /// Requeue row updates that could not be processed yet, typically because
-    /// the corresponding schema has not been activated yet.
-    pub fn requeue_pending_row_updates(&mut self, updates: Vec<VisibleRowUpdate>) {
-        self.pending_row_updates.extend(updates);
+    /// Requeue row visibility changes that could not be processed yet,
+    /// typically because the corresponding schema has not been activated yet.
+    pub fn requeue_pending_row_visibility_changes(&mut self, updates: Vec<RowVisibilityChange>) {
+        self.pending_row_visibility_changes.extend(updates);
     }
 
     /// Emit a QuerySettled notification to a client.

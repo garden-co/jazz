@@ -56,9 +56,9 @@ pub enum HistoryScan {
     AsOf { ts: u64 },
 }
 
-/// Visible row change emitted when a row object's winning version changes.
+/// Visibility change emitted when a row object's winning version changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisibleRowUpdate {
+pub struct RowVisibilityChange {
     pub object_id: ObjectId,
     pub row_locator: RowLocator,
     pub row: StoredRowVersion,
@@ -67,10 +67,10 @@ pub struct VisibleRowUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddRowVersionResult {
+pub struct ApplyRowVersionResult {
     pub version_id: CommitId,
     pub row_locator: RowLocator,
-    pub visible_update: Option<VisibleRowUpdate>,
+    pub visibility_change: Option<RowVisibilityChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1253,16 +1253,16 @@ fn visible_entry_after_tier_upgrade<H: Storage>(
     })
 }
 
-fn visible_update_from_applied(
+fn visibility_change_from_applied(
     object_id: ObjectId,
     applied: RowVersionApply,
-) -> Option<VisibleRowUpdate> {
+) -> Option<RowVisibilityChange> {
     if !applied.visible_changed {
         return None;
     }
 
     let current_visible = applied.current_visible?;
-    Some(VisibleRowUpdate {
+    Some(RowVisibilityChange {
         object_id,
         row_locator: applied.row_locator,
         row: current_visible,
@@ -1277,7 +1277,7 @@ pub fn apply_row_version<H: Storage>(
     branch_name: &BranchName,
     row: StoredRowVersion,
     index_mutations: &[IndexMutation<'_>],
-) -> Result<AddRowVersionResult, RowHistoryError> {
+) -> Result<ApplyRowVersionResult, RowHistoryError> {
     let row_locator = row_locator_from_storage(io, object_id)?;
     let table = row_locator.table.to_string();
     let version_id = row.version_id();
@@ -1302,10 +1302,10 @@ pub fn apply_row_version<H: Storage>(
         .map_err(RowHistoryError::StorageError)?
         .is_some()
     {
-        return Ok(AddRowVersionResult {
+        return Ok(ApplyRowVersionResult {
             version_id,
             row_locator,
-            visible_update: None,
+            visibility_change: None,
         });
     }
 
@@ -1336,10 +1336,10 @@ pub fn apply_row_version<H: Storage>(
         visible_changed,
     };
 
-    Ok(AddRowVersionResult {
+    Ok(ApplyRowVersionResult {
         version_id,
         row_locator,
-        visible_update: visible_update_from_applied(object_id, applied),
+        visibility_change: visibility_change_from_applied(object_id, applied),
     })
 }
 
@@ -1350,7 +1350,7 @@ pub fn patch_row_version_state<H: Storage>(
     version_id: CommitId,
     state: Option<RowState>,
     confirmed_tier: Option<DurabilityTier>,
-) -> Result<Option<VisibleRowUpdate>, RowHistoryError> {
+) -> Result<Option<RowVisibilityChange>, RowHistoryError> {
     let row_locator = row_locator_from_storage(io, object_id)?;
     let table = row_locator.table.to_string();
     let branch = SharedString::from(branch_name.as_str().to_string());
@@ -1396,7 +1396,7 @@ pub fn patch_row_version_state<H: Storage>(
         return Ok(None);
     }
 
-    Ok(Some(VisibleRowUpdate {
+    Ok(Some(RowVisibilityChange {
         object_id,
         row_locator,
         row: current_visible,

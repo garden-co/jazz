@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::row_histories::VisibleRowUpdate;
+use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
@@ -432,26 +432,26 @@ impl QueryManager {
         std::mem::take(&mut self.pending_catalogue_updates)
     }
 
-    /// Retry processing buffered row updates.
+    /// Retry processing buffered row visibility changes.
     ///
     /// Call this after activating new schemas (via try_activate_pending_schemas)
     /// and updating the schema context (via sync_context). Rows that arrived
     /// before their schema was known will be reprocessed.
-    pub fn retry_pending_row_updates(&mut self, storage: &mut dyn Storage) {
-        let pending = std::mem::take(&mut self.pending_row_updates);
+    pub fn retry_pending_row_visibility_changes(&mut self, storage: &mut dyn Storage) {
+        let pending = std::mem::take(&mut self.pending_row_visibility_changes);
         for update in pending {
             self.handle_row_update(storage, update);
         }
     }
 
-    /// Take all pending row updates (used by sync_context to preserve across rebuild).
-    pub fn take_pending_row_updates(&mut self) -> Vec<VisibleRowUpdate> {
-        std::mem::take(&mut self.pending_row_updates)
+    /// Take all pending row visibility changes (used by sync_context to preserve across rebuild).
+    pub fn take_pending_row_visibility_changes(&mut self) -> Vec<RowVisibilityChange> {
+        std::mem::take(&mut self.pending_row_visibility_changes)
     }
 
-    /// Restore pending row updates (used by sync_context after rebuild).
-    pub fn restore_pending_row_updates(&mut self, updates: Vec<VisibleRowUpdate>) {
-        self.pending_row_updates = updates;
+    /// Restore pending row visibility changes (used by sync_context after rebuild).
+    pub fn restore_pending_row_visibility_changes(&mut self, updates: Vec<RowVisibilityChange>) {
+        self.pending_row_visibility_changes = updates;
     }
 
     /// Set known schemas for server-mode operation.

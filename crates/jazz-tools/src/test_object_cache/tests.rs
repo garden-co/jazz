@@ -47,7 +47,7 @@ fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> 
 #[test]
 fn create_object_with_metadata() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
 
     let id = manager.create(&mut io, Some(row_metadata("users")));
 
@@ -61,7 +61,7 @@ fn create_object_with_metadata() {
 #[test]
 fn add_row_version_rejects_unknown_object() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = ObjectId::new();
     let author = ObjectId::new();
 
@@ -78,7 +78,7 @@ fn add_row_version_rejects_unknown_object() {
 #[test]
 fn add_row_version_rejects_unknown_parent() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
     let missing_parent = CommitId([7; 32]);
@@ -128,7 +128,7 @@ fn add_row_version_rejects_unknown_parent() {
 #[test]
 fn add_row_version_tracks_visible_row_and_tips() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -160,20 +160,20 @@ fn add_row_version_tracks_visible_row_and_tips() {
     assert_eq!(winner.data, b"bob".to_vec());
 
     assert_eq!(
-        root.visible_update
+        root.visibility_change
             .as_ref()
             .map(|update| update.row.version_id()),
         Some(root_id)
     );
     assert_eq!(
         alice
-            .visible_update
+            .visibility_change
             .as_ref()
             .map(|update| update.row.version_id()),
         Some(alice_id)
     );
     assert_eq!(
-        bob.visible_update
+        bob.visibility_change
             .as_ref()
             .map(|update| update.row.version_id()),
         Some(bob_id)
@@ -183,7 +183,7 @@ fn add_row_version_tracks_visible_row_and_tips() {
 #[test]
 fn add_row_version_keeps_distinct_same_timestamp_siblings_in_history() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -216,7 +216,7 @@ fn add_row_version_keeps_distinct_same_timestamp_siblings_in_history() {
 #[test]
 fn add_row_version_keeps_identical_payload_versions_across_branches() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -244,7 +244,7 @@ fn add_row_version_keeps_identical_payload_versions_across_branches() {
 #[test]
 fn stale_row_version_does_not_replace_visible_winner() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -262,7 +262,7 @@ fn stale_row_version_does_not_replace_visible_winner() {
 
     assert_ne!(newer_id, older_id);
     assert!(
-        older.visible_update.is_none(),
+        older.visibility_change.is_none(),
         "stale history should not emit a visible-row update"
     );
     assert_eq!(load_visible_row(&io, row_id, "main").version_id(), newer_id);
@@ -271,7 +271,7 @@ fn stale_row_version_does_not_replace_visible_winner() {
 #[test]
 fn out_of_order_global_row_updates_tier_pointer_without_becoming_current() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -303,7 +303,7 @@ fn out_of_order_global_row_updates_tier_pointer_without_becoming_current() {
 #[test]
 fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
     let mut io = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
+    let mut manager = TestObjectCache::new();
     let row_id = manager.create(&mut io, Some(row_metadata("users")));
     let author = ObjectId::new();
 
@@ -340,9 +340,9 @@ fn patch_row_version_state_promotes_confirmed_tier_monotonically() {
 }
 
 #[test]
-fn storage_loads_row_metadata_and_branch_tips_without_object_manager_hydration() {
+fn storage_loads_row_metadata_and_branch_tips_without_test_cache_hydration() {
     let mut writer_storage = MemoryStorage::new();
-    let mut writer = ObjectManager::new();
+    let mut writer = TestObjectCache::new();
     let row_id = writer.create(&mut writer_storage, Some(row_metadata("users")));
     let author = ObjectId::new();
 

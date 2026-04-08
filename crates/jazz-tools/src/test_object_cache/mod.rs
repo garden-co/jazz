@@ -10,11 +10,11 @@ use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 #[cfg(test)]
 use crate::row_histories::{
-    AddRowVersionResult, RowHistoryError, RowState, StoredRowVersion, VisibleRowUpdate,
+    ApplyRowVersionResult, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
     apply_row_version, patch_row_version_state,
 };
 #[cfg(test)]
-use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
+use crate::storage::{IndexMutation, Storage, StorageError};
 #[cfg(test)]
 use crate::sync_manager::DurabilityTier;
 
@@ -41,14 +41,14 @@ impl From<RowHistoryError> for Error {
 
 /// Transitional test-oriented metadata and tip mirrors.
 #[derive(Debug, Clone, Default)]
-pub struct ObjectManager {
+pub struct TestObjectCache {
     #[cfg(test)]
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
 }
 
-impl ObjectManager {
+impl TestObjectCache {
     pub fn new() -> Self {
         Self::default()
     }
@@ -85,20 +85,6 @@ impl ObjectManager {
     }
 
     #[cfg(test)]
-    pub fn create_row_with_id<H: Storage>(
-        &mut self,
-        io: &mut H,
-        id: ObjectId,
-        row_locator: RowLocator,
-    ) -> ObjectId {
-        let _ = io.put_row_locator(id, Some(&row_locator));
-        #[cfg(test)]
-        self.metadata_by_id
-            .insert(id, crate::storage::metadata_from_row_locator(&row_locator));
-        id
-    }
-
-    #[cfg(test)]
     pub fn cache_metadata_for_tests(
         &mut self,
         object_id: ObjectId,
@@ -128,7 +114,7 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
         row: StoredRowVersion,
-    ) -> Result<AddRowVersionResult, Error> {
+    ) -> Result<ApplyRowVersionResult, Error> {
         self.add_row_version_with_update_and_indices(io, object_id, branch_name, row, &[])
     }
 
@@ -140,7 +126,7 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
         row: StoredRowVersion,
         index_mutations: &[IndexMutation<'_>],
-    ) -> Result<AddRowVersionResult, Error> {
+    ) -> Result<ApplyRowVersionResult, Error> {
         let branch_name = branch_name.into();
         let applied = apply_row_version(io, object_id, &branch_name, row, index_mutations)
             .map_err(Error::from)?;
@@ -170,28 +156,6 @@ impl ObjectManager {
     }
 
     #[cfg(test)]
-    pub fn remember_remote_row_version_with_storage<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: BranchName,
-        row: StoredRowVersion,
-    ) -> Result<Option<VisibleRowUpdate>, Error> {
-        let applied =
-            apply_row_version(io, object_id, &branch_name, row, &[]).map_err(Error::from)?;
-
-        #[cfg(test)]
-        self.refresh_row_branch_tips_for_tests(
-            io,
-            applied.row_locator.table.as_str(),
-            object_id,
-            branch_name,
-        );
-
-        Ok(applied.visible_update)
-    }
-
-    #[cfg(test)]
     pub fn patch_row_version_state_with_storage<H: Storage>(
         &mut self,
         io: &mut H,
@@ -200,7 +164,7 @@ impl ObjectManager {
         version_id: CommitId,
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
-    ) -> Option<VisibleRowUpdate> {
+    ) -> Option<RowVisibilityChange> {
         patch_row_version_state(
             io,
             object_id,
@@ -248,44 +212,6 @@ impl ObjectManager {
         let _ = io.put_metadata(object_id, metadata.clone());
         #[cfg(test)]
         self.metadata_by_id.entry(object_id).or_insert(metadata);
-    }
-
-    /// Calculate memory usage breakdown for profiling.
-    #[cfg(test)]
-    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
-        let mut row_objects = 0usize;
-        let mut index_objects = 0usize;
-
-        for metadata in self.metadata_by_id.values() {
-            let obj_size = self.estimate_object_size(metadata);
-            let is_index = metadata
-                .get(crate::metadata::MetadataKey::Type.as_str())
-                .is_some_and(|t| t == crate::metadata::ObjectType::Index.as_str());
-            let entry_overhead = std::mem::size_of::<ObjectId>() + 48;
-            if is_index {
-                index_objects += obj_size + entry_overhead;
-            } else {
-                row_objects += obj_size + entry_overhead;
-            }
-        }
-
-        let subscriptions = 0usize;
-        let other = 0;
-
-        let total = row_objects + index_objects + subscriptions + other;
-        (row_objects, index_objects, subscriptions, other, total)
-    }
-
-    /// Estimate memory size of an object's metadata map.
-    #[cfg(test)]
-    fn estimate_object_size(&self, metadata: &HashMap<String, String>) -> usize {
-        let mut size = std::mem::size_of::<HashMap<String, String>>();
-
-        for (key, value) in metadata {
-            size += key.len() + value.len() + 48;
-        }
-
-        size
     }
 }
 

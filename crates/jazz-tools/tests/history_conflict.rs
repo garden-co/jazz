@@ -830,16 +830,11 @@ async fn concurrent_edits_on_different_fields() {
 ///  LWW winner: bob-offline-edit (higher timestamp — bob edited last)
 /// ```
 ///
-/// KNOWN BUG: `queue_full_sync_to_server` only iterates the in-memory
-/// `ObjectManager`. On fresh connect, Fjall is opened but objects are
-/// lazy-loaded on demand — so bob's offline commit is never seen by the
-/// outbox and is never pushed to the server.  Fix: either eagerly load all
-/// Fjall objects before adding the server, or hook `get_or_load` to trigger
-/// a sync push for newly-loaded objects.
+/// KNOWN GAP: this offline reconnect scenario is still red in the row-history
+/// engine and needs a dedicated end-to-end investigation before we can rely on
+/// it as a coverage test.
 #[tokio::test]
-#[ignore = "architectural gap: offline Fjall commits are not pushed on reconnect \
-            (queue_full_sync_to_server only iterates in-memory objects; \
-            get_or_load has no sync hook)"]
+#[ignore = "known offline reconnect gap in row-history sync coverage"]
 async fn offline_user_wins_on_reconnect() {
     let server = TestingServer::start().await;
     let schema = test_schema();

@@ -1,7 +1,7 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! raw tables, row regions, and derived indices.
+//! raw tables, row histories, visible entries, and derived indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -457,7 +457,7 @@ mod tests {
     use crate::catalogue::CatalogueEntry;
     use crate::metadata::RowProvenance;
     use crate::query_manager::types::Value;
-    use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+    use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
 
     fn make_row_version(

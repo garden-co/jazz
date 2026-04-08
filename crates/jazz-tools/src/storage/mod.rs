@@ -176,7 +176,7 @@ fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
 // Storage Trait
 // ============================================================================
 
-/// Synchronous storage for metadata, row regions, raw tables, and indices.
+/// Synchronous storage for metadata, row histories, raw tables, and indices.
 ///
 /// All operations are **synchronous** - they return immediately with results.
 /// This eliminates the async response/callback pattern that permeated the
@@ -364,7 +364,7 @@ pub trait Storage {
     }
 
     // ================================================================
-    // Row-region storage
+    // Row-history storage
     // ================================================================
 
     fn append_history_region_rows(
@@ -373,7 +373,7 @@ pub trait Storage {
         _rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
-            "row-region history appends are not implemented for this backend yet".to_string(),
+            "row-history appends are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -383,7 +383,7 @@ pub trait Storage {
         _entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
-            "row-region visible upserts are not implemented for this backend yet".to_string(),
+            "visible-entry upserts are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -395,7 +395,7 @@ pub trait Storage {
         _confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
-            "row-region history patching is not implemented for this backend yet".to_string(),
+            "row-history patching is not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -424,7 +424,7 @@ pub trait Storage {
         _branch: &str,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region visible scans are not implemented for this backend yet".to_string(),
+            "visible-row scans are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -435,7 +435,7 @@ pub trait Storage {
         _row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region visible lookups are not implemented for this backend yet".to_string(),
+            "visible-row lookups are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -591,7 +591,7 @@ pub trait Storage {
         _row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region visible row scans are not implemented for this backend yet".to_string(),
+            "visible-row history scans are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -601,7 +601,7 @@ pub trait Storage {
         _row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region history row scans are not implemented for this backend yet".to_string(),
+            "row-history row scans are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -612,7 +612,7 @@ pub trait Storage {
         _scan: HistoryScan,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
-            "row-region history scans are not implemented for this backend yet".to_string(),
+            "row-history scans are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -1045,12 +1045,12 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 type RawTableEntries = BTreeMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Default)]
-struct TableRowRegions {
+struct TableRowHistories {
     visible: BTreeMap<SharedString, BTreeMap<ObjectId, VisibleRowEntry>>,
     history: BTreeMap<(ObjectId, CommitId), StoredRowVersion>,
 }
 
-impl TableRowRegions {
+impl TableRowHistories {
     fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowVersion> {
         let mut rows: Vec<_> = self
             .history
@@ -1101,8 +1101,8 @@ pub struct MemoryStorage {
     raw_tables: HashMap<String, RawTableEntries>,
     /// Decoded row locators keyed by logical row id.
     row_locators: HashMap<ObjectId, RowLocator>,
-    /// Row-region storage keyed by table.
-    row_regions: HashMap<String, TableRowRegions>,
+    /// Row-history storage keyed by table.
+    row_histories: HashMap<String, TableRowHistories>,
 }
 
 impl MemoryStorage {
@@ -1377,7 +1377,7 @@ impl Storage for MemoryStorage {
         table: &str,
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
-        let regions = self.row_regions.entry(table.to_string()).or_default();
+        let regions = self.row_histories.entry(table.to_string()).or_default();
         for row in rows {
             regions
                 .history
@@ -1391,7 +1391,7 @@ impl Storage for MemoryStorage {
         table: &str,
         entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        let regions = self.row_regions.entry(table.to_string()).or_default();
+        let regions = self.row_histories.entry(table.to_string()).or_default();
         for entry in entries {
             regions
                 .visible
@@ -1409,7 +1409,7 @@ impl Storage for MemoryStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        let Some(regions) = self.row_regions.get_mut(table) else {
+        let Some(regions) = self.row_histories.get_mut(table) else {
             return Ok(());
         };
 
@@ -1457,7 +1457,7 @@ impl Storage for MemoryStorage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
 
@@ -1478,7 +1478,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
-        Ok(self.row_regions.get(table).and_then(|regions| {
+        Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
                 .get(branch)
@@ -1493,7 +1493,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<QueryRowVersion>, StorageError> {
-        Ok(self.row_regions.get(table).and_then(|regions| {
+        Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
                 .get(branch)
@@ -1509,7 +1509,7 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
     ) -> Result<Option<VisibleRowEntry>, StorageError> {
         Ok(self
-            .row_regions
+            .row_histories
             .get(table)
             .and_then(|regions| regions.visible.get(branch))
             .and_then(|rows| rows.get(&row_id).cloned()))
@@ -1521,7 +1521,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<Vec<CommitId>>, StorageError> {
-        Ok(self.row_regions.get(table).and_then(|regions| {
+        Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
                 .get(branch)
@@ -1537,7 +1537,7 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(None);
         };
         let Some(entry) = regions
@@ -1568,7 +1568,7 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<QueryRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(None);
         };
         let Some(entry) = regions
@@ -1598,7 +1598,7 @@ impl Storage for MemoryStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
 
@@ -1617,7 +1617,7 @@ impl Storage for MemoryStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
 
@@ -1638,7 +1638,7 @@ impl Storage for MemoryStorage {
         version_id: CommitId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         Ok(self
-            .row_regions
+            .row_histories
             .get(table)
             .and_then(|regions| regions.history.get(&(row_id, version_id)).cloned()))
     }
@@ -1650,7 +1650,7 @@ impl Storage for MemoryStorage {
         version_id: CommitId,
     ) -> Result<Option<QueryRowVersion>, StorageError> {
         Ok(self
-            .row_regions
+            .row_histories
             .get(table)
             .and_then(|regions| regions.history.get(&(row_id, version_id)))
             .map(QueryRowVersion::from))
@@ -1662,7 +1662,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         scan: HistoryScan,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let Some(regions) = self.row_regions.get(table) else {
+        let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
 
@@ -1932,8 +1932,8 @@ mod tests {
     }
 
     #[test]
-    fn memory_storage_row_regions_visible_and_history_round_trip() {
-        use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+    fn memory_storage_row_histories_visible_and_history_round_trip() {
+        use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
@@ -1974,7 +1974,7 @@ mod tests {
 
     #[test]
     fn memory_storage_visible_entries_track_older_tier_winners() {
-        use crate::row_regions::{RowState, StoredRowVersion, VisibleRowEntry};
+        use crate::row_histories::{RowState, StoredRowVersion, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
         let row_id = ObjectId::new();
@@ -2025,7 +2025,7 @@ mod tests {
             .load_visible_region_row("users", "dev/main", row_id)
             .unwrap();
         let entry = storage
-            .row_regions
+            .row_histories
             .get("users")
             .and_then(|regions| regions.visible.get("dev/main"))
             .and_then(|rows| rows.get(&row_id))

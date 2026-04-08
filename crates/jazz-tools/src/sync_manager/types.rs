@@ -156,7 +156,7 @@ pub enum ClientRole {
 /// Tracking state for a connected server.
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
-    /// What we've pushed to this server for row-region sync:
+    /// What we've pushed to this server for row-history sync:
     /// (row object, branch) -> set of known row-version ids.
     pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Row IDs for which we've sent metadata.
@@ -181,7 +181,7 @@ pub struct ClientState {
     pub session: Option<Session>,
     /// Active queries from this client.
     pub queries: HashMap<QueryId, QueryScope>,
-    /// What we've sent to this client for row-region sync:
+    /// What we've sent to this client for row-history sync:
     /// (row object, branch) -> set of known row-version ids.
     pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Row IDs for which we've sent metadata.

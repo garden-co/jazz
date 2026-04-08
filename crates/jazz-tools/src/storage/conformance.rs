@@ -1,4 +1,4 @@
-//! Storage conformance test suite for the row-region/raw-table storage model.
+//! Storage conformance test suite for the row-history/raw-table storage model.
 
 use std::collections::HashMap;
 
