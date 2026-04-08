@@ -66,7 +66,7 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte",
-    "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
+    "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && pnpm --filter jazz-auth build && rm -rf dist/vendor/jazz-auth && mkdir -p dist/vendor/jazz-auth && cp -R ../jazz-auth/dist/* dist/vendor/jazz-auth/",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.svelte.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",

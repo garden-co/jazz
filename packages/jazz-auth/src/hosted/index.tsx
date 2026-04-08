@@ -323,6 +323,7 @@ export interface JazzHostedAuthOptions {
   issuer?: string;
   secret: string;
   trustedOrigins?: string[];
+  useNextCookies?: boolean;
 }
 
 export interface JazzHostedAuth {
@@ -363,6 +364,32 @@ function resolveJazzPrincipalId(user: Record<string, unknown>): string {
 export function createJazzHostedAuth(options: JazzHostedAuthOptions): JazzHostedAuth {
   const apiBasePath = options.apiBasePath ?? "/api/auth";
   const hostedBasePath = options.hostedBasePath ?? "/auth";
+  const plugins = [];
+
+  if (options.useNextCookies !== false) {
+    plugins.push(nextCookies());
+  }
+
+  plugins.push(
+    jwt({
+      jwks: {
+        keyPairConfig: {
+          alg: "ES256",
+        },
+      },
+      jwt: {
+        definePayload: ({ user }) => ({
+          email: user.email,
+          jazz_principal_id: resolveJazzPrincipalId(user as Record<string, unknown>),
+          name: user.name,
+        }),
+        expirationTime: "15m",
+        getSubject: ({ user }) => resolveJazzPrincipalId(user as Record<string, unknown>),
+        issuer: options.issuer ?? options.baseURL,
+      },
+    }),
+  );
+
   const auth = betterAuth({
     basePath: apiBasePath,
     baseURL: options.baseURL,
@@ -374,26 +401,7 @@ export function createJazzHostedAuth(options: JazzHostedAuthOptions): JazzHosted
       requireEmailVerification: false,
       ...options.emailAndPassword,
     },
-    plugins: [
-      nextCookies(),
-      jwt({
-        jwks: {
-          keyPairConfig: {
-            alg: "ES256",
-          },
-        },
-        jwt: {
-          definePayload: ({ user }) => ({
-            email: user.email,
-            jazz_principal_id: resolveJazzPrincipalId(user as Record<string, unknown>),
-            name: user.name,
-          }),
-          expirationTime: "15m",
-          getSubject: ({ user }) => resolveJazzPrincipalId(user as Record<string, unknown>),
-          issuer: options.issuer ?? options.baseURL,
-        },
-      }),
-    ],
+    plugins,
     secret: options.secret,
     trustedOrigins: options.trustedOrigins ?? [options.baseURL],
   }) as unknown as ReturnType<typeof betterAuth>;
@@ -570,3 +578,9 @@ export async function handleJazzHostedSignOut(
 
   return finalizeAuthRedirect(authResponse, request, redirectTo);
 }
+
+export {
+  startJazzHostedAuthServer,
+  type JazzHostedAuthServerHandle,
+  type JazzHostedAuthServerOptions,
+} from "./server.js";

@@ -107,9 +107,8 @@ function printWrapperHelp() {
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
   console.log("  migrations push       Push a reviewed migration edge to the server");
-  console.log("  auth init             Scaffold a hosted Jazz Auth Next.js app");
   console.log("  create                Create a new resource");
-  console.log("  server                Run a Jazz server");
+  console.log("  server                Run a Jazz server with bundled Jazz Auth");
   console.log("  mcp                   Run the Jazz MCP server");
   console.log("  help                  Print this message");
   console.log("");
@@ -121,6 +120,45 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
 const command = args[0];
+
+function resolveRustBinaryPath() {
+  const key = `${process.platform}-${process.arch}`;
+  const binaryName = BINARIES[key];
+  const localBinaryName = process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools";
+  const fallbackCandidates = [
+    join(here, "..", "..", "..", "target", "debug", localBinaryName),
+    join(here, "..", "..", "..", "target", "release", localBinaryName),
+  ];
+
+  const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
+  if (rustBinOverride && !existsSync(rustBinOverride)) {
+    fail(`Configured Rust binary missing: ${rustBinOverride}`);
+  }
+
+  const binaryPath =
+    rustBinOverride ??
+    (bundledBinaryPath && existsSync(bundledBinaryPath)
+      ? bundledBinaryPath
+      : fallbackCandidates.find((candidate) => existsSync(candidate)));
+
+  if (!binaryPath) {
+    const lines = [];
+    if (!binaryName) {
+      lines.push(
+        `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
+      );
+    } else {
+      lines.push(`Bundled binary missing: ${binaryName}`);
+      lines.push("This package may be corrupted or published without target artifacts.");
+    }
+    lines.push("No local Cargo build was found in target/debug or target/release.");
+    lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
+    fail(lines.join("\n"));
+  }
+
+  ensureExecutable(binaryPath, rustBinOverride ?? binaryName ?? localBinaryName);
+  return { binaryName, binaryPath };
+}
 
 // Handle the MCP server before any Rust binary resolution.
 if (!command || command === "--help" || command === "-h") {
@@ -151,42 +189,23 @@ if (!command || command === "--help" || command === "-h") {
     env: process.env,
   });
   exitWithSpawnResult(tsCommandResult, "TypeScript schema CLI");
+} else if (command === "server") {
+  const combinedServerPath = join(here, "..", "dist", "combined-server.js");
+  if (!existsSync(combinedServerPath)) {
+    fail(`Combined server runner missing: ${combinedServerPath}`);
+  }
+
+  const wantsHelp = args.includes("--help") || args.includes("-h");
+  const extraEnv = wantsHelp
+    ? process.env
+    : { ...process.env, JAZZ_TOOLS_RUST_BIN: resolveRustBinaryPath().binaryPath };
+  const combinedServerResult = spawnSync(process.execPath, [combinedServerPath, ...args], {
+    stdio: "inherit",
+    env: extraEnv,
+  });
+  exitWithSpawnResult(combinedServerResult, "Combined Jazz server runner");
 } else {
-  const key = `${process.platform}-${process.arch}`;
-  const binaryName = BINARIES[key];
-  const localBinaryName = process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools";
-  const fallbackCandidates = [
-    join(here, "..", "..", "..", "target", "debug", localBinaryName),
-    join(here, "..", "..", "..", "target", "release", localBinaryName),
-  ];
-
-  const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
-  if (rustBinOverride && !existsSync(rustBinOverride)) {
-    fail(`Configured Rust binary missing: ${rustBinOverride}`);
-  }
-  const binaryPath =
-    rustBinOverride ??
-    (bundledBinaryPath && existsSync(bundledBinaryPath)
-      ? bundledBinaryPath
-      : fallbackCandidates.find((candidate) => existsSync(candidate)));
-
-  if (!binaryPath) {
-    const lines = [];
-    if (!binaryName) {
-      lines.push(
-        `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
-      );
-    } else {
-      lines.push(`Bundled binary missing: ${binaryName}`);
-      lines.push("This package may be corrupted or published without target artifacts.");
-    }
-    lines.push("No local Cargo build was found in target/debug or target/release.");
-    lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
-    fail(lines.join("\n"));
-  }
-
-  ensureExecutable(binaryPath, rustBinOverride ?? binaryName ?? localBinaryName);
-
+  const { binaryName, binaryPath } = resolveRustBinaryPath();
   const result = spawnSync(binaryPath, args, { stdio: "inherit", env: process.env });
   exitWithSpawnResult(result, binaryName ?? binaryPath);
 }
