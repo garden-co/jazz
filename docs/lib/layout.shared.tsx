@@ -9,6 +9,13 @@ export const gitConfig = {
 
 export function baseOptions(): BaseLayoutProps {
   return {
+    links: [
+      {
+        text: "Docs",
+        url: "/docs",
+        active: "nested-url",
+      },
+    ],
     nav: {
       title: "Jazz 2 Docs",
     },
