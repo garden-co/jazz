@@ -74,55 +74,69 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bench-out/native
-          cat > bench-out/native/metadata.json <<EOF
-          {
-            "workflow": "${GITHUB_WORKFLOW}",
-            "run_id": "${GITHUB_RUN_ID}",
-            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
-            "repository": "${GITHUB_REPOSITORY}",
-            "sha": "${BENCH_SHA}",
-            "ref": "${BENCH_REF}",
-            "branch": "${BENCH_BRANCH}",
-            "profile": "${BENCH_PROFILE}",
-            "runner_name": "${RUNNER_NAME}",
-            "runner_os": "${RUNNER_OS}",
-            "runner_arch": "${RUNNER_ARCH}"
-          }
-          EOF
           rustc -V > bench-out/native/rustc.txt
           uname -a > bench-out/native/uname.txt
           lscpu > bench-out/native/lscpu.txt
+          for engine in rocksdb sqlite; do
+            mkdir -p "bench-out/native/${engine}"
+            printf '%s\n' \
+              '{' \
+              "  \"workflow\": \"${GITHUB_WORKFLOW}\"," \
+              "  \"run_id\": \"${GITHUB_RUN_ID}\"," \
+              "  \"run_attempt\": \"${GITHUB_RUN_ATTEMPT}\"," \
+              "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+              "  \"sha\": \"${BENCH_SHA}\"," \
+              "  \"ref\": \"${BENCH_REF}\"," \
+              "  \"branch\": \"${BENCH_BRANCH}\"," \
+              "  \"profile\": \"${BENCH_PROFILE}\"," \
+              "  \"runner_name\": \"${RUNNER_NAME}\"," \
+              "  \"runner_os\": \"${RUNNER_OS}\"," \
+              "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+              "  \"storage_engine\": \"${engine}\"" \
+              '}' > "bench-out/native/${engine}/metadata.json"
+            cp bench-out/native/rustc.txt "bench-out/native/${engine}/rustc.txt"
+            cp bench-out/native/uname.txt "bench-out/native/${engine}/uname.txt"
+            cp bench-out/native/lscpu.txt "bench-out/native/${engine}/lscpu.txt"
+          done
 
       - name: Build native benchmark binaries
         run: |
           set -euo pipefail
           cargo build --release -p jazz-tools --features client,rocksdb --example realistic_bench
+          cargo build --release -p jazz-tools --features client,sqlite --example realistic_bench
           cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run
+          cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run
 
       - name: Run native benchmark suite
         run: |
           set -euo pipefail
           sleep 10
-          taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
-            --suite native \
-            --out-dir bench-out/native \
-            --profile "${BENCH_PROFILE}" \
-            --skip-set benchmarks/realistic/ci_skip_set.json \
-            --repeat-count "${BENCH_REPEAT_COUNT}" \
-            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
-
-      - name: Export Criterion artifacts
-        run: |
-          set -euo pipefail
-          node benchmarks/realistic/export_criterion.mjs \
-            --allow-empty \
-            --out bench-out/native/criterion_realistic_phase1.json \
-            --summary-md bench-out/native/criterion_realistic_phase1.md
+          for engine in rocksdb sqlite; do
+            rm -rf target/criterion
+            out_dir="bench-out/native/${engine}"
+            taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
+              --suite native \
+              --storage-engine "${engine}" \
+              --out-dir "${out_dir}" \
+              --profile "${BENCH_PROFILE}" \
+              --skip-set benchmarks/realistic/ci_skip_set.json \
+              --repeat-count "${BENCH_REPEAT_COUNT}" \
+              --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+            node benchmarks/realistic/export_criterion.mjs \
+              --allow-empty \
+              --out "${out_dir}/criterion_realistic_phase1.json" \
+              --summary-md "${out_dir}/criterion_realistic_phase1.md"
+          done
 
       - name: Publish native execution summary
         run: |
           set -euo pipefail
-          cat bench-out/native/summary.md >> "$GITHUB_STEP_SUMMARY"
+          for summary in bench-out/native/*/summary.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Build native manifest
         run: |
@@ -134,49 +148,54 @@ jobs:
               printf ''
             fi
           }
-          jq -n \
-            --arg workflow "${GITHUB_WORKFLOW}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${BENCH_SHA}" \
-            --arg ref "${BENCH_REF}" \
-            --arg branch "${BENCH_BRANCH}" \
-            --arg profile "${BENCH_PROFILE}" \
-            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg w1_sha256 "$(file_sha bench-out/native/w1_interactive.json)" \
-            --arg w4_sha256 "$(file_sha bench-out/native/w4_cold_start.json)" \
-            --arg status_sha256 "$(file_sha bench-out/native/suite_status.json)" \
-            --arg summary_sha256 "$(file_sha bench-out/native/summary.md)" \
-            --arg skip_candidates_sha256 "$(file_sha bench-out/native/skip_candidates.json)" \
-            --arg criterion_json_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.json)" \
-            --arg criterion_md_sha256 "$(file_sha bench-out/native/criterion_realistic_phase1.md)" \
-            'def nullable($value): if $value == "" then null else $value end;
-            {
-              kind: "realistic-bench-native",
-              generated_at: $generated_at,
-              workflow: $workflow,
-              run_id: $run_id,
-              run_attempt: $run_attempt,
-              repository: $repository,
-              sha: $sha,
-              ref: $ref,
-              branch: $branch,
-              profile: $profile,
-              files: [
-                { path: "metadata.json" },
-                { path: "rustc.txt" },
-                { path: "uname.txt" },
-                { path: "lscpu.txt" },
-                { path: "suite_status.json", sha256: nullable($status_sha256) },
-                { path: "summary.md", sha256: nullable($summary_sha256) },
-                { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
-                { path: "w1_interactive.json", sha256: nullable($w1_sha256) },
-                { path: "w4_cold_start.json", sha256: nullable($w4_sha256) },
-                { path: "criterion_realistic_phase1.json", sha256: nullable($criterion_json_sha256) },
-                { path: "criterion_realistic_phase1.md", sha256: nullable($criterion_md_sha256) }
-              ]
-            }' > bench-out/native/manifest.json
+          for engine in rocksdb sqlite; do
+            dir="bench-out/native/${engine}"
+            jq -n \
+              --arg workflow "${GITHUB_WORKFLOW}" \
+              --arg run_id "${GITHUB_RUN_ID}" \
+              --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${BENCH_SHA}" \
+              --arg ref "${BENCH_REF}" \
+              --arg branch "${BENCH_BRANCH}" \
+              --arg profile "${BENCH_PROFILE}" \
+              --arg storage_engine "${engine}" \
+              --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg w1_sha256 "$(file_sha "${dir}/w1_interactive.json")" \
+              --arg w4_sha256 "$(file_sha "${dir}/w4_cold_start.json")" \
+              --arg status_sha256 "$(file_sha "${dir}/suite_status.json")" \
+              --arg summary_sha256 "$(file_sha "${dir}/summary.md")" \
+              --arg skip_candidates_sha256 "$(file_sha "${dir}/skip_candidates.json")" \
+              --arg criterion_json_sha256 "$(file_sha "${dir}/criterion_realistic_phase1.json")" \
+              --arg criterion_md_sha256 "$(file_sha "${dir}/criterion_realistic_phase1.md")" \
+              'def nullable($value): if $value == "" then null else $value end;
+              {
+                kind: "realistic-bench-native",
+                generated_at: $generated_at,
+                workflow: $workflow,
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                repository: $repository,
+                sha: $sha,
+                ref: $ref,
+                branch: $branch,
+                profile: $profile,
+                storage_engine: $storage_engine,
+                files: [
+                  { path: "metadata.json" },
+                  { path: "rustc.txt" },
+                  { path: "uname.txt" },
+                  { path: "lscpu.txt" },
+                  { path: "suite_status.json", sha256: nullable($status_sha256) },
+                  { path: "summary.md", sha256: nullable($summary_sha256) },
+                  { path: "skip_candidates.json", sha256: nullable($skip_candidates_sha256) },
+                  { path: "w1_interactive.json", sha256: nullable($w1_sha256) },
+                  { path: "w4_cold_start.json", sha256: nullable($w4_sha256) },
+                  { path: "criterion_realistic_phase1.json", sha256: nullable($criterion_json_sha256) },
+                  { path: "criterion_realistic_phase1.md", sha256: nullable($criterion_md_sha256) }
+                ]
+              }' > "${dir}/manifest.json"
+          done
 
       - name: Upload native artifacts
         uses: actions/upload-artifact@v4
@@ -241,7 +260,8 @@ jobs:
             "profile": "${BENCH_PROFILE}",
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
-            "runner_arch": "${RUNNER_ARCH}"
+            "runner_arch": "${RUNNER_ARCH}",
+            "storage_engine": "opfs-btree"
           }
           EOF
           node -v > bench-out/browser/node.txt
@@ -308,6 +328,7 @@ jobs:
               ref: $ref,
               branch: $branch,
               profile: $profile,
+              storage_engine: "opfs-btree",
               files: [
                 { path: "metadata.json" },
                 { path: "node.txt" },
@@ -438,10 +459,10 @@ jobs:
       - name: Update benchmark skip set
         run: |
           set -euo pipefail
-          args=(
-            --skip-set benchmarks/realistic/ci_skip_set.json
-            --status site-input/native/suite_status.json
-          )
+          args=(--skip-set benchmarks/realistic/ci_skip_set.json)
+          while IFS= read -r status_file; do
+            args+=(--status "$status_file")
+          done < <(find site-input/native -name suite_status.json -type f | sort)
           if [ -f site-input/browser/suite_status.json ]; then
             args+=(--status site-input/browser/suite_status.json)
           fi
@@ -558,7 +579,7 @@ jobs:
           if [ -n "${BENCH_SITE_URL:-}" ]; then
             printf 'Preview site: %s\n\n' "${BENCH_SITE_URL}" >> bench-out/pr-report.md
           fi
-          for summary in site-input/native/summary.md site-input/browser/summary.md; do
+          for summary in site-input/native/*/summary.md site-input/browser/summary.md; do
             if [ -f "$summary" ]; then
               cat "$summary" >> bench-out/pr-report.md
               printf '\n' >> bench-out/pr-report.md
