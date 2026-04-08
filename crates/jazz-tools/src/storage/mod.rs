@@ -32,6 +32,7 @@ use smolset::SmolSet;
 
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
+use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
@@ -89,6 +90,13 @@ pub type MetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
 pub type RawTableRows = Vec<(String, Vec<u8>)>;
 
 const METADATA_TABLE: &str = "__metadata";
+const ROW_LOCATOR_TABLE: &str = "__row_locator";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowLocator {
+    pub table: String,
+    pub origin_schema_hash: Option<String>,
+}
 
 fn metadata_raw_key(id: ObjectId) -> String {
     hex::encode(id.uuid().as_bytes())
@@ -110,6 +118,25 @@ fn encode_metadata(metadata: &HashMap<String, String>) -> Result<Vec<u8>, Storag
 fn decode_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError> {
     serde_json::from_slice(bytes)
         .map_err(|err| StorageError::IoError(format!("deserialize metadata: {err}")))
+}
+
+fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLocator> {
+    Some(RowLocator {
+        table: metadata.get(MetadataKey::Table.as_str())?.clone(),
+        origin_schema_hash: metadata
+            .get(MetadataKey::OriginSchemaHash.as_str())
+            .cloned(),
+    })
+}
+
+fn encode_row_locator(locator: &RowLocator) -> Result<Vec<u8>, StorageError> {
+    postcard::to_allocvec(locator)
+        .map_err(|err| StorageError::IoError(format!("serialize row locator: {err}")))
+}
+
+fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
+    postcard::from_bytes(bytes)
+        .map_err(|err| StorageError::IoError(format!("deserialize row locator: {err}")))
 }
 
 // ============================================================================
@@ -138,7 +165,16 @@ pub trait Storage {
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
         let bytes = encode_metadata(&metadata)?;
-        self.raw_table_put(METADATA_TABLE, &metadata_raw_key(id), &bytes)
+        self.raw_table_put(METADATA_TABLE, &metadata_raw_key(id), &bytes)?;
+
+        if let Some(locator) = row_locator_from_metadata(&metadata) {
+            let locator_bytes = encode_row_locator(&locator)?;
+            self.raw_table_put(ROW_LOCATOR_TABLE, &metadata_raw_key(id), &locator_bytes)?;
+        } else {
+            let _ = self.raw_table_delete(ROW_LOCATOR_TABLE, &metadata_raw_key(id));
+        }
+
+        Ok(())
     }
 
     /// Load metadata for a logical id. Returns None if it doesn't exist.
@@ -156,6 +192,12 @@ pub trait Storage {
         }
         rows.sort_by_key(|(object_id, _)| *object_id);
         Ok(rows)
+    }
+
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        self.raw_table_get(ROW_LOCATOR_TABLE, &metadata_raw_key(id))?
+            .map(|bytes| decode_row_locator(&bytes))
+            .transpose()
     }
 
     // ================================================================

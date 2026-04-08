@@ -179,7 +179,7 @@ fn tuple_element_row() {
     let version_id = make_commit_id(1);
     let elem = TupleElement::Row {
         id,
-        content: content.clone(),
+        content: content.clone().into(),
         version_id,
         row_provenance: test_row_provenance(),
     };
@@ -230,7 +230,7 @@ fn tuple_equality_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
+        content: vec![1, 2, 3].into(),
         version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
@@ -248,7 +248,7 @@ fn tuple_hash_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
+        content: vec![1, 2, 3].into(),
         version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
@@ -273,7 +273,7 @@ fn tuple_in_hashset() {
     // Same ID with different content should be found
     let tuple_with_content = Tuple::new(vec![TupleElement::Row {
         id: id1,
-        content: vec![1, 2, 3],
+        content: vec![1, 2, 3].into(),
         version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);

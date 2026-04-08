@@ -431,8 +431,8 @@ impl SyncManager {
                             payload,
                             session.clone(),
                             metadata,
-                            old_content,
-                            new_content,
+                            old_content.map(|content| content.to_vec()),
+                            new_content.map(|content| content.to_vec()),
                             operation,
                         );
                     }

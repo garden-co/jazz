@@ -208,7 +208,7 @@ mod tests {
     fn row_tuple(id: ObjectId, content: &[u8], commit_byte: u8) -> Tuple {
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: content.to_vec(),
+            content: content.to_vec().into(),
             version_id: CommitId([commit_byte; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])

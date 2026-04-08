@@ -6,7 +6,7 @@ use crate::metadata::{
 };
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{RowState, StoredRowVersion};
-use crate::schema_manager::{origin_schema_hash_from_metadata, resolve_current_table_name};
+use crate::schema_manager::resolve_current_table_name;
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -207,11 +207,14 @@ impl QueryManager {
     }
 
     fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
-        let metadata = storage.load_metadata(row_id).ok().flatten()?;
-        let table = metadata.get(MetadataKey::Table.as_str())?;
-        let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
+        let locator = storage.load_row_locator(row_id).ok().flatten()?;
+        let table = locator.table.as_str();
+        let origin_schema_hash = locator
+            .origin_schema_hash
+            .as_deref()
+            .and_then(SchemaHash::from_hex);
         resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())
-            .or_else(|| Some(table.clone()))
+            .or(Some(locator.table))
     }
 
     fn load_visible_row_on_branch(
@@ -474,7 +477,7 @@ impl QueryManager {
 
         Self::transform_row_with_schema(
             id,
-            row.data.clone(),
+            row.data.to_vec(),
             row.version_id(),
             BranchName::new(&row.branch),
             &mut transform_context,
@@ -1288,7 +1291,7 @@ impl QueryManager {
         if row.is_hard_deleted() {
             return None;
         }
-        Some(row.data)
+        Some(row.data.to_vec())
     }
 
     pub(super) fn visible_row_is_hard_deleted(
@@ -1556,7 +1559,7 @@ impl QueryManager {
             id,
             self.current_branch().as_str(),
             parents,
-            old_data.clone(),
+            old_data.to_vec(),
             &delete_provenance,
             Some(DeleteKind::Soft),
         );

@@ -344,7 +344,7 @@ impl RecursiveRelationNode {
                 Tuple::new_with_provenance(
                     vec![TupleElement::Row {
                         id,
-                        content,
+                        content: content.into(),
                         version_id,
                         row_provenance,
                     }],
@@ -458,7 +458,7 @@ impl RecursiveRelationNode {
                             let changed = *existing_content != target_row.data
                                 || *existing_commit_id != target_row.version_id;
                             if changed {
-                                *existing_content = target_row.data.clone();
+                                *existing_content = target_row.data.to_vec();
                                 *existing_commit_id = target_row.version_id;
                                 *existing_row_provenance = target_row.row_provenance.clone();
                             }
@@ -468,7 +468,7 @@ impl RecursiveRelationNode {
                             seen_rows.insert(
                                 *target_id,
                                 (
-                                    target_row.data.clone(),
+                                    target_row.data.to_vec(),
                                     target_row.version_id,
                                     target_row.row_provenance.clone(),
                                     combined_provenance.clone(),
@@ -482,7 +482,11 @@ impl RecursiveRelationNode {
                             .get(target_id)
                             .map(|(_, _, _, provenance)| provenance.clone())
                             .unwrap_or(combined_provenance);
-                        next_frontier.push((*target_id, target_row.data, frontier_provenance));
+                        next_frontier.push((
+                            *target_id,
+                            target_row.data.to_vec(),
+                            frontier_provenance,
+                        ));
                     }
                 }
             }
@@ -496,7 +500,7 @@ impl RecursiveRelationNode {
                 Tuple::new_with_provenance(
                     vec![TupleElement::Row {
                         id,
-                        content,
+                        content: content.into(),
                         version_id,
                         row_provenance,
                     }],
@@ -634,7 +638,7 @@ fn tuple_from_normalized_content(content: Vec<u8>, provenance: TupleProvenance) 
     Tuple::new_with_provenance(
         vec![TupleElement::Row {
             id,
-            content,
+            content: content.into(),
             version_id,
             row_provenance: RowProvenance::for_insert(SYSTEM_PRINCIPAL_ID, 0),
         }],
@@ -760,7 +764,7 @@ mod tests {
         let seed = encode_row(seed_desc, &[Value::Integer(1)]).unwrap();
         let seed_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
-            content: seed,
+            content: seed.into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);

@@ -352,7 +352,7 @@ impl MagicColumnsNode {
             let element = projected.get_mut(request.element_index)?;
             *element = TupleElement::Row {
                 id: row.id,
-                content: new_content,
+                content: new_content.into(),
                 version_id: row.version_id,
                 row_provenance: row.provenance,
             };

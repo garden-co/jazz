@@ -416,7 +416,7 @@ impl ArraySubqueryNode {
         Some(Tuple::new_with_provenance(
             vec![TupleElement::Row {
                 id: outer_id,
-                content: output_content,
+                content: output_content.into(),
                 version_id,
                 row_provenance,
             }],
@@ -689,7 +689,7 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
-            content: user_data,
+            content: user_data.into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
@@ -732,7 +732,7 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,
-            content: user_data,
+            content: user_data.into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);

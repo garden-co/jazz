@@ -13,7 +13,7 @@ use crate::schema_manager::{
     LensTransformer, SchemaContext, origin_schema_hash_from_metadata, resolve_current_table_name,
     translate_table_name_to_schema,
 };
-use crate::storage::Storage;
+use crate::storage::{RowLocator, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SchemaWarning, SyncManager,
@@ -1248,7 +1248,7 @@ impl QueryManager {
         }
 
         if update.row.is_hard_deleted() {
-            let old_data = old_row.map(|row| row.data.as_slice());
+            let old_data = old_row.map(|row| row.data.as_ref());
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
                 &branch_table,
@@ -1499,11 +1499,8 @@ impl QueryManager {
         }
     }
 
-    fn load_row_metadata(
-        storage: &dyn Storage,
-        row_id: ObjectId,
-    ) -> Option<HashMap<String, String>> {
-        storage.load_metadata(row_id).ok().flatten()
+    fn load_row_locator(storage: &dyn Storage, row_id: ObjectId) -> Option<RowLocator> {
+        storage.load_row_locator(row_id).ok().flatten()
     }
 
     pub(super) fn load_best_visible_row_version(
@@ -1533,11 +1530,11 @@ impl QueryManager {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        let metadata = Self::load_row_metadata(storage, row_id)?;
-        Self::load_best_visible_row_version_from_storage_with_metadata(
+        let locator = Self::load_row_locator(storage, row_id)?;
+        Self::load_best_visible_row_version_from_storage_with_locator(
             storage,
             row_id,
-            &metadata,
+            &locator,
             branches,
             durability_tier,
             schema_context,
@@ -1545,17 +1542,20 @@ impl QueryManager {
         )
     }
 
-    fn load_best_visible_row_version_from_storage_with_metadata(
+    fn load_best_visible_row_version_from_storage_with_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
-        metadata: &HashMap<String, String>,
+        locator: &RowLocator,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        let original_table = metadata.get(MetadataKey::Table.as_str())?.clone();
-        let origin_schema_hash = origin_schema_hash_from_metadata(metadata);
+        let original_table = locator.table.clone();
+        let origin_schema_hash = locator
+            .origin_schema_hash
+            .as_deref()
+            .and_then(SchemaHash::from_hex);
         let current_table = resolve_current_table_name(
             schema_context,
             &original_table,
@@ -1653,11 +1653,11 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let metadata = Self::load_row_metadata(storage, row_id)?;
-        let resolved = Self::load_best_visible_row_version_from_storage_with_metadata(
+        let locator = Self::load_row_locator(storage, row_id)?;
+        let resolved = Self::load_best_visible_row_version_from_storage_with_locator(
             storage,
             row_id,
-            &metadata,
+            &locator,
             branches,
             durability_tier,
             schema_context,
@@ -1665,10 +1665,10 @@ impl QueryManager {
         )
         .or_else(|| {
             let pending_version_id = local_pending_version?;
-            let resolved = Self::load_best_visible_row_version_from_storage_with_metadata(
+            let resolved = Self::load_best_visible_row_version_from_storage_with_locator(
                 storage,
                 row_id,
-                &metadata,
+                &locator,
                 branches,
                 None,
                 schema_context,

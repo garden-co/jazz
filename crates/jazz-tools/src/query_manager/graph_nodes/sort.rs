@@ -277,7 +277,7 @@ mod tests {
         let data = encode_row(&descriptor, values).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: data,
+            content: data.into(),
             version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
@@ -442,7 +442,7 @@ mod tests {
             let data = encode_row(&descriptor, values).unwrap();
             Tuple::new(vec![TupleElement::Row {
                 id,
-                content: data,
+                content: data.into(),
                 version_id: CommitId([0; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             }])
