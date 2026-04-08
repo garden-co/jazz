@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
-#[cfg(test)]
-use crate::commit::Commit;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
@@ -860,69 +858,6 @@ impl StoredRowVersion {
             delete_kind,
             is_deleted,
             data: data.into(),
-            metadata,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn from_commit(
-        row_id: ObjectId,
-        branch: impl Into<String>,
-        _commit_id: CommitId,
-        commit: &Commit,
-        state: RowState,
-    ) -> Self {
-        let provenance = commit
-            .row_provenance()
-            .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
-        let branch = SharedString::from(branch.into());
-        let delete_kind = match commit
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get(MetadataKey::Delete.as_str()))
-            .map(String::as_str)
-        {
-            Some("soft") => Some(DeleteKind::Soft),
-            Some("hard") => Some(DeleteKind::Hard),
-            _ => None,
-        };
-        let metadata = RowMetadata::from_hash_map(
-            commit
-                .metadata
-                .as_ref()
-                .map(|metadata| {
-                    metadata
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != MetadataKey::Delete.as_str())
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        );
-        let version_id = compute_row_version_id(
-            &branch,
-            &commit.parents.iter().copied().collect::<Vec<_>>(),
-            &commit.content,
-            provenance.updated_at,
-            &provenance.updated_by,
-            (!metadata.is_empty()).then_some(&metadata),
-        );
-
-        Self {
-            row_id,
-            version_id,
-            branch,
-            parents: commit.parents.iter().copied().collect(),
-            updated_at: provenance.updated_at,
-            created_by: provenance.created_by.into(),
-            created_at: provenance.created_at,
-            updated_by: provenance.updated_by.into(),
-            batch_id: BatchId::from_commit_id(version_id),
-            state,
-            confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
-            delete_kind,
-            is_deleted: delete_kind.is_some(),
-            data: commit.content.clone().into(),
             metadata,
         }
     }

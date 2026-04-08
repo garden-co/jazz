@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use smallvec::smallvec;
 
-use crate::commit::Commit;
+use crate::commit::CommitId;
 use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
@@ -64,25 +64,53 @@ fn set_client_query_scope(
         .set_client_query_scope_with_storage(storage, client_id, query_id, scope, session);
 }
 
+#[derive(Debug, Clone)]
+struct IncomingRowVersion {
+    parents: smallvec::SmallVec<[CommitId; 2]>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: String,
+    delete_kind: Option<DeleteKind>,
+}
+
+impl IncomingRowVersion {
+    fn row_provenance(&self) -> RowProvenance {
+        RowProvenance::for_insert(self.author.clone(), self.timestamp)
+    }
+
+    fn row_metadata(&self) -> HashMap<String, String> {
+        row_provenance_metadata(&self.row_provenance(), self.delete_kind)
+            .into_iter()
+            .collect()
+    }
+
+    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowVersion {
+        StoredRowVersion::new(
+            object_id,
+            branch,
+            self.parents.iter().copied().collect::<Vec<_>>(),
+            self.content.clone(),
+            self.row_provenance(),
+            self.row_metadata(),
+            state,
+            None,
+        )
+    }
+}
+
 fn stored_row_commit(
-    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    parents: smallvec::SmallVec<[CommitId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
     delete_kind: Option<DeleteKind>,
-) -> Commit {
-    let author = author.into();
-    Commit {
+) -> IncomingRowVersion {
+    IncomingRowVersion {
         parents,
         content,
         timestamp,
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(author.clone(), timestamp),
-            delete_kind,
-        )),
-        author,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
+        author: author.into(),
+        delete_kind,
     }
 }
 
@@ -90,33 +118,22 @@ fn row_version_created_payload(
     object_id: ObjectId,
     branch: &str,
     metadata: Option<RowMetadata>,
-    commit: &Commit,
+    commit: &IncomingRowVersion,
 ) -> SyncPayload {
     SyncPayload::RowVersionCreated {
         metadata,
-        row: StoredRowVersion::from_commit(
-            object_id,
-            branch,
-            commit.id(),
-            commit,
-            RowState::VisibleDirect,
-        ),
+        row: commit.to_row(object_id, branch, RowState::VisibleDirect),
     }
 }
 
 fn row_version_id_for_commit(
     object_id: ObjectId,
     branch: &str,
-    commit: &Commit,
-) -> crate::commit::CommitId {
-    StoredRowVersion::from_commit(
-        object_id,
-        branch,
-        commit.id(),
-        commit,
-        RowState::VisibleDirect,
-    )
-    .version_id()
+    commit: &IncomingRowVersion,
+) -> CommitId {
+    commit
+        .to_row(object_id, branch, RowState::VisibleDirect)
+        .version_id()
 }
 
 fn add_row_commit(
@@ -472,7 +489,7 @@ fn enqueue_inherited_insert(
     branch: &str,
     folder_id: ObjectId,
     title: &str,
-) -> Commit {
+) -> IncomingRowVersion {
     let commit = stored_row_commit(
         smallvec![],
         encode_document("alice", title, Some(folder_id)),
@@ -861,7 +878,10 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         .object_manager
         .get_tip_ids(obj_id, &branch);
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
         "Denied insert should not be applied on the branch"
     );
 }
@@ -935,7 +955,10 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
         .object_manager
         .get_tip_ids(obj_id, &branch);
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
         "Denied insert should not be applied on the branch"
     );
 }
@@ -1311,7 +1334,10 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
         .object_manager
         .get_tip_ids(obj_id, &branch);
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
         "Deferred insert must not be applied before the schema is known"
     );
 
@@ -1414,7 +1440,10 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
         .object_manager
         .get_tip_ids(obj_id, &branch);
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Timed-out insert should not be applied on the branch"
     );
 }
@@ -1484,7 +1513,10 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
         .object_manager
         .get_tip_ids(obj_id, "main");
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Denied insert should not be applied on unresolved branch writes"
     );
 }
@@ -1567,7 +1599,10 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
         .object_manager
         .get_tip_ids(obj_id, "main");
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        tips.is_err()
+            || !tips
+                .unwrap()
+                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Denied insert should not be applied when stale self.schema fallback is unsafe"
     );
 }
@@ -3316,7 +3351,11 @@ fn synced_soft_delete_should_use_delete_policy() {
         .get_tip_ids(protected.row_id, &branch)
         .unwrap();
     assert!(
-        !tips.contains(&delete_commit.id()),
+        !tips.contains(&row_version_id_for_commit(
+            protected.row_id,
+            &branch,
+            &delete_commit
+        )),
         "denied synced soft delete should not be applied"
     );
     assert!(
