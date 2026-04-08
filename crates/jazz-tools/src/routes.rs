@@ -92,6 +92,13 @@ struct SchemaHashesResponse {
     hashes: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSchemaResponse {
+    schema: Schema,
+    published_at: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AdminSubscriptionIntrospectionParams {
     #[serde(rename = "appId")]
@@ -626,7 +633,7 @@ async fn sync_handler(
     Json(SyncBatchResponse { results }).into_response()
 }
 
-/// Return the catalogue schema for the given hash.
+/// Return the catalogue schema for the given hash plus its publish timestamp.
 ///
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
 async fn schema_handler(
@@ -675,11 +682,26 @@ async fn schema_handler(
 
     match state.runtime.known_schema(&schema_hash) {
         Ok(Some(schema)) => {
+            let published_at = match state.runtime.schema_published_at(&schema_hash) {
+                Ok(timestamp) => timestamp,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::internal(format!(
+                            "failed to read schema publish timestamp: {err}"
+                        ))),
+                    )
+                        .into_response();
+                }
+            };
             tracing::info!(
                 requested_hash = %schema_hash.short(),
                 "schema request: returning requested hash"
             );
-            let body = schema.clone();
+            let body = StoredSchemaResponse {
+                schema: schema.clone(),
+                published_at,
+            };
             Json(body).into_response()
         }
         Ok(None) => (
@@ -1937,7 +1959,7 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
+        let state = make_state_with_schema(schema.clone()).await;
 
         let app = make_test_router(state);
 
@@ -1975,6 +1997,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(schema_response.status(), StatusCode::OK);
+        let schema_body = body::to_bytes(schema_response.into_body(), usize::MAX)
+            .await
+            .expect("schema body");
+        let schema_json: Value = serde_json::from_slice(&schema_body).expect("schema json");
+        let expected_schema_json = serde_json::to_value(schema).expect("expected schema json");
+        assert_eq!(schema_json["schema"], expected_schema_json);
+        assert!(schema_json.get("publishedAt").is_some());
 
         let bad_hash_response = app
             .oneshot(

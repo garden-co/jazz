@@ -986,6 +986,7 @@ mod integration_tests {
         assert_eq!(schema_response.status(), StatusCode::OK);
         let schema_json: Value = schema_response.json().await.unwrap();
         let expected_schema_json = serde_json::to_value(schema.clone()).unwrap();
-        assert_eq!(schema_json, expected_schema_json);
+        assert_eq!(schema_json["schema"], expected_schema_json);
+        assert!(schema_json.get("publishedAt").is_some());
     }
 }
