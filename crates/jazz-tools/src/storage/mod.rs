@@ -450,7 +450,6 @@ pub trait Storage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        validate_index_value_size(table, column, branch, value)?;
         let raw_table = key_codec::index_raw_table(table, column, branch);
         let key = key_codec::index_entry_key(table, column, branch, value, row_id)?;
         self.raw_table_put(&raw_table, &key, &[0x01])

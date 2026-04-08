@@ -922,8 +922,6 @@ impl QueryManager {
             );
         }
         let storage_ref: &dyn Storage = storage;
-        let schema_context = self.schema_context.clone();
-        let branch_schema_map = self.branch_schema_map.clone();
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
         for sub_id in subscription_ids {
@@ -938,6 +936,8 @@ impl QueryManager {
             let include_deleted = subscription.query.include_deleted;
 
             let delta = {
+                let schema_context = &self.schema_context;
+                let branch_schema_map = &self.branch_schema_map;
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                     let durability_tier = if subscription.settled_once
                         && subscription.local_updates == LocalUpdates::Immediate
@@ -951,15 +951,15 @@ impl QueryManager {
                         == LocalUpdates::Immediate)
                         .then(|| self.pending_local_row_versions.get(&id).copied())
                         .flatten();
-                    self.load_visible_row_for_query(
+                    Self::load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
                         durability_tier,
                         local_pending_version,
                         include_deleted,
-                        &schema_context,
-                        &branch_schema_map,
+                        schema_context,
+                        branch_schema_map,
                         &table,
                         sub_id,
                         &mut schema_warnings,
@@ -993,11 +993,13 @@ impl QueryManager {
             }
 
             if subscription.uses_explicit_authorization_filtering {
+                let auth_schema_context = self.schema_context.clone();
+                let auth_branch_schema_map = self.branch_schema_map.clone();
                 let visible_rows = self.authorized_rows_from_graph(
                     storage_ref,
                     &subscription.graph,
-                    &schema_context,
-                    &branch_schema_map,
+                    &auth_schema_context,
+                    &auth_branch_schema_map,
                     subscription.session.as_ref(),
                 );
                 let visible_rows_by_id: HashMap<_, _> = visible_rows
@@ -1532,8 +1534,28 @@ impl QueryManager {
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
         let metadata = Self::load_row_metadata(storage, row_id)?;
+        Self::load_best_visible_row_version_from_storage_with_metadata(
+            storage,
+            row_id,
+            &metadata,
+            branches,
+            durability_tier,
+            schema_context,
+            branch_schema_map,
+        )
+    }
+
+    fn load_best_visible_row_version_from_storage_with_metadata(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        branches: &[String],
+        durability_tier: Option<DurabilityTier>,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<(String, StoredRowVersion)> {
         let original_table = metadata.get(MetadataKey::Table.as_str())?.clone();
-        let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
+        let origin_schema_hash = origin_schema_hash_from_metadata(metadata);
         let current_table = resolve_current_table_name(
             schema_context,
             &original_table,
@@ -1619,7 +1641,6 @@ impl QueryManager {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn load_visible_row_for_query(
-        &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
@@ -1632,27 +1653,30 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = self
-            .load_best_visible_row_version(
+        let metadata = Self::load_row_metadata(storage, row_id)?;
+        let resolved = Self::load_best_visible_row_version_from_storage_with_metadata(
+            storage,
+            row_id,
+            &metadata,
+            branches,
+            durability_tier,
+            schema_context,
+            branch_schema_map,
+        )
+        .or_else(|| {
+            let pending_version_id = local_pending_version?;
+            let resolved = Self::load_best_visible_row_version_from_storage_with_metadata(
                 storage,
                 row_id,
+                &metadata,
                 branches,
-                durability_tier,
+                None,
                 schema_context,
                 branch_schema_map,
-            )
-            .or_else(|| {
-                let pending_version_id = local_pending_version?;
-                let (table, row) = self.load_best_visible_row_version(
-                    storage,
-                    row_id,
-                    branches,
-                    None,
-                    schema_context,
-                    branch_schema_map,
-                )?;
-                (row.version_id() == pending_version_id).then_some((table, row))
-            })?;
+            )?;
+            let (_, row) = &resolved;
+            (row.version_id() == pending_version_id).then_some(resolved)
+        })?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {
