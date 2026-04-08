@@ -57,6 +57,14 @@ Each row version stores user columns and reserved system columns side by side us
 - `$is_deleted`
 - `$metadata`
 
+To keep the implementation honest, the code structure should follow the design directly:
+
+- `row_histories` for row-local DAG semantics and visible-entry transitions
+- `row_format` for the generic binary row codec used by both user data and system data
+- `storage` for physical key layout and backend-specific persistence
+
+That means the row-history subsystem should not own the generic codec, and the generic codec should not stay buried under `query_manager`.
+
 Slice 1 should also reserve a history-only optional `$tx_id` placeholder:
 
 - direct writes leave `$tx_id = null`
@@ -69,6 +77,7 @@ This matters for more than storage layout:
 - column access should look the same for user and system columns everywhere
 - on-disk, in-memory, and sync payloads should share the same canonical row format as much as possible
 - the existing fast reproject logic should be reused to encode subsets of columns for sync, subscriptions, and internal metadata-only paths
+- the shared binary codec should become a neutral `row_format` module rather than living under query planning code
 - `$updated_at` should be derived from `$version_id` rather than stored as a separate hot-path field
 - parent pointers should reference only version ids; same-row ancestry is enforced by the enclosing history region rather than repeating row ids in every parent edge
 
@@ -106,6 +115,20 @@ Sync becomes row-oriented instead of commit-oriented:
 - use reprojected column subsets when a payload does not need the full row
 - ship row-state or durability changes as updates to system columns rather than as a second structural metadata channel
 - keep row-version parent relationships in the sync model so ancestry remains precise across devices
+
+As part of the pre-Slice-2 cleanup, the remaining compatibility tissue from the old model should go away:
+
+- legacy `Commit`
+- legacy `StoredState`
+- legacy `CommitAckState`
+- legacy object/branch containers for user rows
+- production `ObjectManager` ownership of row state
+
+The runtime should instead rely on:
+
+- storage-backed row apply / patch helpers
+- pure row-history reducer logic
+- a small monotonic clock in `RuntimeCore`
 
 Settled semantics improve already in Slice 1 because the runtime no longer has to reconstruct direct-write state from commit ids, branch frontiers, and separate ack state. The persisted row-version metadata itself becomes the durable write record. But Slice 1 deliberately keeps the external product semantics for direct writes close to today:
 

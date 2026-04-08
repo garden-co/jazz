@@ -51,6 +51,7 @@ The engine still has version history, staging, transactions, and durability tier
 - Visibility and settlement rules should be expressible in table terms, even if the engine materializes optimized keyed regions for speed.
 - We should have one primary data management system to optimize on disk, in memory, and on the wire.
 - Prefer write-time fan-out over read-time joins on the hot path.
+- The cleanup before Slice 2 should move the codebase to names and module boundaries that match this model directly.
 
 ### Core model
 
@@ -67,6 +68,46 @@ The old object boundary disappears for user rows. A row version is not wrapped i
 - one DAG per logical row
 - branches are labels and visible heads over that DAG
 - ancestry is not branch-local, even if visibility is
+
+### Code structure target
+
+The runtime should read like the new design instead of carrying transitional names:
+
+- `row_histories` owns the row-history semantic types and transitions
+- `row_format` owns the generic binary row encoding used by user rows, row-history rows, visible entries, and catalogue rows
+- `storage` owns physical key layout and backend persistence
+- `RuntimeCore` owns a tiny monotonic clock for direct-write timestamp allocation
+
+The important separation is:
+
+- `row_histories` is specifically about row-version history and visible-entry semantics
+- `row_format` is a generic record codec, not a row-history concept
+- storage helpers may persist row-history values, but storage is not the semantic owner of row-history rules
+
+The intended internal split is:
+
+```text
+row_format/
+  generic binary row/value encoding, reprojection, descriptors
+
+row_histories/
+  types       StoredRowVersion, VisibleRowEntry, RowState
+  reducer     append-version and patch-state transitions
+
+storage/
+  key layout
+  backend adapters
+  storage-backed apply/patch helpers
+```
+
+The old compatibility structures should disappear before Slice 2:
+
+- legacy `Commit`
+- legacy `StoredState`
+- legacy `CommitAckState`
+- legacy object/branch containers that still model user rows as object DAGs
+
+`CommitId` may remain temporarily as the concrete version-id type, but it should be treated as "row version id" rather than evidence that the old commit model still exists.
 
 ### Physical layout
 
@@ -242,6 +283,31 @@ This means:
 - joins, filters, sorting, and subscriptions all work over the visible region by default
 
 History-aware and time-travel paths may query the history region, but those are not the default UI path.
+
+### Runtime ownership
+
+The production row path should not keep a separate semantic authority like today's transitional `ObjectManager`.
+
+The target ownership is:
+
+- `RuntimeCore`
+  - scheduler / sync sender
+  - storage
+  - schema manager
+  - query manager
+  - sync manager
+  - monotonic clock
+- `row_histories`
+  - pure row-history reducer logic
+- `storage`
+  - storage-backed row apply / patch entrypoints returning row-visibility changes
+
+In that target shape:
+
+- there is no production visible-row mirror
+- there is no production metadata mirror for rows
+- there is no production branch-tip mirror
+- the storage-backed visible and history regions are the only source of truth for user-row state
 
 ### Visibility and settlement semantics
 
