@@ -71,6 +71,7 @@ Testing details are documented in the layer specs above (especially Query/Sync i
 Remaining work items and future designs live in [`specs/todo/`](todo/). Notable:
 
 - **[Batch Branches and Prefix-Indexed Storage](todo/b_launch/batch_branches_and_prefix_storage.md)** — Replace multi-tip branches with linear per-batch histories under a shared prefix, optimized for millions of batches per object and fast leaf-head lookup
+- **[Jazz Auth](todo/b_launch/auth_integrations.md)** — Hosted auth sidecar plus a self-host compatible Better Auth escape hatch, layered on top of Jazz's existing JWT/JWKS auth path
 - **[Sharding Design Sketch](todo/b_launch/sharding_design_sketch.md)** — Future architecture for distributing data across storage shards (nothing implemented)
 - **[Storage: Browser E2E Suite](todo/a_mvp/browser_e2e_test_suite.md)** — End-to-end verification for browser runtime + worker + sync
 - **[Built-in File Storage](todo/a_mvp/built_in_file_storage.md)** — Framework-native file/blob storage using relational tables and chunked binary parts

@@ -14,7 +14,7 @@ A hosted dashboard where developers can:
 
 ## Auth Integration
 
-The dashboard should integrate with WorkOS platform to auto-provision a WorkOS org per jazz app (and environment?). Should also include a hosted BetterAuth instance as a less vendor-locked auth option. See `auth_integrations.md` for details.
+The dashboard should manage Jazz Auth configuration for each app: hosted auth enablement, provider setup, and generated self-host compatible Better Auth snippets. Enterprise SSO / WorkOS-style integrations are follow-up work layered on top of this. See `auth_integrations.md` for details.
 
 ## Open Questions
 
