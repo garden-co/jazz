@@ -98,36 +98,38 @@ export async function createSharedTaskMap(
  * Simulates a crash scenario:
  * 1. Blocks alice's storage writes
  * 2. Makes transactions on the map (these reach the server but not local storage)
- * 3. Waits for server acknowledgement
+ * 3. Waits for sync to complete
  * 4. Disconnects alice
  * 5. Unblocks storage (crash: alice never wrote these txs locally)
  * 6. Restarts alice from disk
  * 7. Re-attaches the same storage object
  * 8. Loads and returns the map from disk (missing the lost transactions)
  */
-export async function crashAfterServerAckBeforeLocalPersist(opts: {
-  alice: ReturnType<typeof setupTestNode>;
-  aliceStorage: StorageAPI;
-  map: RawCoMap;
-  mapId: CoID<RawCoMap>;
-  serverPeerId: string;
-  transactions: TaskFields;
-}): Promise<RawCoMap> {
-  const { alice, aliceStorage, map, mapId, serverPeerId, transactions } = opts;
-
+export async function crashAfterServerAckBeforeLocalPersist(
+  alice: ReturnType<typeof setupTestNode>,
+  aliceStorage: StorageAPI,
+  mapId: CoID<RawCoMap>,
+  transactionsToLose: Record<string, string>,
+): Promise<RawCoMap> {
   // Block storage writes — transactions will sync to server but not persist locally
   const originalStore = aliceStorage.store.bind(aliceStorage);
   aliceStorage.store = () => {};
 
   // Apply the transactions (these will go to the server)
-  for (const [key, value] of Object.entries(transactions)) {
-    if (value !== undefined) {
-      map.set(key, value, "trusting");
-    }
+  const map = alice.node.getCoValue(mapId).getCurrentContent() as RawCoMap;
+  for (const [key, value] of Object.entries(transactionsToLose)) {
+    map.set(key, value, "trusting");
   }
 
-  // Wait for the server to acknowledge receipt
-  await alice.node.syncManager.waitForSyncWithPeer(serverPeerId, mapId, 5000);
+  // Wait for sync to complete with server peers only (storage is blocked).
+  // We use waitForSyncWithPeer for each connected peer rather than
+  // waitForSync (which also waits for storage and would deadlock here).
+  const peers = Object.values(alice.node.syncManager.peers);
+  await Promise.all(
+    peers.map((peer) =>
+      alice.node.syncManager.waitForSyncWithPeer(peer.id, mapId, 10_000),
+    ),
+  );
 
   // Disconnect alice (simulates crash / network loss)
   alice.disconnect();
