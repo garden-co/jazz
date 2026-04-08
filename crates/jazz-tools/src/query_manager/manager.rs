@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
-use crate::row_regions::StoredRowVersion;
+use crate::row_regions::{QueryRowVersion, StoredRowVersion};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
 };
@@ -1163,11 +1163,7 @@ impl QueryManager {
     ) {
         let original_table = update.row_locator.table.to_string();
         let branch = update.row.branch.as_str();
-        let origin_schema_hash = update
-            .row_locator
-            .origin_schema_hash
-            .as_deref()
-            .and_then(SchemaHash::from_hex);
+        let origin_schema_hash = update.row_locator.origin_schema_hash;
 
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
@@ -1528,7 +1524,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         Self::load_best_visible_row_version_from_storage(
             storage,
             row_id,
@@ -1546,7 +1542,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         let locator = Self::load_row_locator(storage, row_id)?;
         Self::load_best_visible_row_version_from_storage_with_locator(
             storage,
@@ -1567,9 +1563,9 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         let hinted_table = table_hint.to_string();
-        let mut best: Option<(CommitId, StoredRowVersion)> = None;
+        let mut best: Option<(CommitId, QueryRowVersion)> = None;
 
         for branch in branches {
             let branch_schema_hash = branch_schema_map
@@ -1609,13 +1605,13 @@ impl QueryManager {
             let mut loaded_row = None;
             for candidate_table in candidate_tables {
                 let loaded = match durability_tier {
-                    Some(required_tier) => storage.load_visible_region_row_for_tier(
+                    Some(required_tier) => storage.load_visible_query_row_for_tier(
                         &candidate_table,
                         branch,
                         row_id,
                         required_tier,
                     ),
-                    None => storage.load_visible_region_row(&candidate_table, branch, row_id),
+                    None => storage.load_visible_query_row(&candidate_table, branch, row_id),
                 };
                 if let Some(row) = loaded.ok().flatten() {
                     loaded_row = Some(row);
@@ -1653,7 +1649,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         table_hint
             .and_then(|hint| {
                 Self::load_best_visible_row_version_from_storage_with_table_hint(
@@ -1686,20 +1682,16 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         let original_table = locator.table.clone();
-        let origin_schema_hash = locator
-            .origin_schema_hash
-            .as_deref()
-            .and_then(SchemaHash::from_hex);
         let current_table = resolve_current_table_name(
             schema_context,
             &original_table,
-            origin_schema_hash.as_ref(),
+            locator.origin_schema_hash.as_ref(),
         )
         .unwrap_or_else(|| original_table.to_string());
 
-        let mut best: Option<(CommitId, StoredRowVersion)> = None;
+        let mut best: Option<(CommitId, QueryRowVersion)> = None;
 
         for branch in branches {
             let branch_schema_hash = branch_schema_map
@@ -1739,13 +1731,13 @@ impl QueryManager {
             let mut loaded_row = None;
             for candidate_table in candidate_tables {
                 let loaded = match durability_tier {
-                    Some(required_tier) => storage.load_visible_region_row_for_tier(
+                    Some(required_tier) => storage.load_visible_query_row_for_tier(
                         &candidate_table,
                         branch,
                         row_id,
                         required_tier,
                     ),
-                    None => storage.load_visible_region_row(&candidate_table, branch, row_id),
+                    None => storage.load_visible_query_row(&candidate_table, branch, row_id),
                 };
                 if let Some(row) = loaded.ok().flatten() {
                     loaded_row = Some(row);

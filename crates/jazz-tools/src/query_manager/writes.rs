@@ -5,7 +5,7 @@ use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{RowState, StoredRowVersion};
+use crate::row_regions::{QueryRowVersion, RowState, StoredRowVersion};
 use crate::schema_manager::resolve_current_table_name;
 use crate::storage::Storage;
 
@@ -210,12 +210,12 @@ impl QueryManager {
     fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
         let locator = storage.load_row_locator(row_id).ok().flatten()?;
         let table = locator.table.as_str();
-        let origin_schema_hash = locator
-            .origin_schema_hash
-            .as_deref()
-            .and_then(SchemaHash::from_hex);
-        resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())
-            .or(Some(locator.table.to_string()))
+        resolve_current_table_name(
+            &self.schema_context,
+            table,
+            locator.origin_schema_hash.as_ref(),
+        )
+        .or(Some(locator.table.to_string()))
     }
 
     fn load_visible_row_on_branch(
@@ -223,7 +223,7 @@ impl QueryManager {
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, QueryRowVersion)> {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         self.load_best_visible_row_version(
             storage,

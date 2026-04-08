@@ -12,18 +12,21 @@ use std::sync::{Mutex, MutexGuard};
 use super::{
     Storage, StorageError,
     storage_core::{
-        append_history_region_rows_core, load_history_row_version_core,
-        load_visible_region_entry_core, load_visible_region_frontier_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
-        scan_visible_region_core, scan_visible_region_row_versions_core,
-        upsert_visible_region_rows_core,
+        append_history_region_rows_core, load_history_query_row_version_core,
+        load_history_row_version_core, load_visible_query_row_core,
+        load_visible_query_row_for_tier_core, load_visible_region_entry_core,
+        load_visible_region_frontier_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_regions::{
+    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+};
 use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
@@ -366,6 +369,17 @@ impl Storage for SqliteStorage {
         })
     }
 
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_query_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
     fn load_visible_region_entry(
         &self,
         table: &str,
@@ -374,6 +388,20 @@ impl Storage for SqliteStorage {
     ) -> Result<Option<VisibleRowEntry>, StorageError> {
         self.with_inner(|inner| {
             load_visible_region_entry_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_query_row_for_tier_core(table, branch, row_id, required_tier, |key| {
+                Self::get(&inner.conn, key)
+            })
         })
     }
 
@@ -422,6 +450,19 @@ impl Storage for SqliteStorage {
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
             load_history_row_version_core(table, row_id, version_id, |key| {
+                Self::get(&inner.conn, key)
+            })
+        })
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_history_query_row_version_core(table, row_id, version_id, |key| {
                 Self::get(&inner.conn, key)
             })
         })

@@ -34,8 +34,10 @@ use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
-use crate::query_manager::types::{SharedString, Value};
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::query_manager::types::{SchemaHash, SharedString, Value};
+use crate::row_regions::{
+    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -95,7 +97,7 @@ const ROW_LOCATOR_TABLE: &str = "__row_locator";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowLocator {
     pub table: SharedString,
-    pub origin_schema_hash: Option<SharedString>,
+    pub origin_schema_hash: Option<SchemaHash>,
 }
 
 fn metadata_raw_key(id: ObjectId) -> String {
@@ -125,8 +127,7 @@ fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLo
         table: metadata.get(MetadataKey::Table.as_str())?.clone().into(),
         origin_schema_hash: metadata
             .get(MetadataKey::OriginSchemaHash.as_str())
-            .cloned()
-            .map(Into::into),
+            .and_then(|raw_hash| SchemaHash::from_hex(raw_hash)),
     })
 }
 
@@ -352,6 +353,18 @@ pub trait Storage {
         ))
     }
 
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_visible_region_row(table, branch, row_id)?
+            .as_ref()
+            .map(QueryRowVersion::from))
+    }
+
     fn load_visible_region_row_for_tier(
         &self,
         table: &str,
@@ -371,6 +384,19 @@ pub trait Storage {
         }
 
         self.load_history_row_version(table, row_id, version_id)
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_visible_region_row_for_tier(table, branch, row_id, required_tier)?
+            .as_ref()
+            .map(QueryRowVersion::from))
     }
 
     fn load_visible_region_entry(
@@ -413,6 +439,18 @@ pub trait Storage {
             .scan_history_row_versions(table, row_id)?
             .into_iter()
             .find(|row| row.version_id() == version_id))
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_history_row_version(table, row_id, version_id)?
+            .as_ref()
+            .map(QueryRowVersion::from))
     }
 
     fn row_version_exists(
@@ -715,6 +753,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_visible_region_row(table, branch, row_id)
     }
 
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_visible_query_row(table, branch, row_id)
+    }
+
     fn load_visible_region_row_for_tier(
         &self,
         table: &str,
@@ -723,6 +770,16 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         required_tier: DurabilityTier,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         (**self).load_visible_region_row_for_tier(table, branch, row_id, required_tier)
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_visible_query_row_for_tier(table, branch, row_id, required_tier)
     }
 
     fn scan_visible_region_row_versions(
@@ -739,6 +796,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         (**self).scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_history_query_row_version(table, row_id, version_id)
     }
 
     fn scan_history_region(
@@ -819,7 +885,7 @@ type RawTableEntries = BTreeMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Default)]
 struct TableRowRegions {
-    visible: BTreeMap<(String, ObjectId), VisibleRowEntry>,
+    visible: BTreeMap<SharedString, BTreeMap<ObjectId, VisibleRowEntry>>,
     history: BTreeMap<(ObjectId, CommitId), StoredRowVersion>,
 }
 
@@ -836,14 +902,15 @@ impl TableRowRegions {
     }
 
     fn rebuild_visible_entry(&mut self, branch: &str, row_id: ObjectId) {
-        let key = (branch.to_string(), row_id);
         let Some(current_row) = self
             .visible
-            .get(&key)
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
             .map(|entry| entry.current_row.clone())
         else {
             return;
         };
+        let branch_key = current_row.branch.clone();
 
         let mut history_rows = self.history_rows_for(branch, row_id);
         if !history_rows
@@ -854,7 +921,9 @@ impl TableRowRegions {
         }
 
         self.visible
-            .insert(key, VisibleRowEntry::rebuild(current_row, &history_rows));
+            .entry(branch_key)
+            .or_default()
+            .insert(row_id, VisibleRowEntry::rebuild(current_row, &history_rows));
     }
 }
 
@@ -1108,13 +1177,11 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         let regions = self.row_regions.entry(table.to_string()).or_default();
         for entry in entries {
-            regions.visible.insert(
-                (
-                    entry.current_row.branch.to_string(),
-                    entry.current_row.row_id,
-                ),
-                entry.clone(),
-            );
+            regions
+                .visible
+                .entry(entry.current_row.branch.clone())
+                .or_default()
+                .insert(entry.current_row.row_id, entry.clone());
         }
         Ok(())
     }
@@ -1145,18 +1212,20 @@ impl Storage for MemoryStorage {
             }
         }
 
-        for entry in regions.visible.values_mut() {
-            let row = &mut entry.current_row;
-            if row.batch_id == batch_id {
-                if let Some(state) = state {
-                    row.state = state;
+        for branch_rows in regions.visible.values_mut() {
+            for entry in branch_rows.values_mut() {
+                let row = &mut entry.current_row;
+                if row.batch_id == batch_id {
+                    if let Some(state) = state {
+                        row.state = state;
+                    }
+                    row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                        (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                        (Some(existing), None) => Some(existing),
+                        (None, incoming) => incoming,
+                    };
+                    affected_visible_rows.insert((row.branch.clone(), row.row_id));
                 }
-                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
-                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                    (Some(existing), None) => Some(existing),
-                    (None, incoming) => incoming,
-                };
-                affected_visible_rows.insert((row.branch.clone(), row.row_id));
             }
         }
 
@@ -1178,10 +1247,13 @@ impl Storage for MemoryStorage {
 
         Ok(regions
             .visible
-            .iter()
-            .filter(|((row_branch, _), _)| row_branch == branch)
-            .map(|(_, entry)| entry.current_row.clone())
-            .collect())
+            .get(branch)
+            .map(|rows| {
+                rows.values()
+                    .map(|entry| entry.current_row.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     fn load_visible_region_row(
@@ -1193,8 +1265,24 @@ impl Storage for MemoryStorage {
         Ok(self.row_regions.get(table).and_then(|regions| {
             regions
                 .visible
-                .get(&(branch.to_string(), row_id))
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
                 .map(|entry| entry.current_row.clone())
+        }))
+    }
+
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self.row_regions.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
+                .map(|entry| QueryRowVersion::from(&entry.current_row))
         }))
     }
 
@@ -1207,7 +1295,8 @@ impl Storage for MemoryStorage {
         Ok(self
             .row_regions
             .get(table)
-            .and_then(|regions| regions.visible.get(&(branch.to_string(), row_id)).cloned()))
+            .and_then(|regions| regions.visible.get(branch))
+            .and_then(|rows| rows.get(&row_id).cloned()))
     }
 
     fn load_visible_region_frontier(
@@ -1219,7 +1308,8 @@ impl Storage for MemoryStorage {
         Ok(self.row_regions.get(table).and_then(|regions| {
             regions
                 .visible
-                .get(&(branch.to_string(), row_id))
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
                 .map(|entry| entry.branch_frontier.clone())
         }))
     }
@@ -1234,7 +1324,11 @@ impl Storage for MemoryStorage {
         let Some(regions) = self.row_regions.get(table) else {
             return Ok(None);
         };
-        let Some(entry) = regions.visible.get(&(branch.to_string(), row_id)) else {
+        let Some(entry) = regions
+            .visible
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
+        else {
             return Ok(None);
         };
 
@@ -1251,6 +1345,38 @@ impl Storage for MemoryStorage {
             .find(|row| row.version_id() == version_id))
     }
 
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(None);
+        };
+        let Some(entry) = regions
+            .visible
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
+        else {
+            return Ok(None);
+        };
+
+        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+            return Ok(None);
+        };
+        if version_id == entry.current_version_id() {
+            return Ok(Some(QueryRowVersion::from(&entry.current_row)));
+        }
+
+        Ok(regions
+            .history_rows_for(branch, row_id)
+            .into_iter()
+            .find(|row| row.version_id() == version_id)
+            .map(|row| QueryRowVersion::from(&row)))
+    }
+
     fn scan_visible_region_row_versions(
         &self,
         table: &str,
@@ -1262,9 +1388,9 @@ impl Storage for MemoryStorage {
 
         let mut rows: Vec<_> = regions
             .visible
-            .iter()
-            .filter(|((_, visible_row_id), _)| *visible_row_id == row_id)
-            .map(|(_, entry)| entry.current_row.clone())
+            .values()
+            .filter_map(|branch_rows| branch_rows.get(&row_id))
+            .map(|entry| entry.current_row.clone())
             .collect();
         rows.sort_by_key(|row| row.branch.clone());
         Ok(rows)
@@ -1299,6 +1425,19 @@ impl Storage for MemoryStorage {
             .row_regions
             .get(table)
             .and_then(|regions| regions.history.get(&(row_id, version_id)).cloned()))
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .row_regions
+            .get(table)
+            .and_then(|regions| regions.history.get(&(row_id, version_id)))
+            .map(QueryRowVersion::from))
     }
 
     fn scan_history_region(
@@ -1672,7 +1811,8 @@ mod tests {
         let entry = storage
             .row_regions
             .get("users")
-            .and_then(|regions| regions.visible.get(&("dev/main".to_string(), row_id)))
+            .and_then(|regions| regions.visible.get("dev/main"))
+            .and_then(|rows| rows.get(&row_id))
             .cloned()
             .expect("visible entry");
 
