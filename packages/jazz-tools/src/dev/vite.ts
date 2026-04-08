@@ -27,7 +27,7 @@ export interface JazzPluginOptions {
   appId?: string;
 }
 
-const DEFAULT_PORT = 1625;
+const DEFAULT_PORT = 0;
 const LOG_PREFIX = "[jazz]";
 
 interface ViteDevServer {
@@ -37,6 +37,9 @@ interface ViteDevServer {
     env?: Record<string, string>;
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
+  ws: {
+    send(payload: { type: string; err?: { message: string; stack?: string } }): void;
+  };
 }
 
 export function jazzPlugin(options: JazzPluginOptions = {}) {
@@ -91,7 +94,12 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
 
         serverUrl = serverHandle.url;
         console.log(`${LOG_PREFIX} server started on ${serverUrl}`);
+        if (serverHandle.dataDir) {
+          console.log(`${LOG_PREFIX} data dir: ${serverHandle.dataDir}`);
+        }
       }
+
+      console.log(`${LOG_PREFIX} app id: ${appId}`);
 
       try {
         await pushSchemaCatalogue({
@@ -102,10 +110,15 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         });
         console.log(`${LOG_PREFIX} schema published`);
       } catch (error) {
-        console.error(
-          `${LOG_PREFIX} schema push failed:`,
-          error instanceof Error ? error.message : error,
-        );
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`${LOG_PREFIX} schema push failed:`, message);
+        viteServer.ws.send({
+          type: "error",
+          err: {
+            message: `${LOG_PREFIX} schema push failed: ${message}`,
+            stack: error instanceof Error ? error.stack : undefined,
+          },
+        });
       }
 
       watcher = watchSchema({
@@ -118,14 +131,21 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         },
         onError: (error) => {
           console.error(`${LOG_PREFIX} schema push failed:`, error.message);
+          viteServer.ws.send({
+            type: "error",
+            err: {
+              message: `${LOG_PREFIX} schema push failed: ${error.message}`,
+              stack: error.stack,
+            },
+          });
         },
       });
 
       viteServer.config.env ??= {};
-      viteServer.config.env.VITE_JAZZ_APP_ID = appId;
-      viteServer.config.env.VITE_JAZZ_SERVER_URL = serverUrl;
-      process.env.VITE_JAZZ_APP_ID = appId;
-      process.env.VITE_JAZZ_SERVER_URL = serverUrl;
+      viteServer.config.env.JAZZ_APP_ID = appId;
+      viteServer.config.env.JAZZ_SERVER_URL = serverUrl;
+      process.env.JAZZ_APP_ID = appId;
+      process.env.JAZZ_SERVER_URL = serverUrl;
 
       viteServer.httpServer?.once("close", async () => {
         watcher?.close();

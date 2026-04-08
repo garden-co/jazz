@@ -8,7 +8,7 @@ import {
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
-import { app } from "../schema/app.js";
+import { app } from "../schema";
 
 const devToolsAttachedClients = new WeakSet<object>();
 
@@ -64,15 +64,15 @@ function Router() {
 
 // #region context-setup-react
 export function App() {
-  const appId = import.meta.env.VITE_JAZZ_APP_ID;
-  const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+  const appId = import.meta.env.JAZZ_APP_ID;
+  const serverUrl = import.meta.env.JAZZ_SERVER_URL;
 
   if (!appId) {
-    throw new Error("VITE_JAZZ_APP_ID is required");
+    throw new Error("JAZZ_APP_ID is required");
   }
 
   if (!serverUrl) {
-    throw new Error("VITE_JAZZ_SERVER_URL is required");
+    throw new Error("JAZZ_SERVER_URL is required");
   }
 
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });

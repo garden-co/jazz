@@ -5,24 +5,24 @@ import { jazzPlugin } from "./vite.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
-const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
-const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
+const originalJazzServerUrl = process.env.JAZZ_SERVER_URL;
+const originalJazzAppId = process.env.JAZZ_APP_ID;
 
 afterEach(async () => {
   await tempRoots.cleanup();
 
   if (originalJazzServerUrl === undefined) {
-    delete process.env.VITE_JAZZ_SERVER_URL;
+    delete process.env.JAZZ_SERVER_URL;
   } else {
-    process.env.VITE_JAZZ_SERVER_URL = originalJazzServerUrl;
+    process.env.JAZZ_SERVER_URL = originalJazzServerUrl;
   }
 
   if (originalJazzAppId === undefined) {
-    delete process.env.VITE_JAZZ_APP_ID;
+    delete process.env.JAZZ_APP_ID;
     return;
   }
 
-  process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
+  process.env.JAZZ_APP_ID = originalJazzAppId;
 });
 
 describe("jazzPlugin", () => {
@@ -65,10 +65,10 @@ describe("jazzPlugin", () => {
     expect(schemasResponse.ok).toBe(true);
     const body = (await schemasResponse.json()) as { hashes?: string[] };
     expect(body.hashes?.length).toBeGreaterThan(0);
-    expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeTruthy();
-    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
-    expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(fakeViteServer.config.env.JAZZ_APP_ID).toBeTruthy();
+    expect(fakeViteServer.config.env.JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(process.env.JAZZ_APP_ID).toBe(fakeViteServer.config.env.JAZZ_APP_ID);
+    expect(process.env.JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
 
     for (const handler of closeHandlers) {
       await handler();
@@ -93,9 +93,9 @@ describe("jazzPlugin", () => {
     ) => Promise<void>;
     await configureServer(fakeViteServer);
 
-    expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeUndefined();
-    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBeUndefined();
-    expect(process.env.VITE_JAZZ_APP_ID).toBe(originalJazzAppId);
-    expect(process.env.VITE_JAZZ_SERVER_URL).toBe(originalJazzServerUrl);
+    expect(fakeViteServer.config.env.JAZZ_APP_ID).toBeUndefined();
+    expect(fakeViteServer.config.env.JAZZ_SERVER_URL).toBeUndefined();
+    expect(process.env.JAZZ_APP_ID).toBe(originalJazzAppId);
+    expect(process.env.JAZZ_SERVER_URL).toBe(originalJazzServerUrl);
   });
 });
