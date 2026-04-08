@@ -1555,6 +1555,55 @@ impl QueryManager {
         )
     }
 
+    fn branch_schema_hash_for_visible_load(
+        branch: &str,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<SchemaHash> {
+        branch_schema_map
+            .get(branch)
+            .copied()
+            .or_else(|| {
+                (branch == schema_context.branch_name().as_str())
+                    .then_some(schema_context.current_hash)
+            })
+            .or_else(|| {
+                ComposedBranchName::parse(&BranchName::new(branch)).and_then(|composed| {
+                    if composed.schema_hash.short() == schema_context.current_hash.short() {
+                        Some(schema_context.current_hash)
+                    } else {
+                        schema_context
+                            .live_schemas
+                            .keys()
+                            .copied()
+                            .find(|hash| hash.short() == composed.schema_hash.short())
+                    }
+                })
+            })
+    }
+
+    fn load_visible_query_row_from_candidate_tables(
+        storage: &dyn Storage,
+        primary_table: &str,
+        fallback_table: Option<&str>,
+        branch: &str,
+        row_id: ObjectId,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Option<QueryRowVersion> {
+        let load = |table: &str| match durability_tier {
+            Some(required_tier) => {
+                storage.load_visible_query_row_for_tier(table, branch, row_id, required_tier)
+            }
+            None => storage.load_visible_query_row(table, branch, row_id),
+        };
+
+        load(primary_table).ok().flatten().or_else(|| {
+            fallback_table
+                .filter(|fallback| *fallback != primary_table)
+                .and_then(|fallback| load(fallback).ok().flatten())
+        })
+    }
+
     fn load_best_visible_row_version_from_storage_with_table_hint(
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -1564,60 +1613,28 @@ impl QueryManager {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, QueryRowVersion)> {
-        let hinted_table = table_hint.to_string();
         let mut best: Option<(CommitId, QueryRowVersion)> = None;
 
         for branch in branches {
-            let branch_schema_hash = branch_schema_map
-                .get(branch)
-                .copied()
-                .or_else(|| {
-                    (branch.as_str() == schema_context.branch_name().as_str())
-                        .then_some(schema_context.current_hash)
-                })
-                .or_else(|| {
-                    ComposedBranchName::parse(&BranchName::new(branch)).and_then(|composed| {
-                        if composed.schema_hash.short() == schema_context.current_hash.short() {
-                            Some(schema_context.current_hash)
-                        } else {
-                            schema_context
-                                .live_schemas
-                                .keys()
-                                .copied()
-                                .find(|hash| hash.short() == composed.schema_hash.short())
-                        }
-                    })
-                });
-            let scan_table = branch_schema_hash
-                .and_then(|hash| {
-                    if hash == schema_context.current_hash {
-                        Some(hinted_table.clone())
-                    } else {
-                        translate_table_name_to_schema(schema_context, &hinted_table, &hash)
-                    }
-                })
-                .unwrap_or_else(|| hinted_table.clone());
-            let candidate_tables = if scan_table == hinted_table {
-                vec![scan_table]
-            } else {
-                vec![scan_table, hinted_table.clone()]
-            };
-            let mut loaded_row = None;
-            for candidate_table in candidate_tables {
-                let loaded = match durability_tier {
-                    Some(required_tier) => storage.load_visible_query_row_for_tier(
-                        &candidate_table,
-                        branch,
-                        row_id,
-                        required_tier,
-                    ),
-                    None => storage.load_visible_query_row(&candidate_table, branch, row_id),
-                };
-                if let Some(row) = loaded.ok().flatten() {
-                    loaded_row = Some(row);
-                    break;
-                }
-            }
+            let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
+                branch,
+                schema_context,
+                branch_schema_map,
+            );
+            let translated_table = branch_schema_hash.and_then(|hash| {
+                (hash != schema_context.current_hash)
+                    .then(|| translate_table_name_to_schema(schema_context, table_hint, &hash))
+                    .flatten()
+            });
+            let primary_table = translated_table.as_deref().unwrap_or(table_hint);
+            let loaded_row = Self::load_visible_query_row_from_candidate_tables(
+                storage,
+                primary_table,
+                Some(table_hint),
+                branch,
+                row_id,
+                durability_tier,
+            );
             let Some(row) = loaded_row else {
                 continue;
             };
@@ -1638,7 +1655,7 @@ impl QueryManager {
             }
         }
 
-        best.map(|(_, row)| (hinted_table, row))
+        best.map(|(_, row)| (table_hint.to_string(), row))
     }
 
     pub(super) fn load_best_visible_row_version_with_hint_or_locator(
@@ -1683,67 +1700,48 @@ impl QueryManager {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, QueryRowVersion)> {
-        let original_table = locator.table.clone();
-        let current_table = resolve_current_table_name(
-            schema_context,
-            &original_table,
-            locator.origin_schema_hash.as_ref(),
-        )
-        .unwrap_or_else(|| original_table.to_string());
+        let original_table = locator.table.as_str();
+        let current_table = locator
+            .origin_schema_hash
+            .filter(|hash| *hash != schema_context.current_hash)
+            .and_then(|origin_schema_hash| {
+                resolve_current_table_name(
+                    schema_context,
+                    original_table,
+                    Some(&origin_schema_hash),
+                )
+            })
+            .filter(|translated| translated != original_table);
+        let current_table_name = current_table.as_deref().unwrap_or(original_table);
 
         let mut best: Option<(CommitId, QueryRowVersion)> = None;
 
         for branch in branches {
-            let branch_schema_hash = branch_schema_map
-                .get(branch)
-                .copied()
-                .or_else(|| {
-                    (branch.as_str() == schema_context.branch_name().as_str())
-                        .then_some(schema_context.current_hash)
-                })
-                .or_else(|| {
-                    ComposedBranchName::parse(&BranchName::new(branch)).and_then(|composed| {
-                        if composed.schema_hash.short() == schema_context.current_hash.short() {
-                            Some(schema_context.current_hash)
-                        } else {
-                            schema_context
-                                .live_schemas
-                                .keys()
-                                .copied()
-                                .find(|hash| hash.short() == composed.schema_hash.short())
-                        }
-                    })
-                });
-            let scan_table = branch_schema_hash
-                .and_then(|hash| {
-                    if hash == schema_context.current_hash {
-                        Some(current_table.clone())
-                    } else {
-                        translate_table_name_to_schema(schema_context, &current_table, &hash)
-                    }
-                })
-                .unwrap_or_else(|| original_table.to_string());
-            let candidate_tables = if scan_table == original_table.as_str() {
-                vec![scan_table]
-            } else {
-                vec![scan_table, original_table.to_string()]
-            };
-            let mut loaded_row = None;
-            for candidate_table in candidate_tables {
-                let loaded = match durability_tier {
-                    Some(required_tier) => storage.load_visible_query_row_for_tier(
-                        &candidate_table,
-                        branch,
-                        row_id,
-                        required_tier,
-                    ),
-                    None => storage.load_visible_query_row(&candidate_table, branch, row_id),
-                };
-                if let Some(row) = loaded.ok().flatten() {
-                    loaded_row = Some(row);
-                    break;
+            let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
+                branch,
+                schema_context,
+                branch_schema_map,
+            );
+            let translated_table = match branch_schema_hash {
+                Some(hash) if hash == schema_context.current_hash => None,
+                Some(hash) => {
+                    translate_table_name_to_schema(schema_context, current_table_name, &hash)
                 }
-            }
+                None => None,
+            };
+            let primary_table = match branch_schema_hash {
+                Some(hash) if hash == schema_context.current_hash => current_table_name,
+                Some(_) => translated_table.as_deref().unwrap_or(original_table),
+                None => original_table,
+            };
+            let loaded_row = Self::load_visible_query_row_from_candidate_tables(
+                storage,
+                primary_table,
+                Some(original_table),
+                branch,
+                row_id,
+                durability_tier,
+            );
             let Some(row) = loaded_row else {
                 continue;
             };
@@ -1764,7 +1762,7 @@ impl QueryManager {
             }
         }
 
-        best.map(|(_, row)| (current_table, row))
+        best.map(|(_, row)| (current_table_name.to_string(), row))
     }
 
     #[allow(clippy::too_many_arguments)]
