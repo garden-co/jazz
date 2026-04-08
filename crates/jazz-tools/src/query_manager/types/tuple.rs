@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use ahash::AHashSet;
+use smolset::SmolSet;
 
 use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
@@ -101,7 +101,7 @@ impl TupleElement {
 pub struct Tuple(pub Vec<TupleElement>, pub TupleProvenance);
 
 pub type ScopedObject = (ObjectId, BranchName);
-pub type TupleProvenance = AHashSet<ScopedObject>;
+pub type TupleProvenance = SmolSet<[ScopedObject; 4]>;
 
 #[derive(Clone, Debug)]
 pub struct LoadedRow {
@@ -277,12 +277,16 @@ impl Tuple {
 
     /// Merge another tuple's provenance into this tuple.
     pub fn merge_provenance_from(&mut self, other: &Tuple) {
-        self.1.extend(other.1.iter().copied());
+        for scoped_object in other.1.iter().copied() {
+            self.1.insert(scoped_object);
+        }
     }
 
     /// Merge an explicit provenance set into this tuple.
     pub fn merge_provenance(&mut self, provenance: &TupleProvenance) {
-        self.1.extend(provenance.iter().copied());
+        for scoped_object in provenance.iter().copied() {
+            self.1.insert(scoped_object);
+        }
     }
 }
 

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use crate::object::ObjectId;
 use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement,
+    TupleProvenance,
 };
 
 /// Materializes rows from IDs/tuples.
@@ -189,7 +190,7 @@ impl MaterializeNode {
     {
         let mut materialized_elements = Vec::with_capacity(tuple.len());
         let mut materialized_provenance = if tuple.len() == 1 {
-            AHashSet::new()
+            TupleProvenance::new()
         } else {
             tuple.provenance().clone()
         };
@@ -219,7 +220,9 @@ impl MaterializeNode {
                         if tuple.len() == 1 {
                             materialized_provenance = loaded.provenance.clone();
                         } else {
-                            materialized_provenance.extend(loaded.provenance.iter().copied());
+                            for scoped_object in loaded.provenance.iter().copied() {
+                                materialized_provenance.insert(scoped_object);
+                            }
                         }
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
