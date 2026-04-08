@@ -13,11 +13,11 @@ use super::{
     Storage, StorageError,
     storage_core::{
         append_history_region_rows_core, load_history_row_version_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
-        scan_visible_region_core, scan_visible_region_row_versions_core,
-        upsert_visible_region_rows_core,
+        load_visible_region_entry_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
 use crate::commit::CommitId;
@@ -362,6 +362,17 @@ impl Storage for SqliteStorage {
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
             load_visible_region_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn load_visible_region_entry(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<VisibleRowEntry>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_region_entry_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
         })
     }
 

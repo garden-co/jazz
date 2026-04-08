@@ -143,18 +143,23 @@ impl QueryManager {
 
         // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            // Remove old value
-            if let Ok(old_value) = decode_column(descriptor, old_data, col_idx)
-                && old_value != Value::Null
-            {
+            let Ok(old_value) = decode_column(descriptor, old_data, col_idx) else {
+                continue;
+            };
+            let Ok(new_value) = decode_column(descriptor, new_data, col_idx) else {
+                continue;
+            };
+
+            if old_value == new_value {
+                continue;
+            }
+
+            if old_value != Value::Null {
                 Self::remove_column_index_values(
                     storage, table, col, branch, &old_value, object_id,
                 )?;
             }
-            // Add new value
-            if let Ok(new_value) = decode_column(descriptor, new_data, col_idx)
-                && new_value != Value::Null
-            {
+            if new_value != Value::Null {
                 Self::insert_column_index_values(
                     storage, table, col, branch, &new_value, object_id,
                 )?;

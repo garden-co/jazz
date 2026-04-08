@@ -248,6 +248,10 @@ impl QueryManager {
         row_id: ObjectId,
         branch: &str,
     ) -> Vec<CommitId> {
+        if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch, row_id) {
+            return entry.branch_frontier;
+        }
+
         storage
             .scan_row_branch_tip_ids(table, branch, row_id)
             .unwrap_or_default()
