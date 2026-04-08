@@ -4,7 +4,8 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::row_regions::{
     BatchId, HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_stored_row_version,
-    decode_visible_row_entry, encode_stored_row_version, encode_visible_row_entry,
+    decode_visible_current_row, decode_visible_row_entry, decode_visible_row_frontier,
+    encode_stored_row_version, encode_visible_row_entry,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -32,6 +33,11 @@ fn encode_visible_entry(entry: &VisibleRowEntry) -> Result<Vec<u8>, StorageError
 fn decode_visible_entry(bytes: &[u8]) -> Result<VisibleRowEntry, StorageError> {
     decode_visible_row_entry(bytes)
         .map_err(|err| storage_codec_error("decode", "visible row entry", err))
+}
+
+fn decode_visible_current(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
+    decode_visible_current_row(bytes)
+        .map_err(|err| storage_codec_error("decode", "visible current row", err))
 }
 
 fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
@@ -213,7 +219,7 @@ pub(super) fn scan_visible_region_core(
     let prefix = visible_row_prefix(table, branch);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_visible_entry(&bytes).map(|entry| entry.current_row))
+        .map(|(_, bytes)| decode_visible_current(&bytes))
         .collect::<Result<_, _>>()?;
     rows.sort_by_key(|row| (row.branch.clone(), row.row_id));
     Ok(rows)
@@ -228,7 +234,7 @@ pub(super) fn load_visible_region_row_core(
 ) -> Result<Option<StoredRowVersion>, StorageError> {
     let key = visible_row_key(table, branch, row_id);
     match get(&key)? {
-        Some(bytes) => Ok(Some(decode_visible_entry(&bytes)?.current_row)),
+        Some(bytes) => Ok(Some(decode_visible_current(&bytes)?)),
         None => Ok(None),
     }
 }
@@ -248,6 +254,22 @@ pub(super) fn load_visible_region_entry_core(
 }
 
 #[allow(dead_code)]
+pub(super) fn load_visible_region_frontier_core(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<Vec<CommitId>>, StorageError> {
+    let key = visible_row_key(table, branch, row_id);
+    match get(&key)? {
+        Some(bytes) => Ok(Some(decode_visible_row_frontier(&bytes).map_err(
+            |err| storage_codec_error("decode", "visible row frontier", err),
+        )?)),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)]
 pub(super) fn scan_visible_region_row_versions_core(
     table: &str,
     row_id: ObjectId,
@@ -256,7 +278,7 @@ pub(super) fn scan_visible_region_row_versions_core(
     let prefix = visible_table_prefix(table);
     let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_visible_entry(&bytes).map(|entry| entry.current_row))
+        .map(|(_, bytes)| decode_visible_current(&bytes))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|row| row.row_id == row_id)
