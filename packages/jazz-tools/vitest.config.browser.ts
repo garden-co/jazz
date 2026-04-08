@@ -15,9 +15,14 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./tests/browser/remote-browser-db-node.js";
+import {
+  REALISTIC_BROWSER_BENCH_TEST,
+  shouldExcludeRealisticBrowserBench,
+} from "./src/browser-benchmark-mode.js";
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
+const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 
 export default defineConfig({
   define: {
@@ -70,7 +75,7 @@ export default defineConfig({
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
-    exclude: ["tests/browser/realistic-bench.test.ts"],
+    exclude: excludeRealisticBrowserBench ? [REALISTIC_BROWSER_BENCH_TEST] : [],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
