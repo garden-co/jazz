@@ -11,7 +11,7 @@ use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::query::ArraySubqueryRequirement;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, Tuple, TupleDelta,
+    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Tuple, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
 
@@ -163,7 +163,7 @@ impl ArraySubqueryNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -327,7 +327,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         // UUID[] FK forward includes correlate an array of ids to scalar inner ids.
         // Evaluate each element independently so output preserves source order/duplicates.
@@ -353,7 +353,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         let instance = self
             .subgraph_template
@@ -446,7 +446,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 

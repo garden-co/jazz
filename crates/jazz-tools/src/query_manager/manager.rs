@@ -952,34 +952,35 @@ impl QueryManager {
             let delta = {
                 let schema_context = &self.schema_context;
                 let branch_schema_map = &self.branch_schema_map;
-                let row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
-                    let durability_tier = if subscription.settled_once
-                        && subscription.local_updates == LocalUpdates::Immediate
-                        && subscription.pending_local_row_ids.contains(&id)
-                    {
-                        None
-                    } else {
-                        subscription.durability_tier
+                let row_loader =
+                    |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                        let durability_tier = if subscription.settled_once
+                            && subscription.local_updates == LocalUpdates::Immediate
+                            && subscription.pending_local_row_ids.contains(&id)
+                        {
+                            None
+                        } else {
+                            subscription.durability_tier
+                        };
+                        let local_pending_version = (subscription.local_updates
+                            == LocalUpdates::Immediate)
+                            .then(|| self.pending_local_row_versions.get(&id).copied())
+                            .flatten();
+                        Self::load_visible_row_for_query(
+                            storage_ref,
+                            id,
+                            table_hint.as_ref().map(TableName::as_str),
+                            &branches,
+                            durability_tier,
+                            local_pending_version,
+                            include_deleted,
+                            schema_context,
+                            branch_schema_map,
+                            &table,
+                            sub_id,
+                            &mut schema_warnings,
+                        )
                     };
-                    let local_pending_version = (subscription.local_updates
-                        == LocalUpdates::Immediate)
-                        .then(|| self.pending_local_row_versions.get(&id).copied())
-                        .flatten();
-                    Self::load_visible_row_for_query(
-                        storage_ref,
-                        id,
-                        table_hint.as_deref(),
-                        &branches,
-                        durability_tier,
-                        local_pending_version,
-                        include_deleted,
-                        schema_context,
-                        branch_schema_map,
-                        &table,
-                        sub_id,
-                        &mut schema_warnings,
-                    )
-                };
 
                 subscription.graph.settle(storage_ref, row_loader)
             };

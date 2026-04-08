@@ -289,12 +289,8 @@ fn resolve_magic_column_requests(
             let element_index = (tuple_descriptor.element_count() > 0).then_some(0);
             let table_name = tuple_descriptor
                 .element(0)
-                .and_then(|element| scope_table_map.get(&element.table).copied())
-                .or_else(|| {
-                    tuple_descriptor
-                        .element(0)
-                        .map(|element| TableName::new(&element.table))
-                });
+                .and_then(|element| scope_table_map.get(element.table.as_str()).copied())
+                .or_else(|| tuple_descriptor.element(0).map(|element| element.table));
             element_index.zip(table_name)
         };
 
@@ -318,7 +314,7 @@ fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> V
     let single_unscoped = tuple_descriptor.element_count() == 1
         && tuple_descriptor
             .element(0)
-            .is_some_and(|element| element.table.is_empty());
+            .is_some_and(|element| element.table.as_str().is_empty());
 
     tuple_descriptor
         .iter()
@@ -2045,7 +2041,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {

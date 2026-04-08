@@ -1069,11 +1069,11 @@ impl QueryManager {
 
         let storage_ref: &dyn Storage = storage;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let mut row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
+        let mut row_loader = |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
             let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
                 storage_ref,
                 id,
-                table_hint.as_deref(),
+                table_hint.as_ref().map(TableName::as_str),
                 &[branch.to_string()],
                 None,
                 &self.schema_context,

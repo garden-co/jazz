@@ -347,7 +347,7 @@ impl QueryManager {
         );
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId, _table_hint: Option<String>| {
+        let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
             self.load_row_for_authorization_context(
                 storage,
                 related_id,
@@ -767,22 +767,23 @@ impl QueryManager {
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
             {
-                let row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
-                    Self::load_visible_row_for_query(
-                        storage_ref,
-                        id,
-                        table_hint.as_deref(),
-                        &branches,
-                        None,
-                        None,
-                        include_deleted,
-                        &subscription_context,
-                        &branch_schema_map,
-                        &table,
-                        super::graph_nodes::output::QuerySubscriptionId(sub.query_id.0),
-                        &mut schema_warnings,
-                    )
-                };
+                let row_loader =
+                    |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                        Self::load_visible_row_for_query(
+                            storage_ref,
+                            id,
+                            table_hint.as_ref().map(TableName::as_str),
+                            &branches,
+                            None,
+                            None,
+                            include_deleted,
+                            &subscription_context,
+                            &branch_schema_map,
+                            &table,
+                            super::graph_nodes::output::QuerySubscriptionId(sub.query_id.0),
+                            &mut schema_warnings,
+                        )
+                    };
 
                 let _delta = graph.settle(storage_ref, row_loader);
             }
@@ -922,11 +923,11 @@ impl QueryManager {
             let new_scope = {
                 {
                     let row_loader =
-                        |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
+                        |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
                             Self::load_visible_row_for_query(
                                 storage,
                                 id,
-                                table_hint.as_deref(),
+                                table_hint.as_ref().map(TableName::as_str),
                                 branches,
                                 None,
                                 None,
@@ -1573,29 +1574,30 @@ impl QueryManager {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-            let mut row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
-                let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
-                    storage,
-                    id,
-                    table_hint.as_deref(),
-                    &branches,
-                    None,
-                    &self.schema_context,
-                    &branch_schema_map,
-                )?;
-                if row.is_hard_deleted() {
-                    return None;
-                }
-                let version_id = row.version_id();
-                let provenance = row.row_provenance();
-                let source_branch = BranchName::new(&row.branch);
-                Some(LoadedRow::new(
-                    row.data,
-                    version_id,
-                    provenance,
-                    [(id, source_branch)].into_iter().collect(),
-                ))
-            };
+            let mut row_loader =
+                |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                    let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
+                        storage,
+                        id,
+                        table_hint.as_ref().map(TableName::as_str),
+                        &branches,
+                        None,
+                        &self.schema_context,
+                        &branch_schema_map,
+                    )?;
+                    if row.is_hard_deleted() {
+                        return None;
+                    }
+                    let version_id = row.version_id();
+                    let provenance = row.row_provenance();
+                    let source_branch = BranchName::new(&row.branch);
+                    Some(LoadedRow::new(
+                        row.data,
+                        version_id,
+                        provenance,
+                        [(id, source_branch)].into_iter().collect(),
+                    ))
+                };
 
             // Settle all graphs
             let all_complete = state

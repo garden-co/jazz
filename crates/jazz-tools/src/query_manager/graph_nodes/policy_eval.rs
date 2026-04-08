@@ -39,7 +39,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         table_name: &str,
         local_policy_override: Option<&PolicyExpr>,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -99,7 +99,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         target_table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -138,9 +138,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for source_row_id in candidate_ids {
-            let Some(source_row) =
-                row_loader(source_row_id, Some(source_table_name.as_str().to_string()))
-            else {
+            let Some(source_row) = row_loader(source_row_id, Some(source_table_name)) else {
                 continue;
             };
 
@@ -185,7 +183,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -293,7 +291,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         _table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -331,7 +329,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         visited.insert(parent_id);
 
         let parent_table_name = *parent_table;
-        let parent_row = match row_loader(parent_id, Some(parent_table_name.as_str().to_string())) {
+        let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
             None => return false,
         };
@@ -380,7 +378,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -421,7 +419,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {

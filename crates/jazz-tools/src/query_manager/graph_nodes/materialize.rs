@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use crate::object::ObjectId;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, TupleElement,
+    LoadedRow, Row, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement,
 };
 
 /// Materializes rows from IDs/tuples.
@@ -38,7 +38,7 @@ pub struct MaterializeNode {
 }
 
 /// Function type for loading row data from storage.
-pub type RowLoader = Box<dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>>;
+pub type RowLoader = Box<dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>>;
 
 impl MaterializeNode {
     /// Create a new materialize node with TupleDescriptor and selective element materialization.
@@ -116,7 +116,7 @@ impl MaterializeNode {
     /// If loader returns None for any element in a tuple, that tuple is silently dropped.
     pub fn materialize_tuples<F>(&mut self, delta: TupleDelta, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -185,7 +185,7 @@ impl MaterializeNode {
     /// Returns None if any element that should be materialized can't be loaded.
     fn materialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Option<Tuple>
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut materialized_elements = Vec::with_capacity(tuple.len());
         let mut materialized_provenance = if tuple.len() == 1 {
@@ -207,7 +207,7 @@ impl MaterializeNode {
                     let table_hint = self
                         .output_descriptor
                         .element(elem_idx)
-                        .map(|element| element.table.clone());
+                        .map(|element| element.table);
                     if let Some(loaded) = loader(*id, table_hint) {
                         let row = Row::new(
                             *id,
@@ -281,7 +281,7 @@ impl MaterializeNode {
     /// Check for updated IDs and return update deltas (tuple version).
     pub fn check_updated_tuples<F>(&mut self, mut loader: F) -> TupleDelta
     where
-        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
         let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
@@ -409,7 +409,7 @@ mod tests {
 
         let delta = make_tuple_delta_add(&[id1, id2]);
 
-        let loader = |id: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+        let loader = |id: ObjectId, _table_hint: Option<TableName>| -> Option<LoadedRow> {
             if id == id1 {
                 Some(make_loaded_row(data1.clone(), commit1))
             } else if id == id2 {
@@ -436,7 +436,7 @@ mod tests {
 
         // First add
         let add_delta = make_tuple_delta_add(&[id1]);
-        let loader = |_: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+        let loader = |_: ObjectId, _table_hint: Option<TableName>| -> Option<LoadedRow> {
             Some(make_loaded_row(data1.clone(), commit1))
         };
         let added = node.materialize_tuples(add_delta, loader);
@@ -514,7 +514,7 @@ mod tests {
         let delta = make_tuple_delta_add(&[id1, id2]);
 
         // Loader only returns data for id1, not id2
-        let loader = |id: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+        let loader = |id: ObjectId, _table_hint: Option<TableName>| -> Option<LoadedRow> {
             if id == id1 {
                 Some(make_loaded_row(data1.clone(), commit1))
             } else {
@@ -542,7 +542,7 @@ mod tests {
         let commit1 = make_commit_id(1);
 
         let delta = make_tuple_delta_add(&[id1]);
-        let loader = |_: ObjectId, _table_hint: Option<String>| -> Option<LoadedRow> {
+        let loader = |_: ObjectId, _table_hint: Option<TableName>| -> Option<LoadedRow> {
             Some(make_loaded_row(data1.clone(), commit1))
         };
 
