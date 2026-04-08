@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
@@ -25,13 +24,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
-fn row_input<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
-    pairs
-        .into_iter()
-        .map(|(column, value)| (column.to_string(), value))
-        .collect()
-}
-
 fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)> {
     pairs
         .into_iter()
@@ -40,7 +32,7 @@ fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)
 }
 
 fn title_document_values(title: &str) -> Vec<Value> {
-    vec![Value::Text(title.to_string())]
+    vec![title.into()]
 }
 
 fn complex_document_values(
@@ -50,10 +42,10 @@ fn complex_document_values(
     folder_id: Option<ObjectId>,
 ) -> Vec<Value> {
     vec![
-        Value::Text(team_slug.to_string()),
-        Value::Boolean(published),
-        Value::Text(title.to_string()),
-        folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+        team_slug.into(),
+        published.into(),
+        title.into(),
+        folder_id.into(),
     ]
 }
 
@@ -183,7 +175,7 @@ fn hop_membership_select_policy() -> PolicyExpr {
 
 fn mixed_complex_select_policy() -> PolicyExpr {
     PolicyExpr::and(vec![
-        PolicyExpr::eq_literal("published", Value::Boolean(true)),
+        PolicyExpr::eq_literal("published", true.into()),
         PolicyExpr::in_session("team_slug", vec!["claims".into(), "team_slugs".into()]),
         PolicyExpr::Exists {
             table: "document_flags".into(),
@@ -193,7 +185,7 @@ fn mixed_complex_select_policy() -> PolicyExpr {
                     op: CmpOp::Eq,
                     value: outer_row_id_ref(),
                 },
-                PolicyExpr::eq_literal("flag", Value::Text("allow".to_string())),
+                PolicyExpr::eq_literal("flag", "allow".into()),
             ])),
         },
         PolicyExpr::and(vec![
@@ -305,10 +297,7 @@ fn exists_update_policy_schema() -> Schema {
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create(
-            "documents",
-            row_input([("title", Value::Text(title.to_string()))]),
-        )
+        .create("documents", row_input!("title" => title.to_string()))
         .await
         .expect("create title document")
         .0
@@ -318,10 +307,7 @@ async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group
     client
         .create(
             "document_grants",
-            row_input([
-                ("document_id", Value::Uuid(document_id)),
-                ("group_slug", Value::Text(group_slug.to_string())),
-            ]),
+            row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
         )
         .await
         .expect("create document grant");
@@ -331,10 +317,7 @@ async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug:
     client
         .create(
             "group_memberships",
-            row_input([
-                ("user_id", Value::Text(user_id.to_string())),
-                ("group_slug", Value::Text(group_slug.to_string())),
-            ]),
+            row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
         )
         .await
         .expect("create group membership");
@@ -400,10 +383,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     let share_id = admin
         .create(
             "document_shares",
-            row_input([
-                ("document_id", Value::Uuid(doc_id)),
-                ("user_id", Value::Text("bob".to_string())),
-            ]),
+            row_input!("document_id" => doc_id, "user_id" => "bob"),
         )
         .await
         .expect("create document share")
@@ -426,10 +406,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     assert_eq!(bob_rows.len(), 1);
 
     admin
-        .update(
-            share_id,
-            row_changes([("user_id", Value::Text("dave".to_string()))]),
-        )
+        .update(share_id, row_changes([("user_id", "dave".into())]))
         .await
         .expect("update document share user");
     wait_for_subscription_update(
@@ -614,10 +591,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         client
             .create(
                 "folders",
-                row_input([
-                    ("owner_id", Value::Text(owner_id.to_string())),
-                    ("name", Value::Text(name.to_string())),
-                ]),
+                row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
             )
             .await
             .expect("create folder")
@@ -634,15 +608,12 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         client
             .create(
                 "documents",
-                row_input([
-                    ("team_slug", Value::Text(team_slug.to_string())),
-                    ("published", Value::Boolean(published)),
-                    ("title", Value::Text(title.to_string())),
-                    (
-                        "folder_id",
-                        folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-                    ),
-                ]),
+                row_input!(
+                    "team_slug" => team_slug.to_string(),
+                    "published" => published,
+                    "title" => title.to_string(),
+                    "folder_id" => folder_id,
+                ),
             )
             .await
             .expect("create complex document")
@@ -653,10 +624,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         client
             .create(
                 "document_flags",
-                row_input([
-                    ("document_id", Value::Uuid(document_id)),
-                    ("flag", Value::Text(flag.to_string())),
-                ]),
+                row_input!("document_id" => document_id, "flag" => flag.to_string()),
             )
             .await
             .expect("create document flag");
@@ -793,10 +761,7 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     admin
         .create(
             "document_editors",
-            row_input([
-                ("document_id", Value::Uuid(doc_id)),
-                ("user_id", Value::Text("alice".to_string())),
-            ]),
+            row_input!("document_id" => doc_id, "user_id" => "alice"),
         )
         .await
         .expect("create document editor");
@@ -821,12 +786,9 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     )
     .await;
 
-    bob.update(
-        doc_id,
-        row_changes([("title", Value::Text("Hacked".to_string()))]),
-    )
-    .await
-    .expect("optimistic local exists update");
+    bob.update(doc_id, row_changes([("title", "Hacked".into())]))
+        .await
+        .expect("optimistic local exists update");
 
     let rows_after_update = observer
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
