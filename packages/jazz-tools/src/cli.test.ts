@@ -367,7 +367,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -397,8 +397,8 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -427,7 +427,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -1475,7 +1475,7 @@ describe("bin integration", () => {
       rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
-    const result = runBin(["schema", "export", "--schema-dir", root, "--format", "json"]);
+    const result = runBin(["schema", "export", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     const exported = JSON.parse(String(result.stdout));
@@ -1509,9 +1509,31 @@ describe("bin integration", () => {
       "utf8",
     );
 
-    const result = runBin(["schema", "export", "--schema-hash", schemaHash, "--format", "json"], {
+    const result = runBin(["schema", "export", "--schema-hash", schemaHash], {
       cwd: root,
     });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
+  it("loads schema export --schema-hash from a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `20260406T120000-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(
+      ["schema", "export", "--schema-hash", schemaHash, "--migrations-dir", migrationsDir],
+      { cwd: root },
+    );
 
     expect(result.status).toBe(0);
     expect(JSON.parse(String(result.stdout))).toEqual(schema);
@@ -1540,12 +1562,11 @@ describe("bin integration", () => {
 
     try {
       await exportSchema({
-        format: "json",
         schemaHash,
         schemaDir: root,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
-      } as any);
+      });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -1562,6 +1583,71 @@ describe("bin integration", () => {
       JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
     ).toEqual(schema);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists schema export --schema-hash into a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const exportFetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(input).toContain(`/schema/${schemaHash}`);
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
+      return new Response(JSON.stringify(schema), { status: 200 });
+    });
+    vi.stubGlobal("fetch", exportFetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        migrationsDir,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const snapshotFiles = (await readdir(join(migrationsDir, "snapshots"))).filter((name) =>
+      name.endsWith(`-${schemaHash.slice(0, 12)}.json`),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+    expect(
+      JSON.parse(await readFile(join(migrationsDir, "snapshots", snapshotFiles[0]!), "utf8")),
+    ).toEqual(schema);
+    expect(exportFetchMock).toHaveBeenCalledTimes(1);
+
+    // Later migrations use the exported local snapshot
+    const migrationFetchMock = vi.fn(async () => {
+      throw new Error("Expected createMigration() to use the exported local snapshot.");
+    });
+    vi.stubGlobal("fetch", migrationFetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      migrationsDir,
+      fromHash: schemaHash.slice(0, 12),
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+    });
+
+    expect(filePath).not.toBeNull();
+    expect(migrationFetchMock).not.toHaveBeenCalled();
   });
 
   it("verifies packed runtime bootstrap with a native-only help probe", async () => {
