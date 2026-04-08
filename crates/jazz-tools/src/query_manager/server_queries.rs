@@ -766,7 +766,7 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             {
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    self.load_visible_row_for_query(
+                    Self::load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
@@ -919,7 +919,7 @@ impl QueryManager {
             let new_scope = {
                 {
                     let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        self.load_visible_row_for_query(
+                        Self::load_visible_row_for_query(
                             storage,
                             id,
                             branches,

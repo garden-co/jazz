@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -70,7 +71,7 @@ pub fn compute_row_version_id(
     data: &[u8],
     updated_at: u64,
     updated_by: &str,
-    metadata: Option<&BTreeMap<String, String>>,
+    metadata: Option<&RowMetadata>,
 ) -> CommitId {
     let mut hasher = Hasher::new();
 
@@ -92,7 +93,7 @@ pub fn compute_row_version_id(
     if let Some(metadata) = metadata {
         hasher.update(&[1u8]);
         hasher.update(&(metadata.len() as u64).to_le_bytes());
-        for (key, value) in metadata {
+        for (key, value) in metadata.iter() {
             hasher.update(&(key.len() as u64).to_le_bytes());
             hasher.update(key.as_bytes());
             hasher.update(&(value.len() as u64).to_le_bytes());
@@ -307,27 +308,24 @@ fn commit_ids_from_value(value: &Value, label: &str) -> Result<Vec<CommitId>, En
     values.iter().map(commit_id_from_value).collect()
 }
 
-fn metadata_to_value(metadata: &HashMap<String, String>) -> Value {
-    let mut entries: Vec<_> = metadata.iter().collect();
-    entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
-
+fn metadata_to_value(metadata: &RowMetadata) -> Value {
     Value::Array(
-        entries
-            .into_iter()
+        metadata
+            .iter()
             .map(|(key, value)| Value::Row {
                 id: None,
-                values: vec![Value::Text(key.clone()), Value::Text(value.clone())],
+                values: vec![Value::Text(key.to_string()), Value::Text(value.to_string())],
             })
             .collect(),
     )
 }
 
-fn metadata_from_value(value: &Value) -> Result<HashMap<String, String>, EncodingError> {
+fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
     let Value::Array(entries) = value else {
         return Err(malformed(format!("expected metadata array, got {value:?}")));
     };
 
-    let mut metadata = HashMap::with_capacity(entries.len());
+    let mut metadata = Vec::with_capacity(entries.len());
     for entry in entries {
         let Value::Row { values, .. } = entry else {
             return Err(malformed(format!(
@@ -352,10 +350,10 @@ fn metadata_from_value(value: &Value) -> Result<HashMap<String, String>, Encodin
                 values[1]
             )));
         };
-        metadata.insert(key.clone(), value.clone());
+        metadata.push((key.clone(), value.clone()));
     }
 
-    Ok(metadata)
+    Ok(RowMetadata::from_entries(metadata))
 }
 
 fn expect_uuid(value: &Value, label: &str) -> Result<ObjectId, EncodingError> {
@@ -437,7 +435,7 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
         Value::Array(values) => values
             .iter()
             .map(commit_id_from_value)
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<SmallVec<[CommitId; 2]>, _>>()?,
         other => {
             return Err(malformed(format!("expected parents array, got {other:?}")));
         }
@@ -527,7 +525,7 @@ pub struct StoredRowVersion {
     pub row_id: ObjectId,
     pub version_id: CommitId,
     pub branch: String,
-    pub parents: Vec<crate::commit::CommitId>,
+    pub parents: SmallVec<[crate::commit::CommitId; 2]>,
     pub updated_at: u64,
     pub created_by: String,
     pub created_at: u64,
@@ -537,7 +535,42 @@ pub struct StoredRowVersion {
     pub confirmed_tier: Option<DurabilityTier>,
     pub is_deleted: bool,
     pub data: Vec<u8>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: RowMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RowMetadata(SmallVec<[(String, String); 4]>);
+
+impl RowMetadata {
+    pub fn from_entries(mut entries: Vec<(String, String)>) -> Self {
+        entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        entries.dedup_by(|(left_key, _), (right_key, _)| left_key == right_key);
+        Self(SmallVec::from_vec(entries))
+    }
+
+    pub fn from_hash_map(metadata: HashMap<String, String>) -> Self {
+        Self::from_entries(metadata.into_iter().collect())
+    }
+
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.0
+            .iter()
+            .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
 }
 
 impl StoredRowVersion {
@@ -557,12 +590,7 @@ impl StoredRowVersion {
             .is_some_and(|value| {
                 value == DeleteKind::Soft.as_str() || value == DeleteKind::Hard.as_str()
             });
-        let metadata_btree = (!metadata.is_empty()).then(|| {
-            metadata
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<BTreeMap<_, _>>()
-        });
+        let metadata = RowMetadata::from_hash_map(metadata);
         let branch = branch.into();
         let version_id = compute_row_version_id(
             &branch,
@@ -570,14 +598,14 @@ impl StoredRowVersion {
             &data,
             provenance.updated_at,
             &provenance.updated_by,
-            metadata_btree.as_ref(),
+            (!metadata.is_empty()).then_some(&metadata),
         );
 
         Self {
             row_id,
             version_id,
             branch,
-            parents,
+            parents: SmallVec::from_vec(parents),
             updated_at: provenance.updated_at,
             created_by: provenance.created_by,
             created_at: provenance.created_at,
@@ -603,29 +631,25 @@ impl StoredRowVersion {
             .row_provenance()
             .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
         let branch = branch.into();
-        let metadata: HashMap<String, String> = commit
-            .metadata
-            .as_ref()
-            .map(|metadata| {
-                metadata
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let metadata_btree = (!metadata.is_empty()).then(|| {
-            metadata
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<BTreeMap<_, _>>()
-        });
+        let metadata = RowMetadata::from_hash_map(
+            commit
+                .metadata
+                .as_ref()
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
         let version_id = compute_row_version_id(
             &branch,
             &commit.parents.iter().copied().collect::<Vec<_>>(),
             &commit.content,
             provenance.updated_at,
             &provenance.updated_by,
-            metadata_btree.as_ref(),
+            (!metadata.is_empty()).then_some(&metadata),
         );
 
         Self {
