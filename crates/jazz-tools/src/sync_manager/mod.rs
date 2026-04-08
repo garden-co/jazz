@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
+#[cfg(test)]
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
@@ -33,6 +34,7 @@ pub use types::*;
 /// - Downstream clients (untrusted, receive query-filtered subsets)
 #[derive(Clone)]
 pub struct SyncManager {
+    #[cfg(test)]
     pub object_manager: ObjectManager,
     pub(super) clock: MonotonicClock,
     pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
@@ -72,8 +74,11 @@ pub struct SyncManager {
 
 impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyncManager")
-            .field("object_manager", &self.object_manager)
+        let mut debug = f.debug_struct("SyncManager");
+        #[cfg(test)]
+        debug.field("object_manager", &self.object_manager);
+
+        debug
             .field("clock", &self.clock)
             .field("catalogue_entries", &self.catalogue_entries)
             .field(
@@ -113,13 +118,9 @@ impl Default for SyncManager {
 
 impl SyncManager {
     pub fn new() -> Self {
-        Self::with_object_manager(ObjectManager::new())
-    }
-
-    /// Create with an existing ObjectManager.
-    pub fn with_object_manager(object_manager: ObjectManager) -> Self {
         Self {
-            object_manager,
+            #[cfg(test)]
+            object_manager: ObjectManager::new(),
             clock: MonotonicClock::new(),
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
@@ -139,6 +140,14 @@ impl SyncManager {
             pending_query_settled: Vec::new(),
             received_row_version_acks: Vec::new(),
         }
+    }
+
+    /// Create with an existing ObjectManager.
+    #[cfg(test)]
+    pub fn with_object_manager(object_manager: ObjectManager) -> Self {
+        let mut manager = Self::new();
+        manager.object_manager = object_manager;
+        manager
     }
 
     pub fn reserve_timestamp(&mut self) -> u64 {
