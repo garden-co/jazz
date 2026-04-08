@@ -165,10 +165,11 @@ impl QueryManager {
         update: crate::object_manager::VisibleRowUpdate,
     ) -> Result<StoredRowVersion, QueryError> {
         let row = update.row.clone();
-        let metadata = update.metadata.clone();
         self.handle_row_update_with_origin(storage, update, true);
-        self.sync_manager
-            .forward_row_version_to_servers(row_id, metadata, row.clone());
+        if let Ok(Some(metadata)) = storage.load_metadata(row_id) {
+            self.sync_manager
+                .forward_row_version_to_servers(row_id, metadata, row.clone());
+        }
         Ok(row)
     }
 
@@ -1068,10 +1069,11 @@ impl QueryManager {
 
         let storage_ref: &dyn Storage = storage;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let (_, row) = self.load_best_visible_row_version(
+        let mut row_loader = |id: ObjectId, table_hint: Option<String>| -> Option<LoadedRow> {
+            let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
                 storage_ref,
                 id,
+                table_hint.as_deref(),
                 &[branch.to_string()],
                 None,
                 &self.schema_context,

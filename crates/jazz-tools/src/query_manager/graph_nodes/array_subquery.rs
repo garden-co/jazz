@@ -163,7 +163,7 @@ impl ArraySubqueryNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -327,7 +327,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         // UUID[] FK forward includes correlate an array of ids to scalar inner ids.
         // Evaluate each element independently so output preserves source order/duplicates.
@@ -353,7 +353,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         let instance = self
             .subgraph_template
@@ -363,7 +363,9 @@ impl ArraySubqueryNode {
             None => return (Value::Array(vec![]), TupleProvenance::default()),
         };
 
-        let _row_delta = instance.graph.settle(io, &mut |id, _| row_loader(id));
+        let _row_delta = instance
+            .graph
+            .settle(io, &mut |id, hint| row_loader(id, hint));
         let mut provenance = TupleProvenance::default();
         let array_elements: Vec<Value> = instance
             .graph
@@ -444,7 +446,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 

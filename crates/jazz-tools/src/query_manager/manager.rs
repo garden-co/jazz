@@ -5,13 +5,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
-use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
 use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{
-    LensTransformer, SchemaContext, origin_schema_hash_from_metadata, resolve_current_table_name,
-    translate_table_name_to_schema,
+    LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
 };
 use crate::storage::{RowLocator, Storage};
 use crate::sync_manager::{
@@ -1162,12 +1160,13 @@ impl QueryManager {
         update: VisibleRowUpdate,
         local_update: bool,
     ) {
-        let original_table = match update.metadata.get(MetadataKey::Table.as_str()) {
-            Some(table) => table.clone(),
-            None => return,
-        };
+        let original_table = update.row_locator.table.to_string();
         let branch = update.row.branch.as_str();
-        let origin_schema_hash = origin_schema_hash_from_metadata(&update.metadata);
+        let origin_schema_hash = update
+            .row_locator
+            .origin_schema_hash
+            .as_deref()
+            .and_then(SchemaHash::from_hex);
 
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
@@ -1645,7 +1644,7 @@ impl QueryManager {
         best.map(|(_, row)| (hinted_table, row))
     }
 
-    fn load_best_visible_row_version_with_hint_or_locator(
+    pub(super) fn load_best_visible_row_version_with_hint_or_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
         table_hint: Option<&str>,

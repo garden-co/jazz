@@ -240,15 +240,16 @@ impl PolicyGraph {
 
     /// Settle the graph. With synchronous Storage, always completes in one pass.
     ///
-    /// The row_loader trait object is used to fetch row content by ObjectId.
+    /// The row_loader trait object is used to fetch row content by ObjectId and
+    /// optional table hint.
     /// Using trait object instead of generic to avoid recursion limit when
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<String>) -> Option<LoadedRow>,
     ) -> bool {
-        let _delta = self.graph.settle(io, &mut |id, _| row_loader(id));
+        let _delta = self.graph.settle(io, &mut |id, hint| row_loader(id, hint));
         true
     }
 
@@ -388,7 +389,7 @@ mod tests {
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
-        let mut row_loader = |_id: ObjectId| -> Option<LoadedRow> { None };
+        let mut row_loader = |_id: ObjectId, _hint: Option<String>| -> Option<LoadedRow> { None };
 
         // Settle the graph
         pg.settle(&storage, &mut row_loader);
