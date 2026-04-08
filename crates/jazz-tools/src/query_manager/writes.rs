@@ -1919,12 +1919,8 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -1936,17 +1932,9 @@ impl QueryManager {
         self.hard_delete(storage, id)
     }
 
-    /// Get a row by ID if loaded in ObjectManager.
-    ///
-    /// Returns decoded values and the table name if the row exists.
+    /// Get a row by ID from storage-backed row regions.
     pub fn get_row(&self, storage: &dyn Storage, id: ObjectId) -> Option<(String, Vec<Value>)> {
-        // Get table name from object metadata
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)?
-            .get(MetadataKey::Table.as_str())?
-            .clone();
+        let table = self.load_row_table_name(storage, id)?;
         let table_name = TableName::new(&table);
 
         let (data, _) = self
