@@ -55,7 +55,7 @@ impl QueryManager {
     }
 
     fn reserve_write_timestamp(&mut self) -> u64 {
-        self.sync_manager.object_manager.reserve_timestamp()
+        self.sync_manager.reserve_timestamp()
     }
 
     fn row_provenance_for_insert(

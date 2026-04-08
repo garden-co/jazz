@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 use smolset::SmolSet;
-use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
@@ -52,34 +51,11 @@ pub struct ObjectManager {
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
-    /// Last timestamp used, for monotonic ordering.
-    last_timestamp: u64,
 }
 
 impl ObjectManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Get next monotonic timestamp (microseconds since epoch).
-    /// Guarantees each call returns a value greater than the previous.
-    fn next_timestamp(&mut self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_micros() as u64;
-
-        self.last_timestamp = if now > self.last_timestamp {
-            now
-        } else {
-            self.last_timestamp + 1
-        };
-
-        self.last_timestamp
-    }
-
-    pub fn reserve_timestamp(&mut self) -> u64 {
-        self.next_timestamp()
     }
 
     /// Create a new metadata entry with optional metadata, returning its id.

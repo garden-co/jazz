@@ -4,6 +4,7 @@ pub mod commit;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
+mod monotonic_clock;
 pub mod object;
 pub mod object_manager;
 pub mod query_manager;

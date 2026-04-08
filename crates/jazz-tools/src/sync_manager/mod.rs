@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::catalogue::CatalogueEntry;
+use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{ObjectManager, VisibleRowUpdate};
 use crate::query_manager::query::Query;
@@ -32,6 +33,7 @@ pub use types::*;
 #[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
+    pub(super) clock: MonotonicClock,
     pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
@@ -71,6 +73,7 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
+            .field("clock", &self.clock)
             .field("catalogue_entries", &self.catalogue_entries)
             .field(
                 "allow_unprivileged_schema_catalogue_writes",
@@ -116,6 +119,7 @@ impl SyncManager {
     pub fn with_object_manager(object_manager: ObjectManager) -> Self {
         Self {
             object_manager,
+            clock: MonotonicClock::new(),
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
@@ -134,6 +138,10 @@ impl SyncManager {
             pending_query_settled: Vec::new(),
             received_row_version_acks: Vec::new(),
         }
+    }
+
+    pub fn reserve_timestamp(&mut self) -> u64 {
+        self.clock.reserve_timestamp()
     }
 
     /// Add a durability identity for this node (enables durability notifications).
