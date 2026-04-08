@@ -207,12 +207,7 @@ impl QueryManager {
     }
 
     fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
-        let metadata = self
-            .sync_manager
-            .object_manager
-            .get(row_id)
-            .cloned()
-            .or_else(|| storage.load_metadata(row_id).ok().flatten())?;
+        let metadata = storage.load_metadata(row_id).ok().flatten()?;
         let table = metadata.get(MetadataKey::Table.as_str())?;
         let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
         resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())

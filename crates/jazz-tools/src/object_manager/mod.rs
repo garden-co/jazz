@@ -7,7 +7,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
@@ -155,12 +155,12 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: &BranchName,
     ) -> Result<Vec<StoredRowVersion>, Error> {
-        Ok(io
-            .scan_history_row_versions(table, object_id)
-            .map_err(Error::StorageError)?
-            .into_iter()
-            .filter(|row| row.branch == branch_name.as_str())
-            .collect())
+        io.scan_history_region(
+            table,
+            branch_name.as_str(),
+            HistoryScan::Row { row_id: object_id },
+        )
+        .map_err(Error::StorageError)
     }
 
     fn visible_row_from_history(rows: &[StoredRowVersion]) -> Option<StoredRowVersion> {
