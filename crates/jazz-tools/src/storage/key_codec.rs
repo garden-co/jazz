@@ -243,6 +243,30 @@ pub(super) fn visible_table_prefix(table: &str) -> String {
 }
 
 #[allow(dead_code)]
+pub(super) fn visible_row_versions_key(table: &str, row_id: ObjectId, branch: &str) -> String {
+    let mut key =
+        String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + branch.len());
+    key.push_str("row:");
+    key.push_str(table);
+    key.push_str(":2:");
+    append_uuid_hex(&mut key, row_id);
+    key.push(':');
+    key.push_str(branch);
+    key
+}
+
+#[allow(dead_code)]
+pub(super) fn visible_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
+    let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
+    prefix.push_str("row:");
+    prefix.push_str(table);
+    prefix.push_str(":2:");
+    append_uuid_hex(&mut prefix, row_id);
+    prefix.push(':');
+    prefix
+}
+
+#[allow(dead_code)]
 pub(super) fn history_row_key(table: &str, row_id: ObjectId, version_id: CommitId) -> String {
     let mut key = String::with_capacity(
         4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + COMMIT_ID_HEX_BYTES,

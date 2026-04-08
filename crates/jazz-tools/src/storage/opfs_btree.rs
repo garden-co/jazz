@@ -387,7 +387,12 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        scan_visible_region_row_versions_core(table, row_id, |prefix| self.tree_scan_prefix(prefix))
+        scan_visible_region_row_versions_core(
+            table,
+            row_id,
+            |prefix| self.tree_scan_prefix(prefix),
+            |key| self.tree_read(key),
+        )
     }
 
     fn scan_history_row_versions(
