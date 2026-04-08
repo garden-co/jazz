@@ -244,9 +244,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
-        {
+        if self.storage_write_pending_flush {
             let _span = tracing::debug_span!("flush_wal").entered();
             self.storage.flush_wal();
+            self.clear_storage_write_pending_flush();
         }
     }
 
@@ -262,6 +263,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             );
         }
         for msg in messages {
+            if msg.payload.writes_storage() {
+                self.mark_storage_write_pending_flush();
+            }
             self.push_sync_inbox(msg);
             applied_messages += 1;
         }
@@ -291,6 +295,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 .copied()
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
+                if msg.payload.writes_storage() {
+                    self.mark_storage_write_pending_flush();
+                }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
                 last_applied = sequence;

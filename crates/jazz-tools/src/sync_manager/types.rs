@@ -393,6 +393,17 @@ impl SyncPayload {
         }
     }
 
+    /// True when handling this payload may mutate local storage.
+    pub fn writes_storage(&self) -> bool {
+        matches!(
+            self,
+            SyncPayload::CatalogueEntryUpdated { .. }
+                | SyncPayload::RowVersionCreated { .. }
+                | SyncPayload::RowVersionNeeded { .. }
+                | SyncPayload::RowVersionStateChanged { .. }
+        )
+    }
+
     /// Encode this payload using postcard.
     pub fn to_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)
