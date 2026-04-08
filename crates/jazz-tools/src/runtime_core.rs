@@ -238,6 +238,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     parked_sync_messages_by_server_seq: HashMap<ServerId, BTreeMap<u64, InboxEntry>>,
     /// Next expected per-server stream sequence.
     next_expected_server_seq: HashMap<ServerId, u64>,
+    /// Highest per-server stream sequence already applied to the inbox.
+    last_applied_server_seq: HashMap<ServerId, u64>,
 
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
@@ -269,6 +271,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
+            last_applied_server_seq: HashMap::new(),
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
             next_subscription_handle: 0,

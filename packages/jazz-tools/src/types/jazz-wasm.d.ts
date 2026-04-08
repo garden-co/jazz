@@ -85,9 +85,9 @@ declare module "jazz-wasm" {
       optionsJson?: string | null,
     ): number;
     unsubscribe(handle: number): void;
-    onSyncMessageReceived(messageJson: string): void;
+    onSyncMessageReceived(messageJson: string, seq?: number | null): void;
     onSyncMessageToSend(callback: SyncOutboxCallback): void;
-    addServer(serverCatalogueStateHash?: string | null): void;
+    addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     addClient(): string;
     getSchema(): unknown;

@@ -904,6 +904,7 @@ impl<'a> Normalizer<'a> {
             SyncPayload::QuerySettled {
                 query_id,
                 through_seq,
+                ..
             } => {
                 format!("query:{} through_seq:{}", query_id.0, through_seq)
             }
@@ -1004,6 +1005,7 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         SyncPayload::QuerySettled {
             query_id,
             through_seq,
+            ..
         } => {
             format!("query:{} through_seq:{}", query_id.0, through_seq)
         }

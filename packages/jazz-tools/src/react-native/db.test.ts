@@ -24,9 +24,11 @@ function makeSchema(tableName: string): WasmSchema {
 
 function makeClientStub() {
   const shutdown = vi.fn(async () => undefined);
+  const updateAuthToken = vi.fn();
   return {
-    client: { shutdown } as unknown as JazzClient,
+    client: { shutdown, updateAuthToken } as unknown as JazzClient,
     shutdown,
+    updateAuthToken,
   };
 }
 
@@ -75,20 +77,26 @@ describe("react-native Db", () => {
       tier: config.tier,
       dataPath: config.dataPath,
     });
-    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(runtime, {
-      appId: config.appId,
-      schema,
-      serverUrl: config.serverUrl,
-      serverPathPrefix: config.serverPathPrefix,
-      env: config.env,
-      userBranch: config.userBranch,
-      jwtToken: config.jwtToken,
-      localAuthMode: config.localAuthMode,
-      localAuthToken: config.localAuthToken,
-      adminSecret: config.adminSecret,
-      tier: config.tier,
-      defaultDurabilityTier: config.tier,
-    });
+    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(
+      runtime,
+      {
+        appId: config.appId,
+        schema,
+        serverUrl: config.serverUrl,
+        serverPathPrefix: config.serverPathPrefix,
+        env: config.env,
+        userBranch: config.userBranch,
+        jwtToken: config.jwtToken,
+        localAuthMode: config.localAuthMode,
+        localAuthToken: config.localAuthToken,
+        adminSecret: config.adminSecret,
+        tier: config.tier,
+        defaultDurabilityTier: config.tier,
+      },
+      {
+        onAuthFailure: expect.any(Function),
+      },
+    );
   });
 
   it("RNDB-U02 reuses cached clients for same schema key and creates new clients for distinct schemas", () => {
@@ -174,5 +182,27 @@ describe("react-native Db", () => {
     });
 
     expect(() => db.exposeGetClient(schema)).toThrow(clientError);
+  });
+
+  it("RNDB-U05 forwards updateAuthToken to cached native clients", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const schemaA = makeSchema("todos");
+    const schemaB = makeSchema("projects");
+    const clientA = makeClientStub();
+    const clientB = makeClientStub();
+
+    createJazzRnRuntimeMock
+      .mockReturnValueOnce({ id: "runtime-a" } as never)
+      .mockReturnValueOnce({ id: "runtime-b" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client).mockReturnValueOnce(clientB.client);
+
+    const db = new TestDb({ appId: "rn-app", jwtToken: "stale-jwt" });
+    db.exposeGetClient(schemaA);
+    db.exposeGetClient(schemaB);
+
+    db.updateAuthToken("fresh-jwt");
+
+    expect(clientA.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
+    expect(clientB.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
   });
 });

@@ -35,6 +35,16 @@ function simulateClick(el: HTMLElement) {
   el.click();
 }
 
+function findPlusButton(el: HTMLElement): HTMLButtonElement | null {
+  return (
+    el.querySelector<HTMLButtonElement>("button:has(.lucide-plus)") ??
+    ([...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus")) as
+      | HTMLButtonElement
+      | undefined) ??
+    null
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -102,12 +112,19 @@ describe("Upload E2E", () => {
       "Editor should be visible",
     );
 
+    await waitFor(
+      () => {
+        const plusButton = findPlusButton(el);
+        return plusButton !== null && !plusButton.disabled;
+      },
+      10000,
+      "Action menu button should be enabled",
+    );
+
     // Open the action menu and click "Image"
-    const plusButton =
-      el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    await act(async () => simulateClick(plusButton as HTMLButtonElement));
 
     await waitFor(
       () =>
@@ -178,12 +195,19 @@ describe("Upload E2E", () => {
       "Editor should be visible",
     );
 
+    await waitFor(
+      () => {
+        const plusButton = findPlusButton(el);
+        return plusButton !== null && !plusButton.disabled;
+      },
+      10000,
+      "Action menu button should be enabled",
+    );
+
     // Open the action menu and click "File"
-    const plusButton =
-      el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    await act(async () => simulateClick(plusButton as HTMLButtonElement));
 
     await waitFor(
       () =>

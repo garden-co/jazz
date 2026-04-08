@@ -6,22 +6,22 @@ When a row is deleted (or otherwise exits a query's result set) while a client h
 
 This is the root cause of the flaky `"syncs queries and mutations between two TS clients via cloud-server"` integration test, which fails ~1/9 runs.
 
-## Where
+## Priority
 
-The bug spans the sync protocol boundary between server-side scope management and client-side cache invalidation:
+high
 
-- **Server scope diffing** — `SyncManager::set_client_query_scope()` at `crates/jazz-tools/src/sync_manager/mod.rs:333-375`. Only computes `newly_visible` (objects entering scope). Objects leaving scope are silently dropped — no notification sent.
-- **Server forwarding gate** — `forward_update_to_clients_except()` at `crates/jazz-tools/src/sync_manager/forwarding.rs:47-61`. Line 58: `client.is_in_scope(object_id, &branch_name)` — only forwards `ObjectUpdated` to clients whose query scopes include the object. If a client has no active subscription at the moment of the delete, the object is not in scope, and the delete is never forwarded.
-- **Client-side graph settlement** — `QueryManager::process()` at `crates/jazz-tools/src/query_manager/manager.rs` (function starts at line 651, row_loader at lines 721-745). The `row_loader` (line 722) reads from the local object manager via `om.get_or_load()`, which still has the stale pre-delete version. `is_soft_deleted` (line 736) returns false because the client never received the delete commit. The delivery gate (lines 757-770) holds results until `tier_satisfied`, but once `QuerySettled` arrives, it delivers whatever the local graph settled to — with no comparison against server-side results.
-- **Client-side index scan** — `IndexScanNode::scan()` at `crates/jazz-tools/src/query_manager/graph_nodes/index_scan.rs:71-102`. Scans the client's local storage index, which still contains the stale row's entry.
+## Notes
 
-## Steps to reproduce
+- Where:
+  - Server scope diffing: `SyncManager::set_client_query_scope()` at `crates/jazz-tools/src/sync_manager/mod.rs:333-375`.
+  - Server forwarding gate: `forward_update_to_clients_except()` at `crates/jazz-tools/src/sync_manager/forwarding.rs:47-61`.
+  - Client-side graph settlement: `QueryManager::process()` at `crates/jazz-tools/src/query_manager/manager.rs`.
+  - Client-side index scan: `IndexScanNode::scan()` at `crates/jazz-tools/src/query_manager/graph_nodes/index_scan.rs:71-102`.
+- Repro:
+  - The test `"syncs queries and mutations between two TS clients via cloud-server"` at `packages/jazz-tools/src/runtime/cloud-server.integration.test.ts:1247` reproduces this intermittently, with the race window during the delete step.
+  - Deterministic sequence:
 
-The test `"syncs queries and mutations between two TS clients via cloud-server"` at `packages/jazz-tools/src/runtime/cloud-server.integration.test.ts:1247` (currently `it.skip`) reproduces this ~11% of the time. The race window is during the delete step (lines 1304-1305).
-
-Deterministic reproduction requires this exact sequence:
-
-```
+```text
  clientA                    server                    clientB
     |                         |                         |
     |--- createDurable ------>|--- ObjectUpdated ------->|  (row enters B's cache)
@@ -49,25 +49,8 @@ Deterministic reproduction requires this exact sequence:
     |                         |    => query returns stale row
 ```
 
-This repeats every 150ms for the full 20s timeout. Every `query()` call creates a fresh subscription, but the server never sends the delete because the deleted row is never "in scope."
-
-## Expected
-
-`waitForRows(clientB, queryAllTodos, (rows) => !rows.some(...))` should resolve within a few hundred milliseconds after client A's `deleteDurable()` completes.
-
-## Actual
-
-Client B's `query()` returns `[{"id":"...","values":[{"type":"Text","value":"shared-item"},{"type":"Boolean","value":true}]}]` for the full 20s timeout, then the test fails with:
-
-```
-Error: timed out waiting for predicate; lastRows=[...], lastError=none
-```
-
-## Priority
-
-high
-
-## Notes
+- Expected: `waitForRows(clientB, queryAllTodos, (rows) => !rows.some(...))` resolves shortly after client A finishes `deleteDurable()`.
+- Actual: client B keeps returning the stale row for the full timeout and the test fails.
 
 ### Key evidence from CI logs
 

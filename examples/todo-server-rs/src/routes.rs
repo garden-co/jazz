@@ -1,6 +1,5 @@
 //! HTTP routes for the todo API.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -98,12 +97,8 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     })
 }
 
-fn todo_values(title: String, description: String) -> HashMap<String, Value> {
-    HashMap::from([
-        ("title".to_string(), Value::Text(title)),
-        ("done".to_string(), Value::Boolean(false)),
-        ("description".to_string(), Value::Text(description)),
-    ])
+fn todo_values(title: String, description: String) -> std::collections::HashMap<String, Value> {
+    jazz_tools::row_input!("title" => title, "done" => false, "description" => description)
 }
 
 /// List all todos.

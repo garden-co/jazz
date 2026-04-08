@@ -4,15 +4,9 @@
 
 Harden Jazz lens semantics and tooling so schema evolution stays deterministic, reviewable, and safe under mixed-version traffic. This includes preserving hidden newer fields during old-client writes, making lens-path selection ambiguity-aware, supporting corrected or asymmetric migrations for the same schema pair, and defining an explicit story for type-changing migrations.
 
-## Why
-
-Lenses are the mechanism that makes overlapping schema versions workable. If their edge cases are loose, normal rollouts can turn into silent data loss, nondeterministic behavior, or migrations that cannot be corrected once published.
-
-## Rough appetite
-
-big
-
 ## Notes
+
+- Lenses are what make overlapping schema versions workable. If the edge cases are loose, rollouts can turn into silent data loss, nondeterministic behavior, or migrations that cannot be corrected once published.
 
 Mixed-version write safety:
 Current repro: `rc_old_client_update_preserves_unseen_newer_fields` fails because a v1-originated update causes the v2 view of the row to lose the original `email`. The current whole-row LWW model treats the older-schema rewrite as authoritative even when some target-schema fields were never visible to that client. We likely need schema-aware merge behavior that can preserve source-backed newer fields instead of letting synthetic lens defaults win, or else use lens to transform diffs instead of whole rows.

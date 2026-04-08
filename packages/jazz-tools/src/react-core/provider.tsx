@@ -1,10 +1,16 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 
+type CoreJazzDb = {
+  getAuthState(): AuthState;
+  onAuthChanged(listener: (state: AuthState) => void): () => void;
+};
+
 type CoreJazzClient = {
-  db: unknown;
+  db: CoreJazzDb;
   manager: SubscriptionsOrchestrator;
   session?: Session | null;
   shutdown: () => Promise<void>;
@@ -26,7 +32,12 @@ export type JazzProviderProps = {
   createJazzClient: CreateJazzClient;
 };
 
-const JazzContext = createContext<CoreJazzClient | null>(null);
+type JazzContextValue = {
+  client: CoreJazzClient;
+  authState: AuthState;
+};
+
+const JazzContext = createContext<JazzContextValue | null>(null);
 
 type CachedClientEntry = {
   configKey: string;
@@ -100,7 +111,16 @@ function releaseClient(configKey: string): void {
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
  */
 export function JazzClientProvider({ client, children }: JazzClientProviderProps) {
-  return <JazzContext.Provider value={client}>{children}</JazzContext.Provider>;
+  const [authState, setAuthState] = useState(() => client.db.getAuthState());
+
+  useEffect(() => {
+    setAuthState(client.db.getAuthState());
+    return client.db.onAuthChanged((nextAuthState) => {
+      setAuthState(nextAuthState);
+    });
+  }, [client]);
+
+  return <JazzContext.Provider value={{ client, authState }}>{children}</JazzContext.Provider>;
 }
 
 /**
@@ -153,7 +173,7 @@ export function JazzProvider({ config, fallback, children, createJazzClient }: J
 export function useJazzClient(): CoreJazzClient {
   const ctx = useContext(JazzContext);
   if (!ctx) throw new Error("useDb must be used within <JazzProvider>");
-  return ctx;
+  return ctx.client;
 }
 
 export function useDb<TDb = unknown>(): TDb {

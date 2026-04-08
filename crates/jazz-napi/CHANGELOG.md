@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.26
+
+### Patch Changes
+
+- 15ce77e: Fix large global query and subscription snapshots dropping rows by sequencing sync delivery and delaying `QuerySettled` tier unlocks until earlier sync updates have been applied.
+
 ## 2.0.0-alpha.25
 
 ## 2.0.0-alpha.24

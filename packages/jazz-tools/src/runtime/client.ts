@@ -17,13 +17,15 @@ import {
   createSyncOutboxRouter,
   isExpectedFetchAbortError,
   linkExternalIdentity as sendLinkExternalIdentityRequest,
+  SyncAuthError,
   type SyncStreamController,
   type SyncAuth,
+  type AuthFailureReason,
   type LinkExternalResponse,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import { resolveClientSessionStateSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
@@ -96,9 +98,9 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(serverCatalogueStateHash?: string | null): void;
+  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
@@ -165,6 +167,7 @@ export type LinkExternalIdentityResult = LinkExternalResponse;
 
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
+  onAuthFailure?: (reason: AuthFailureReason) => void;
 }
 
 /**
@@ -607,28 +610,34 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
+  private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
 
   private constructor(
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.resolvedSession = resolveClientSessionSync({
+    this.onAuthFailure = runtimeOptions?.onAuthFailure;
+    this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
       localAuthMode: context.localAuthMode,
       localAuthToken: context.localAuthToken,
-    });
+    }).session;
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
       getAuth: () => this.getSyncAuth(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
+      },
+      onAuthFailure: (reason) => {
+        this.onAuthFailure?.(reason);
       },
     });
   }
@@ -639,7 +648,10 @@ export class JazzClient {
    * @param context Application context with driver and schema
    * @returns Connected JazzClient instance
    */
-  static async connect(context: AppContext): Promise<JazzClient> {
+  static async connect(
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): Promise<JazzClient> {
     const resolvedContext = resolveLocalAuthDefaults(context);
 
     // Load WASM module dynamically
@@ -659,6 +671,7 @@ export class JazzClient {
       runtime,
       resolvedContext,
       resolveDefaultDurabilityTier(resolvedContext),
+      runtimeOptions,
     );
 
     // Set up sync if server URL provided
@@ -701,6 +714,7 @@ export class JazzClient {
       runtime,
       resolvedContext,
       resolveDefaultDurabilityTier(resolvedContext),
+      runtimeOptions,
     );
 
     // Set up sync if server URL provided
@@ -721,8 +735,17 @@ export class JazzClient {
    * @param context Application context
    * @returns Connected JazzClient instance
    */
-  static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
-    const client = new JazzClient(runtime, context, resolveDefaultDurabilityTier(context));
+  static connectWithRuntime(
+    runtime: Runtime,
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): JazzClient {
+    const client = new JazzClient(
+      runtime,
+      context,
+      resolveDefaultDurabilityTier(context),
+      runtimeOptions,
+    );
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -792,6 +815,17 @@ export class JazzClient {
     this.useBackendSyncAuth = true;
     this.streamController.updateAuth();
     return this;
+  }
+
+  updateAuthToken(jwtToken?: string): void {
+    this.context.jwtToken = jwtToken;
+    this.resolvedSession = resolveClientSessionStateSync({
+      appId: this.context.appId,
+      jwtToken,
+      localAuthMode: this.context.localAuthMode,
+      localAuthToken: this.context.localAuthToken,
+    }).session;
+    this.streamController.updateAuth();
   }
 
   private getSyncAuth(): SyncAuth {
@@ -1478,6 +1512,11 @@ export class JazzClient {
         onServerPayload: (payload, isCatalogue) =>
           this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
+          if (error instanceof SyncAuthError) {
+            this.streamController.notifyAuthFailure(error.reason);
+            return;
+          }
+
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
             console.error("Sync POST error:", error);

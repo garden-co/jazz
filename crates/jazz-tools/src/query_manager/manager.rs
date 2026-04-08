@@ -821,6 +821,13 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
+    pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
+        let sub_id = QuerySubscriptionId(query_id.0);
+        if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
+            sub.query_frontier_complete = true;
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
@@ -892,20 +899,29 @@ impl QueryManager {
         // 4b. Settle policy graphs and finalize completed checks
         self.settle_policy_checks(storage);
 
+        // 4c. Apply QuerySettled messages that do not depend on any earlier
+        // sequenced sync updates. Watermarked settlements stay queued for
+        // RuntimeCore, which tracks per-server stream progress.
+        let pending_query_settled = self.sync_manager.take_pending_query_settled();
+        if !pending_query_settled.is_empty() {
+            let mut blocked = Vec::new();
+            for pending_settled in pending_query_settled {
+                if pending_settled.through_seq == 0 {
+                    self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
+                } else {
+                    blocked.push(pending_settled);
+                }
+            }
+            if !blocked.is_empty() {
+                self.sync_manager.requeue_pending_query_settled(blocked);
+            }
+        }
+
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.
 
         // 6. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
-
-        // 7a. Process incoming QuerySettled notifications
-        let settled_notifications = self.sync_manager.take_pending_query_settled();
-        for query_id in settled_notifications {
-            let sub_id = QuerySubscriptionId(query_id.0);
-            if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
-                sub.query_frontier_complete = true;
-            }
-        }
 
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure

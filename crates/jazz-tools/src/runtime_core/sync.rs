@@ -41,6 +41,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .sync_manager_mut()
             .remove_server(server_id);
+        self.parked_sync_messages_by_server_seq.remove(&server_id);
+        self.next_expected_server_seq.remove(&server_id);
+        self.last_applied_server_seq.remove(&server_id);
     }
 
     /// Add a client connection.

@@ -18,12 +18,12 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 - `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
 - `scenarios/r8_many_branches.json`: many linked branches on a single object
 
-## Native Runner (Fjall)
+## Native Runner (RocksDB)
 
 Run from workspace root:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
   --profile benchmarks/realistic/profiles/s.json \
   --scenario benchmarks/realistic/scenarios/w1_interactive.json
 ```
@@ -31,7 +31,7 @@ RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_benc
 `W3` requires a running server and `--server-url`:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
   --profile benchmarks/realistic/profiles/s.json \
   --scenario benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
@@ -42,7 +42,7 @@ RUST_LOG=warn cargo run -p jazz-tools --features client --example realistic_benc
 Run the local realistic benchmark suite:
 
 ```bash
-cargo bench -p jazz-tools --bench realistic_phase1
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1
 ```
 
 It currently loads:
@@ -51,7 +51,7 @@ It currently loads:
 - scenario `R1`: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
 - scenario `R2`: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
 - scenario `R2B`: `benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
-- scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load_fjall.json` (cold open + first query, Fjall)
+- scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load.json` (cold open + first query, RocksDB)
 - scenario `R4`: `benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
 - scenario `R5`: `benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
 - scenario `R6`: `benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
@@ -63,7 +63,7 @@ Current topology coverage:
 - `T0_local`: `realistic_phase1/crud_sustained` and `realistic_phase1/reads_sustained`
 - mixed read/write churn: `realistic_phase1/reads_sustained_with_write_churn`
 - `T1_single_hop`: `realistic_phase1/crud_sustained_single_hop` and `realistic_phase1/reads_sustained_single_hop`
-- persisted cold-load (`M1_fjall`): `realistic_phase1/cold_load_fjall` (requires `--features fjall`)
+- persisted cold-load (`M1_rocksdb`): `realistic_phase1/cold_load_rocksdb` (requires `--features rocksdb`)
 - fanout delivery: `realistic_phase1/fanout_updates`
 - recursive permission read/write: `realistic_phase1/permission_recursive`
 - recursive permission write-heavy: `realistic_phase1/permission_write_heavy`
@@ -73,7 +73,7 @@ Current topology coverage:
 Run only the cold-load benchmark:
 
 ```bash
-cargo bench -p jazz-tools --features fjall --bench realistic_phase1 cold_load_fjall
+cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 cold_load_rocksdb
 ```
 
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
@@ -89,10 +89,12 @@ pnpm bench:realistic:export-criterion -- \
 Run the browser benchmark test:
 
 ```bash
+pnpm --filter jazz-napi build
 pnpm --dir packages/jazz-tools run bench:realistic:browser
 ```
 
 The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
+The Node-side test server used by the browser harness comes from `jazz-napi`, so its native binding needs to be built first in a workspace checkout.
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
 

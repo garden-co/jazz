@@ -82,12 +82,12 @@ export const NATIVE_BENCHMARKS = [
     },
   },
   {
-    id: "native-criterion:r3_cold_load_fjall",
+    id: "native-criterion:r3_cold_load_rocksdb",
     suite: "native",
-    label: "Criterion R3 cold-load Fjall",
+    label: "Criterion R3 cold-load RocksDB",
     kind: "criterion",
-    log_path: "logs/criterion_r3_cold_load_fjall.log",
-    criterion_filter: "realistic_phase1/cold_load_fjall",
+    log_path: "logs/criterion_r3_cold_load_rocksdb.log",
+    criterion_filter: "realistic_phase1/cold_load_rocksdb",
     env: {
       JAZZ_REALISTIC_VARIANT: "ci",
     },

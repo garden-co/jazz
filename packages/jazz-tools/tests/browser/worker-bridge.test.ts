@@ -23,6 +23,7 @@ import {
 import {
   blockTestingServerNetwork,
   getTestingServerInfo,
+  getTestingServerNetworkDebug,
   unblockTestingServerNetwork,
 } from "./testing-server.js";
 import {
@@ -90,6 +91,17 @@ interface ProjectInit {
   name: string;
 }
 
+interface WorkerMessageDebugEvent {
+  atMs: number;
+  type: string;
+  details?: Record<string, unknown>;
+}
+
+interface WorkerMessageProbe {
+  dispose(): void;
+  snapshot(): WorkerMessageDebugEvent[];
+}
+
 const todos: TableProxy<Todo, TodoInit> = {
   _table: "todos",
   _schema: schema,
@@ -103,6 +115,132 @@ const projects: TableProxy<Project, ProjectInit> = {
   _rowType: {} as Project,
   _initType: {} as ProjectInit,
 };
+
+function summarizeWorkerMessage(
+  data: { type?: string; [key: string]: unknown } | undefined,
+): Record<string, unknown> | undefined {
+  if (!data?.type) {
+    return undefined;
+  }
+
+  switch (data.type) {
+    case "init-ok":
+      return { clientId: data.clientId };
+    case "error":
+      return { message: data.message };
+    case "sync":
+      return { payloadCount: Array.isArray(data.payload) ? data.payload.length : undefined };
+    case "peer-sync":
+      return {
+        peerId: data.peerId,
+        term: data.term,
+        payloadCount: Array.isArray(data.payload) ? data.payload.length : undefined,
+      };
+    default:
+      return undefined;
+  }
+}
+
+function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
+  const worker = (db as { worker?: Worker | null }).worker;
+  const startedAt = Date.now();
+  const events: WorkerMessageDebugEvent[] = [];
+
+  if (!worker) {
+    return {
+      dispose() {},
+      snapshot() {
+        return [];
+      },
+    };
+  }
+
+  const handler = (event: MessageEvent<{ type?: string; [key: string]: unknown }>) => {
+    events.push({
+      atMs: Date.now() - startedAt,
+      type: event.data?.type ?? "unknown",
+      details: summarizeWorkerMessage(event.data),
+    });
+    if (events.length > 40) {
+      events.shift();
+    }
+  };
+
+  worker.addEventListener("message", handler);
+
+  return {
+    dispose() {
+      worker.removeEventListener("message", handler);
+    },
+    snapshot() {
+      return [...events];
+    },
+  };
+}
+
+function getDbWorkerDebugState(db: Db): Record<string, unknown> {
+  const anyDb = db as {
+    tabRole?: unknown;
+    tabId?: unknown;
+    currentLeaderTabId?: unknown;
+    currentLeaderTerm?: unknown;
+    activeRemoteLeaderTabId?: unknown;
+    primaryDbName?: unknown;
+    workerDbName?: unknown;
+    workerBridge?: {
+      state?: {
+        phase?: unknown;
+        workerClientId?: unknown;
+        expectsUpstreamServer?: unknown;
+        upstreamServerConnected?: unknown;
+        resolveUpstreamServerReady?: unknown;
+        serverPayloadForwarder?: unknown;
+        pendingSyncPayloadsForWorker?: unknown[];
+      };
+    } | null;
+  };
+  const bridgeState = anyDb.workerBridge?.state;
+
+  return {
+    tabRole: anyDb.tabRole,
+    tabId: anyDb.tabId,
+    currentLeaderTabId: anyDb.currentLeaderTabId,
+    currentLeaderTerm: anyDb.currentLeaderTerm,
+    activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
+    primaryDbName: anyDb.primaryDbName,
+    workerDbName: anyDb.workerDbName,
+    bridge: bridgeState
+      ? {
+          phase: bridgeState.phase,
+          workerClientId: bridgeState.workerClientId,
+          expectsUpstreamServer: bridgeState.expectsUpstreamServer,
+          upstreamServerConnected: bridgeState.upstreamServerConnected,
+          waitingForUpstreamServer: Boolean(bridgeState.resolveUpstreamServerReady),
+          hasServerPayloadForwarder: Boolean(bridgeState.serverPayloadForwarder),
+          pendingSyncPayloadsForWorker: bridgeState.pendingSyncPayloadsForWorker?.length ?? 0,
+        }
+      : null,
+  };
+}
+
+async function rethrowWithWorkerDiagnostics(
+  label: string,
+  error: unknown,
+  serverUrl: string,
+  dbs: Array<{ name: string; db: Db; probe?: WorkerMessageProbe }>,
+): Promise<never> {
+  const network = await getTestingServerNetworkDebug(serverUrl);
+  const diagnostics = {
+    network,
+    dbs: dbs.map(({ name, db, probe }) => ({
+      name,
+      state: getDbWorkerDebugState(db),
+      recentWorkerMessages: probe?.snapshot() ?? [],
+    })),
+  };
+  const message = error instanceof Error ? error.message : String(error);
+  throw new Error(`${label}: ${message}\nDiagnostics: ${JSON.stringify(diagnostics, null, 2)}`);
+}
 
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = {
@@ -436,6 +574,39 @@ describe("Worker Bridge with OPFS", () => {
 
     const persistedRows = await db2.all(allTodos, { tier: "worker" });
     expect(persistedRows.length).toEqual(0);
+  });
+
+  it("query rejects if bridge fails to init", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("query-bridge-init-failure") },
+      }),
+    );
+
+    // @ts-expect-error - worker is private
+    const worker = db.worker as Worker;
+    const originalPostMessage = worker.postMessage.bind(worker);
+    worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
+      const typed = message as { type?: string } | undefined;
+      if (typed?.type === "init") {
+        queueMicrotask(() => {
+          worker.dispatchEvent(
+            new MessageEvent("message", {
+              data: { type: "error", message: "forced bridge init failure for query test" },
+            }),
+          );
+        });
+        return;
+      }
+      return originalPostMessage(message, { transfer });
+    }) as Worker["postMessage"];
+
+    await expect(db.all(allTodos, { tier: "worker" })).rejects.toThrow(
+      "Worker init failed: forced bridge init failure for query test",
+    );
+
+    worker.postMessage = originalPostMessage;
   });
 
   // -------------------------------------------------------------------------
@@ -916,6 +1087,79 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   /**
+   *   writer ──baseline write──► server
+   *   fresh probe starts while server traffic is blocked
+   *   probe ──edge query pending──X server
+   *   network unblocks
+   *   expected: the first fresh edge query completes without needing a second client recreate
+   */
+  it("replays a fresh edge query once upstream attaches after init", async () => {
+    const sharedLocalAuthToken = `edge-query-late-attach-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { serverUrl } = await getTestingServerInfo();
+    const dbWriter = await createSyncedDb(ctx, "edge-late-attach-writer", sharedLocalAuthToken);
+    const writerProbe = attachWorkerMessageProbe(dbWriter);
+    let probeProbe: WorkerMessageProbe | null = null;
+
+    try {
+      const baselineTitle = `edge-late-baseline-${Date.now()}`;
+      await withTimeout(
+        dbWriter.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+        10000,
+        "Baseline insert(worker) did not resolve",
+      );
+
+      await waitForTodos(
+        dbWriter,
+        (rows) => rows.some((row) => row.title === baselineTitle),
+        "Writer sees baseline row at edge before blocking",
+        20000,
+        "edge",
+      ).catch((error) =>
+        rethrowWithWorkerDiagnostics(
+          "Writer baseline edge read failed before network block",
+          error,
+          serverUrl,
+          [{ name: "writer", db: dbWriter, probe: writerProbe }],
+        ),
+      );
+
+      await blockTestingServerNetwork(serverUrl);
+      await sleep(250);
+
+      const dbProbe = await createSyncedDb(ctx, "edge-late-attach-probe", sharedLocalAuthToken);
+      probeProbe = attachWorkerMessageProbe(dbProbe);
+      const probeRowsPromise = waitForTodos(
+        dbProbe,
+        (rows) => rows.some((row) => row.title === baselineTitle),
+        "Fresh edge query resolves after upstream attach",
+        20000,
+        "edge",
+      ).catch((error) =>
+        rethrowWithWorkerDiagnostics(
+          "Fresh probe edge read stayed pending after unblock",
+          error,
+          serverUrl,
+          [
+            { name: "writer", db: dbWriter, probe: writerProbe },
+            { name: "probe", db: dbProbe, probe: probeProbe },
+          ],
+        ),
+      );
+
+      await sleep(500);
+      await unblockTestingServerNetwork(serverUrl);
+      await sleep(250);
+
+      const rowsOnProbe = await probeRowsPromise;
+      expect(rowsOnProbe.some((row) => row.title === baselineTitle)).toBe(true);
+    } finally {
+      probeProbe?.dispose();
+      writerProbe.dispose();
+      await unblockTestingServerNetwork(serverUrl);
+    }
+  }, 60000);
+
+  /**
    *   A ──baseline write──► server ◄── B sees baseline
    *   browser blocks Jazz server traffic without reloading the page
    *   A ──offline write(worker)──X server
@@ -926,6 +1170,7 @@ describe("Worker Bridge with OPFS", () => {
     const sharedLocalAuthToken = `sync-offline-reconnect-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
     const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
+    const dbAProbe = attachWorkerMessageProbe(dbA);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -1017,15 +1262,32 @@ describe("Worker Bridge with OPFS", () => {
     );
     expect(rowsOnB.some((row) => row.title === offlineTitle)).toBe(true);
 
-    const dbProbe = await createSyncedDb(ctx, "sync-offline-probe", sharedLocalAuthToken);
-    const rowsOnProbe = await waitForTodos(
-      dbProbe,
-      (rows) => rows.some((row) => row.title === offlineTitle),
-      "Fresh client sees offline worker row at edge after reconnect",
-      20000,
-      "edge",
-    );
-    expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
+    let dbProbeTrace: WorkerMessageProbe | null = null;
+    try {
+      const dbProbe = await createSyncedDb(ctx, "sync-offline-probe", sharedLocalAuthToken);
+      dbProbeTrace = attachWorkerMessageProbe(dbProbe);
+      const rowsOnProbe = await waitForTodos(
+        dbProbe,
+        (rows) => rows.some((row) => row.title === offlineTitle),
+        "Fresh client sees offline worker row at edge after reconnect",
+        20000,
+        "edge",
+      ).catch((error) =>
+        rethrowWithWorkerDiagnostics(
+          "Fresh probe edge read failed after reconnect",
+          error,
+          serverUrl,
+          [
+            { name: "writer-a", db: dbA, probe: dbAProbe },
+            { name: "probe", db: dbProbe, probe: dbProbeTrace },
+          ],
+        ),
+      );
+      expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
+    } finally {
+      dbProbeTrace?.dispose();
+      dbAProbe.dispose();
+    }
   }, 120000);
 
   it("local-only subscriptions receive rows from opfs", async () => {
