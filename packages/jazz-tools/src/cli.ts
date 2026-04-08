@@ -344,10 +344,11 @@ async function writeSnapshotSchema(
   migrationsDir: string | undefined,
   hash: string,
   schema: WasmSchema,
+  timestamp: string = createTimestamp(),
 ): Promise<string> {
   const dir = snapshotsDir(schemaDir, migrationsDir);
   await mkdir(dir, { recursive: true });
-  const filePath = join(dir, snapshotFilename(hash));
+  const filePath = join(dir, snapshotFilename(hash, timestamp));
   await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
   return filePath;
 }
@@ -431,14 +432,18 @@ async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promis
           "schema hash",
           (await fetchSchemaHashes(serverUrl, { adminSecret })).hashes,
         );
-  const schema = (
-    await fetchStoredWasmSchema(serverUrl, {
-      adminSecret,
-      schemaHash: resolvedHash,
-    })
-  ).schema;
-  await writeSnapshotSchema(options.schemaDir, options.migrationsDir, resolvedHash, schema);
-  return schema;
+  const storedSchema = await fetchStoredWasmSchema(serverUrl, {
+    adminSecret,
+    schemaHash: resolvedHash,
+  });
+  await writeSnapshotSchema(
+    options.schemaDir,
+    options.migrationsDir,
+    resolvedHash,
+    storedSchema.schema,
+    createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
+  );
+  return storedSchema.schema;
 }
 
 let wasmModulePromise: Promise<any> | null = null;
@@ -991,6 +996,17 @@ function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
+function createSnapshotTimestampFromPublishedAt(
+  publishedAt: number | null | undefined,
+  fallbackNow: Date = new Date(),
+): string {
+  if (typeof publishedAt !== "number" || !Number.isFinite(publishedAt) || publishedAt < 0) {
+    return createTimestamp(fallbackNow);
+  }
+
+  return createTimestamp(new Date(publishedAt));
+}
+
 function normalizeMigrationName(name: string): string {
   const normalized = name
     .trim()
@@ -1227,14 +1243,19 @@ async function resolveHistoricalSchema(
   const resolvedAdminSecret = requireSchemaExportServerValue(adminSecret, "adminSecret");
 
   try {
-    const schema = (
-      await fetchStoredWasmSchema(resolvedServerUrl, {
-        adminSecret: resolvedAdminSecret,
-        schemaHash: resolvedHash,
-      })
-    ).schema;
-    await writeSnapshotSchemaForMigrations(migrationsDir, snapshotFilename(resolvedHash), schema);
-    return { hash: resolvedHash, schema };
+    const storedSchema = await fetchStoredWasmSchema(resolvedServerUrl, {
+      adminSecret: resolvedAdminSecret,
+      schemaHash: resolvedHash,
+    });
+    await writeSnapshotSchemaForMigrations(
+      migrationsDir,
+      snapshotFilename(
+        resolvedHash,
+        createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
+      ),
+      storedSchema.schema,
+    );
+    return { hash: resolvedHash, schema: storedSchema.schema };
   } catch (error) {
     if (error instanceof Error && /Schema fetch failed: 404/i.test(error.message)) {
       throw new Error(`No stored schema found for ${label} ${resolvedHash}.`);
