@@ -3939,7 +3939,7 @@ type AppSchema = s.Schema<typeof schema>;
     In practice, a Rust app runs the schema export command and deserializes the JSON into Jazz's Rust `Schema` type:
 
     ```bash
-    npx jazz-tools schema export --format json
+    npx jazz-tools schema export
     ```
 
     The Rust examples shell out to this command at startup, so the schema definition stays unified even when the app itself is written in Rust. See [Setup](/docs/setup) for the end-to-end backend context pattern.
