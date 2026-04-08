@@ -2,7 +2,6 @@ import {
   createDb,
   createSyntheticUserSwitcher,
   getActiveSyntheticAuth,
-  resolveClientSession,
   type DbConfig,
   type Db,
 } from "jazz-tools";
@@ -71,10 +70,8 @@ export async function startApp(
   };
 
   // #region context-setup-ts-client
-  const [db, session] = await Promise.all([
-    createDb(resolvedConfig),
-    resolveClientSession(resolvedConfig),
-  ]);
+  const db = await createDb(resolvedConfig);
+  const session = db.getAuthState().session;
   // #endregion context-setup-ts-client
   const sessionUserId = session?.user_id ?? null;
 

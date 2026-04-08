@@ -7,6 +7,7 @@ What it demonstrates:
 - Using `@workos-inc/authkit-react` to handle the full OAuth / SSO sign-in flow
 - Pointing the Jazz sync server at WorkOS's hosted JWKS endpoint — no local auth server needed
 - Calling `getAccessToken()` from the AuthKit hook and passing the WorkOS access token directly to `JazzProvider`
+- Recreating `JazzProvider` on login and logout, while reserving `db.updateAuthToken(...)` for same-user JWT refresh after auth expiry
 - Falling back to anonymous `localAuth` when no WorkOS session exists
 - Role-based UI gating derived from JWT claims (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `permissions.ts`
 
@@ -70,17 +71,9 @@ redirect back from WorkOS:
 
 ```tsx
 export function App() {
-  const [token, setToken] = React.useState<string | null>(null);
-
   return (
-    <AuthKitProvider
-      clientId={WORKOS_CLIENT_ID}
-      devMode={true}
-      onRefresh={({ accessToken }) => {
-        setToken(accessToken);
-      }}
-    >
-      <JazzApp token={token} onTokenChange={setToken} />
+    <AuthKitProvider clientId={WORKOS_CLIENT_ID} devMode={true}>
+      <JazzApp />
     </AuthKitProvider>
   );
 }
@@ -89,9 +82,7 @@ export function App() {
 ### Token exchange — `src/App.tsx`
 
 `JazzApp` reads the WorkOS session with `useAuth()` and calls `getAccessToken()` whenever the
-user object changes. The root also listens to AuthKit's `onRefresh` callback so Jazz swaps in a
-fresh WorkOS JWT before the previous one expires. The access token is a standard JWT signed by
-WorkOS:
+user object changes. The access token is a standard JWT signed by WorkOS:
 
 ```tsx
 const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
@@ -100,32 +91,35 @@ React.useEffect(() => {
   let isCancelled = false;
 
   if (!user) {
-    onTokenChange(null);
+    setInitialJwtToken(null);
     return;
   }
 
   getAccessToken().then((accessToken) => {
     if (!isCancelled) {
-      onTokenChange(accessToken ?? null);
+      setInitialJwtToken(accessToken ?? null);
     }
   });
 
   return () => {
     isCancelled = true;
   };
-}, [getAccessToken, onTokenChange, user]);
+}, [getAccessToken, user]);
 ```
 
 Once the token is available, `JazzProvider` is mounted in JWT mode. When the user signs out,
-`signOut` ends the WorkOS session and the effect resets the token to `null`, reverting Jazz to
-anonymous mode.
+`signOut` ends the WorkOS session and Jazz is recreated in anonymous mode.
 
 ```tsx
-const config: DbConfig = token
-  ? { appId, jwtToken: token, serverUrl, ... }
+const config: DbConfig = initialJwtToken
+  ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
   : { appId, ...getActiveSyntheticAuth(appId, { defaultMode: "anonymous" }), ... };
 
-<JazzProvider key={token ? "jwt" : "local"} config={config}>
+<JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
   <ChatShell user={user} onSignIn={signIn} onSignOut={signOut} />
 </JazzProvider>
 ```
+
+If the sync server later returns `401` for an expired or invalid bearer token, the example asks
+WorkOS for a fresh access token and calls `db.updateAuthToken(freshJwt)` for that same user. Login and
+logout still recreate the Jazz client.

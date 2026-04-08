@@ -1,11 +1,11 @@
-import { createDb, resolveClientSession, type DbConfig } from "jazz-tools";
+import { createDb, type DbConfig } from "jazz-tools";
 import { app } from "../session-app.js";
 
 export async function authSessionExamples(config: DbConfig) {
   const db = await createDb(config);
 
   // #region auth-session-ts-hook
-  const session = await resolveClientSession(config);
+  const session = db.getAuthState().session;
   // #endregion auth-session-ts-hook
 
   // #region auth-session-ts-user-id

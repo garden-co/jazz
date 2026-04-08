@@ -1,10 +1,17 @@
 import type { LocalAuthMode, Session } from "./context.js";
 
-interface ClientSessionInput {
+export interface ClientSessionInput {
   appId: string;
   jwtToken?: string;
   localAuthMode?: LocalAuthMode;
   localAuthToken?: string;
+}
+
+export type ClientSessionTransport = "bearer" | "local";
+
+export interface ClientSessionState {
+  transport: ClientSessionTransport | null;
+  session: Session | null;
 }
 
 interface JwtPayload {
@@ -304,48 +311,43 @@ export function resolveJwtSession(jwtToken: string): Session | null {
 }
 
 /**
- * Resolve the client session that will be used for permission checks.
+ * Resolve the client session state that will be used for permission checks.
  *
  * Priority mirrors request auth headers:
  * 1. JWT (Authorization bearer token)
  * 2. Local anonymous/demo auth (mode + token)
  * 3. No session
  */
-export async function resolveClientSession(config: ClientSessionInput): Promise<Session | null> {
+export function resolveClientSessionStateSync(config: ClientSessionInput): ClientSessionState {
   const jwtSession = resolveJwtSession(config.jwtToken ?? "");
-  if (jwtSession) return jwtSession;
+  if (jwtSession) {
+    return {
+      transport: "bearer",
+      session: jwtSession,
+    };
+  }
 
   const localMode = config.localAuthMode;
   const localToken = trimOptional(config.localAuthToken);
   if (!localMode || !localToken) {
-    return null;
+    return {
+      transport: null,
+      session: null,
+    };
   }
 
-  const principalId = await deriveLocalPrincipalId(config.appId, localMode, localToken);
   return {
-    user_id: principalId,
-    claims: {
-      auth_mode: "local",
-      local_mode: localMode,
+    transport: "local",
+    session: {
+      user_id: deriveLocalPrincipalIdSync(config.appId, localMode, localToken),
+      claims: {
+        auth_mode: "local",
+        local_mode: localMode,
+      },
     },
   };
 }
 
 export function resolveClientSessionSync(config: ClientSessionInput): Session | null {
-  const jwtSession = resolveJwtSession(config.jwtToken ?? "");
-  if (jwtSession) return jwtSession;
-
-  const localMode = config.localAuthMode;
-  const localToken = trimOptional(config.localAuthToken);
-  if (!localMode || !localToken) {
-    return null;
-  }
-
-  return {
-    user_id: deriveLocalPrincipalIdSync(config.appId, localMode, localToken),
-    claims: {
-      auth_mode: "local",
-      local_mode: localMode,
-    },
-  };
+  return resolveClientSessionStateSync(config).session;
 }
