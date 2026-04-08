@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::VisibleRowUpdate;
-use crate::row_regions::{QueryRowVersion, StoredRowVersion};
+use crate::row_histories::{QueryRowVersion, StoredRowVersion};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
 };

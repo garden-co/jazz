@@ -8,7 +8,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
-use crate::row_regions::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::storage::{IndexMutation, Storage};
 use crate::sync_manager::DurabilityTier;
 

@@ -1043,7 +1043,7 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
-    use crate::row_regions::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowVersion};
     use crate::sync_manager::ServerId;
 
     fn make_row(byte: u8) -> StoredRowVersion {

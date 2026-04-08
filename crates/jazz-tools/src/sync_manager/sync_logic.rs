@@ -1,7 +1,7 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{RowState, StoredRowVersion};
+use crate::row_histories::{RowState, StoredRowVersion};
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashMap;
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{HistoryScan, StoredRowVersion};
+use crate::row_histories::{HistoryScan, StoredRowVersion};
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use uuid::Uuid;
 
