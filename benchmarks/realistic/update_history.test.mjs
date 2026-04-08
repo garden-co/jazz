@@ -161,10 +161,22 @@ test("update_history ingests engine-specific native and browser manifests from a
     ],
   });
 
-  execFileSync("node", ["benchmarks/realistic/update_history.mjs", "--history", historyPath, "--native", nativeRoot, "--browser", browserRoot], {
-    cwd: "/Users/anselm/.codex/worktrees/25dc/jazz2",
-    stdio: "pipe",
-  });
+  execFileSync(
+    "node",
+    [
+      "benchmarks/realistic/update_history.mjs",
+      "--history",
+      historyPath,
+      "--native",
+      nativeRoot,
+      "--browser",
+      browserRoot,
+    ],
+    {
+      cwd: "/Users/anselm/.codex/worktrees/25dc/jazz2",
+      stdio: "pipe",
+    },
+  );
 
   const history = readJson(historyPath);
   const runKeys = history.runs.map((run) => [run.suite, run.storage_engine]);

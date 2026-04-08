@@ -210,8 +210,7 @@ function latestRun(runs, branch, suite, storageEngine, profile) {
         run.suite === suite &&
         (run.storage_engine ?? null) === (storageEngine ?? null) &&
         run.profile === profile,
-    ) ??
-    null
+    ) ?? null
   );
 }
 
