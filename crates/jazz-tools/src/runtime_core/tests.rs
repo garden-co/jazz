@@ -156,13 +156,11 @@ impl Storage for RowRegionReadFailingStorage {
 
     fn scan_history_region(
         &self,
-        _table: &str,
-        _branch: &str,
-        _scan: crate::row_regions::HistoryScan,
+        table: &str,
+        branch: &str,
+        scan: crate::row_regions::HistoryScan,
     ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
-        Err(StorageError::IoError(
-            "row-region reads deliberately disabled in this test".to_string(),
-        ))
+        self.inner.scan_history_region(table, branch, scan)
     }
 
     fn index_insert(
