@@ -8,7 +8,6 @@ use jazz_tools::{
     DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
 };
 use serde_json::json;
-use std::collections::HashMap;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
     // Replace with your auth provider's JWT verification logic.
@@ -429,20 +428,20 @@ pub async fn create_file_from_bytes(
         let (part_id, _) = client
             .create(
                 "file_parts",
-                HashMap::from([("data".to_string(), Value::Bytea(chunk.to_vec()))]),
+                jazz_tools::row_input!("data" => chunk.to_vec()),
             )
             .await?;
         part_ids.push(Value::Uuid(part_id));
         part_sizes.push(Value::Integer(chunk.len() as i32));
     }
 
-    let mut file_values = HashMap::from([
-        ("mimeType".to_string(), Value::Text(mime_type.into())),
-        ("partIds".to_string(), Value::Array(part_ids)),
-        ("partSizes".to_string(), Value::Array(part_sizes)),
-    ]);
+    let mut file_values = jazz_tools::row_input!(
+        "mimeType" => mime_type,
+        "partIds" => part_ids,
+        "partSizes" => part_sizes,
+    );
     if let Some(name) = name {
-        file_values.insert("name".to_string(), Value::Text(name.into()));
+        file_values.insert("name".to_string(), name.into());
     }
 
     let (file_id, _) = client.create("files", file_values).await?;
@@ -461,11 +460,11 @@ pub async fn create_upload_from_bytes(
     let (upload_id, _) = client
         .create(
             "uploads",
-            HashMap::from([
-                ("owner_id".to_string(), Value::Text(owner_id.into())),
-                ("label".to_string(), Value::Text("Profile photo".into())),
-                ("fileId".to_string(), Value::Uuid(file_id)),
-            ]),
+            jazz_tools::row_input!(
+                "owner_id" => owner_id,
+                "label" => "Profile photo",
+                "fileId" => file_id,
+            ),
         )
         .await?;
 

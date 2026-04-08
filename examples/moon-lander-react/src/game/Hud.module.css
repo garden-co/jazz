@@ -1,0 +1,141 @@
+/* Base panel: hard pixel border, no rounded corners */
+.panel {
+  position: absolute;
+  font-family: monospace;
+  color: #00ffff;
+  background: rgba(10, 4, 20, 0.85);
+  border: 1px solid #ff00ff;
+  box-shadow:
+    0 0 8px rgba(255, 0, 255, 0.3),
+    inset 0 0 12px rgba(255, 0, 255, 0.05);
+  padding: 6px 10px;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+
+.panelLeft {
+  composes: panel;
+  top: 10px;
+  left: 10px;
+  font-size: 11px;
+  line-height: 1.8;
+}
+
+.panelRight {
+  composes: panel;
+  top: 10px;
+  right: 10px;
+  font-size: 11px;
+  line-height: 1.9;
+  min-width: 90px;
+}
+
+/* Labels */
+.label {
+  color: #ff00ff;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+}
+
+.fuelLabel {
+  composes: label;
+  margin-right: 4px;
+}
+
+.playersHeader {
+  composes: label;
+  margin-bottom: 2px;
+}
+
+/* Deposit icon canvas */
+.depositIcon {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  vertical-align: middle;
+  margin-left: 4px;
+  image-rendering: pixelated;
+}
+
+/* Fuel bar */
+.fuelBar {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.segment {
+  display: inline-block;
+  width: 6px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.segmentFilled {
+  composes: segment;
+  background: var(--bar-colour);
+  box-shadow: 0 0 4px var(--bar-colour);
+}
+
+.fuelValue {
+  color: var(--bar-colour);
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+/* Need row */
+.needRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.needStatus {
+  color: var(--status-colour);
+  font-size: 11px;
+}
+
+.checkmark {
+  color: #00ff00;
+}
+
+/* Bag row */
+.bagRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Player rows */
+.playerRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.playerDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--player-color);
+  box-shadow: 0 0 5px var(--player-color);
+}
+
+.playerName {
+  color: var(--player-color);
+}
+
+/* Controls hint */
+.controlsHint {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: monospace;
+  font-size: 11px;
+  color: rgba(255, 0, 255, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  pointer-events: none;
+}
