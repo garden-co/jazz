@@ -259,6 +259,20 @@ function storedRootSchemaWithReorderedColumns() {
   };
 }
 
+function storedSchemaResponse(
+  schema: object,
+  publishedAt: number | null = null,
+  status: number = 200,
+) {
+  return new Response(
+    JSON.stringify({
+      schema,
+      publishedAt,
+    }),
+    { status },
+  );
+}
+
 describe("cli validate", () => {
   it("validates root schema.ts without generating SQL or app artifacts", async () => {
     const { root } = await createWorkspace();
@@ -367,7 +381,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -397,8 +411,8 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -427,7 +441,7 @@ describe("cli schema export", () => {
     }) as typeof process.stdout.write);
 
     try {
-      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -565,14 +579,11 @@ describe("cli migrations", () => {
       }
 
       if (input.endsWith(`/schema/${fromHash}`)) {
-        return new Response(
-          JSON.stringify({
-            todos: {
-              columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       throw new Error(`Unexpected fetch: ${input}`);
@@ -625,34 +636,28 @@ describe("cli migrations", () => {
       }
 
       if (input.endsWith(`/schema/${fromHash}`)) {
-        return new Response(
-          JSON.stringify({
-            todos: {
-              columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-            },
-            legacy_users: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+          },
+          legacy_users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       if (input.endsWith(`/schema/${toHash}`)) {
-        return new Response(
-          JSON.stringify({
-            todos: {
-              columns: [
-                { name: "title", column_type: { type: "Text" }, nullable: false },
-                { name: "notes", column_type: { type: "Text" }, nullable: true },
-              ],
-            },
-            users: {
-              columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "notes", column_type: { type: "Text" }, nullable: true },
+            ],
+          },
+          users: {
+            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       throw new Error(`Unexpected fetch: ${input}`);
@@ -694,25 +699,19 @@ describe("cli migrations", () => {
       }
 
       if (input.endsWith(`/schema/${fromHash}`)) {
-        return new Response(
-          JSON.stringify({
-            users: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       if (input.endsWith(`/schema/${toHash}`)) {
-        return new Response(
-          JSON.stringify({
-            people: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       throw new Error(`Unexpected fetch: ${input}`);
@@ -753,31 +752,25 @@ describe("cli migrations", () => {
       }
 
       if (input.endsWith(`/schema/${fromHash}`)) {
-        return new Response(
-          JSON.stringify({
-            users: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-            orgs: {
-              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+          orgs: {
+            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       if (input.endsWith(`/schema/${toHash}`)) {
-        return new Response(
-          JSON.stringify({
-            companies: {
-              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
-            },
-            people: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          companies: {
+            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+          },
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       throw new Error(`Unexpected fetch: ${input}`);
@@ -821,28 +814,22 @@ describe("cli migrations", () => {
       }
 
       if (input.endsWith(`/schema/${fromHash}`)) {
-        return new Response(
-          JSON.stringify({
-            archived_users: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-            users: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          archived_users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       if (input.endsWith(`/schema/${toHash}`)) {
-        return new Response(
-          JSON.stringify({
-            people: {
-              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          people: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
       }
 
       throw new Error(`Unexpected fetch: ${input}`);
@@ -1118,7 +1105,7 @@ describe("cli permissions", () => {
       }
 
       if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+        return storedSchemaResponse(storedRootSchema());
       }
 
       if (input.endsWith("/admin/permissions/head")) {
@@ -1172,7 +1159,7 @@ describe("cli permissions", () => {
       }
 
       if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+        return storedSchemaResponse(storedRootSchema());
       }
 
       if (input.endsWith("/admin/permissions/head")) {
@@ -1207,9 +1194,7 @@ describe("cli permissions", () => {
       }
 
       if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(JSON.stringify(storedRootSchemaWithReorderedColumns()), {
-          status: 200,
-        });
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
       }
 
       if (input.endsWith("/admin/permissions/head")) {
@@ -1252,7 +1237,7 @@ describe("cli permissions", () => {
       }
 
       if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+        return storedSchemaResponse(storedRootSchema());
       }
 
       if (input.endsWith("/admin/permissions/head")) {
@@ -1309,17 +1294,14 @@ describe("cli permissions", () => {
       }
 
       if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(
-          JSON.stringify({
-            todos: {
-              columns: [
-                { name: "title", column_type: { type: "Text" }, nullable: false },
-                { name: "done", column_type: { type: "Boolean" }, nullable: false },
-              ],
-            },
-          }),
-          { status: 200 },
-        );
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "done", column_type: { type: "Boolean" }, nullable: false },
+            ],
+          },
+        });
       }
 
       if (input.endsWith("/admin/permissions/head")) {
@@ -1475,7 +1457,7 @@ describe("bin integration", () => {
       rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
-    const result = runBin(["schema", "export", "--schema-dir", root, "--format", "json"]);
+    const result = runBin(["schema", "export", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     const exported = JSON.parse(String(result.stdout));
@@ -1509,9 +1491,31 @@ describe("bin integration", () => {
       "utf8",
     );
 
-    const result = runBin(["schema", "export", "--schema-hash", schemaHash, "--format", "json"], {
+    const result = runBin(["schema", "export", "--schema-hash", schemaHash], {
       cwd: root,
     });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
+  it("loads schema export --schema-hash from a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `20260406T120000-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(
+      ["schema", "export", "--schema-hash", schemaHash, "--migrations-dir", migrationsDir],
+      { cwd: root },
+    );
 
     expect(result.status).toBe(0);
     expect(JSON.parse(String(result.stdout))).toEqual(schema);
@@ -1521,6 +1525,7 @@ describe("bin integration", () => {
     const { root } = await createWorkspace();
     const schema = storedRootSchema();
     const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAt = Date.UTC(2026, 3, 6, 12, 0, 0);
     const writes: string[] = [];
     const originalWrite = process.stdout.write.bind(process.stdout);
     const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
@@ -1534,18 +1539,17 @@ describe("bin integration", () => {
       expect(input).toContain(`/schema/${schemaHash}`);
       expect(init?.method).toBe("GET");
       expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
-      return new Response(JSON.stringify(schema), { status: 200 });
+      return storedSchemaResponse(schema, publishedAt);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     try {
       await exportSchema({
-        format: "json",
         schemaHash,
         schemaDir: root,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
-      } as any);
+      });
     } finally {
       writeSpy.mockRestore();
       process.stdout.write = originalWrite;
@@ -1557,11 +1561,77 @@ describe("bin integration", () => {
       name.endsWith(`-${shortSchemaHash}.json`),
     );
     expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
+    expect(snapshotFiles[0]).toBe(`20260406T120000-${shortSchemaHash}.json`);
     expect(
       JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
     ).toEqual(schema);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists schema export --schema-hash into a custom migrations dir", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "db", "generated-migrations");
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAt = Date.UTC(2026, 3, 6, 12, 0, 0);
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const exportFetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(input).toContain(`/schema/${schemaHash}`);
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
+      return storedSchemaResponse(schema, publishedAt);
+    });
+    vi.stubGlobal("fetch", exportFetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        migrationsDir,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const snapshotFiles = (await readdir(join(migrationsDir, "snapshots"))).filter((name) =>
+      name.endsWith(`-${schemaHash.slice(0, 12)}.json`),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+    expect(
+      JSON.parse(await readFile(join(migrationsDir, "snapshots", snapshotFiles[0]!), "utf8")),
+    ).toEqual(schema);
+    expect(exportFetchMock).toHaveBeenCalledTimes(1);
+
+    // Later migrations use the exported local snapshot
+    const migrationFetchMock = vi.fn(async () => {
+      throw new Error("Expected createMigration() to use the exported local snapshot.");
+    });
+    vi.stubGlobal("fetch", migrationFetchMock);
+
+    const filePath = await createMigration({
+      schemaDir: root,
+      migrationsDir,
+      fromHash: schemaHash.slice(0, 12),
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+    });
+
+    expect(filePath).not.toBeNull();
+    expect(migrationFetchMock).not.toHaveBeenCalled();
   });
 
   it("verifies packed runtime bootstrap with a native-only help probe", async () => {
