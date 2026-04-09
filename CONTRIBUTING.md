@@ -43,7 +43,8 @@ Override the cache root with:
 export JAZZ_ROCKSDB_CACHE_DIR=/path/to/cache-root
 ```
 
-To use the GHCR-backed fast path outside GitHub Actions, export credentials first:
+The default GHCR package is public, so the fast path works without credentials.
+If the package ever becomes private again, export credentials first:
 
 ```sh
 export JAZZ_ROCKSDB_GHCR_USERNAME=your-github-username
@@ -59,7 +60,7 @@ To rebuild and publish the full supported set on macOS, use:
 bash scripts/publish-rocksdb-artifacts.sh
 ```
 
-If an archive is missing or GHCR auth is unavailable, builds fall back to
+If an archive is missing or GHCR fetch is unavailable, builds fall back to
 compiling RocksDB from the upstream `rust-rocksdb` checkout, which still needs a
 working C/C++ toolchain.
 

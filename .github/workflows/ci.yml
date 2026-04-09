@@ -11,14 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  packages: read
-
-env:
-  GITHUB_ACTOR: ${{ github.actor }}
-  GITHUB_TOKEN: ${{ github.token }}
-
 jobs:
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404

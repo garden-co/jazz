@@ -32,15 +32,12 @@ env:
   BENCH_TIMEOUT_SECONDS: "60"
   BENCH_REPEAT_COUNT: "3"
   BENCH_CPUSET: "1-5"
-  GITHUB_ACTOR: ${{ github.actor }}
-  GITHUB_TOKEN: ${{ github.token }}
   VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
   VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
 
 permissions:
   contents: read
   issues: write
-  packages: read
 
 jobs:
   native:

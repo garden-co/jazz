@@ -210,11 +210,19 @@ fn fetch_ghcr_token(plan: &LinkPlan) -> Result<String, String> {
         "https://ghcr.io/token?service=ghcr.io&scope=repository:{}:pull",
         plan.artifact.repository.trim_start_matches("ghcr.io/")
     );
-    let basic_auth = ghcr_basic_auth().ok_or_else(|| {
-        "missing GHCR credentials; set JAZZ_ROCKSDB_GHCR_USERNAME/JAZZ_ROCKSDB_GHCR_PASSWORD (or GHCR_USERNAME/CR_PAT) to use prebuilt RocksDB archives".to_owned()
-    })?;
-    let response: GhcrTokenResponse = curl_json(&token_url, None, None, Some(&basic_auth))?;
-    Ok(response.token)
+    if let Ok(response) = curl_json::<GhcrTokenResponse>(&token_url, None, None, None) {
+        return Ok(response.token);
+    }
+
+    if let Some(basic_auth) = ghcr_basic_auth() {
+        let response: GhcrTokenResponse = curl_json(&token_url, None, None, Some(&basic_auth))?;
+        return Ok(response.token);
+    }
+
+    Err(format!(
+        "failed to fetch anonymous GHCR token for {}; if this package becomes private again, set JAZZ_ROCKSDB_GHCR_USERNAME/JAZZ_ROCKSDB_GHCR_PASSWORD (or GHCR_USERNAME/CR_PAT)",
+        plan.artifact.repository
+    ))
 }
 
 fn ghcr_basic_auth() -> Option<(String, String)> {
