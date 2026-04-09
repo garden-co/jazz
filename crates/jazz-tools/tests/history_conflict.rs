@@ -3,7 +3,7 @@
 mod support;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
@@ -15,6 +15,12 @@ use support::{TestingClient, has_updated, wait_for_query, wait_for_subscription_
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+static HISTORY_CONFLICT_SUITE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn lock_history_conflict_suite() -> tokio::sync::MutexGuard<'static, ()> {
+    HISTORY_CONFLICT_SUITE_LOCK.lock().await
+}
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -44,6 +50,7 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 /// ```
 #[tokio::test]
 async fn concurrent_updates_resolve_to_lww_winner() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -166,6 +173,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 /// ```
 #[tokio::test]
 async fn concurrent_creates_both_survive() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -252,6 +260,7 @@ async fn concurrent_creates_both_survive() {
 /// ```
 #[tokio::test]
 async fn rapid_concurrent_updates_converge() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -376,6 +385,7 @@ async fn rapid_concurrent_updates_converge() {
 /// ```
 #[tokio::test]
 async fn fresh_client_sees_lww_winner_after_conflict() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -531,6 +541,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 /// ```
 #[tokio::test]
 async fn subscription_reflects_concurrent_update() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -603,6 +614,7 @@ async fn subscription_reflects_concurrent_update() {
 /// ```
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -686,6 +698,7 @@ async fn sequential_updates_preserve_latest() {
 /// ```
 #[tokio::test]
 async fn concurrent_edits_on_different_fields() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -905,6 +918,7 @@ async fn establish_offline_reconnect_baseline(
 /// ```
 #[tokio::test]
 async fn persistent_peer_reloads_synced_state_before_offline_editing() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
         alice,
@@ -960,6 +974,7 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing() {
 /// ```
 #[tokio::test]
 async fn offline_reconnect_replays_local_edit_after_rejoin() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
         alice,
@@ -1113,6 +1128,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin() {
 /// ```
 #[tokio::test]
 async fn online_user_wins_on_reconnect() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
         alice,
