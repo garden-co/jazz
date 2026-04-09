@@ -3,10 +3,14 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
+use jazz_tools::commit::CommitId;
 use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
 use jazz_tools::schema_manager::encode_schema;
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -272,30 +276,26 @@ fn basic_auth_header(username: &str, password: &str) -> String {
     )
 }
 
-fn sync_body() -> Value {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "RowVersionCreated": {
-                "metadata": null,
-                "row": {
-                    "row_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "branch": "main",
-                    "parents": [],
-                    "updated_at": 1000,
-                    "created_by": "01234567-89ab-cdef-0123-456789abcdef",
-                    "created_at": 1000,
-                    "updated_by": "01234567-89ab-cdef-0123-456789abcdef",
-                    "batch_id": uuid::Uuid::nil(),
-                    "state": "VisibleDirect",
-                    "confirmed_tier": null,
-                    "is_deleted": false,
-                    "data": [97,108,105,99,101],
-                    "metadata": {}
-                }
-            }
-        }]
-    })
+fn sync_body() -> SyncBatchRequest {
+    let row_id = jazz_tools::ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        jazz_tools::metadata::RowProvenance::for_insert(row_id.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    SyncBatchRequest {
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+        client_id: ClientId::new(),
+    }
 }
 
 fn get_free_port() -> u16 {
