@@ -126,6 +126,52 @@ const TODO_PERMISSIONS: CompiledPermissions = {
     select: { using: { type: "True" } },
   },
 };
+const RELATION_LITERAL_PERMISSIONS: CompiledPermissions = {
+  resources: {
+    select: {
+      using: {
+        type: "ExistsRel",
+        rel: {
+          Filter: {
+            input: {
+              TableScan: {
+                table: "resource_access_edges",
+              },
+            },
+            predicate: {
+              And: [
+                {
+                  Cmp: {
+                    left: {
+                      scope: "resource_access_edges",
+                      column: "kind",
+                    },
+                    op: "Eq",
+                    right: {
+                      Literal: "individual",
+                    },
+                  },
+                },
+                {
+                  Cmp: {
+                    left: {
+                      scope: "resource_access_edges",
+                      column: "grant_role",
+                    },
+                    op: "Eq",
+                    right: {
+                      Literal: "viewer",
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  },
+};
 
 function makeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) =>
@@ -278,6 +324,86 @@ describe("backend/create-jazz-context", () => {
         todos: {
           columns: [],
           policies: TODO_PERMISSIONS.todos as any,
+        },
+      }),
+      "server-app",
+      "dev",
+      "main",
+      "/tmp/jazz.db",
+      "edge",
+    );
+  });
+
+  it("BC-U04b: normalizes relation literals before serializing runtime schema JSON", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: {
+        wasmSchema: {
+          resources: {
+            columns: [],
+          },
+        },
+      },
+      permissions: RELATION_LITERAL_PERMISSIONS,
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+    });
+
+    context.db();
+
+    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
+      serializeRuntimeSchema({
+        resources: {
+          columns: [],
+          policies: {
+            select: {
+              using: {
+                type: "ExistsRel",
+                rel: {
+                  Filter: {
+                    input: {
+                      TableScan: {
+                        table: "resource_access_edges",
+                      },
+                    },
+                    predicate: {
+                      And: [
+                        {
+                          Cmp: {
+                            left: {
+                              scope: "resource_access_edges",
+                              column: "kind",
+                            },
+                            op: "Eq",
+                            right: {
+                              Literal: {
+                                type: "Text",
+                                value: "individual",
+                              },
+                            },
+                          },
+                        },
+                        {
+                          Cmp: {
+                            left: {
+                              scope: "resource_access_edges",
+                              column: "grant_role",
+                            },
+                            op: "Eq",
+                            right: {
+                              Literal: {
+                                type: "Text",
+                                value: "viewer",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       }),
       "server-app",
