@@ -27,6 +27,7 @@ use jazz_tools::binding_support::{
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
     serialize_outbox_entry, subscription_delta_to_json,
 };
+use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
@@ -36,7 +37,10 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::server::TestingServer as JazzTestingServer;
+use jazz_tools::server::{
+    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder,
+    TestingServer as JazzTestingServer,
+};
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
@@ -170,6 +174,28 @@ struct TestingServerStartOptions {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevServerStartOptions {
+    app_id: String,
+    port: Option<u16>,
+    data_dir: Option<String>,
+    in_memory: Option<bool>,
+    jwks_url: Option<String>,
+    allow_anonymous: Option<bool>,
+    allow_demo: Option<bool>,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+    catalogue_authority: Option<String>,
+    catalogue_authority_url: Option<String>,
+    catalogue_authority_admin_secret: Option<String>,
+}
+
+fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
+    serde_json::from_value(options)
+        .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -1295,6 +1321,158 @@ impl TestingServer {
             .take();
 
         if let Some(server) = server {
+            server.shutdown().await;
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// DevServer
+// ============================================================================
+
+#[napi]
+pub struct DevServer {
+    inner: Mutex<Option<JazzHostedServer>>,
+    app_id: String,
+    url: String,
+    port: u16,
+    data_dir: String,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+}
+
+#[napi]
+impl DevServer {
+    #[napi(factory, ts_return_type = "Promise<DevServer>")]
+    pub async fn start(
+        #[napi(
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+        )]
+        options: JsonValue,
+    ) -> napi::Result<Self> {
+        let opts = parse_dev_server_start_options(options)?;
+
+        let app_id =
+            AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
+
+        let catalogue_authority = match opts.catalogue_authority.as_deref() {
+            Some("forward") => {
+                let base_url = opts.catalogue_authority_url.ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "catalogueAuthorityUrl is required when catalogueAuthority is 'forward'",
+                    )
+                })?;
+                let admin_secret = opts.catalogue_authority_admin_secret.ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "catalogueAuthorityAdminSecret is required when catalogueAuthority is 'forward'",
+                    )
+                })?;
+                CatalogueAuthorityMode::Forward {
+                    base_url,
+                    admin_secret,
+                }
+            }
+            _ => CatalogueAuthorityMode::Local,
+        };
+
+        let auth_config = AuthConfig {
+            jwks_url: opts.jwks_url,
+            allow_anonymous: opts.allow_anonymous.unwrap_or(false),
+            allow_demo: opts.allow_demo.unwrap_or(false),
+            backend_secret: opts.backend_secret.clone(),
+            admin_secret: opts.admin_secret.clone(),
+        };
+
+        let in_memory = opts.in_memory.unwrap_or(false);
+        let data_dir = if in_memory {
+            String::new()
+        } else {
+            opts.data_dir.unwrap_or_else(|| "./data".to_string())
+        };
+
+        let mut server_builder = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_catalogue_authority(catalogue_authority);
+
+        if in_memory {
+            server_builder = server_builder.with_in_memory_storage();
+        } else {
+            server_builder = server_builder.with_sqlite_storage(&data_dir);
+        }
+
+        let built = server_builder
+            .build()
+            .await
+            .map_err(napi::Error::from_reason)?;
+
+        let data_dir_path = std::path::PathBuf::from(&data_dir);
+
+        let hosted = JazzHostedServer::start(
+            built,
+            opts.port,
+            app_id,
+            data_dir_path,
+            opts.admin_secret.clone(),
+            opts.backend_secret.clone(),
+        )
+        .await;
+
+        let url = hosted.base_url();
+        let port = hosted.port;
+        let resolved_data_dir = hosted.data_dir.to_string_lossy().into_owned();
+
+        Ok(Self {
+            inner: Mutex::new(Some(hosted)),
+            app_id: opts.app_id,
+            url,
+            port,
+            data_dir: resolved_data_dir,
+            backend_secret: opts.backend_secret,
+            admin_secret: opts.admin_secret,
+        })
+    }
+
+    #[napi(getter, js_name = "appId")]
+    pub fn app_id(&self) -> String {
+        self.app_id.clone()
+    }
+
+    #[napi(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    #[napi(getter)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    #[napi(getter, js_name = "dataDir")]
+    pub fn data_dir(&self) -> String {
+        self.data_dir.clone()
+    }
+
+    #[napi(getter, js_name = "backendSecret")]
+    pub fn backend_secret(&self) -> Option<String> {
+        self.backend_secret.clone()
+    }
+
+    #[napi(getter, js_name = "adminSecret")]
+    pub fn admin_secret(&self) -> Option<String> {
+        self.admin_secret.clone()
+    }
+
+    #[napi]
+    pub async fn stop(&self) -> napi::Result<()> {
+        let mut server = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .take();
+
+        if let Some(ref mut server) = server {
             server.shutdown().await;
         }
 

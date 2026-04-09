@@ -5,10 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:auth": "tsx server/main.ts",
+    "dev:auth": "node server/main.ts",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
-    "sync-server": "tsx scripts/sync-server.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
