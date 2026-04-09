@@ -392,14 +392,19 @@ async fn wait_for_todos_count_on_disk(
             let row_ids = storage.index_scan_all("todos", "_id", &branch);
             let mut materialized = 0usize;
             for row_id in row_ids {
-                let has_metadata = storage.load_metadata(row_id).ok().flatten().is_some();
+                let has_locator = storage
+                    .load_row_locator(row_id)
+                    .ok()
+                    .flatten()
+                    .map(|locator| locator.table.as_str() == "todos")
+                    .unwrap_or(false);
                 let has_content = storage
                     .load_visible_region_row("todos", branch_name.as_str(), row_id)
                     .ok()
                     .flatten()
                     .map(|row| !row.data.is_empty())
                     .unwrap_or(false);
-                if has_metadata && has_content {
+                if has_locator && has_content {
                     materialized += 1;
                 }
             }

@@ -611,6 +611,7 @@ export class JazzClient {
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
   private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
+  private syncStarted = false;
   private remoteSyncConnected: boolean;
   private pendingRemoteSyncWaiters: Array<{
     resolve: () => void;
@@ -1524,6 +1525,7 @@ export class JazzClient {
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
+    this.syncStarted = true;
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
@@ -1572,7 +1574,12 @@ export class JazzClient {
   }
 
   private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
-    if (!this.context.serverUrl || tier === "worker" || this.remoteSyncConnected) {
+    if (
+      !this.syncStarted ||
+      !this.context.serverUrl ||
+      tier === "worker" ||
+      this.remoteSyncConnected
+    ) {
       return;
     }
 
