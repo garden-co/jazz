@@ -162,7 +162,7 @@ describe("JazzClient sync auth handling", () => {
 
   it("waits for in-flight sync posts during shutdown and ignores new outbox work", async () => {
     const stream = openConnectedStream("server-client-id");
-    let resolveSyncResponse: ((response: Response) => void) | null = null;
+    const syncResponseControl: { resolve?: (response: Response) => void } = {};
     const fetchMock = vi.fn((input: string | URL) => {
       const url = String(input);
       if (url.includes("/events")) {
@@ -170,7 +170,7 @@ describe("JazzClient sync auth handling", () => {
       }
       if (url.endsWith("/sync")) {
         return new Promise<Response>((resolve) => {
-          resolveSyncResponse = resolve;
+          syncResponseControl.resolve = resolve;
         });
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -207,7 +207,11 @@ describe("JazzClient sync auth handling", () => {
     sendServerPayload('{"kind":"second"}');
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/sync"))).toHaveLength(1);
 
-    resolveSyncResponse?.(okResponse());
+    const releaseSyncResponse = syncResponseControl.resolve;
+    if (!releaseSyncResponse) {
+      throw new Error("expected /sync fetch to capture a response resolver");
+    }
+    releaseSyncResponse(okResponse());
     await shutdownPromise;
 
     expect(close).toHaveBeenCalledTimes(1);
