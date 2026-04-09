@@ -1,0 +1,50 @@
+---
+title: "Nested data with permission inheritance"
+description: Model a project/task/comment hierarchy with inherited permissions, queries, and multi-level inserts.
+reviewedAt: "f7048c19"
+---
+
+This recipe shows how to model a simple hierarchy, inherit permissions from parent rows, and query/insert at each level.
+
+## Schema
+
+A simple schema with three tables linked by foreign keys. A project has tasks, and tasks have comments.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/nested-data-snippets.tsx#nested-schema
+</include>
+
+## Inherited permissions
+
+Use `allowedTo` to inherit access from the parent row. If you can read a project, you can read its tasks, and if you can read a task, you can read its comments.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/nested-data-snippets.tsx#nested-permissions
+</include>
+
+The `allowedTo.read("projectId")` argument is the FK column name. See [Permissions](/docs/auth/permissions) for `maxDepth` and recursive inheritance.
+
+<Callout type="info">
+  Projects use `$createdBy` instead of an explicit `owner_id` column. Jazz tracks who created each
+  row automatically, so you can reference it in permissions without adding a column to your schema.
+  Anyone can insert a `project`, and it will automatically be created with the appropriate
+  `$createdBy` information.
+</Callout>
+
+## Querying
+
+<include cwd lang="tsx" meta='title="ProjectTasks.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/nested-data-snippets.tsx#nested-query
+</include>
+
+See [Includes and relations](/docs/reading/includes-and-relations) for `include()`, reverse relations, and `select()`.
+
+## Inserting
+
+Insert from the top down&hairsp;—&hairsp;create the project first, then tasks referencing it.
+
+<include cwd lang="tsx" meta='title="CreateProject.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/nested-data-snippets.tsx#nested-insert
+</include>
+
+Each insert executes locally and syncs in the background. Because permissions inherit downward, anyone who can access the project automatically gets access to its tasks and comments.
