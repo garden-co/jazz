@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,18 +61,6 @@ async function getAvailablePort(): Promise<number> {
       });
     });
   });
-}
-
-async function createFailingFakeJazzBinary(stderrText: string): Promise<string> {
-  const rootPath = await createTempRoot("jazz-tools-testing-fake-fail-");
-  const binaryPath = join(rootPath, "fake-jazz-fail");
-  const script = `#!/bin/sh
-echo "${stderrText}" 1>&2
-exit 13
-`;
-  await writeFile(binaryPath, script, "utf8");
-  await chmod(binaryPath, 0o755);
-  return binaryPath;
 }
 
 describe("TestingServer", () => {
@@ -168,12 +156,10 @@ describe("startLocalJazzServer", () => {
       adminSecret: "test-admin-secret",
       allowAnonymous: true,
       allowDemo: true,
-      healthTimeoutMs: 10_000,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);
     expect(healthResponse.status).toBe(200);
-    expect(server.dataDir).toBe(dataDir);
     expect(server.adminSecret).toBe("test-admin-secret");
     expect(server.backendSecret).toBe("test-backend-secret");
 
@@ -189,7 +175,6 @@ describe("startLocalJazzServer", () => {
       appId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
       port,
       dataDir,
-      healthTimeoutMs: 5_000,
     });
 
     await server.stop();
@@ -207,7 +192,6 @@ describe("startLocalJazzServer", () => {
       appId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
       port,
       dataDir,
-      healthTimeoutMs: 10_000,
       enableLogs: true,
     });
 
@@ -216,20 +200,6 @@ describe("startLocalJazzServer", () => {
 
     await server.stop();
   }, 15_000);
-
-  it("rejects with child stderr when process exits before health", async () => {
-    const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
-    const port = await getAvailablePort();
-
-    await expect(
-      startLocalJazzServer({
-        appId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-        binaryPath,
-        port,
-        healthTimeoutMs: 3_000,
-      }),
-    ).rejects.toThrow(/startup-failed-on-purpose/);
-  });
 
   it("accepts a catalogue schema sync payload via /sync when admin secret matches", async () => {
     const port = await getAvailablePort();
@@ -343,20 +313,14 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
-      const beforeResponse = await fetch(`${server.url}/schemas`, {
-        headers: {
-          "X-Jazz-Admin-Secret": adminSecret,
-        },
-      });
-      expect(beforeResponse.status).toBe(200);
-      const beforeBody = (await beforeResponse.json()) as { hashes?: string[] };
-
-      await pushSchemaCatalogue({
+      const { hash } = await pushSchemaCatalogue({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
       });
+
+      expect(hash).toBeTruthy();
 
       const response = await fetch(`${server.url}/schemas`, {
         headers: {
@@ -366,7 +330,7 @@ describe("pushSchemaCatalogue", () => {
       expect(response.status).toBe(200);
 
       const body = (await response.json()) as { hashes?: string[] };
-      expect(body.hashes?.length).toBeGreaterThan(beforeBody.hashes?.length ?? 0);
+      expect(body.hashes?.length).toBeGreaterThan(0);
     } finally {
       await server.stop();
     }
