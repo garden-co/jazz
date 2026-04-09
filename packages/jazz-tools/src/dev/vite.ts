@@ -67,7 +67,15 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (env.JAZZ_SERVER_URL) {
         serverUrl = env.JAZZ_SERVER_URL;
         adminSecret = options.adminSecret ?? "";
-        appId = env.JAZZ_APP_ID ?? options.appId ?? randomUUID();
+        if (!adminSecret) {
+          throw new Error(
+            `${LOG_PREFIX} adminSecret is required when connecting to an existing server`,
+          );
+        }
+        appId = env.JAZZ_APP_ID ?? options.appId ?? "";
+        if (!appId) {
+          throw new Error(`${LOG_PREFIX} appId is required when connecting to an existing server`);
+        }
         console.log(`${LOG_PREFIX} using server from .env: ${serverUrl}`);
       } else if (typeof serverOpt === "string") {
         serverUrl = serverOpt;
@@ -77,7 +85,10 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
             `${LOG_PREFIX} adminSecret is required when connecting to an existing server`,
           );
         }
-        appId = options.appId ?? randomUUID();
+        appId = options.appId ?? "";
+        if (!appId) {
+          throw new Error(`${LOG_PREFIX} appId is required when connecting to an existing server`);
+        }
       } else {
         const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
         adminSecret = serverConfig.adminSecret ?? `jazz-dev-${randomUUID().slice(0, 8)}`;

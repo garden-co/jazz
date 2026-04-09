@@ -62,30 +62,30 @@ function Router() {
   return <GenerateData />;
 }
 
+const appId = import.meta.env.JAZZ_APP_ID;
+const serverUrl = import.meta.env.JAZZ_SERVER_URL;
+
+if (!appId) {
+  throw new Error("JAZZ_APP_ID is required");
+}
+
+if (!serverUrl) {
+  throw new Error("JAZZ_SERVER_URL is required");
+}
+
+const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+const config: DbConfig = {
+  appId,
+  env: import.meta.env.DEV ? "dev" : "prod",
+  userBranch: "main",
+  devMode: import.meta.env.DEV,
+  localAuthMode: active.localAuthMode,
+  localAuthToken: active.localAuthToken,
+  serverUrl,
+};
+
 // #region context-setup-react
 export function App() {
-  const appId = import.meta.env.JAZZ_APP_ID;
-  const serverUrl = import.meta.env.JAZZ_SERVER_URL;
-
-  if (!appId) {
-    throw new Error("JAZZ_APP_ID is required");
-  }
-
-  if (!serverUrl) {
-    throw new Error("JAZZ_SERVER_URL is required");
-  }
-
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-  const config: DbConfig = {
-    appId,
-    env: import.meta.env.DEV ? "dev" : "prod",
-    userBranch: "main",
-    devMode: import.meta.env.DEV,
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
-    serverUrl,
-  };
-
   return (
     <JazzProvider config={config} fallback={<p>Loading...</p>}>
       <DevToolsRegistration />
