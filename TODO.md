@@ -15,6 +15,7 @@
 - [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
 - [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
 - [**lens-transform-silent-degradation**](todo/issues/lens-transform-silent-degradation.md) — Failed lens transforms fall back to original data and continue, silently propagating schema mismatches.
+- [**policy-error-reasons**](todo/issues/policy-error-reasons.md) — Policy-denied errors (e.g. `WriteError("policy denied INSERT on table todos")`) include
 
 ## Ideas
 
