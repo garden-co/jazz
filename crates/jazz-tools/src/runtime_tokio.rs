@@ -521,6 +521,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
+    /// Return the latest publish timestamp for a schema catalogue object.
+    pub fn schema_published_at(
+        &self,
+        schema_hash: &SchemaHash,
+    ) -> Result<Option<u64>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().schema_published_at(schema_hash))
+    }
+
     /// Seed an additional known schema into the in-memory schema manager.
     pub fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
