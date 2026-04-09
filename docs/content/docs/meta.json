@@ -12,6 +12,12 @@
     "reading",
     "writing",
     "auth",
+    "---Recipes---",
+    "recipes/user-owned-data",
+    "recipes/shared-access",
+    "recipes/real-time-collaborative-list",
+    "recipes/nested-data",
+    "recipes/auth-provider-integration",
     "---Reference---",
     "reference"
   ]
