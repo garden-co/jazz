@@ -1,5 +1,20 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { __resetJazzNextPluginForTests, withJazz, type NextConfigLike } from "./next.js";
+
+vi.mock("./dev-server.js", () => ({
+  startLocalJazzServer: vi.fn(),
+  pushSchemaCatalogue: vi.fn(),
+}));
+
+vi.mock("./schema-watcher.js", () => ({
+  watchSchema: vi.fn(),
+}));
+
+vi.mock("./vite.js", () => ({
+  jazzPlugin: vi.fn(),
+}));
+
+const dev = await import("./index.js");
 
 const PRODUCTION_BUILD_PHASE = "phase-production-build";
 
@@ -59,5 +74,15 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+  });
+});
+
+describe("dev barrel", () => {
+  it("preserves the existing dev exports and exposes withJazz", () => {
+    expect(dev.startLocalJazzServer).toBeDefined();
+    expect(dev.pushSchemaCatalogue).toBeDefined();
+    expect(dev.watchSchema).toBeDefined();
+    expect(dev.jazzPlugin).toBeDefined();
+    expect(dev.withJazz).toBe(withJazz);
   });
 });
