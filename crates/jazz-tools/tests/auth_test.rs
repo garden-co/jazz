@@ -12,7 +12,13 @@ mod test_server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use jazz_tools::commit::CommitId;
+use jazz_tools::jazz_transport::SyncBatchRequest;
+use jazz_tools::metadata::RowProvenance;
+use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -93,30 +99,26 @@ fn encode_session(session: &Session) -> String {
 
 /// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "RowVersionCreated": {
-                "metadata": null,
-                "row": {
-                    "row_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "branch": "main",
-                    "parents": [],
-                    "updated_at": 1000,
-                    "created_by": "01234567-89ab-cdef-0123-456789abcdef",
-                    "created_at": 1000,
-                    "updated_by": "01234567-89ab-cdef-0123-456789abcdef",
-                    "batch_id": uuid::Uuid::nil(),
-                    "state": "VisibleDirect",
-                    "confirmed_tier": null,
-                    "is_deleted": false,
-                    "data": [97,108,105,99,101],
-                    "metadata": {}
-                }
-            }
-        }]
-    })
-    .to_string()
+    let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
+    let row = StoredRowVersion::new(
+        ObjectId::from_uuid(uuid::Uuid::parse_str(object_id_text).expect("parse test object id")),
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        RowProvenance::for_insert(object_id_text.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let request = SyncBatchRequest {
+        client_id: ClientId::new(),
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+    };
+
+    serde_json::to_string(&request).expect("serialize typed sync batch request")
 }
 
 // ============================================================================
