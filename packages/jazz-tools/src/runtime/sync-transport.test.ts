@@ -285,6 +285,33 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
+  it("detects mis-tagged catalogue payloads from their JSON shape", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000",
+      JSON.stringify({
+        CatalogueEntryUpdated: {
+          entry: {
+            metadata: {
+              type: "catalogue_permissions_head",
+            },
+          },
+        },
+      }),
+      false,
+      { adminSecret: "admin-secret", backendSecret: "backend-secret" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Jazz-Admin-Secret": "admin-secret",
+    });
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Backend-Secret");
+  });
+
   it("posts link-external with bearer and local auth headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

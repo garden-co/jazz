@@ -686,14 +686,18 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const isSchemaCatalogue = isCatalogue && isStructuralSchemaCataloguePayload(payloadJson);
+  const catalogueType = catalogueObjectTypeFromPayloadJson(payloadJson);
+  const effectiveIsCatalogue = isCatalogue || catalogueType !== null;
+  const isSchemaCatalogue =
+    effectiveIsCatalogue &&
+    (catalogueType === "catalogue_schema" || isStructuralSchemaCataloguePayload(payloadJson));
 
-  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
+  if (effectiveIsCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (isCatalogue && auth.adminSecret) {
+  if (effectiveIsCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);

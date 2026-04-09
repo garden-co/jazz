@@ -48,6 +48,14 @@ export interface RunningServer extends TodoServer {
   baseUrl: string;
 }
 
+export interface TodoServerConfig {
+  dataPath?: string;
+  appId?: string;
+  serverUrl?: string;
+  backendSecret?: string;
+  adminSecret?: string;
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -55,15 +63,15 @@ export interface RunningServer extends TodoServer {
 /**
  * Create a todo server.
  *
- * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
+ * @param config Optional server config. Environment variables are used as fallback.
  * @returns TodoServer with app, db, and shutdown function
  */
-export async function createServer(dataPath?: string): Promise<TodoServer> {
-  const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
-  const serverUrl = process.env.JAZZ_SERVER_URL?.trim();
-  const backendSecret = process.env.JAZZ_BACKEND_SECRET?.trim();
-  const adminSecret = process.env.JAZZ_ADMIN_SECRET?.trim();
+export async function createServer(config: TodoServerConfig = {}): Promise<TodoServer> {
+  const dbPath = config.dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
+  const appId = config.appId ?? process.env.JAZZ_APP_ID ?? "todo-server-ts";
+  const serverUrl = config.serverUrl ?? process.env.JAZZ_SERVER_URL?.trim();
+  const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
+  const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
 
   if (!serverUrl || !backendSecret) {
     throw new Error(

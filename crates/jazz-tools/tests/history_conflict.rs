@@ -651,11 +651,13 @@ async fn sequential_updates_preserve_latest() {
         .connect()
         .await;
 
+    // Fresh-client replay is the slowest step in this file on loaded CI runners.
+    let fresh_client_timeout = Duration::from_secs(45);
     let bob_rows = wait_for_query(
         &bob,
         query,
         Some(DurabilityTier::EdgeServer),
-        QUERY_TIMEOUT,
+        fresh_client_timeout,
         "bob sees v3",
         |rows| {
             (rows.len() == 1

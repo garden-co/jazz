@@ -836,6 +836,70 @@ describe("NAPI integration", () => {
     }
   }, 20_000);
 
+  it("posts catalogue sync with admin auth even in backend mode", async () => {
+    const captureServer = await startSyncCaptureServer();
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: `napi-backend-catalogue-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-backend-secret",
+        adminSecret: "napi-admin-secret",
+      });
+
+      const db = context.asBackend();
+      const unsubscribe = db.subscribeAll(allTodosQuery, () => undefined, { tier: "edge" });
+
+      await vi.waitFor(
+        () =>
+          expect(
+            captureServer.syncRequests.some((request) =>
+              request.body.payloads.some(
+                (payload) =>
+                  typeof payload === "object" &&
+                  payload !== null &&
+                  "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+              ),
+            ),
+          ).toBe(true),
+        {
+          timeout: 15_000,
+        },
+      );
+
+      const request = captureServer.syncRequests.find((candidate) =>
+        candidate.body.payloads.some(
+          (payload) =>
+            typeof payload === "object" &&
+            payload !== null &&
+            "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+        ),
+      );
+      if (!request) {
+        throw new Error("expected a CatalogueEntryUpdated sync request");
+      }
+
+      expect(request.headers["x-jazz-admin-secret"]).toBe("napi-admin-secret");
+      expect(request.headers["x-jazz-backend-secret"]).toBeUndefined();
+      expect(request.headers.authorization).toBeUndefined();
+      unsubscribe();
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await captureServer.stop();
+    }
+  }, 20_000);
+
   it("replays active backend query subscriptions after the events stream reconnects", async () => {
     const captureServer = await startSyncCaptureServer();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
