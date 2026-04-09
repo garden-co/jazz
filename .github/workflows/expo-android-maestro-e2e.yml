@@ -166,7 +166,9 @@ jobs:
           rm -rf "${SDK_ROOT}/.temp"
           rm -rf "${HOME}/.android/cache"
 
+          set +o pipefail
           yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
           sdkmanager --install "ndk;27.1.12297006"
 
       - name: Install Vercel Sandbox CLI
