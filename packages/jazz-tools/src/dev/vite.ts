@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   startLocalJazzServer,
   pushSchemaCatalogue,
@@ -29,6 +31,19 @@ export interface JazzPluginOptions {
 
 const DEFAULT_PORT = 0;
 const LOG_PREFIX = "[jazz]";
+
+async function persistAppIdToEnv(root: string, appId: string): Promise<void> {
+  const envPath = join(root, ".env");
+  let content = "";
+  try {
+    content = await readFile(envPath, "utf8");
+  } catch {
+    // file doesn't exist yet
+  }
+  if (content.includes("JAZZ_APP_ID=")) return;
+  const line = `JAZZ_APP_ID=${appId}\n`;
+  await writeFile(envPath, content ? content + line : line);
+}
 
 interface ViteDevServer {
   config: {
@@ -113,6 +128,10 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         console.log(`${LOG_PREFIX} server started on ${serverUrl}`);
         if (serverHandle.dataDir) {
           console.log(`${LOG_PREFIX} data dir: ${serverHandle.dataDir}`);
+        }
+
+        if (!env.JAZZ_APP_ID && !serverConfig.appId && !options.appId) {
+          await persistAppIdToEnv(viteServer.config.root, appId);
         }
       }
 
