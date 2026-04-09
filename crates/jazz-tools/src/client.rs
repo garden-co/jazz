@@ -10,7 +10,9 @@ use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{
+    OrderedRowDelta, RowDescriptor, Schema, SchemaHash, TableName, Value,
+};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -206,7 +208,7 @@ impl JazzClient {
             let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
-            let stream_headers = conn.build_stream_headers();
+            let stream_headers = conn.build_stream_headers(SchemaHash::compute(&declared_schema));
             let server_id_for_stream = server_id;
             let mut initial_stream_ready_tx = initial_stream_ready_tx;
             let tracer_for_incoming = context.sync_tracer.clone();

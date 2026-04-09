@@ -2,6 +2,7 @@
 
 use crate::jazz_transport::SyncBatchRequest;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::{ClientId, SyncPayload};
 use base64::Engine;
 use reqwest::Client;
@@ -117,9 +118,12 @@ impl ServerConnection {
     /// Build auth headers for the binary streaming connection.
     ///
     /// Same auth as `build_headers` but without Content-Type.
-    pub fn build_stream_headers(&self) -> HeaderMap {
+    pub fn build_stream_headers(&self, schema_hash: SchemaHash) -> HeaderMap {
         let mut headers = self.build_headers(None);
         headers.remove(CONTENT_TYPE);
+        if let Ok(schema_hash) = HeaderValue::from_str(&schema_hash.to_string()) {
+            headers.insert("X-Jazz-Client-Schema-Hash", schema_hash);
+        }
         headers
     }
 

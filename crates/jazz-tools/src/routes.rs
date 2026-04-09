@@ -31,7 +31,7 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
-use crate::sync_manager::ClientId;
+use crate::sync_manager::{ClientId, SyncPayload};
 
 /// Runs an async closure when this guard is dropped.
 ///
@@ -86,6 +86,8 @@ struct EventsParams {
     /// Client-provided ID for reconnect support.
     client_id: Option<String>,
 }
+
+const CLIENT_SCHEMA_HASH_HEADER: &str = "X-Jazz-Client-Schema-Hash";
 
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
@@ -333,6 +335,19 @@ async fn events_handler(
         })?,
         None => ClientId::new(),
     };
+    let client_schema_hash = match headers
+        .get(CLIENT_SCHEMA_HASH_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(hash_text) => Some(parse_schema_hash_param(hash_text).map_err(|message| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response()
+        })?),
+        None => None,
+    };
 
     {
         let _span = tracing::debug_span!("events_handler", %client_id).entered();
@@ -419,6 +434,27 @@ async fn events_handler(
         }
         ClientSetup::Session(session) => {
             let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
+    }
+
+    if let Some(client_schema_hash) = client_schema_hash {
+        match state.runtime.with_schema_manager(|schema_manager| {
+            schema_manager.connection_schema_diagnostics(client_schema_hash)
+        }) {
+            Ok(diagnostics) if diagnostics.has_issues() => {
+                state.connection_event_hub.dispatch_payload(
+                    client_id,
+                    SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(
+                    %client_id,
+                    %client_schema_hash,
+                    "failed to compute connection schema diagnostics: {err}"
+                );
+            }
         }
     }
 
@@ -1649,10 +1685,12 @@ mod tests {
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync_manager::{
-        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+        ClientId, ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source,
+        SyncPayload,
     };
     use axum::body;
     use axum::routing::{get, post};
+    use futures::StreamExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -1720,6 +1758,7 @@ mod tests {
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
         axum::Router::new()
+            .route("/events", get(events_handler))
             .route("/schema/:hash", get(schema_handler))
             .route("/schemas", get(schema_hashes_handler))
             .route("/admin/schemas", post(publish_schema_handler))
@@ -1761,6 +1800,29 @@ mod tests {
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
+    }
+
+    async fn read_server_events(body: axum::body::Body, expected_count: usize) -> Vec<ServerEvent> {
+        let mut stream = body.into_data_stream();
+        let mut events = Vec::new();
+        let mut buffered = Vec::new();
+
+        while events.len() < expected_count {
+            if let Some((event, consumed)) = ServerEvent::decode_frame(&buffered) {
+                events.push(event);
+                buffered.drain(..consumed);
+                continue;
+            }
+
+            let next_chunk = tokio::time::timeout(Duration::from_millis(250), stream.next())
+                .await
+                .expect("timed out waiting for stream chunk")
+                .expect("stream ended before expected events")
+                .expect("stream chunk should decode");
+            buffered.extend_from_slice(&next_chunk);
+        }
+
+        events
     }
 
     #[tokio::test]
@@ -2972,5 +3034,51 @@ mod tests {
                     .map(|query| query.contains("\"name\""))
                     .unwrap_or(false)
         }));
+    }
+
+    #[tokio::test]
+    async fn events_handler_emits_connection_schema_diagnostics_for_client_schema() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let current_hash = SchemaHash::compute(&schema);
+        let declared_hash = SchemaHash::from_bytes([9; 32]);
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/events")
+                    .header("X-Jazz-Local-Mode", "anonymous")
+                    .header("X-Jazz-Local-Token", "alice")
+                    .header("X-Jazz-Client-Schema-Hash", declared_hash.to_string())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("events response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = read_server_events(response.into_body(), 2).await;
+        assert!(matches!(events[0], ServerEvent::Connected { .. }));
+
+        match &events[1] {
+            ServerEvent::SyncUpdate { payload, .. } => {
+                assert_eq!(
+                    payload.as_ref(),
+                    &SyncPayload::ConnectionSchemaDiagnostics(ConnectionSchemaDiagnostics {
+                        client_schema_hash: declared_hash,
+                        disconnected_permissions_schema_hash: Some(current_hash),
+                        unreachable_schema_hashes: vec![],
+                    })
+                );
+            }
+            other => panic!("expected SyncUpdate, got {}", other.variant_name()),
+        }
     }
 }

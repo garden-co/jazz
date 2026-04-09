@@ -642,6 +642,7 @@ export class JazzClient {
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
       getAuth: () => this.getSyncAuth(),
+      getSchemaHash: () => this.runtime.getSchemaHash(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
