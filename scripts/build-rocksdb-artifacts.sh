@@ -123,8 +123,8 @@ for target in "${TARGETS[@]}"; do
       ;;
     x86_64-unknown-linux-gnu)
       # Linux consumers link these archives with libstdc++, so publish them with GNU toolchains.
-      linux_cc="${CC_x86_64_unknown_linux_gnu:-cc}"
-      linux_cxx="${CXX_x86_64_unknown_linux_gnu:-c++}"
+      linux_cc="${CC_x86_64_unknown_linux_gnu:-gcc}"
+      linux_cxx="${CXX_x86_64_unknown_linux_gnu:-g++}"
       linux_ar="${AR_x86_64_unknown_linux_gnu:-ar}"
       linux_ranlib="${RANLIB_x86_64_unknown_linux_gnu:-ranlib}"
       require_command "${linux_cc}"
