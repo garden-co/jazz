@@ -902,14 +902,12 @@ describe("NAPI integration", () => {
   }, 25_000);
 
   it("applies createJazzContext(...).forSession() mutations through high-level Db APIs", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-session-secret";
     const adminSecret = "napi-session-admin-secret";
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
-      port,
       backendSecret,
       adminSecret,
     });
@@ -1056,14 +1054,12 @@ describe("NAPI integration", () => {
   }, 60_000);
 
   it("extracts JWT request auth and applies createJazzContext(...).forRequest() mutations via Db", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-request-secret";
     const adminSecret = "napi-request-admin-secret";
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
-      port,
       backendSecret,
       adminSecret,
     });
@@ -1187,7 +1183,6 @@ describe("NAPI integration", () => {
   }, 60_000);
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-query-backend-secret";
     const adminSecret = "napi-query-admin-secret";
@@ -1198,7 +1193,6 @@ describe("NAPI integration", () => {
     const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({
       appId,
-      port,
       jwksUrl: jwks.url,
       backendSecret,
       adminSecret,
@@ -1419,7 +1413,6 @@ describe("NAPI integration", () => {
   }, 60_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-e2e-backend-secret";
     const adminSecret = "napi-e2e-admin-secret";
@@ -1427,7 +1420,6 @@ describe("NAPI integration", () => {
     let readerRuntimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
-      port,
       backendSecret,
       adminSecret,
     });
