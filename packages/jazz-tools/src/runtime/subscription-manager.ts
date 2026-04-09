@@ -70,6 +70,7 @@ export class SubscriptionManager<T extends { id: string }> {
       switch (change.kind) {
         case RowChangeKind.Added:
           this.currentResults.set(change.id, transform(change.row));
+          this.removeId(change.id);
           this.insertIdAt(change.id, change.index);
           break;
         case RowChangeKind.Removed:

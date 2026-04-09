@@ -368,6 +368,21 @@ impl SyncManager {
         );
     }
 
+    /// Load an existing catalogue object from storage into ObjectManager without
+    /// appending a new commit.
+    pub fn load_catalogue_object_from_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) {
+        self.track_catalogue_object(object_id, metadata);
+        let branches = vec!["main".to_string()];
+        let _ = self
+            .object_manager
+            .get_or_load(object_id, storage, &branches);
+    }
+
     // ========================================================================
     // Pending Query Subscriptions
     // ========================================================================

@@ -368,6 +368,12 @@
       browser: "Browser",
       "native-criterion": "Native CR",
     };
+    const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "opfs-btree"];
+    const STORAGE_ENGINE_LABELS = {
+      rocksdb: "RocksDB",
+      sqlite: "SQLite",
+      "opfs-btree": "OPFS-btree",
+    };
     const CORE_METRICS = ["wall_time_ms", "throughput_ops_per_sec"];
     const OP_METRIC_ORDER = ["avg_ms", "p95_ms"];
     const SCENARIO_CARD_WIDTH = 296;
@@ -393,6 +399,32 @@
 
     function suiteLabel(suite) {
       return SUITE_LABELS[suite] || suite || "Unknown";
+    }
+
+    function storageEngineRank(storageEngine) {
+      const idx = STORAGE_ENGINE_ORDER.indexOf(storageEngine);
+      return idx === -1 ? STORAGE_ENGINE_ORDER.length + 1 : idx;
+    }
+
+    function storageEngineLabel(storageEngine) {
+      return STORAGE_ENGINE_LABELS[storageEngine] || storageEngine || "";
+    }
+
+    function runLaneKey(run) {
+      return [run.suite || "", run.storage_engine || ""].join("::");
+    }
+
+    function runLaneLabel(run) {
+      const suite = suiteLabel(run && run.suite);
+      const storage = storageEngineLabel(run && (run.storage_engine || run.storageEngine));
+      return storage ? suite + " (" + storage + ")" : suite;
+    }
+
+    function laneRank(run) {
+      return (
+        suiteRank(run && run.suite) * 100 +
+        storageEngineRank(run && (run.storage_engine || run.storageEngine))
+      );
     }
 
     function runId(run) {
@@ -453,7 +485,7 @@
             ref: run.ref || "",
             generated_at: run.generated_at || "",
             runs: [],
-            runs_by_suite: {},
+            runs_by_lane: {},
           };
           map.set(key, snapshot);
         }
@@ -462,12 +494,17 @@
             ? run.generated_at || snapshot.generated_at
             : snapshot.generated_at;
         snapshot.runs.push(run);
-        snapshot.runs_by_suite[run.suite] = run;
+        snapshot.runs_by_lane[runLaneKey(run)] = run;
       }
 
       return [...map.values()]
         .map((snapshot) => {
-          snapshot.runs.sort((a, b) => suiteRank(a.suite) - suiteRank(b.suite) || compareText(a.suite, b.suite));
+          snapshot.runs.sort(
+            (a, b) =>
+              laneRank(a) - laneRank(b) ||
+              compareText(a.suite, b.suite) ||
+              compareText(a.storage_engine, b.storage_engine),
+          );
           return snapshot;
         })
         .sort(byGenerated);
@@ -478,15 +515,16 @@
         snapshot.generated_at || "n/a",
         String(snapshot.sha || "n/a").slice(0, 12),
         runId(snapshot),
-        snapshot.runs.length + " suites",
+        snapshot.runs.length + " lanes",
       ].join(" • ");
     }
 
     function normalizeScenarioEntry(run, scenario) {
       const variantKey = scenarioVariant(scenario);
       return {
-        key: [run.suite || "", scenario.scenario_id || "", variantKey].join("::"),
+        key: [run.suite || "", run.storage_engine || "", scenario.scenario_id || "", variantKey].join("::"),
         suite: run.suite || "",
+        storageEngine: run.storage_engine || "",
         scenarioId: scenario.scenario_id || "unknown",
         scenarioName: scenario.scenario_name || scenario.scenario_id || "unknown",
         topology: scenario.topology || "",
@@ -500,8 +538,10 @@
     }
 
     function compareScenarioEntries(a, b) {
-      const suiteCmp = suiteRank(a.suite) - suiteRank(b.suite);
-      if (suiteCmp !== 0) return suiteCmp;
+      const laneCmp =
+        suiteRank(a.suite) - suiteRank(b.suite) ||
+        storageEngineRank(a.storageEngine) - storageEngineRank(b.storageEngine);
+      if (laneCmp !== 0) return laneCmp;
       const scenarioCmp = compareText(a.scenarioId, b.scenarioId);
       if (scenarioCmp !== 0) return scenarioCmp;
       const variantCmp = compareText(a.variantKey, b.variantKey);
@@ -707,8 +747,13 @@
       return descriptor.label;
     }
 
-    function scenarioPrefixText(suite, scenarioId) {
-      return suiteLabel(suite).toLowerCase() + "/" + String(scenarioId || "");
+    function scenarioPrefixText(suite, storageEngine, scenarioId) {
+      const parts = [suiteLabel(suite).toLowerCase()];
+      if (storageEngineLabel(storageEngine)) {
+        parts.push(storageEngineLabel(storageEngine).toLowerCase());
+      }
+      parts.push(String(scenarioId || ""));
+      return parts.join("/");
     }
 
     function formatPct(value) {
@@ -858,6 +903,7 @@
         cards.push({
           key,
           suite: baseEntry.suite,
+          storageEngine: baseEntry.storageEngine,
           scenarioId: baseEntry.scenarioId,
           scenarioName: baseEntry.scenarioName,
           subtitle: baseEntry.variantLabel || baseEntry.topology || "",
@@ -874,6 +920,7 @@
         for (const metricRow of card.metricRows) {
           rows.push({
             suite: card.suite,
+            storageEngine: card.storageEngine,
             scenarioId: card.scenarioId,
             scenarioName: card.scenarioName,
             subtitle: card.subtitle,
@@ -932,9 +979,6 @@
       const runs = Array.isArray(history.runs) ? [...history.runs].sort(byGenerated) : [];
       const snapshots = buildSnapshots(runs);
 
-      const suites = unique(runs.map((run) => run.suite).filter(Boolean)).sort(
-        (a, b) => suiteRank(a) - suiteRank(b) || compareText(a, b),
-      );
       const branches = unique(snapshots.map((snapshot) => snapshot.branch).filter(Boolean)).sort(compareText);
       const profiles = unique(snapshots.map((snapshot) => snapshot.profile).filter(Boolean)).sort(compareText);
 
@@ -1056,7 +1100,7 @@
 
         for (const snapshot of snapshots.slice(0, 60)) {
           const tr = document.createElement("tr");
-          const suitesText = snapshot.runs.map((run) => suiteLabel(run.suite)).join(", ");
+          const suitesText = snapshot.runs.map((run) => runLaneLabel(run)).join(", ");
           const cardCount = scenarioEntries(snapshot).length;
           tr.innerHTML = [
             "<td>" + escapeHtml(snapshot.generated_at || "n/a") + "</td>",
@@ -1127,7 +1171,7 @@
           if (card.subtitle) subtitleParts.push(card.subtitle);
           article.innerHTML = [
             '<div class="scenario-head">',
-            '  <span class="scenario-prefix">' + escapeHtml(scenarioPrefixText(card.suite, card.scenarioId)) + ":</span>",
+            '  <span class="scenario-prefix">' + escapeHtml(scenarioPrefixText(card.suite, card.storageEngine, card.scenarioId)) + ":</span>",
             '  <span class="scenario-title">' + escapeHtml(prettyToken(card.scenarioName)) + "</span>",
             subtitleParts.length
               ? '  <span class="scenario-subtitle">' + escapeHtml(prettyToken(subtitleParts.join(" • "))) + "</span>"
@@ -1197,7 +1241,7 @@
           const tr = document.createElement("tr");
           tr.innerHTML = [
             "<td>" + escapeHtml(entry.branch) + "</td>",
-            "<td>" + escapeHtml(suiteLabel(diff.suite)) + "</td>",
+            "<td>" + escapeHtml(runLaneLabel(diff)) + "</td>",
             "<td>" + escapeHtml(diff.scenarioId) + "</td>",
             "<td>" + escapeHtml(diff.descriptor.label) + "</td>",
             '<td class="num ' + diff.deltaClass + '"' + inlineStyleAttr(diff.deltaStyle) + inlineTitleAttr(deltaTooltip(diff)) + ">" + escapeHtml(formatPct(diff.deltaPct)) + "</td>",

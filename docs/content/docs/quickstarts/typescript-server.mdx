@@ -83,7 +83,7 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 
 Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 For server-owned work, use `context.asBackend()`. For embedded or local-only setups without a
-server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/context-setup/server-setup)
+server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/getting-started/server-setup)
 covers those patterns in more detail.
 
 <Accordions type="single">
@@ -173,4 +173,4 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 - [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;identity providers, JWKS, and session resolution
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
-- [Server Setup](/docs/context-setup/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment
+- [Server Setup](/docs/getting-started/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment

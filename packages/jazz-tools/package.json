@@ -43,6 +43,14 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
+    "./dev": {
+      "types": "./dist/dev/index.d.ts",
+      "default": "./dist/dev/index.js"
+    },
+    "./dev/vite": {
+      "types": "./dist/dev/vite.d.ts",
+      "default": "./dist/dev/vite.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",
