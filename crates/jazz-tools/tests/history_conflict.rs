@@ -610,7 +610,7 @@ async fn subscription_reflects_concurrent_update() {
 ///
 /// ```text
 /// alice: create → update "v1" → update "v2" → update "v3"
-/// bob: queries → sees "v3"
+///   bob: connected the whole time ─────────────────────────► sees "v3"
 /// ```
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
@@ -626,11 +626,35 @@ async fn sequential_updates_preserve_latest() {
         .connect()
         .await;
 
-    // Alice creates and updates 3 times
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-seq")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates, Bob sees the shared starting point, then Alice updates 3 times.
     let (todo_id, _) = alice
         .create("todos", todo_values("v0"))
         .await
         .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees v0",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1[0] == Value::Text("v0".to_string()))
+            .then_some(())
+        },
+    )
+    .await;
 
     for version in ["v1", "v2", "v3"] {
         alice
@@ -642,8 +666,7 @@ async fn sequential_updates_preserve_latest() {
             .expect("update");
     }
 
-    // Wait for alice to see v3 at EdgeServer
-    let query = QueryBuilder::new("todos").build();
+    // Both connected participants should converge on the last sequential write.
     wait_for_query(
         &alice,
         query.clone(),
@@ -654,22 +677,11 @@ async fn sequential_updates_preserve_latest() {
     )
     .await;
 
-    // Bob connects fresh, must see v3
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-seq")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    // Fresh-client replay is the slowest step in this file on loaded CI runners.
-    let fresh_client_timeout = Duration::from_secs(45);
     let bob_rows = wait_for_query(
         &bob,
         query,
         Some(DurabilityTier::EdgeServer),
-        fresh_client_timeout,
+        QUERY_TIMEOUT,
         "bob sees v3",
         |rows| {
             (rows.len() == 1
