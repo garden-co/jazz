@@ -1,23 +1,6 @@
-export interface JazzServerOptions {
-  port?: number;
-  adminSecret?: string;
-  appId?: string;
-  allowAnonymous?: boolean;
-  allowDemo?: boolean;
-  dataDir?: string;
-  inMemory?: boolean;
-  jwksUrl?: string;
-  catalogueAuthority?: "local" | "forward";
-  catalogueAuthorityUrl?: string;
-  catalogueAuthorityAdminSecret?: string;
-}
+import type { JazzPluginOptions } from "./vite.js";
 
-export interface JazzPluginOptions {
-  server?: boolean | string | JazzServerOptions;
-  adminSecret?: string;
-  schemaDir?: string;
-  appId?: string;
-}
+export type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
 export interface NextConfigLike {
   env?: Record<string, string | undefined>;
@@ -35,8 +18,6 @@ type NextConfigFactory = (
 ) => NextConfigLike | Promise<NextConfigLike>;
 
 type NextConfigInput = NextConfigLike | NextConfigFactory;
-
-const DEVELOPMENT_PHASE = "phase-development-server";
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
   return Array.from(new Set([...(existing ?? []), "jazz-tools", "jazz-napi"]));
@@ -65,10 +46,6 @@ export function withJazz(
       ...resolved,
       serverExternalPackages: mergeServerExternalPackages(resolved.serverExternalPackages),
     };
-
-    if (phase !== DEVELOPMENT_PHASE) {
-      return merged;
-    }
 
     return merged;
   };

@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { __resetJazzNextPluginForTests, withJazz, type NextConfigLike } from "./next.js";
 
-const DEVELOPMENT_PHASE = "phase-development-server";
 const PRODUCTION_BUILD_PHASE = "phase-production-build";
 
 async function resolveWrappedConfig(
