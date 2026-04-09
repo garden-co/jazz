@@ -219,6 +219,14 @@ impl QueryManager {
                         operation: Operation::Update,
                     });
                 };
+                if auth_table_schema.policies.update.using.is_none()
+                    && auth_table_schema.policies.update.with_check.is_none()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
 
                 if let Some(policy) = auth_table_schema.policies.update.using.as_ref()
                     && !self.evaluate_current_authorization_policy_for_content(
@@ -261,51 +269,56 @@ impl QueryManager {
                         operation: Operation::Update,
                     });
                 }
-            } else if let Some(policy) = &using_policy {
-                let mut visited = HashSet::new();
-                if !self.evaluate_policy_for_content_with_context_for_row(
-                    storage,
-                    policy,
-                    old_data_for_policy,
-                    old_provenance_for_policy,
-                    &descriptor,
-                    session,
-                    table,
-                    branch,
-                    id,
-                    0,
-                    &mut visited,
-                ) {
+            } else {
+                if using_policy.is_none() && check_policy.is_none() {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Update,
                     });
                 }
-            }
 
-            if self
-                .local_write_authorization_context(branch, Some(session))
-                .is_none()
-                && let Some(policy) = check_policy
-            {
-                let mut visited = HashSet::new();
-                if !self.evaluate_policy_for_content_with_context_for_row(
-                    storage,
-                    &policy,
-                    &new_data,
-                    new_provenance,
-                    &descriptor,
-                    session,
-                    table,
-                    branch,
-                    id,
-                    0,
-                    &mut visited,
-                ) {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Update,
-                    });
+                if let Some(policy) = using_policy.as_ref() {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        old_data_for_policy,
+                        old_provenance_for_policy,
+                        &descriptor,
+                        session,
+                        table,
+                        branch,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
+                }
+
+                if let Some(policy) = check_policy.as_ref() {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        &new_data,
+                        new_provenance,
+                        &descriptor,
+                        session,
+                        table,
+                        branch,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
                 }
             }
         }
@@ -471,47 +484,58 @@ impl QueryManager {
                     table,
                     origin_schema_hash.as_ref(),
                 );
-                let allowed = auth_schema
-                    .get(&auth_table_name)
-                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
-                    .map(|policy| {
-                        self.evaluate_current_authorization_policy_for_content(
-                            storage,
-                            object_id,
-                            self.current_branch().as_str(),
-                            auth_table_name,
-                            policy,
-                            &data,
-                            &provenance,
-                            session,
-                            Operation::Insert,
-                            &auth_schema,
-                            &auth_context,
-                        )
-                    })
-                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
-                if !allowed {
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                let Some(policy) = auth_table_schema.policies.insert.with_check.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    object_id,
+                    self.current_branch().as_str(),
+                    auth_table_name,
+                    policy,
+                    &data,
+                    &provenance,
+                    session,
+                    Operation::Insert,
+                    &auth_schema,
+                    &auth_context,
+                ) {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Insert,
                     });
                 }
-            } else if let Some(policy) = insert_policy
-                && !self.evaluate_policy_for_content_with_context(
+            } else {
+                let Some(policy) = insert_policy.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                if !self.evaluate_policy_for_content_with_context(
                     storage,
-                    &policy,
+                    policy,
                     &data,
                     &provenance,
                     &descriptor,
                     session,
                     table,
                     self.current_branch().as_str(),
-                )
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Insert,
-                });
+                ) {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
             }
         }
 
@@ -629,47 +653,58 @@ impl QueryManager {
                     table,
                     origin_schema_hash.as_ref(),
                 );
-                let allowed = auth_schema
-                    .get(&auth_table_name)
-                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
-                    .map(|policy| {
-                        self.evaluate_current_authorization_policy_for_content(
-                            storage,
-                            object_id,
-                            branch,
-                            auth_table_name,
-                            policy,
-                            &data,
-                            &provenance,
-                            session,
-                            Operation::Insert,
-                            &auth_schema,
-                            &auth_context,
-                        )
-                    })
-                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
-                if !allowed {
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                let Some(policy) = auth_table_schema.policies.insert.with_check.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    object_id,
+                    branch,
+                    auth_table_name,
+                    policy,
+                    &data,
+                    &provenance,
+                    session,
+                    Operation::Insert,
+                    &auth_schema,
+                    &auth_context,
+                ) {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Insert,
                     });
                 }
-            } else if let Some(policy) = insert_policy
-                && !self.evaluate_policy_for_content_with_context(
+            } else {
+                let Some(policy) = insert_policy.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                if !self.evaluate_policy_for_content_with_context(
                     storage,
-                    &policy,
+                    policy,
                     &data,
                     &provenance,
                     &descriptor,
                     session,
                     table,
                     branch,
-                )
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Insert,
-                });
+                ) {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
             }
         }
 
@@ -1004,7 +1039,15 @@ impl QueryManager {
             branch,
         );
         if graphs.is_empty() {
-            return true;
+            return graph_clauses.iter().all(|clause| match clause {
+                ComplexClause::Inherits { via_column, .. } => descriptor
+                    .column_index(via_column)
+                    .and_then(|col_idx| {
+                        super::encoding::column_is_null(descriptor, content, col_idx).ok()
+                    })
+                    .unwrap_or(false),
+                _ => false,
+            });
         }
 
         let branches = vec![branch.to_string()];
@@ -1211,7 +1254,7 @@ impl QueryManager {
                     visited,
                 )
             })
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         visited.remove(&(table_name, row_id, operation));
         local_allow
@@ -1511,48 +1554,57 @@ impl QueryManager {
                     });
                 };
 
-                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
-                    && !self.evaluate_current_authorization_policy_for_content(
-                        storage,
-                        id,
-                        &current_branch,
-                        auth_table_name,
-                        policy,
-                        &old_data,
-                        &old_provenance,
-                        session,
-                        Operation::Delete,
-                        &auth_schema,
-                        &auth_context,
-                    )
-                {
+                let Some(policy) = auth_table_schema.policies.effective_delete_using() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
+
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    id,
+                    &current_branch,
+                    auth_table_name,
+                    policy,
+                    &old_data,
+                    &old_provenance,
+                    session,
+                    Operation::Delete,
+                    &auth_schema,
+                    &auth_context,
+                ) {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
                     });
                 }
-            } else if let Some(policy) = using_policy
-                && {
-                    let mut visited = HashSet::new();
-                    !self.evaluate_policy_for_content_with_context_for_row(
-                        storage,
-                        &policy,
-                        &old_data,
-                        &old_provenance,
-                        &descriptor,
-                        session,
-                        &table,
-                        &current_branch,
-                        id,
-                        0,
-                        &mut visited,
-                    )
+            } else {
+                let Some(policy) = using_policy.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
+                let mut visited = HashSet::new();
+                if !self.evaluate_policy_for_content_with_context_for_row(
+                    storage,
+                    policy,
+                    &old_data,
+                    &old_provenance,
+                    &descriptor,
+                    session,
+                    &table,
+                    &current_branch,
+                    id,
+                    0,
+                    &mut visited,
+                ) {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
                 }
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Delete,
-                });
             }
         }
 
@@ -1672,31 +1724,42 @@ impl QueryManager {
                     });
                 };
 
-                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
-                    && !self.evaluate_current_authorization_policy_for_content(
-                        storage,
-                        id,
-                        branch,
-                        auth_table_name,
-                        policy,
-                        old_data_for_policy,
-                        old_provenance_for_policy,
-                        session,
-                        Operation::Delete,
-                        &auth_schema,
-                        &auth_context,
-                    )
-                {
+                let Some(policy) = auth_table_schema.policies.effective_delete_using() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
+
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    id,
+                    branch,
+                    auth_table_name,
+                    policy,
+                    old_data_for_policy,
+                    old_provenance_for_policy,
+                    session,
+                    Operation::Delete,
+                    &auth_schema,
+                    &auth_context,
+                ) {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
                     });
                 }
-            } else if let Some(policy) = using_policy {
+            } else {
+                let Some(policy) = using_policy.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
                 let mut visited = HashSet::new();
                 if !self.evaluate_policy_for_content_with_context_for_row(
                     storage,
-                    &policy,
+                    policy,
                     old_data_for_policy,
                     old_provenance_for_policy,
                     &descriptor,

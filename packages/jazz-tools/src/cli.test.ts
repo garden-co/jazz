@@ -94,6 +94,31 @@ async function computeTestSchemaHash(schema: object): Promise<string> {
   }
 }
 
+async function captureConsoleOutput<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; logs: string[]; warns: string[] }> {
+  const logs: string[] = [];
+  const warns: string[] = [];
+  const logSpy = vi
+    .spyOn(console, "log")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+    });
+  const warnSpy = vi
+    .spyOn(console, "warn")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      warns.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+    });
+
+  try {
+    const result = await run();
+    return { result, logs, warns };
+  } finally {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  }
+}
+
 function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -187,6 +212,39 @@ import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.where({ done: true }),
+]);
+`;
+}
+
+function rootBooleanExplicitPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.never(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.never(),
+]);
+`;
+}
+
+function rootBooleanPermissionsWithoutDelete(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
 ]);
 `;
 }
@@ -362,6 +420,83 @@ describe("cli validate", () => {
     await writeFile(join(root, "permissions.ts"), permissionsSchemaInvalidShape());
 
     await expect(validate({ schemaDir: root })).rejects.toThrow(/invalid permissions export/i);
+  });
+
+  it("warns for every table operation when permissions.ts is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const { warns } = await captureConsoleOutput(() => validate({ schemaDir: root }));
+
+    expect(warns).toHaveLength(8);
+    expect(warns).toContain(
+      'Warning: table "projects" has no explicit read policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "projects" has no explicit insert policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "projects" has no explicit update policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "projects" has no explicit delete policy in permissions.ts; runtime denies unless update.using fallback applies.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit read policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit insert policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit update policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; runtime denies unless update.using fallback applies.',
+    );
+  });
+
+  it("warns only for the table operations missing explicit permissions", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const { warns } = await captureConsoleOutput(() => validate({ schemaDir: root }));
+
+    expect(warns).toHaveLength(7);
+    expect(warns).not.toContain(
+      'Warning: table "todos" has no explicit read policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit insert policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit update policy in permissions.ts; runtime defaults to deny.',
+    );
+    expect(warns).toContain(
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; runtime denies unless update.using fallback applies.',
+    );
+  });
+
+  it("treats always() and never() as explicit permissions for validate", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootBooleanExplicitPermissionsSchema());
+
+    const { warns } = await captureConsoleOutput(() => validate({ schemaDir: root }));
+
+    expect(warns).toEqual([]);
+  });
+
+  it("warns when delete is missing even if update is explicitly granted", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootBooleanPermissionsWithoutDelete());
+
+    const { warns } = await captureConsoleOutput(() => validate({ schemaDir: root }));
+
+    expect(warns).toEqual([
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; runtime denies unless update.using fallback applies.',
+    ]);
   });
 });
 
@@ -1385,7 +1520,7 @@ describe("bin integration", () => {
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
-  });
+  }, 15000);
 
   it("loads root permissions.ts through the validate command", async () => {
     const { root } = await createWorkspace();

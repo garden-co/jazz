@@ -58,18 +58,126 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
+fn allow_all_policies() -> jazz_tools::query_manager::types::TablePolicies {
+    let allow = jazz_tools::query_manager::policy::PolicyExpr::True;
+    jazz_tools::query_manager::types::TablePolicies::new()
+        .with_select(allow.clone())
+        .with_insert(allow.clone())
+        .with_update(Some(allow.clone()), allow.clone())
+        .with_delete(allow)
+}
+
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
-        .table(TableSchema::builder("projects").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean)
                 .nullable_column("description", ColumnType::Text)
                 .nullable_fk_column("parent", "todos")
-                .nullable_fk_column("project", "projects"),
+                .nullable_fk_column("project", "projects")
+                .policies(allow_all_policies()),
         )
         .build()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadView {
+    bundle_object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadResponse {
+    head: Option<PermissionsHeadView>,
+}
+
+fn split_inline_policies(
+    schema: &jazz_tools::Schema,
+) -> (
+    jazz_tools::Schema,
+    std::collections::HashMap<String, jazz_tools::query_manager::types::TablePolicies>,
+) {
+    let mut structural_schema = jazz_tools::Schema::with_capacity(schema.len());
+    let mut permissions = std::collections::HashMap::new();
+
+    for (table_name, table_schema) in schema {
+        structural_schema.insert(
+            *table_name,
+            TableSchema {
+                columns: table_schema.columns.clone(),
+                policies: jazz_tools::query_manager::types::TablePolicies::default(),
+            },
+        );
+
+        if table_schema.policies != jazz_tools::query_manager::types::TablePolicies::default() {
+            permissions.insert(table_name.to_string(), table_schema.policies.clone());
+        }
+    }
+
+    (structural_schema, permissions)
+}
+
+async fn publish_schema_and_permissions(server_url: &str, schema: &jazz_tools::Schema) {
+    let http_client = reqwest::Client::new();
+    let (structural_schema, permissions) = split_inline_policies(schema);
+
+    let published_schema = http_client
+        .post(format!("{server_url}/admin/schemas"))
+        .header("Content-Type", "application/json")
+        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
+        .json(&serde_json::json!({ "schema": structural_schema }))
+        .send()
+        .await
+        .expect("publish schema request")
+        .error_for_status()
+        .expect("publish schema status")
+        .json::<PublishSchemaResponse>()
+        .await
+        .expect("publish schema response");
+
+    if permissions.is_empty() {
+        return;
+    }
+
+    let current_head = http_client
+        .get(format!("{server_url}/admin/permissions/head"))
+        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
+        .send()
+        .await
+        .expect("fetch permissions head request")
+        .error_for_status()
+        .expect("fetch permissions head status")
+        .json::<PermissionsHeadResponse>()
+        .await
+        .expect("fetch permissions head response");
+
+    http_client
+        .post(format!("{server_url}/admin/permissions"))
+        .header("Content-Type", "application/json")
+        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
+        .json(&serde_json::json!({
+            "schemaHash": published_schema.hash,
+            "permissions": permissions,
+            "expectedParentBundleObjectId": current_head.head.map(|head| head.bundle_object_id),
+        }))
+        .send()
+        .await
+        .expect("publish permissions request")
+        .error_for_status()
+        .expect("publish permissions status");
 }
 
 async fn setup_test_app(temp_dir: &TempDir) -> Router {
@@ -734,9 +842,11 @@ async fn test_server_resync() {
 
     // IMPORTANT: Client app_id must match server's app_id for schema sync to work
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+    publish_schema_and_permissions(&server.base_url(), &test_schema()).await;
 
     // 2. Create client with todos schema, add data
-    // This client has admin_secret so it can sync the catalogue (schema) to server.
+    // This client has admin_secret for writes, but the test seeds schema and
+    // permissions explicitly because schema sync no longer carries policies.
     // JWT token provides a session for the client's SSE and sync requests.
     {
         let context = AppContext {

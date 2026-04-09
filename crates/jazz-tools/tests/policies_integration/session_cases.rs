@@ -10,7 +10,6 @@ use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
-use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -25,11 +24,24 @@ const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
 fn join_select_policy_schema() -> Schema {
     SchemaBuilder::new()
-        .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("orgs")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
-                .fk_column("org_id", "orgs"),
+                .fk_column("org_id", "orgs")
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True),
+                ),
         )
         .table(
             TableSchema::builder("team_memberships")
@@ -37,6 +49,7 @@ fn join_select_policy_schema() -> Schema {
                 .fk_column("team_id", "teams")
                 .policies(
                     TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
                         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
                 ),
         )
@@ -44,7 +57,7 @@ fn join_select_policy_schema() -> Schema {
 }
 
 /// Schema for documents owned by `owner_id` with INSERT/UPDATE/DELETE restricted
-/// to the row owner. SELECT is unrestricted (no policy) so observers can read.
+/// to the row owner. SELECT is explicitly open so observers can read.
 fn write_policy_schema() -> Schema {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
 
@@ -55,6 +68,7 @@ fn write_policy_schema() -> Schema {
                 .column("title", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
+                        .with_select(PolicyExpr::True)
                         .with_insert(owner_policy.clone())
                         .with_update(Some(owner_policy.clone()), PolicyExpr::True)
                         .with_delete(owner_policy),
@@ -74,7 +88,12 @@ fn write_check_policy_schema() -> Schema {
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy)),
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(owner_policy.clone())
+                        .with_update(Some(PolicyExpr::True), owner_policy),
+                ),
         )
         .build()
 }
@@ -85,10 +104,14 @@ fn in_session_array_policy_schema() -> Schema {
             TableSchema::builder("team_documents")
                 .column("team_id", ColumnType::Uuid)
                 .column("title", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::in_session(
-                    "team_id",
-                    vec!["claims".into(), "team_ids".into()],
-                ))),
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::in_session(
+                            "team_id",
+                            vec!["claims".into(), "team_ids".into()],
+                        )),
+                ),
         )
         .build()
 }

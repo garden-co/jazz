@@ -783,10 +783,10 @@ where
         Operation::Delete => parent_schema.policies.effective_delete_using(),
     };
 
-    // If parent has no policy, allow access
+    // Missing parent policy fails closed.
     let parent_policy = match parent_policy {
         Some(p) => p,
-        None => return true,
+        None => return false,
     };
 
     // Recursively evaluate the parent's policy

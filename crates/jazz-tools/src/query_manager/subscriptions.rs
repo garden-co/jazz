@@ -169,14 +169,7 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        let compile_schema: Schema = schema
-            .iter()
-            .map(|(table_name, table_schema)| {
-                let mut structural = table_schema.clone();
-                structural.policies = crate::query_manager::types::TablePolicies::default();
-                (*table_name, structural)
-            })
-            .collect();
+        let compile_schema = Self::compile_schema_with_passthrough_select_policies(schema);
 
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {

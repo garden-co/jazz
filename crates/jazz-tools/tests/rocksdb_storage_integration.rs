@@ -10,7 +10,7 @@ use jazz_tools::{
     AppContext, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
-use support::{TestingClient, wait_for_query};
+use support::{TestingClient, publish_schema_and_permissions, wait_for_query};
 use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -20,7 +20,8 @@ fn todos_schema() -> jazz_tools::Schema {
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
+                .column("completed", ColumnType::Boolean)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }
@@ -30,12 +31,14 @@ fn multi_table_schema() -> jazz_tools::Schema {
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
+                .column("completed", ColumnType::Boolean)
+                .policies(support::allow_all_policies()),
         )
         .table(
             TableSchema::builder("notes")
                 .column("body", ColumnType::Text)
-                .column("priority", ColumnType::Integer),
+                .column("priority", ColumnType::Integer)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }
@@ -46,7 +49,8 @@ fn indexed_schema() -> jazz_tools::Schema {
             TableSchema::builder("products")
                 .column("name", ColumnType::Text)
                 .column("price", ColumnType::Double)
-                .column("category", ColumnType::Text),
+                .column("category", ColumnType::Text)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }

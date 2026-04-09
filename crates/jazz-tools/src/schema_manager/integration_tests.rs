@@ -3900,7 +3900,8 @@ mod tests {
             .table(
                 TableSchema::builder("items")
                     .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .build();
 
@@ -3953,7 +3954,8 @@ mod tests {
             .table(
                 TableSchema::builder("items")
                     .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .build();
 

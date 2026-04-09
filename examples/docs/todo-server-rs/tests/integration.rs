@@ -58,16 +58,30 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
+fn allow_all_policies() -> jazz_tools::query_manager::types::TablePolicies {
+    let allow = jazz_tools::query_manager::policy::PolicyExpr::True;
+    jazz_tools::query_manager::types::TablePolicies::new()
+        .with_select(allow.clone())
+        .with_insert(allow.clone())
+        .with_update(Some(allow.clone()), allow.clone())
+        .with_delete(allow)
+}
+
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
-        .table(TableSchema::builder("projects").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean)
                 .nullable_column("description", ColumnType::Text)
                 .nullable_fk_column("parent", "todos")
-                .nullable_fk_column("project", "projects"),
+                .nullable_fk_column("project", "projects")
+                .policies(allow_all_policies()),
         )
         .build()
 }

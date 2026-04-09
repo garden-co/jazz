@@ -69,7 +69,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                     visited_referencing,
                 )
             })
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
@@ -348,7 +348,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         let parent_policy = match parent_policy {
             Some(p) => p,
-            None => return true,
+            None => return false,
         };
 
         let parent_row = Row::new(

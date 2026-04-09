@@ -61,10 +61,12 @@ fn file_referencing_schema(array_edge: bool) -> Schema {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let via_column = if array_edge { "images" } else { "image" };
 
-    let files_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
-        owner_policy.clone(),
-        PolicyExpr::inherits_referencing(Operation::Select, "todos", via_column),
-    ]));
+    let files_policies = TablePolicies::new()
+        .with_insert(PolicyExpr::True)
+        .with_select(PolicyExpr::or(vec![
+            owner_policy.clone(),
+            PolicyExpr::inherits_referencing(Operation::Select, "todos", via_column),
+        ]));
 
     let mut schema = Schema::new();
     schema.insert(

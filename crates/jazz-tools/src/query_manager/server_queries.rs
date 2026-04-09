@@ -22,6 +22,12 @@ use super::types::{
     Value,
 };
 
+fn schema_has_any_select_policy(schema: &Schema) -> bool {
+    schema
+        .values()
+        .any(|table_schema| table_schema.policies.select.using.is_some())
+}
+
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
     PendingSchema,
@@ -474,10 +480,10 @@ impl QueryManager {
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select.using.as_ref())
         else {
-            return auth_schema.contains_key(&table_name);
+            return false;
         };
         let Some(session) = session else {
-            return false;
+            return matches!(select_policy, PolicyExpr::True);
         };
 
         self.evaluate_authorization_policy(
@@ -514,12 +520,8 @@ impl QueryManager {
             }
             return Vec::new();
         };
-
-        if auth_schema
-            .values()
-            .all(|table_schema| table_schema.policies.select.using.is_none())
-        {
-            return graph.current_result();
+        if !schema_has_any_select_policy(&auth_schema) {
+            return Vec::new();
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -567,12 +569,8 @@ impl QueryManager {
             }
             return HashSet::new();
         };
-
-        if auth_schema
-            .values()
-            .all(|table_schema| table_schema.policies.select.using.is_none())
-        {
-            return graph.sync_scope_object_ids();
+        if !schema_has_any_select_policy(&auth_schema) {
+            return HashSet::new();
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -870,13 +868,21 @@ impl QueryManager {
                     .get_client(sub.client_id)
                     .and_then(|c| c.session.clone())
             });
+            let uses_explicit_authorization_filtering = session_for_policy.is_some()
+                && !self.client_bypasses_authorization_filtering(sub.client_id)
+                && self.authorization_differs_from_schema_context(&subscription_context);
+            let compile_schema = if uses_explicit_authorization_filtering {
+                Self::compile_schema_with_passthrough_select_policies(&schema_for_compile)
+            } else {
+                schema_for_compile.as_ref().clone()
+            };
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
             let graph = Self::compile_graph(
                 &query_for_compile,
-                &schema_for_compile,
+                &compile_schema,
                 session_for_policy.clone(),
                 &subscription_context,
             );
@@ -1454,7 +1460,11 @@ impl QueryManager {
         let policy = match policy {
             Some(p) => p,
             None => {
-                self.sync_manager.approve_permission_check(storage, check);
+                let reason = format!(
+                    "{:?} denied on table {} - no explicit current permission policy",
+                    check.operation, table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
                 return;
             }
         };
@@ -1570,7 +1580,13 @@ impl QueryManager {
         let new_provenance = Self::payload_tip_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
-            self.sync_manager.approve_permission_check(storage, check);
+            self.sync_manager.reject_permission_check(
+                check,
+                format!(
+                    "Update denied on table {} - no explicit current permission policy",
+                    table_name.0
+                ),
+            );
             return;
         }
 
@@ -1687,13 +1703,13 @@ impl QueryManager {
                     // Get the FK column to find the parent
                     let col_idx = match descriptor.column_index(via_column) {
                         Some(idx) => idx,
-                        None => continue, // Column not found
+                        None => return Vec::new(),
                     };
 
                     // Get the referenced table
                     let parent_table = match &descriptor.columns[col_idx].references {
                         Some(t) => *t,
-                        None => continue, // No FK reference
+                        None => return Vec::new(),
                     };
 
                     // Check if FK is NULL - if so, INHERITS passes
@@ -1707,13 +1723,13 @@ impl QueryManager {
                     let parent_id =
                         match super::encoding::decode_column(descriptor, content, col_idx) {
                             Ok(Value::Uuid(id)) => id,
-                            _ => continue, // Can't decode FK
+                            _ => return Vec::new(),
                         };
 
                     // Get parent's policy for the specified operation
                     let parent_schema = match self.schema.get(&parent_table) {
                         Some(s) => s,
-                        None => continue, // Parent table not in schema
+                        None => return Vec::new(),
                     };
 
                     let parent_policy = match operation {
@@ -1723,10 +1739,10 @@ impl QueryManager {
                         Operation::Delete => parent_schema.policies.effective_delete_using(),
                     };
 
-                    // If parent has no policy, INHERITS passes
+                    // Missing parent policy fails closed.
                     let parent_policy = match parent_policy {
                         Some(p) => p,
-                        None => continue,
+                        None => return Vec::new(),
                     };
 
                     // Create policy graph for INHERITS
@@ -1740,6 +1756,8 @@ impl QueryManager {
                         1,
                     ) {
                         graphs.push(graph);
+                    } else {
+                        return Vec::new();
                     }
                 }
                 ComplexClause::Exists { table, condition } => {
@@ -1752,11 +1770,15 @@ impl QueryManager {
                         branch,
                     ) {
                         graphs.push(graph);
+                    } else {
+                        return Vec::new();
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
                     if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, branch) {
                         graphs.push(graph);
+                    } else {
+                        return Vec::new();
                     }
                 }
                 ComplexClause::InheritsReferencing { .. } => {
@@ -1834,5 +1856,313 @@ impl QueryManager {
                     .reject_permission_check(state.pending_check, reason);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commit::{Commit, CommitId};
+    use crate::metadata::RowProvenance;
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::graph::{CompactNode, GraphNode, QueryGraph};
+    use crate::query_manager::graph_nodes::{
+        NodeId,
+        output::{OutputMode, OutputNode},
+    };
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, Tuple, TupleDescriptor, TupleElement,
+    };
+    use crate::storage::{
+        CatalogueManifest, CatalogueManifestOp, LoadedBranch, MemoryStorage, Storage, StorageError,
+    };
+    use crate::sync_manager::DurabilityTier;
+    use smallvec::SmallVec;
+    use std::cell::Cell;
+    use std::collections::{HashMap, HashSet};
+    use std::ops::Bound;
+
+    fn documents_schema_without_policies() -> Schema {
+        let mut schema = Schema::new();
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+        schema.insert(TableName::new("documents"), TableSchema::new(descriptor));
+        schema
+    }
+
+    fn output_graph_with_single_row(
+        table: &str,
+        descriptor: RowDescriptor,
+        row: Row,
+        branch: &str,
+    ) -> QueryGraph {
+        let mut graph = QueryGraph::new(TableName::new(table), descriptor.clone());
+        let tuple_descriptor = TupleDescriptor::single("", descriptor);
+        let mut output = OutputNode::with_tuple_descriptor(tuple_descriptor, OutputMode::Delta);
+        let tuple = Tuple::new_with_provenance(
+            vec![TupleElement::from_row(&row)],
+            [(row.id, BranchName::new(branch))].into_iter().collect(),
+        );
+        output.process_with_ordered_input(&[tuple]);
+        graph.nodes.push(CompactNode {
+            node: GraphNode::Output(output),
+            inputs: SmallVec::new(),
+            outputs: SmallVec::new(),
+        });
+        graph.output_node = NodeId(0);
+        graph
+    }
+
+    #[derive(Default)]
+    struct CountingStorage {
+        inner: MemoryStorage,
+        load_object_metadata_calls: Cell<usize>,
+        load_branch_calls: Cell<usize>,
+    }
+
+    impl CountingStorage {
+        fn total_loads(&self) -> usize {
+            self.load_object_metadata_calls.get() + self.load_branch_calls.get()
+        }
+    }
+
+    impl Storage for CountingStorage {
+        fn create_object(
+            &mut self,
+            id: ObjectId,
+            metadata: HashMap<String, String>,
+        ) -> Result<(), StorageError> {
+            self.inner.create_object(id, metadata)
+        }
+
+        fn load_object_metadata(
+            &self,
+            id: ObjectId,
+        ) -> Result<Option<HashMap<String, String>>, StorageError> {
+            self.load_object_metadata_calls
+                .set(self.load_object_metadata_calls.get() + 1);
+            self.inner.load_object_metadata(id)
+        }
+
+        fn load_branch(
+            &self,
+            object_id: ObjectId,
+            branch: &BranchName,
+        ) -> Result<Option<LoadedBranch>, StorageError> {
+            self.load_branch_calls.set(self.load_branch_calls.get() + 1);
+            self.inner.load_branch(object_id, branch)
+        }
+
+        fn append_commit(
+            &mut self,
+            object_id: ObjectId,
+            branch: &BranchName,
+            commit: Commit,
+        ) -> Result<(), StorageError> {
+            self.inner.append_commit(object_id, branch, commit)
+        }
+
+        fn delete_commit(
+            &mut self,
+            object_id: ObjectId,
+            branch: &BranchName,
+            commit_id: CommitId,
+        ) -> Result<(), StorageError> {
+            self.inner.delete_commit(object_id, branch, commit_id)
+        }
+
+        fn set_branch_tails(
+            &mut self,
+            object_id: ObjectId,
+            branch: &BranchName,
+            tails: Option<HashSet<CommitId>>,
+        ) -> Result<(), StorageError> {
+            self.inner.set_branch_tails(object_id, branch, tails)
+        }
+
+        fn store_ack_tier(
+            &mut self,
+            commit_id: CommitId,
+            tier: DurabilityTier,
+        ) -> Result<(), StorageError> {
+            self.inner.store_ack_tier(commit_id, tier)
+        }
+
+        fn append_catalogue_manifest_op(
+            &mut self,
+            app_id: ObjectId,
+            op: CatalogueManifestOp,
+        ) -> Result<(), StorageError> {
+            self.inner.append_catalogue_manifest_op(app_id, op)
+        }
+
+        fn append_catalogue_manifest_ops(
+            &mut self,
+            app_id: ObjectId,
+            ops: &[CatalogueManifestOp],
+        ) -> Result<(), StorageError> {
+            self.inner.append_catalogue_manifest_ops(app_id, ops)
+        }
+
+        fn load_catalogue_manifest(
+            &self,
+            app_id: ObjectId,
+        ) -> Result<Option<CatalogueManifest>, StorageError> {
+            self.inner.load_catalogue_manifest(app_id)
+        }
+
+        fn index_insert(
+            &mut self,
+            table: &str,
+            column: &str,
+            branch: &str,
+            value: &Value,
+            row_id: ObjectId,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .index_insert(table, column, branch, value, row_id)
+        }
+
+        fn index_remove(
+            &mut self,
+            table: &str,
+            column: &str,
+            branch: &str,
+            value: &Value,
+            row_id: ObjectId,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .index_remove(table, column, branch, value, row_id)
+        }
+
+        fn index_lookup(
+            &self,
+            table: &str,
+            column: &str,
+            branch: &str,
+            value: &Value,
+        ) -> Vec<ObjectId> {
+            self.inner.index_lookup(table, column, branch, value)
+        }
+
+        fn index_range(
+            &self,
+            table: &str,
+            column: &str,
+            branch: &str,
+            start: Bound<&Value>,
+            end: Bound<&Value>,
+        ) -> Vec<ObjectId> {
+            self.inner.index_range(table, column, branch, start, end)
+        }
+
+        fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+            self.inner.index_scan_all(table, column, branch)
+        }
+    }
+
+    #[test]
+    fn authorized_rows_short_circuit_before_loading_objects_when_no_select_policies_exist() {
+        let schema = documents_schema_without_policies();
+        let mut qm = QueryManager::new(crate::sync_manager::SyncManager::new());
+        qm.set_current_schema(schema.clone(), "test", "main");
+
+        let descriptor = schema
+            .get(&TableName::new("documents"))
+            .expect("documents schema")
+            .columns
+            .clone();
+        let row = Row::new(
+            ObjectId::new(),
+            encode_row(&descriptor, &[Value::Text("draft".into())]).expect("row encodes"),
+            CommitId([7; 32]),
+            RowProvenance::for_insert("seed", 0),
+        );
+        let graph = output_graph_with_single_row("documents", descriptor, row, "main");
+        let storage = CountingStorage::default();
+        let schema_context = qm.schema_context.clone();
+
+        let visible_rows = qm.authorized_rows_from_graph(
+            &storage,
+            &graph,
+            &schema_context,
+            &HashMap::new(),
+            Some(&Session::new("alice")),
+        );
+
+        assert!(visible_rows.is_empty());
+        assert_eq!(
+            storage.total_loads(),
+            0,
+            "missing read policies should short-circuit before provenance authorization",
+        );
+    }
+
+    #[test]
+    fn authorized_scope_short_circuit_before_loading_objects_when_no_select_policies_exist() {
+        let schema = documents_schema_without_policies();
+        let mut qm = QueryManager::new(crate::sync_manager::SyncManager::new());
+        qm.set_current_schema(schema.clone(), "test", "main");
+
+        let descriptor = schema
+            .get(&TableName::new("documents"))
+            .expect("documents schema")
+            .columns
+            .clone();
+        let row = Row::new(
+            ObjectId::new(),
+            encode_row(&descriptor, &[Value::Text("draft".into())]).expect("row encodes"),
+            CommitId([9; 32]),
+            RowProvenance::for_insert("seed", 0),
+        );
+        let graph = output_graph_with_single_row("documents", descriptor, row, "main");
+        let storage = CountingStorage::default();
+        let schema_context = qm.schema_context.clone();
+
+        let visible_scope = qm.authorized_scope_from_graph(
+            &storage,
+            &graph,
+            &schema_context,
+            &HashMap::new(),
+            Some(&Session::new("alice")),
+        );
+
+        assert!(visible_scope.is_empty());
+        assert_eq!(
+            storage.total_loads(),
+            0,
+            "missing read policies should short-circuit before provenance authorization",
+        );
+    }
+
+    #[test]
+    fn create_policy_graphs_returns_none_for_unresolvable_complex_clause() {
+        let schema = documents_schema_without_policies();
+        let mut qm = QueryManager::new(crate::sync_manager::SyncManager::new());
+        qm.set_current_schema(schema.clone(), "test", "main");
+
+        let descriptor = schema
+            .get(&TableName::new("documents"))
+            .expect("documents schema")
+            .columns
+            .clone();
+        let content = encode_row(&descriptor, &[Value::Text("draft".into())]).expect("row encodes");
+
+        let graphs = qm.create_policy_graphs_for_complex_clauses(
+            &[ComplexClause::Inherits {
+                operation: Operation::Select,
+                via_column: "missing_parent_id".into(),
+                max_depth: Some(4),
+            }],
+            &content,
+            &descriptor,
+            &TableName::new("documents"),
+            &Session::new("alice"),
+            "main",
+        );
+
+        assert!(
+            graphs.is_empty(),
+            "unresolvable complex clauses should deny directly instead of building a false graph",
+        );
     }
 }

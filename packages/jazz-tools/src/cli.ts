@@ -15,6 +15,7 @@ import type { DefinedMigration } from "./migrations.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { Lens, SqlType } from "./schema.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "./schema-loader.js";
+import { collectMissingExplicitPolicyDiagnostics } from "./schema-permissions.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
@@ -42,6 +43,17 @@ export interface SchemaExportOptions {
 
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
+
+function formatMissingExplicitPolicyWarning(
+  tableName: string,
+  operation: "read" | "insert" | "update" | "delete",
+): string {
+  if (operation === "delete") {
+    return `Warning: table "${tableName}" has no explicit delete policy in permissions.ts; runtime denies unless update.using fallback applies.`;
+  }
+
+  return `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; runtime defaults to deny.`;
+}
 
 function parseArgs(): { command: string; options: BuildOptions } {
   const args = process.argv.slice(2);
@@ -80,6 +92,10 @@ async function pathExists(path: string): Promise<boolean> {
 export async function validate(options: BuildOptions): Promise<void> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   const tableCount = compiled.schema.tables.length;
+  const missingExplicitPolicies = collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  );
   console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
   if (compiled.permissionsFile) {
     console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
@@ -87,6 +103,9 @@ export async function validate(options: BuildOptions): Promise<void> {
     console.log(
       "Use `jazz-tools permissions status` or `jazz-tools permissions push` for auth publication.",
     );
+  }
+  for (const diagnostic of missingExplicitPolicies) {
+    console.warn(formatMissingExplicitPolicyWarning(diagnostic.tableName, diagnostic.operation));
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }

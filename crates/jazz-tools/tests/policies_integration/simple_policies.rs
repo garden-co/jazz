@@ -26,6 +26,20 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .policies(policies)
 }
 
+fn delete_fallback_schema(table_name: &str) -> Schema {
+    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+
+    SchemaBuilder::new()
+        .table(make_documents_schema(
+            table_name,
+            TablePolicies::default()
+                .with_select(PolicyExpr::True)
+                .with_insert(owner_policy.clone())
+                .with_update(Some(owner_policy), PolicyExpr::True),
+        ))
+        .build()
+}
+
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
     vec![owner_id.into(), title.into(), archived.into()]
 }
@@ -171,11 +185,15 @@ async fn insert_policies_boolean() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_insert_true",
-            TablePolicies::new().with_insert(PolicyExpr::True),
+            TablePolicies::new()
+                .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True),
         ))
         .table(make_documents_schema(
             "documents_insert_false",
-            TablePolicies::new().with_insert(PolicyExpr::False),
+            TablePolicies::new()
+                .with_insert(PolicyExpr::False)
+                .with_select(PolicyExpr::True),
         ))
         .build();
 
@@ -212,6 +230,83 @@ async fn insert_policies_boolean() {
     assert_ne!(
         insert_false_id, insert_true_id,
         "seed ids should be distinct"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that omitting `INSERT` denies session-scoped writes even when
+/// reads stay explicitly open.
+///
+/// Alice inserts into two tables:
+/// - `documents_insert_explicit`: insert allowed by an explicit policy
+/// - `documents_insert_missing`: insert denied because `insert` is omitted
+///
+/// Bob reads through an explicit `SELECT True` grant on both tables, so the
+/// only difference is whether `INSERT` was declared.
+#[tokio::test]
+async fn insert_policies_deny_by_default_when_insert_is_omitted() {
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents_insert_explicit",
+            TablePolicies::default()
+                .with_select(PolicyExpr::True)
+                .with_insert(PolicyExpr::True),
+        ))
+        .table(make_documents_schema(
+            "documents_insert_missing",
+            TablePolicies::default().with_select(PolicyExpr::True),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
+    let explicit_id = seed_document(
+        &alice,
+        "documents_insert_explicit",
+        "alice",
+        "visible",
+        false,
+    )
+    .await;
+    let missing_id = seed_document(
+        &alice,
+        "documents_insert_missing",
+        "alice",
+        "hidden by omission",
+        false,
+    )
+    .await;
+
+    let explicit_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_insert_explicit").build(),
+        "bob sees row from explicitly granted insert",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == explicit_id
+                        && *values == boolean_policy_document_values("alice", "visible", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(explicit_rows.len(), 1);
+
+    let missing_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_insert_missing").build(),
+        "bob does not see row from omitted insert policy",
+        Some,
+    )
+    .await;
+    assert!(missing_rows.is_empty());
+    assert!(
+        missing_rows.iter().all(|(id, _)| *id != missing_id),
+        "omitting INSERT should deny the session-scoped write"
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -297,6 +392,76 @@ async fn select_policies_boolean() {
     server.shutdown().await;
 }
 
+/// Verifies that omitting `SELECT` denies session-scoped reads even when the
+/// row was accepted by an explicit `INSERT` policy.
+#[tokio::test]
+async fn select_policies_deny_by_default_when_select_is_omitted() {
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents_select_explicit",
+            TablePolicies::default()
+                .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True),
+        ))
+        .table(make_documents_schema(
+            "documents_select_missing",
+            TablePolicies::default().with_insert(PolicyExpr::True),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
+    let visible_id = seed_document(
+        &alice,
+        "documents_select_explicit",
+        "alice",
+        "visible",
+        false,
+    )
+    .await;
+    let hidden_id = seed_document(
+        &alice,
+        "documents_select_missing",
+        "alice",
+        "hidden by omission",
+        false,
+    )
+    .await;
+
+    let visible_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_select_explicit").build(),
+        "bob sees row when select is explicit",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == visible_id
+                        && *values == boolean_policy_document_values("alice", "visible", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(visible_rows.len(), 1);
+
+    let hidden_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_select_missing").build(),
+        "bob sees no rows when select is omitted",
+        Some,
+    )
+    .await;
+    assert!(hidden_rows.is_empty());
+    assert!(
+        hidden_rows.iter().all(|(id, _)| *id != hidden_id),
+        "omitting SELECT should hide persisted rows from session queries"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// Verifies that a literal `SELECT archived = false` policy filters archived
 /// rows out of query results.
 ///
@@ -373,12 +538,14 @@ async fn update_policies_boolean() {
             "documents_update_true",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True)
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True),
         ))
         .table(make_documents_schema(
             "documents_update_false",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True)
                 .with_update(Some(PolicyExpr::False), PolicyExpr::False),
         ))
         .build();
@@ -441,6 +608,102 @@ async fn update_policies_boolean() {
     server.shutdown().await;
 }
 
+/// Verifies that omitting `UPDATE` rejects session-scoped writes while leaving
+/// explicit read access intact.
+#[tokio::test]
+async fn update_policies_deny_by_default_when_update_is_omitted() {
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents_update_explicit",
+            TablePolicies::default()
+                .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True)
+                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+        ))
+        .table(make_documents_schema(
+            "documents_update_missing",
+            TablePolicies::default()
+                .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
+    let explicit_id = seed_document(
+        &alice,
+        "documents_update_explicit",
+        "alice",
+        "original",
+        false,
+    )
+    .await;
+    let missing_id = seed_document(
+        &alice,
+        "documents_update_missing",
+        "alice",
+        "original",
+        false,
+    )
+    .await;
+
+    wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_update_missing").build(),
+        "bob sees seeded row before omitted update",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == missing_id
+                        && *values == boolean_policy_document_values("alice", "original", false)
+                })
+                .then_some(())
+        },
+    )
+    .await;
+
+    update_document_title(&alice, explicit_id, "updated").await;
+    update_document_title(&alice, missing_id, "blocked").await;
+
+    let explicit_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_update_explicit").build(),
+        "bob sees update when update is explicit",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == explicit_id
+                        && *values == boolean_policy_document_values("alice", "updated", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(explicit_rows.len(), 1);
+
+    let missing_rows = wait_for_rows(
+        &bob,
+        QueryBuilder::new("documents_update_missing").build(),
+        "bob still sees original row when update is omitted",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == missing_id
+                        && *values == boolean_policy_document_values("alice", "original", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(missing_rows.iter().any(|(id, values)| {
+        *id == missing_id && *values == boolean_policy_document_values("alice", "original", false)
+    }));
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// Verifies that simple boolean DELETE policies gate persisted row visibility
 /// without needing a larger subscription scenario.
 ///
@@ -463,12 +726,14 @@ async fn delete_policies_boolean() {
             "documents_delete_true",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True)
                 .with_delete(PolicyExpr::True),
         ))
         .table(make_documents_schema(
             "documents_delete_false",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::True)
                 .with_delete(PolicyExpr::False),
         ))
         .build();
@@ -528,6 +793,111 @@ async fn delete_policies_boolean() {
     server.shutdown().await;
 }
 
+/// Verifies that omitting `DELETE` still allows the runtime fallback to
+/// `update.using` for rows the caller owns.
+#[tokio::test]
+async fn delete_policies_use_update_using_fallback_for_owner_delete() {
+    let table_name = "documents_delete_missing_owner";
+    let schema = delete_fallback_schema(table_name);
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
+    let query = QueryBuilder::new(table_name).build();
+
+    let alice_doc = seed_document(&alice, table_name, "alice", "alice row", false).await;
+    let visible_values = boolean_policy_document_values("alice", "alice row", false);
+    let observer_rows = wait_for_rows(
+        &observer,
+        query.clone(),
+        "observer sees owner row before fallback delete",
+        |rows| has_row(&rows, alice_doc, &visible_values).then_some(rows),
+    )
+    .await;
+    assert_eq!(observer_rows.len(), 1);
+
+    delete_document(&alice, alice_doc).await;
+    let observer_after_delete = connect_ready_user(
+        &server,
+        &schema,
+        "observer_after_delete",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let rows_after_delete = wait_for_rows(
+        &observer_after_delete,
+        query,
+        "fresh observer sees owner delete succeed through update.using fallback",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(rows_after_delete.is_empty());
+
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
+    observer_after_delete
+        .shutdown()
+        .await
+        .expect("shutdown observer_after_delete");
+    server.shutdown().await;
+}
+
+/// Verifies that the same fallback still denies deleting rows that fail
+/// `update.using`.
+#[tokio::test]
+async fn delete_policies_use_update_using_fallback_to_deny_non_owner_delete() {
+    let table_name = "documents_delete_missing_non_owner";
+    let schema = delete_fallback_schema(table_name);
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", table_name, READY_TIMEOUT).await;
+    let query = QueryBuilder::new(table_name).build();
+
+    let bob_doc = seed_document(&bob, table_name, "bob", "bob row", false).await;
+    let bob_values = boolean_policy_document_values("bob", "bob row", false);
+
+    wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees bob row before attempting rejected fallback delete",
+        |rows| has_row(&rows, bob_doc, &bob_values).then_some(()),
+    )
+    .await;
+
+    delete_document(&alice, bob_doc).await;
+    let observer_after_rejected_delete = connect_ready_user(
+        &server,
+        &schema,
+        "observer_after_rejected_delete",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let rows_after_rejected_delete = wait_for_rows(
+        &observer_after_rejected_delete,
+        query,
+        "fresh observer still sees bob row after rejected fallback delete",
+        |rows| has_row(&rows, bob_doc, &bob_values).then_some(rows),
+    )
+    .await;
+    assert!(has_row(&rows_after_rejected_delete, bob_doc, &bob_values));
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    observer_after_rejected_delete
+        .shutdown()
+        .await
+        .expect("shutdown observer_after_rejected_delete");
+    server.shutdown().await;
+}
+
 /// Verifies a simple state-machine policy over `archived`:
 /// inserts require `archived = false`, updates require the previous row to
 /// have `archived = false`, and deletes require `archived = true`.
@@ -559,6 +929,7 @@ async fn archived_state_policies_gate_insert_update_and_delete() {
         .table(make_documents_schema(
             table_name,
             TablePolicies::new()
+                .with_select(PolicyExpr::True)
                 .with_insert(incomplete_policy.clone())
                 .with_update(Some(incomplete_policy), PolicyExpr::True)
                 .with_delete(archived_policy),

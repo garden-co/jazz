@@ -14,6 +14,8 @@ export default s.definePermissions(app, ({ policy, session, anyOf }) => {
 
   policy.members.allowRead.where({ userId: session.user_id });
   policy.members.allowInsert.where({});
+  policy.members.allowUpdate.never();
+  policy.members.allowDelete.never();
 
   policy.venues.allowRead.where({});
   policy.venues.allowInsert.where({});

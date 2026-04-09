@@ -16,6 +16,19 @@ import type {
 } from "./schema.js";
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
+export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
+
+export interface MissingExplicitPolicyDiagnostic {
+  tableName: string;
+  operation: ExplicitPolicyOperation;
+}
+
+const EXPLICIT_POLICY_OPERATIONS: readonly ExplicitPolicyOperation[] = [
+  "read",
+  "insert",
+  "update",
+  "delete",
+];
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -271,6 +284,41 @@ export function validatePermissionsAgainstSchema(
   compiledPermissions: CompiledPermissionsMap,
 ): void {
   validatePermissionTables(schemaTableNames, compiledPermissions);
+}
+
+function hasExplicitPolicyForOperation(
+  tablePolicies: TablePolicies | undefined,
+  operation: ExplicitPolicyOperation,
+): boolean {
+  switch (operation) {
+    case "read":
+      return !!tablePolicies?.select?.using;
+    case "insert":
+      return !!tablePolicies?.insert?.with_check;
+    case "update":
+      return !!tablePolicies?.update?.using || !!tablePolicies?.update?.with_check;
+    case "delete":
+      return !!tablePolicies?.delete?.using;
+  }
+}
+
+export function collectMissingExplicitPolicyDiagnostics(
+  schemaTableNames: readonly string[],
+  compiledPermissions?: CompiledPermissionsMap,
+): MissingExplicitPolicyDiagnostic[] {
+  const knownPermissions = compiledPermissions ?? {};
+  validatePermissionTables(schemaTableNames, knownPermissions);
+
+  const diagnostics: MissingExplicitPolicyDiagnostic[] = [];
+  for (const tableName of schemaTableNames) {
+    const tablePolicies = knownPermissions[tableName];
+    for (const operation of EXPLICIT_POLICY_OPERATIONS) {
+      if (!hasExplicitPolicyForOperation(tablePolicies, operation)) {
+        diagnostics.push({ tableName, operation });
+      }
+    }
+  }
+  return diagnostics;
 }
 
 export function normalizePermissionsForWasm(

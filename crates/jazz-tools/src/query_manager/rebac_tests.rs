@@ -46,6 +46,18 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
+fn public_read_policies() -> TablePolicies {
+    TablePolicies::new().with_select(PolicyExpr::True)
+}
+
+fn allow_all_policies() -> TablePolicies {
+    TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True)
+}
+
 fn stored_row_commit(
     parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
     content: Vec<u8>,
@@ -147,7 +159,7 @@ fn magic_introspection_schema() -> Schema {
 
     let protected_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
-    let protected_policies = TablePolicies::new()
+    let protected_policies = public_read_policies()
         .with_update(
             Some(PolicyExpr::Exists {
                 table: "admins".into(),
@@ -183,7 +195,7 @@ fn provenance_notes_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("notes"),
-        TableSchema::new(provenance_notes_descriptor()),
+        TableSchema::with_policies(provenance_notes_descriptor(), allow_all_policies()),
     );
     schema
 }
@@ -1470,7 +1482,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 }
 
 #[test]
-fn rebac_table_without_policy_allows_all_writes() {
+fn rebac_table_without_policy_denies_all_session_writes() {
     // Schema with no policies
     let mut schema = Schema::new();
     schema.insert(
@@ -1529,19 +1541,107 @@ fn rebac_table_without_policy_allows_all_writes() {
         },
     });
 
-    // Process - table without policy should allow
+    // Process - table without policy should deny session-scoped row writes
     qm.process(&mut storage);
 
-    // Commit should be applied
+    // Commit should be rejected
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main")
-        .unwrap();
+        .get_tip_ids(obj_id, "main");
     assert!(
-        tips.contains(&commit.id()),
-        "Table without policy should allow all writes"
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Table without policy should deny all session-scoped writes"
     );
+}
+
+#[test]
+fn local_insert_without_policy_denies_session_write() {
+    let mut schema = Schema::new();
+    let notes_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    schema.insert(TableName::new("notes"), TableSchema::new(notes_descriptor));
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "notes",
+            &[Value::Text("draft".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("missing insert policy should deny session-scoped inserts");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("notes")
+    ));
+}
+
+#[test]
+fn local_update_without_policy_denies_session_write() {
+    let mut schema = Schema::new();
+    let notes_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    schema.insert(TableName::new("notes"), TableSchema::new(notes_descriptor));
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let note_id = qm
+        .insert(&mut storage, "notes", &[Value::Text("draft".into())])
+        .expect("seed row without session")
+        .row_id;
+
+    let err = qm
+        .update_with_session(
+            &mut storage,
+            note_id,
+            &[Value::Text("edited".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("missing update policy should deny session-scoped updates");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("notes")
+    ));
+}
+
+#[test]
+fn local_delete_without_policy_denies_session_write() {
+    let mut schema = Schema::new();
+    let notes_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    schema.insert(TableName::new("notes"), TableSchema::new(notes_descriptor));
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let note_id = qm
+        .insert(&mut storage, "notes", &[Value::Text("draft".into())])
+        .expect("seed row without session")
+        .row_id;
+
+    let err = qm
+        .delete_with_session(&mut storage, note_id, Some(&Session::new("alice")))
+        .expect_err("missing delete policy should deny session-scoped deletes");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Delete
+        } if table == TableName::new("notes")
+    ));
 }
 
 #[test]
@@ -2841,6 +2941,56 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
 }
 
 #[test]
+fn local_insert_with_inherits_denies_when_parent_has_no_insert_policy() {
+    let mut schema = Schema::new();
+    let folders_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::new(folders_descriptor),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid).references("folders"),
+        ColumnDescriptor::new("title", ColumnType::Text),
+    ]);
+    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::Inherits {
+        operation: Operation::Insert,
+        via_column: "folder_id".into(),
+        max_depth: Some(10),
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let folder_id = qm
+        .insert(&mut storage, "folders", &[Value::Text("parent".into())])
+        .expect("seed parent row without session")
+        .row_id;
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "documents",
+            &[Value::Uuid(folder_id), Value::Text("child".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("inherits insert should deny when the parent has no insert policy");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("documents")
+    ));
+}
+
+#[test]
 fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     let mut schema = Schema::new();
     let folders_descriptor = RowDescriptor::new(vec![
@@ -3161,6 +3311,59 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
 }
 
 #[test]
+fn local_delete_uses_update_policy_fallback_when_delete_is_missing() {
+    let mut schema = Schema::new();
+    let notes_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("content", ColumnType::Text),
+    ]);
+    let notes_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("notes"),
+        TableSchema::with_policies(notes_descriptor, notes_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let alice_note_id = qm
+        .insert(
+            &mut storage,
+            "notes",
+            &[Value::Text("alice".into()), Value::Text("draft".into())],
+        )
+        .expect("seed alice row without session")
+        .row_id;
+    let bob_note_id = qm
+        .insert(
+            &mut storage,
+            "notes",
+            &[Value::Text("bob".into()), Value::Text("private".into())],
+        )
+        .expect("seed bob row without session")
+        .row_id;
+
+    qm.delete_with_session(&mut storage, alice_note_id, Some(&Session::new("alice")))
+        .expect("delete should fall back to update.using when delete is missing");
+    assert!(qm.row_is_deleted(&storage, "notes", alice_note_id));
+
+    let err = qm
+        .delete_with_session(&mut storage, bob_note_id, Some(&Session::new("alice")))
+        .expect_err("delete fallback should still deny rows that fail update.using");
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Delete
+        } if table == TableName::new("notes")
+    ));
+}
+
+#[test]
 fn synced_soft_delete_should_use_delete_policy() {
     let mut schema = Schema::new();
     let admins_descriptor =
@@ -3270,6 +3473,58 @@ fn synced_soft_delete_should_use_delete_policy() {
     assert!(
         !qm.row_is_deleted(&storage, "protected", protected.row_id),
         "denied synced soft delete should leave the row visible"
+    );
+}
+
+#[test]
+fn rebac_select_inherits_denies_when_parent_has_no_select_policy() {
+    let mut schema = Schema::new();
+    let folders_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::new(folders_descriptor),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid).references("folders"),
+        ColumnDescriptor::new("title", ColumnType::Text),
+    ]);
+    let documents_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
+        operation: Operation::Select,
+        via_column: "folder_id".into(),
+        max_depth: Some(10),
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let folder_id = qm
+        .insert(&mut storage, "folders", &[Value::Text("parent".into())])
+        .expect("seed parent row without session")
+        .row_id;
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[Value::Uuid(folder_id), Value::Text("child".into())],
+    )
+    .expect("seed child row without session");
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("documents").build(),
+        Some(Session::new("alice")),
+    );
+
+    assert!(
+        rows.is_empty(),
+        "inherits select should fail closed when the parent has no select policy"
     );
 }
 

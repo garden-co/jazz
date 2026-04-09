@@ -48,7 +48,8 @@ fn schema_v2() -> jazz_tools::Schema {
             TableSchema::builder("users")
                 .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
-                .nullable_column("email", ColumnType::Text),
+                .nullable_column("email", ColumnType::Text)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }

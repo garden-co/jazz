@@ -20,13 +20,13 @@ use crate::sync_manager::{
 
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::policy::Operation;
+use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
+    SchemaHash, TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -572,17 +572,39 @@ impl QueryManager {
 
     pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
         if self.local_subscription_uses_explicit_authorization(session) {
-            self.schema
-                .iter()
-                .map(|(table_name, table_schema)| {
-                    let mut structural = table_schema.clone();
-                    structural.policies = TablePolicies::default();
-                    (*table_name, structural)
-                })
-                .collect()
+            Self::compile_schema_with_passthrough_select_policies(&self.schema)
         } else {
             self.schema.as_ref().clone()
         }
+    }
+
+    pub(super) fn compile_schema_with_passthrough_select_policies(schema: &Schema) -> Schema {
+        schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies.select.using = Some(PolicyExpr::True);
+                (*table_name, structural)
+            })
+            .collect()
+    }
+
+    pub(super) fn authorization_differs_from_schema_context(
+        &self,
+        schema_context: &SchemaContext,
+    ) -> bool {
+        self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
+            .map(|(auth_schema, _)| auth_schema.as_ref() != &schema_context.current_schema)
+            .unwrap_or(false)
+    }
+
+    fn authorization_schema_snapshot_differs(
+        authorization_schema: Option<&Arc<Schema>>,
+        schema_context: &SchemaContext,
+    ) -> bool {
+        authorization_schema
+            .map(|auth_schema| auth_schema.as_ref() != &schema_context.current_schema)
+            .unwrap_or(false)
     }
 
     /// Mark all subscriptions for recompilation.
@@ -621,14 +643,7 @@ impl QueryManager {
                         .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
                         .unwrap_or(false);
                 let compile_schema = if uses_explicit_authorization_filtering {
-                    current_schema
-                        .iter()
-                        .map(|(table_name, table_schema)| {
-                            let mut structural = table_schema.clone();
-                            structural.policies = TablePolicies::default();
-                            (*table_name, structural)
-                        })
-                        .collect()
+                    Self::compile_schema_with_passthrough_select_policies(&current_schema)
                 } else {
                     current_schema.as_ref().clone()
                 };
@@ -685,16 +700,28 @@ impl QueryManager {
             if sub.needs_recompile {
                 let query_for_compile =
                     Self::query_for_server_compile(&sub.query, &sub.schema_context);
-                let compile_schema: Schema = sub
-                    .schema_context
-                    .current_schema
-                    .iter()
-                    .map(|(table_name, table_schema)| {
-                        let mut structural = table_schema.clone();
-                        structural.policies = TablePolicies::default();
-                        (*table_name, structural)
-                    })
-                    .collect();
+                let uses_explicit_authorization_filtering = sub.session.is_some()
+                    && !matches!(
+                        self.sync_manager
+                            .get_client(*client_id)
+                            .map(|client| client.role),
+                        Some(
+                            crate::sync_manager::ClientRole::Peer
+                                | crate::sync_manager::ClientRole::Admin
+                                | crate::sync_manager::ClientRole::Backend
+                        )
+                    )
+                    && Self::authorization_schema_snapshot_differs(
+                        authorization_schema.as_ref(),
+                        &sub.schema_context,
+                    );
+                let compile_schema = if uses_explicit_authorization_filtering {
+                    Self::compile_schema_with_passthrough_select_policies(
+                        &sub.schema_context.current_schema,
+                    )
+                } else {
+                    sub.schema_context.current_schema.clone()
+                };
                 // Recompile the graph
                 match Self::compile_graph(
                     &query_for_compile,

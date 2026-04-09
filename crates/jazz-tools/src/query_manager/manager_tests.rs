@@ -8,6 +8,7 @@ use smallvec::smallvec;
 use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
+use crate::query_manager::policy::Operation;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session as PolicySession;
 use crate::query_manager::types::{
@@ -17,7 +18,26 @@ use crate::query_manager::types::{
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::SyncManager;
 
+fn public_read_policies() -> TablePolicies {
+    TablePolicies::new().with_select(PolicyExpr::True)
+}
+
 fn test_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("score", ColumnType::Integer),
+            ]),
+            public_read_policies(),
+        ),
+    );
+    schema
+}
+
+fn no_policy_test_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
@@ -51,15 +71,20 @@ fn recursive_hop_team_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("teams"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            public_read_policies(),
+        ),
     );
     schema.insert(
         TableName::new("team_edges"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("child_team", ColumnType::Uuid),
-            ColumnDescriptor::new("parent_team", ColumnType::Uuid),
-        ])
-        .into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+            ]),
+            public_read_policies(),
+        ),
     );
     schema
 }
@@ -3305,11 +3330,13 @@ fn join_schema_with_magic_permissions() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("name", ColumnType::Text),
-        ])
-        .into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            public_read_policies(),
+        ),
     );
 
     let posts_descriptor = RowDescriptor::new(vec![
@@ -3318,7 +3345,7 @@ fn join_schema_with_magic_permissions() -> Schema {
         ColumnDescriptor::new("owner_id", ColumnType::Text),
     ]);
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
-    let posts_policies = TablePolicies::new()
+    let posts_policies = public_read_policies()
         .with_update(Some(owner_policy.clone()), PolicyExpr::True)
         .with_delete(owner_policy);
     schema.insert(
@@ -4501,20 +4528,24 @@ fn users_posts_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("name", ColumnType::Text),
-        ])
-        .into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            public_read_policies(),
+        ),
     );
     schema.insert(
         TableName::new("posts"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("author_id", ColumnType::Integer),
-        ])
-        .into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+            public_read_policies(),
+        ),
     );
     schema
 }
@@ -6168,10 +6199,24 @@ fn policy_schema() -> Schema {
 }
 
 fn join_policy_schema() -> Schema {
+    join_policy_schema_with_policies(
+        TablePolicies::default(),
+        TablePolicies::new()
+            .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+    )
+}
+
+fn join_policy_schema_with_policies(
+    users_policies: TablePolicies,
+    posts_policies: TablePolicies,
+) -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            users_policies,
+        ),
     );
     schema.insert(
         TableName::new("posts"),
@@ -6180,8 +6225,7 @@ fn join_policy_schema() -> Schema {
                 ColumnDescriptor::new("owner_name", ColumnType::Text),
                 ColumnDescriptor::new("title", ColumnType::Text),
             ]),
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+            posts_policies,
         ),
     );
     schema
@@ -6324,7 +6368,10 @@ fn current_join_provenance_permission_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            public_read_policies(),
+        ),
     );
     schema.insert(
         TableName::new("posts"),
@@ -6509,10 +6556,9 @@ fn no_session_returns_all_rows() {
 }
 
 #[test]
-fn table_without_policy_returns_all_rows() {
+fn table_without_policy_returns_no_rows() {
     let sync_manager = SyncManager::new();
-    // Use the regular test_schema which has no policies
-    let schema = test_schema();
+    let schema = no_policy_test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     qm.insert(
@@ -6528,7 +6574,7 @@ fn table_without_policy_returns_all_rows() {
     )
     .unwrap();
 
-    // Even with session, table without policy returns all rows
+    // Even with session, table without policy should fail closed
     let session = PolicySession::new("some_user");
     let query = qm.query("users").build();
     let sub_id = qm
@@ -6544,15 +6590,19 @@ fn table_without_policy_returns_all_rows() {
 
     assert_eq!(
         update.delta.added.len(),
-        2,
-        "Table without policy should return all rows"
+        0,
+        "Table without policy should return no rows"
     );
 }
 
 #[test]
 fn join_query_applies_policy_filter_on_joined_table() {
     let sync_manager = SyncManager::new();
-    let schema = join_policy_schema();
+    let schema = join_policy_schema_with_policies(
+        TablePolicies::new().with_select(PolicyExpr::True),
+        TablePolicies::new()
+            .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+    );
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
@@ -6595,6 +6645,89 @@ fn join_query_applies_policy_filter_on_joined_table() {
         update.delta.added.len(),
         1,
         "join query should apply policy filter on joined table rows"
+    );
+}
+
+#[test]
+fn join_query_with_missing_base_select_policy_returns_no_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("Alice post".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        0,
+        "join query should fail closed when the base table omits SELECT"
+    );
+}
+
+#[test]
+fn join_query_with_missing_joined_select_policy_returns_no_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = join_policy_schema_with_policies(
+        TablePolicies::new().with_select(PolicyExpr::True),
+        TablePolicies::default(),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("Alice post".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("join subscription should emit initial delta");
+    assert_eq!(
+        update.delta.added.len(),
+        0,
+        "join query should fail closed when the joined table omits SELECT"
     );
 }
 
@@ -9910,6 +10043,82 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
         results.len(),
         0,
         "Untrusted downstream should keep current result-only sync behavior"
+    );
+}
+
+#[test]
+fn local_update_with_nullable_inherits_policy_allows_null_fk_row() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("folders"),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_update(
+                    Some(PolicyExpr::inherits(Operation::Update, "folder_id")),
+                    PolicyExpr::True,
+                ),
+        ),
+    );
+
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+    let row_id = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Standalone".into()),
+                Value::Null,
+            ],
+        )
+        .expect("seed standalone document")
+        .row_id;
+
+    qm.update_with_session(
+        &mut storage,
+        row_id,
+        &[
+            Value::Text("alice".into()),
+            Value::Text("Edited".into()),
+            Value::Null,
+        ],
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("nullable inherits update should allow rows without a parent");
+
+    let query = qm.query("documents").build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("observer")), None)
+        .expect("observer subscribes");
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].1,
+        vec![
+            Value::Text("alice".into()),
+            Value::Text("Edited".into()),
+            Value::Null,
+        ],
     );
 }
 

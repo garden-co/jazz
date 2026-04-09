@@ -25,6 +25,15 @@ const BACKEND_SECRET: &str = "integration-backend-secret";
 const JWT_KID: &str = "integration-kid";
 const JWT_SECRET: &str = "integration-jwt-secret";
 
+fn allow_all_policies() -> jazz_tools::query_manager::types::TablePolicies {
+    let allow = jazz_tools::query_manager::policy::PolicyExpr::True;
+    jazz_tools::query_manager::types::TablePolicies::new()
+        .with_select(allow.clone())
+        .with_insert(allow.clone())
+        .with_update(Some(allow.clone()), allow.clone())
+        .with_delete(allow)
+}
+
 fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
     HashMap::from([
         ("title".to_string(), Value::Text(title.to_string())),
@@ -245,7 +254,8 @@ fn test_schema() -> jazz_tools::Schema {
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
+                .column("completed", ColumnType::Boolean)
+                .policies(allow_all_policies()),
         )
         .build()
 }

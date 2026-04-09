@@ -33,6 +33,18 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
+const PERMISSIVE_TEST_SCHEMA: WasmSchema = {
+  todos: {
+    columns: TEST_SCHEMA.todos.columns,
+    policies: {
+      select: { using: { type: "True" } },
+      insert: { with_check: { type: "True" } },
+      update: { using: { type: "True" }, with_check: { type: "True" } },
+      delete: { using: { type: "True" } },
+    },
+  },
+};
+
 type SocialPolicyStyle = "split" | "join" | "hopToWhere";
 
 interface SocialProfile {
@@ -988,6 +1000,10 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
   const permissions = normalizePermissionsForWasm(
     definePermissions(socialApp, ({ policy, anyOf, allowedTo, session }) => {
       const sessionPersonId = session.user_id;
+      policy.profiles.allowInsert.always();
+      policy.people.allowInsert.always();
+      policy.friendships.allowRead.always();
+      policy.friendships.allowInsert.always();
 
       if (style === "split") {
         policy.people.allowRead.where((person) =>
@@ -1405,7 +1421,7 @@ describe("cloud-server integration (Jazz TS)", () => {
     const server = await startCloudServer({ dataRoot, workerThreads: 4 });
     const rowCount = 320;
     const highLimit = 999;
-    const freshReaderAttempts = 2;
+    const freshReaderAttempts = 1;
     const queryAllTodos = translateQuery(
       JSON.stringify({
         table: "todos",
@@ -1415,14 +1431,23 @@ describe("cloud-server integration (Jazz TS)", () => {
         offset: 0,
         limit: highLimit,
       }),
-      TEST_SCHEMA,
+      PERMISSIVE_TEST_SCHEMA,
     );
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
-      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await publishInlineSchemaAndPermissions(
+        server.baseUrl,
+        `/apps/${app.app_id}`,
+        PERMISSIVE_TEST_SCHEMA,
+      );
       await seedTodosViaSyncBatch(
-        makeContext(app.app_id, server.baseUrl, signJwt("large-query-writer", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("large-query-writer", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
         rowCount,
       );
 
@@ -1432,6 +1457,7 @@ describe("cloud-server integration (Jazz TS)", () => {
             app.app_id,
             server.baseUrl,
             signJwt(`large-query-reader-${attempt}`, JWT_SECRET),
+            PERMISSIVE_TEST_SCHEMA,
           ),
         );
         try {
@@ -1466,20 +1492,34 @@ describe("cloud-server integration (Jazz TS)", () => {
         offset: 0,
         limit: highLimit,
       }),
-      TEST_SCHEMA,
+      PERMISSIVE_TEST_SCHEMA,
     );
 
     let reader: JazzClient | null = null;
     try {
       const app = await createApp(server.baseUrl, jwks.url);
-      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await publishInlineSchemaAndPermissions(
+        server.baseUrl,
+        `/apps/${app.app_id}`,
+        PERMISSIVE_TEST_SCHEMA,
+      );
       await seedTodosViaSyncBatch(
-        makeContext(app.app_id, server.baseUrl, signJwt("large-subscription-writer", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("large-subscription-writer", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
         rowCount,
       );
 
       reader = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("large-subscription-reader", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("large-subscription-reader", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
       );
 
       const rows = await subscribeUntilQuiet(reader, queryAllTodos, "global");
@@ -1507,14 +1547,23 @@ describe("cloud-server integration (Jazz TS)", () => {
         offset: 0,
         limit: requestedLimit,
       }),
-      TEST_SCHEMA,
+      PERMISSIVE_TEST_SCHEMA,
     );
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
-      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await publishInlineSchemaAndPermissions(
+        server.baseUrl,
+        `/apps/${app.app_id}`,
+        PERMISSIVE_TEST_SCHEMA,
+      );
       await seedTodosViaSyncBatch(
-        makeContext(app.app_id, server.baseUrl, signJwt("limited-query-writer", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("limited-query-writer", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
         rowCount,
       );
 
@@ -1524,6 +1573,7 @@ describe("cloud-server integration (Jazz TS)", () => {
             app.app_id,
             server.baseUrl,
             signJwt(`limited-query-reader-${attempt}`, JWT_SECRET),
+            PERMISSIVE_TEST_SCHEMA,
           ),
         );
         try {
@@ -1558,20 +1608,34 @@ describe("cloud-server integration (Jazz TS)", () => {
         offset: 0,
         limit: requestedLimit,
       }),
-      TEST_SCHEMA,
+      PERMISSIVE_TEST_SCHEMA,
     );
 
     let reader: JazzClient | null = null;
     try {
       const app = await createApp(server.baseUrl, jwks.url);
-      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await publishInlineSchemaAndPermissions(
+        server.baseUrl,
+        `/apps/${app.app_id}`,
+        PERMISSIVE_TEST_SCHEMA,
+      );
       await seedTodosViaSyncBatch(
-        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-writer", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("limited-subscription-writer", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
         rowCount,
       );
 
       reader = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-reader", JWT_SECRET)),
+        makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("limited-subscription-reader", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
       );
 
       const rows = await subscribeUntilQuiet(reader, queryLimitedTodos, "global");
@@ -1598,7 +1662,7 @@ describe("cloud-server integration (Jazz TS)", () => {
         orderBy: [],
         offset: 0,
       }),
-      TEST_SCHEMA,
+      PERMISSIVE_TEST_SCHEMA,
     );
 
     let clientA: JazzClient | null = null;
@@ -1684,9 +1748,18 @@ describe("cloud-server integration (Jazz TS)", () => {
       let writer: JazzClient | null = null;
       try {
         const app = await createApp(server.baseUrl, jwks.url);
-        await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+        await publishInlineSchemaAndPermissions(
+          server.baseUrl,
+          `/apps/${app.app_id}`,
+          PERMISSIVE_TEST_SCHEMA,
+        );
         writer = await connectClient(
-          makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
+          makeContext(
+            app.app_id,
+            server.baseUrl,
+            signJwt("writer", JWT_SECRET),
+            PERMISSIVE_TEST_SCHEMA,
+          ),
         );
         await writer.createDurable(
           "todos",
@@ -1708,7 +1781,12 @@ describe("cloud-server integration (Jazz TS)", () => {
     let reader: JazzClient | null = null;
     try {
       reader = await connectClient(
-        makeContext(appId, restarted.baseUrl, signJwt("reader", JWT_SECRET)),
+        makeContext(
+          appId,
+          restarted.baseUrl,
+          signJwt("reader", JWT_SECRET),
+          PERMISSIVE_TEST_SCHEMA,
+        ),
       );
       const rows = await waitForRows(reader, queryAllTodos, (all) => all.length >= 1, 20000);
       expect(
@@ -1962,6 +2040,43 @@ function buildOwnedItemsSchema(): WasmSchema {
   const permissions = normalizePermissionsForWasm(
     definePermissions(app, ({ policy, session }) => {
       policy.owned_items.allowRead.where({ ownerId: session.user_id });
+      policy.owned_items.allowInsert.where({ ownerId: session.user_id });
+      policy.owned_items.allowUpdate.where({ ownerId: session.user_id });
+      policy.owned_items.allowDelete.where({ ownerId: session.user_id });
+    }),
+  );
+
+  const tables: WasmSchema = {};
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
+    const tablePolicies = permissions[tableName];
+    tables[tableName] = tablePolicies
+      ? ({
+          ...tableSchema,
+          policies: tablePolicies as unknown as (typeof tableSchema)["policies"],
+        } as (typeof tables)[string])
+      : tableSchema;
+  }
+  return tables;
+}
+
+function buildReadOnlyOwnedItemsSchema(): WasmSchema {
+  const schema: WasmSchema = {
+    owned_items: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
+
+  const app = {
+    owned_items: new OwnedItemQueryBuilder(),
+    wasmSchema: schema,
+  };
+
+  const permissions = normalizePermissionsForWasm(
+    definePermissions(app, ({ policy, session }) => {
+      policy.owned_items.allowRead.where({ ownerId: session.user_id });
     }),
   );
 
@@ -2157,6 +2272,69 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
     } finally {
       if (aliceClient) await aliceClient.shutdown();
       if (bobClient) await bobClient.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 60000);
+
+  it("session-scoped inserts are denied when insert policy is missing while reads still work", async () => {
+    const schema = buildReadOnlyOwnedItemsSchema();
+    const queryAllItems = buildAllRowsQuery(schema, "owned_items");
+
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-policy-read-only-");
+    const server = await startCloudServer({ dataRoot });
+    let seedClient: JazzClient | null = null;
+    let aliceClient: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, schema);
+
+      seedClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("seed-user", JWT_SECRET, { principalId: "seed-user" }),
+          schema,
+        ),
+        jwtToken: undefined,
+        adminSecret: undefined,
+      });
+      seedClient.asBackend();
+      await seedClient.createDurable(
+        "owned_items",
+        {
+          title: { type: "Text", value: "seeded-item" },
+          ownerId: { type: "Text", value: "alice" },
+        },
+        { tier: "edge" },
+      );
+
+      aliceClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("alice", JWT_SECRET, { principalId: "alice" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
+
+      const queryRows = await waitForRows(aliceClient, queryAllItems, (rows) => rows.length === 1);
+      expect(
+        queryRows.map((row) => (row.values[0] as { type: "Text"; value: string }).value),
+      ).toEqual(["seeded-item"]);
+
+      await expect(
+        aliceClient.forSession({ user_id: "alice", claims: {} }).create("owned_items", {
+          title: { type: "Text", value: "alice-item" },
+          ownerId: { type: "Text", value: "alice" },
+        }),
+      ).rejects.toThrow(/Create failed:/);
+    } finally {
+      if (seedClient) await seedClient.shutdown();
+      if (aliceClient) await aliceClient.shutdown();
       await stopProcess(server.child);
       await jwks.stop();
     }

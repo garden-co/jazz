@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::jazz_transport::SyncBatchRequest;
-use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::query_manager::policy::PolicyExpr;
+use jazz_tools::query_manager::types::{SchemaHash, TablePolicies};
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::TestingServer;
@@ -12,7 +13,7 @@ use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
-    QueryBuilder, Schema, SubscriptionStream, Value,
+    QueryBuilder, Schema, SubscriptionStream, TableSchema, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
@@ -29,6 +30,41 @@ const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
+#[allow(dead_code)]
+pub fn allow_all_policies() -> TablePolicies {
+    TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True)
+}
+
+fn split_inline_policies(
+    schema: &Schema,
+) -> (
+    Schema,
+    std::collections::HashMap<jazz_tools::query_manager::types::TableName, TablePolicies>,
+) {
+    let mut structural_schema = Schema::with_capacity(schema.len());
+    let mut permissions = std::collections::HashMap::new();
+
+    for (table_name, table_schema) in schema {
+        structural_schema.insert(
+            *table_name,
+            TableSchema {
+                columns: table_schema.columns.clone(),
+                policies: TablePolicies::default(),
+            },
+        );
+
+        if table_schema.policies != TablePolicies::default() {
+            permissions.insert(*table_name, table_schema.policies.clone());
+        }
+    }
+
+    (structural_schema, permissions)
+}
+
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
@@ -37,6 +73,24 @@ struct SyncServerClient {
     base_url: String,
     route_prefix: String,
     admin_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadView {
+    bundle_object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadResponse {
+    head: Option<PermissionsHeadView>,
 }
 
 impl SyncServerClient {
@@ -62,6 +116,11 @@ impl SyncServerClient {
         })
     }
 
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{}{}", self.base_url, self.route_prefix, path)
+    }
+
+    #[allow(dead_code)]
     async fn push_sync(
         &self,
         payload: jazz_tools::sync_manager::SyncPayload,
@@ -82,6 +141,88 @@ impl SyncServerClient {
             .error_for_status()?;
         Ok(())
     }
+
+    async fn publish_schema(
+        &self,
+        schema: &Schema,
+    ) -> Result<SchemaHash, Box<dyn std::error::Error>> {
+        let response = self
+            .http_client
+            .post(self.endpoint("/admin/schemas"))
+            .header(CONTENT_TYPE, "application/json")
+            .header("X-Jazz-Admin-Secret", &self.admin_secret)
+            .json(&serde_json::json!({ "schema": schema }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<PublishSchemaResponse>()
+            .await?;
+
+        SchemaHash::from_hex(&response.hash)
+            .ok_or_else(|| format!("invalid published schema hash {}", response.hash).into())
+    }
+
+    async fn permissions_head(
+        &self,
+    ) -> Result<Option<PermissionsHeadView>, Box<dyn std::error::Error>> {
+        Ok(self
+            .http_client
+            .get(self.endpoint("/admin/permissions/head"))
+            .header("X-Jazz-Admin-Secret", &self.admin_secret)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<PermissionsHeadResponse>()
+            .await?
+            .head)
+    }
+
+    async fn publish_permissions(
+        &self,
+        schema_hash: SchemaHash,
+        permissions: std::collections::HashMap<String, TablePolicies>,
+        expected_parent_bundle_object_id: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.http_client
+            .post(self.endpoint("/admin/permissions"))
+            .header(CONTENT_TYPE, "application/json")
+            .header("X-Jazz-Admin-Secret", &self.admin_secret)
+            .json(&serde_json::json!({
+                "schemaHash": schema_hash.to_string(),
+                "permissions": permissions,
+                "expectedParentBundleObjectId": expected_parent_bundle_object_id,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
+
+pub async fn publish_schema_and_permissions(
+    server_url: &str,
+    admin_secret: &str,
+    schema: &Schema,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let connection = SyncServerClient::connect(server_url, admin_secret).await?;
+    let (structural_schema, permissions) = split_inline_policies(schema);
+    let schema_hash = connection.publish_schema(&structural_schema).await?;
+
+    if permissions.is_empty() {
+        return Ok(());
+    }
+
+    let current_head = connection.permissions_head().await?;
+    connection
+        .publish_permissions(
+            schema_hash,
+            permissions
+                .into_iter()
+                .map(|(table_name, table_policies)| (table_name.to_string(), table_policies))
+                .collect(),
+            current_head.map(|head| head.bundle_object_id),
+        )
+        .await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -200,6 +341,12 @@ impl<'a> TestingClient<'a> {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
         let context = self.build_context();
+
+        if let Some(admin_secret) = context.admin_secret.as_deref() {
+            publish_schema_and_permissions(&context.server_url, admin_secret, &context.schema)
+                .await
+                .expect("publish test client schema and permissions before connect");
+        }
 
         let client = JazzClient::connect(context.clone())
             .await
@@ -369,6 +516,7 @@ fn normalize_route_prefix(path: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn build_catalogue_runtime(
     schema_manager: SchemaManager,
     storage: MemoryStorage,
@@ -399,12 +547,14 @@ fn build_catalogue_runtime(
     })
 }
 
+#[allow(dead_code)]
 async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
     while in_flight_pushes.load(Ordering::Acquire) > 0 {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
+#[allow(dead_code)]
 pub async fn push_catalogue_in_memory(
     server_url: &str,
     app_id: AppId,
@@ -423,11 +573,17 @@ pub async fn push_catalogue_in_memory(
         std::collections::HashMap::with_capacity(schemas.len());
     for schema in schemas {
         schema_by_hash.insert(SchemaHash::compute(schema), schema);
-        let schema_manager =
-            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, env, user_branch)
-                .map_err(|error| {
-                    format!("Failed to initialize schema manager for schema push: {error:?}")
-                })?;
+        let (structural_schema, _permissions) = split_inline_policies(schema);
+        let schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            structural_schema.clone(),
+            app_id,
+            env,
+            user_branch,
+        )
+        .map_err(|error| {
+            format!("Failed to initialize schema manager for schema push: {error:?}")
+        })?;
         let runtime = build_catalogue_runtime(
             schema_manager,
             MemoryStorage::default(),
@@ -483,6 +639,25 @@ pub async fn push_catalogue_in_memory(
             errors.join("; ")
         )
         .into());
+    }
+
+    for schema in schemas {
+        let (_, permissions) = split_inline_policies(schema);
+        if permissions.is_empty() {
+            continue;
+        }
+
+        let current_head = connection.permissions_head().await?;
+        connection
+            .publish_permissions(
+                SchemaHash::compute(schema),
+                permissions
+                    .into_iter()
+                    .map(|(table_name, table_policies)| (table_name.to_string(), table_policies))
+                    .collect(),
+                current_head.map(|head| head.bundle_object_id),
+            )
+            .await?;
     }
 
     Ok(())

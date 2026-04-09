@@ -17,7 +17,8 @@ fn test_schema() -> jazz_tools::Schema {
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
+                .column("completed", ColumnType::Boolean)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }

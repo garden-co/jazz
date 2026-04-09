@@ -25,22 +25,29 @@ const NO_DELTA_WINDOW: Duration = Duration::from_millis(500);
 
 fn subscription_schema() -> Schema {
     SchemaBuilder::new()
-        .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("orgs")
+                .column("name", ColumnType::Text)
+                .policies(support::allow_all_policies()),
+        )
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
                 .nullable_fk_column("org_id", "orgs")
-                .nullable_fk_column("parent_id", "teams"),
+                .nullable_fk_column("parent_id", "teams")
+                .policies(support::allow_all_policies()),
         )
         .table(
             TableSchema::builder("team_edges")
                 .column("child_team", ColumnType::Uuid)
-                .column("parent_team", ColumnType::Uuid),
+                .column("parent_team", ColumnType::Uuid)
+                .policies(support::allow_all_policies()),
         )
         .table(
             TableSchema::builder("users")
                 .column("name", ColumnType::Text)
-                .nullable_fk_column("team_id", "teams"),
+                .nullable_fk_column("team_id", "teams")
+                .policies(support::allow_all_policies()),
         )
         .table(
             TableSchema::builder("todos")
@@ -54,9 +61,14 @@ fn subscription_schema() -> Schema {
                         element: Box::new(ColumnType::Text),
                     },
                 )
-                .nullable_column("payload", ColumnType::Bytea),
+                .nullable_column("payload", ColumnType::Bytea)
+                .policies(support::allow_all_policies()),
         )
-        .table(TableSchema::builder("file_parts").column("label", ColumnType::Text))
+        .table(
+            TableSchema::builder("file_parts")
+                .column("label", ColumnType::Text)
+                .policies(support::allow_all_policies()),
+        )
         .table(
             TableSchema::builder("files")
                 .column("name", ColumnType::Text)
@@ -65,7 +77,8 @@ fn subscription_schema() -> Schema {
                     ColumnType::Array {
                         element: Box::new(ColumnType::Uuid),
                     },
-                ),
+                )
+                .policies(support::allow_all_policies()),
         )
         .build()
 }

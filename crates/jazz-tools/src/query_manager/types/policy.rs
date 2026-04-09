@@ -52,7 +52,7 @@ pub struct TablePolicies {
 }
 
 impl TablePolicies {
-    /// Create empty policies (allow all by default).
+    /// Create empty policies with no explicit row-level grants.
     pub fn new() -> Self {
         Self::default()
     }

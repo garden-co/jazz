@@ -35,6 +35,7 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
@@ -724,8 +725,9 @@ impl QueryGraph {
         );
         let scope_table_map = HashMap::from([(plan.base_scope.clone(), plan.table)]);
 
-        // Policy filter node (if session provided and table has SELECT policy)
-        if let (Some(session), Some(policy)) = (&session, select_policy) {
+        // Session-scoped row access fails closed: missing SELECT policy behaves like FALSE.
+        if let Some(session) = &session {
+            let policy = select_policy.unwrap_or(PolicyExpr::False);
             let branch_for_policy = branches
                 .first()
                 .cloned()
@@ -1385,9 +1387,13 @@ impl QueryGraph {
 
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
-        if let (Some(session), Some(policy)) =
-            (&session, base_table_schema.policies.select.using.clone())
-        {
+        if let Some(session) = &session {
+            let policy = base_table_schema
+                .policies
+                .select
+                .using
+                .clone()
+                .unwrap_or(PolicyExpr::False);
             let branch_for_policy = branches
                 .first()
                 .cloned()
@@ -1490,9 +1496,13 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) =
-                (&session, right_table_schema.policies.select.using.clone())
-            {
+            if let Some(session) = &session {
+                let policy = right_table_schema
+                    .policies
+                    .select
+                    .using
+                    .clone()
+                    .unwrap_or(PolicyExpr::False);
                 let branch_for_policy = branches
                     .first()
                     .cloned()
@@ -2929,6 +2939,7 @@ mod tests {
         ColumnRef, JoinCondition, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp,
         PredicateExpr, ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
     };
+    use crate::query_manager::session::Session;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 
     fn test_schema() -> Schema {
@@ -3013,6 +3024,32 @@ mod tests {
 
         // Should have: IndexScan -> Materialize -> Sort(default id ASC) -> Output
         assert_eq!(graph.nodes.len(), 4);
+    }
+
+    #[test]
+    fn compile_query_with_session_and_missing_select_policy_adds_policy_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users").build();
+        let schema_context = QueryGraph::default_schema_context(&schema);
+
+        let graph = QueryGraph::try_compile_with_schema_context(
+            &query,
+            &schema,
+            Some(Session::new("alice")),
+            &schema_context,
+        )
+        .expect("graph should compile");
+
+        let policy_filter_count = graph
+            .nodes
+            .iter()
+            .filter(|compact| matches!(compact.node, GraphNode::PolicyFilter(_)))
+            .count();
+
+        assert_eq!(
+            policy_filter_count, 1,
+            "session-scoped queries should still fail closed when SELECT policy is missing",
+        );
     }
 
     #[test]
