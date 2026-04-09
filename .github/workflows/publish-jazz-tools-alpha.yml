@@ -28,6 +28,14 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+  packages: read
+
+env:
+  GITHUB_ACTOR: ${{ github.actor }}
+  GITHUB_TOKEN: ${{ github.token }}
+
 jobs:
   release-push-gate:
     name: Gate release push trigger
@@ -412,9 +420,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -474,7 +479,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build CLI binary
-        run: scripts/with-macos-libclang-env.sh cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -593,10 +598,6 @@ jobs:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -623,7 +624,7 @@ jobs:
 
       - name: Build jazz-napi binding (macOS)
         if: runner.os == 'macOS'
-        run: scripts/with-macos-libclang-env.sh pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:

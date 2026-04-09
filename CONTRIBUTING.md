@@ -16,32 +16,52 @@ Then add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 export RUSTC_WRAPPER=sccache
 ```
 
-### Vendored RocksDB archives
+### RocksDB artifact cache
 
 The repo-local `librocksdb-sys` patch now uses checked-in bindings, so `libclang`
 is no longer required for RocksDB builds.
 
-Supported server targets can skip rebuilding RocksDB entirely by checking in:
+Supported server targets now download a pinned prebuilt RocksDB archive from GHCR
+into the local Cargo cache on the first build, then reuse it on later builds.
+
+The cache root defaults to:
 
 ```text
-vendor/librocksdb-sys/prebuilt/<target-triple>/lib/librocksdb.a
+$CARGO_HOME/jazz-cache/rocksdb/<manifest-digest>/<target-triple>/lib/librocksdb.a
 ```
 
-Supported target triples:
+Supported prebuilt target triples:
 
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-Stage an archive with:
+Override the cache root with:
 
 ```sh
-bash scripts/stage-vendored-rocksdb.sh <target-triple> /path/to/librocksdb.a
+export JAZZ_ROCKSDB_CACHE_DIR=/path/to/cache-root
 ```
 
-If an archive is missing, builds fall back to compiling RocksDB from the
-upstream `rust-rocksdb` checkout, which still needs a working C/C++ toolchain.
+To use the GHCR-backed fast path outside GitHub Actions, export credentials first:
+
+```sh
+export JAZZ_ROCKSDB_GHCR_USERNAME=your-github-username
+export JAZZ_ROCKSDB_GHCR_PASSWORD=your-read-packages-token
+```
+
+`GHCR_USERNAME` plus `CR_PAT` works too. Without credentials, builds fall back to
+compiling RocksDB from source.
+
+To rebuild and publish the full supported set on macOS, use:
+
+```sh
+bash scripts/publish-rocksdb-artifacts.sh
+```
+
+If an archive is missing or GHCR auth is unavailable, builds fall back to
+compiling RocksDB from the upstream `rust-rocksdb` checkout, which still needs a
+working C/C++ toolchain.
 
 ## Testing
 
