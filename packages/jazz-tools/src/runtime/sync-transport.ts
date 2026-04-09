@@ -49,6 +49,7 @@ export interface StreamCallbacks {
 export interface SyncStreamControllerOptions {
   logPrefix?: string;
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
+  getSchemaHash?(): string | undefined;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
@@ -70,6 +71,7 @@ export interface RuntimeSyncStreamControllerOptions {
   logPrefix?: string;
   getRuntime(): RuntimeSyncTarget | null | undefined;
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
+  getSchemaHash?(): string | undefined;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected?(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
@@ -125,26 +127,6 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   }
 
   return false;
-}
-
-function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
-  const warning = payload?.SchemaWarning;
-  if (!warning) return;
-
-  const rowCount = warning.rowCount ?? warning.row_count ?? 0;
-  const tableName = warning.tableName ?? warning.table_name ?? "unknown";
-  const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
-  const shortHash = (hash: string) =>
-    typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
-
-  const sourceHash = shortHash(fromHash);
-  console.warn(
-    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
-      `To ensure data visibility and forward/backward compatibility, run ` +
-      `\`npx jazz-tools@alpha schema export --schema-hash ${sourceHash}\`. ` +
-      `Then generate a migration with ` +
-      `\`npx jazz-tools@alpha migrations create --fromHash ${sourceHash} --toHash <targetHash>\``,
-  );
 }
 
 export async function readSyncAuthError(response: Response): Promise<SyncAuthError | null> {
@@ -310,6 +292,10 @@ export class SyncStreamController {
       Accept: "application/octet-stream",
     };
     applySyncAuthHeaders(headers, this.options.getAuth());
+    const schemaHash = this.options.getSchemaHash?.();
+    if (schemaHash) {
+      headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
+    }
 
     const abortController = new AbortController();
     this.streamAbortController = abortController;
@@ -381,6 +367,7 @@ export function createRuntimeSyncStreamController(
   return new SyncStreamController({
     logPrefix: options.logPrefix,
     getAuth: options.getAuth,
+    getSchemaHash: options.getSchemaHash,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
     onConnected: (catalogueStateHash, nextSyncSeq) => {
@@ -843,7 +830,6 @@ export async function readBinaryFrames(
             event.next_sync_seq ?? null,
           );
         } else if (event.type === "SyncUpdate") {
-          logSchemaWarningPayload(event.payload, logPrefix);
           callbacks.onSyncMessage(JSON.stringify(event.payload), event.seq ?? null);
         }
       } catch (error) {
