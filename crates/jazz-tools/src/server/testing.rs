@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
@@ -7,7 +7,6 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::AppContext;
@@ -15,7 +14,8 @@ use crate::middleware::AuthConfig;
 use crate::query_manager::types::Schema;
 use crate::schema_manager::AppId;
 
-use super::{ServerBuilder, ServerState};
+use super::ServerBuilder;
+use super::hosted::HostedServer;
 use crate::sync_manager::ClientId;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
@@ -160,13 +160,8 @@ impl Drop for TestingJwksServer {
 }
 
 pub struct TestingServer {
-    state: Arc<ServerState>,
-    task: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    port: u16,
-    client: reqwest::Client,
+    hosted: HostedServer,
     app_id: AppId,
-    data_dir: PathBuf,
     admin_secret: String,
     backend_secret: String,
     default_client_user_id: String,
@@ -251,37 +246,26 @@ impl TestingServer {
         }
         let built = server_builder.build().await.expect("build test server");
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
-            .await
-            .expect("bind test server listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, built.app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("serve jazz server");
-        });
-
-        let server = Self {
-            state: built.state.clone(),
-            task: Some(task),
-            shutdown_tx: Some(shutdown_tx),
+        let hosted = HostedServer::start(
+            built,
             port,
-            client: reqwest::Client::new(),
             app_id,
             data_dir,
+            Some(admin_secret.clone()),
+            Some(backend_secret.clone()),
+        )
+        .await;
+
+        Self {
+            hosted,
+            app_id,
             admin_secret,
             backend_secret,
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
             embedded_jwks_server,
-        };
-        server.wait_ready().await;
-        server
+        }
     }
 
     pub fn default_app_id() -> AppId {
@@ -319,11 +303,11 @@ impl TestingServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.port
+        self.hosted.port
     }
 
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        self.hosted.base_url()
     }
 
     pub fn admin_secret(&self) -> &str {
@@ -336,17 +320,17 @@ impl TestingServer {
 
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
     pub async fn set_client_ttl(&self, ttl: Duration) {
-        self.state.set_client_ttl(ttl).await;
+        self.hosted.state.set_client_ttl(ttl).await;
     }
 
     /// Run one sweep iteration to reap expired disconnect candidates.
     pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        self.state.run_sweep_once().await
+        self.hosted.state.run_sweep_once().await
     }
 
     /// Number of clients currently in the disconnect candidates list.
     pub async fn disconnect_candidate_count(&self) -> usize {
-        self.state.disconnect_candidates.read().await.len()
+        self.hosted.state.disconnect_candidates.read().await.len()
     }
 
     pub fn built_in_jwt_helpers_available(&self) -> bool {
@@ -407,63 +391,11 @@ impl TestingServer {
 
     #[allow(dead_code)]
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
-    }
-
-    async fn wait_ready(&self) {
-        let health_url = format!("{}/health", self.base_url());
-        for _ in 0..80 {
-            if let Ok(response) = self.client.get(&health_url).send().await
-                && response.status().is_success()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("jazz-tools server did not become ready in time");
+        &self.hosted.data_dir
     }
 
     pub async fn shutdown(mut self) {
-        self.state
-            .runtime
-            .flush()
-            .await
-            .expect("flush server runtime");
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(mut task) = self.task.take()
-            && tokio::time::timeout(Duration::from_millis(500), &mut task)
-                .await
-                .is_err()
-        {
-            task.abort();
-            let _ = task.await;
-        }
-        self.state
-            .runtime
-            .with_storage(|storage| {
-                storage.flush();
-                storage.flush_wal();
-                let _ = storage.close();
-            })
-            .expect("flush and close server storage");
-        self.state
-            .external_identity_store
-            .close()
-            .await
-            .expect("close external identity store");
-    }
-}
-
-impl Drop for TestingServer {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.hosted.shutdown().await;
     }
 }
 

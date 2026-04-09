@@ -1,7 +1,7 @@
 ---
 title: Server Setup
 description: Hosted and self-hosted database server configuration, app provisioning, and backend context setup.
-reviewedAt: "f6535a533"
+reviewedAt: "cd2e1bc21"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -42,8 +42,7 @@ Local auth defaults depend on `NODE_ENV`:
 
 ## Backend context setup
 
-Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For frontend/browser context creation, see [Client Setup](/docs/context-setup/client-setup).
-For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/context-setup/client-setup).
+Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/getting-started/client-setup).
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
