@@ -858,7 +858,9 @@ export class JazzClient {
     };
   }
 
-  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+  private normalizeQueryExecutionOptions(
+    options?: QueryExecutionOptions,
+  ): ResolvedQueryExecutionOptions {
     return resolveEffectiveQueryExecutionOptions(
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
