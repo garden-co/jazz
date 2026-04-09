@@ -32,58 +32,28 @@ if ! command -v gzip >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -x "${LLVM_AR}" || ! -x "${LLVM_RANLIB}" ]]; then
-  echo "set LLVM_AR and LLVM_RANLIB to working llvm-ar/llvm-ranlib paths" >&2
-  exit 1
-fi
-
 (
   cd "${REPO_ROOT}"
   cargo fetch --manifest-path Cargo.toml
 )
 
-WRAPPER_DIR="$(mktemp -d /tmp/jazz-rocksdb-zig.XXXXXX)"
-cleanup() {
-  rm -rf "${WRAPPER_DIR}"
-}
-trap cleanup EXIT
-
-write_zig_wrapper() {
+require_executable() {
   local path="$1"
-  local tool="$2"
-  local zig_target="$3"
-  local cargo_target="$4"
+  local label="$2"
 
-  cat > "${path}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-args=()
-while [[ \$# -gt 0 ]]; do
-  case "\$1" in
-    --target=${cargo_target})
-      shift
-      ;;
-    --target)
-      if [[ \${2:-} == ${cargo_target} ]]; then
-        shift 2
-      else
-        args+=("\$1")
-        shift
-        if [[ \$# -gt 0 ]]; then
-          args+=("\$1")
-          shift
-        fi
-      fi
-      ;;
-    *)
-      args+=("\$1")
-      shift
-      ;;
-  esac
-done
-exec zig ${tool} -target ${zig_target} "\${args[@]}"
-EOF
-  chmod +x "${path}"
+  if [[ ! -x "${path}" ]]; then
+    echo "set ${label} to a working executable path" >&2
+    exit 1
+  fi
+}
+
+require_command() {
+  local command_name="$1"
+
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "required command not found: ${command_name}" >&2
+    exit 1
+  fi
 }
 
 stage_output() {
@@ -129,27 +99,43 @@ mkdir -p "${OUTPUT_DIR}"
 for target in "${TARGETS[@]}"; do
   case "${target}" in
     aarch64-apple-darwin|x86_64-apple-darwin)
+      require_executable "${LLVM_AR}" "LLVM_AR"
+      require_executable "${LLVM_RANLIB}" "LLVM_RANLIB"
       build_and_store "${target}" \
         AR="${LLVM_AR}" \
         RANLIB="${LLVM_RANLIB}"
       ;;
     aarch64-unknown-linux-gnu)
-      write_zig_wrapper "${WRAPPER_DIR}/cc-${target}" cc aarch64-linux-gnu "${target}"
-      write_zig_wrapper "${WRAPPER_DIR}/cxx-${target}" c++ aarch64-linux-gnu "${target}"
+      # Linux consumers link these archives with libstdc++, so publish them with GNU toolchains.
+      linux_cc="${CC_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-gcc}"
+      linux_cxx="${CXX_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-g++}"
+      linux_ar="${AR_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-ar}"
+      linux_ranlib="${RANLIB_aarch64_unknown_linux_gnu:-aarch64-linux-gnu-ranlib}"
+      require_command "${linux_cc}"
+      require_command "${linux_cxx}"
+      require_command "${linux_ar}"
+      require_command "${linux_ranlib}"
       build_and_store "${target}" \
-        CC_aarch64_unknown_linux_gnu="${WRAPPER_DIR}/cc-${target}" \
-        CXX_aarch64_unknown_linux_gnu="${WRAPPER_DIR}/cxx-${target}" \
-        AR_aarch64_unknown_linux_gnu="${LLVM_AR}" \
-        RANLIB_aarch64_unknown_linux_gnu="${LLVM_RANLIB}"
+        CC_aarch64_unknown_linux_gnu="${linux_cc}" \
+        CXX_aarch64_unknown_linux_gnu="${linux_cxx}" \
+        AR_aarch64_unknown_linux_gnu="${linux_ar}" \
+        RANLIB_aarch64_unknown_linux_gnu="${linux_ranlib}"
       ;;
     x86_64-unknown-linux-gnu)
-      write_zig_wrapper "${WRAPPER_DIR}/cc-${target}" cc x86_64-linux-gnu "${target}"
-      write_zig_wrapper "${WRAPPER_DIR}/cxx-${target}" c++ x86_64-linux-gnu "${target}"
+      # Linux consumers link these archives with libstdc++, so publish them with GNU toolchains.
+      linux_cc="${CC_x86_64_unknown_linux_gnu:-cc}"
+      linux_cxx="${CXX_x86_64_unknown_linux_gnu:-c++}"
+      linux_ar="${AR_x86_64_unknown_linux_gnu:-ar}"
+      linux_ranlib="${RANLIB_x86_64_unknown_linux_gnu:-ranlib}"
+      require_command "${linux_cc}"
+      require_command "${linux_cxx}"
+      require_command "${linux_ar}"
+      require_command "${linux_ranlib}"
       build_and_store "${target}" \
-        CC_x86_64_unknown_linux_gnu="${WRAPPER_DIR}/cc-${target}" \
-        CXX_x86_64_unknown_linux_gnu="${WRAPPER_DIR}/cxx-${target}" \
-        AR_x86_64_unknown_linux_gnu="${LLVM_AR}" \
-        RANLIB_x86_64_unknown_linux_gnu="${LLVM_RANLIB}"
+        CC_x86_64_unknown_linux_gnu="${linux_cc}" \
+        CXX_x86_64_unknown_linux_gnu="${linux_cxx}" \
+        AR_x86_64_unknown_linux_gnu="${linux_ar}" \
+        RANLIB_x86_64_unknown_linux_gnu="${linux_ranlib}"
       ;;
     *)
       echo "unsupported target: ${target}" >&2

@@ -37,10 +37,37 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v shasum >/dev/null 2>&1; then
-  echo "shasum is required" >&2
+sha256_file() {
+  local path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+    return
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+    return
+  fi
+
+  echo "sha256sum or shasum is required" >&2
   exit 1
-fi
+}
+
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+    return
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+    return
+  fi
+
+  echo "sha256sum or shasum is required" >&2
+  exit 1
+}
 
 GHCR_USERNAME="${GHCR_USERNAME:-${GITHUB_ACTOR:-}}"
 GHCR_PASSWORD="${GHCR_PASSWORD:-${GITHUB_TOKEN:-}}"
@@ -79,8 +106,8 @@ for target in "${TARGETS[@]}"; do
     "${GHCR_REPOSITORY}:${tag}" \
     "${archive_path}:${ARTIFACT_TYPE}" | jq -r '.digest')"
 
-  archive_sha256="$(gzip -dc "${archive_path}" | shasum -a 256 | awk '{print $1}')"
-  blob_sha256="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
+  archive_sha256="$(gzip -dc "${archive_path}" | sha256_stdin)"
+  blob_sha256="$(sha256_file "${archive_path}")"
 
   manifest_entries+=("$(jq -n \
     --arg target "${target}" \
