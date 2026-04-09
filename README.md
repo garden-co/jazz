@@ -27,7 +27,7 @@ JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
 
 Vercel builds can use `scripts/install-vercel-deps.sh`, which runs the same Rust bootstrap in docs-only mode without the React Native extras.
 
-Supported server targets can skip rebuilding RocksDB by checking in `librocksdb.a` at `vendor/librocksdb-sys/prebuilt/<target-triple>/lib/librocksdb.a`. The repo now uses checked-in RocksDB bindings, so `libclang` is no longer required for the fallback source-build path either.
+Supported server targets now fetch a pinned prebuilt RocksDB archive from GHCR into a local cache on the first build, then reuse that cached archive on later builds. GitHub Actions can use `${{ github.token }}` for that fetch path; local shells can opt in with `JAZZ_ROCKSDB_GHCR_USERNAME` plus `JAZZ_ROCKSDB_GHCR_PASSWORD` (or `GHCR_USERNAME` plus `CR_PAT`). Without GHCR credentials, the build falls back to compiling RocksDB from source. The repo still uses checked-in RocksDB bindings, so `libclang` is no longer required for the fallback source-build path either. To regenerate and publish the supported archive set, run `bash scripts/publish-rocksdb-artifacts.sh`.
 
 ## Package versioning
 

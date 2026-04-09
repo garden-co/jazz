@@ -11,6 +11,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: read
+
+env:
+  GITHUB_ACTOR: ${{ github.actor }}
+  GITHUB_TOKEN: ${{ github.token }}
+
 jobs:
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -23,9 +31,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,9 +79,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -122,9 +124,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

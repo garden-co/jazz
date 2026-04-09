@@ -1,0 +1,56 @@
+name: Publish RocksDB Artifacts
+
+on:
+  push:
+    branches:
+      - vendored-rocksdb-archives
+  workflow_dispatch:
+
+concurrency:
+  group: publish-rocksdb-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install LLVM and ORAS
+        run: brew install llvm oras
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Publish RocksDB artifacts to GHCR
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-rocksdb-artifacts.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rocksdb-artifact-manifest-${{ matrix.target }}
+          path: dist/rocksdb/manifest.json

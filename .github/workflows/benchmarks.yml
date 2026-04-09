@@ -32,12 +32,15 @@ env:
   BENCH_TIMEOUT_SECONDS: "60"
   BENCH_REPEAT_COUNT: "3"
   BENCH_CPUSET: "1-5"
+  GITHUB_ACTOR: ${{ github.actor }}
+  GITHUB_TOKEN: ${{ github.token }}
   VERCEL_ORG_ID: team_xiRKInFi7lBd1gTqyAGuzmkC
   VERCEL_PROJECT_ID: prj_RfjK9XUx0HaHkxGmvsMrPJhhuZVG
 
 permissions:
   contents: read
   issues: write
+  packages: read
 
 jobs:
   native:
@@ -62,9 +65,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-
-      - name: Prepare local libclang bundle
-        run: benchmarks/realistic/prepare_libclang_env.sh
 
       - uses: actions/setup-node@v6
         with:
@@ -212,9 +212,6 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
-
-      - name: Prepare local libclang bundle
-        run: benchmarks/realistic/prepare_libclang_env.sh
 
       - uses: actions/setup-node@v6
         with:
