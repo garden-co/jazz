@@ -354,4 +354,253 @@ describe("signature mismatch recovery", () => {
       priority: "high",
     });
   }, 15000);
+
+  test("bob converges after already observing alice stale session before recovery", async () => {
+    /**
+     * Bob subscribed and received Alice's stale history.
+     * After Alice recovers, Bob must converge to the repaired state.
+     *
+     * Topology
+     *   Alice --------> Jazz Cloud --------> Bob
+     *     ^                                   |
+     *     |------------- reconnect -----------|
+     *
+     * Before reconnect
+     *   Alice disk   : title, priority
+     *   Jazz Cloud   : title, priority, status
+     *   Bob          : title, priority, status
+     *
+     * Expected after recovery
+     *   Alice visible  : title, priority, status, assignee
+     *   Bob visible    : title, priority, status, assignee
+     */
+    const { alice, bob, aliceStorage } = setupRecoveryActors();
+    const { mapId } = await createSharedTaskMap(alice, {
+      title: "Fix login bug",
+      priority: "high",
+    });
+
+    // Bob explicitly loads the map to subscribe to updates via jazzCloud
+    await loadCoValueOrFail(bob.node, mapId);
+
+    // Wait for Bob to receive Alice's initial state
+    await waitForRecovery(() => {
+      const content = bob.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("title") === "Fix login bug";
+    });
+
+    // Crash: status reaches server + Bob but not Alice's disk
+    const mapAfterRestart = await crashAfterServerAckBeforeLocalPersist(
+      alice,
+      aliceStorage,
+      mapId,
+      { status: "review" },
+    );
+
+    // Wait for Bob to receive the status update (propagated from alice via jazzCloud)
+    await waitForRecovery(() => {
+      const content = bob.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("status") === "review";
+    });
+
+    // Bob should have the stale view with status
+    const bobMapBefore = bob.node
+      .getCoValue(mapId)
+      .getCurrentContent() as RawCoMap;
+    expect(bobMapBefore.get("status")).toBe("review");
+
+    // Alice makes divergent edits (must be more than what was lost to trigger recovery)
+    mapAfterRestart.set("assignee", "bob", "trusting");
+    mapAfterRestart.set("archived", "false", "trusting");
+
+    // Reconnect — triggers recovery
+    alice.connectToSyncServer();
+
+    // Alice converges
+    await waitForRecovery(() => {
+      const content = alice.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return (
+        content?.get("status") === "review" &&
+        content?.get("assignee") === "bob"
+      );
+    });
+
+    expectTaskFields(
+      alice.node.getCoValue(mapId).getCurrentContent() as RawCoMap,
+      {
+        title: "Fix login bug",
+        priority: "high",
+        status: "review",
+        assignee: "bob",
+      },
+    );
+
+    // Bob converges to repaired state including Alice's conflict session edits
+    await waitForRecovery(() => {
+      const content = bob.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("assignee") === "bob";
+    });
+
+    expectTaskFields(
+      bob.node.getCoValue(mapId).getCurrentContent() as RawCoMap,
+      {
+        title: "Fix login bug",
+        priority: "high",
+        status: "review",
+        assignee: "bob",
+      },
+    );
+  }, 15000);
+
+  test("fresh charlie load after alice recovery sees only repaired history", async () => {
+    /**
+     * Charlie was not connected during the crash or recovery.
+     * After Alice recovers, Charlie loads fresh and must see
+     * only repaired state — no stale session leaks.
+     *
+     * Topology
+     *   Alice --------> Jazz Cloud
+     *                       |
+     *               (after recovery)
+     *                       |
+     *                   Charlie (fresh load)
+     *
+     * Before reconnect
+     *   Alice disk   : title
+     *   Jazz Cloud   : title, status
+     *
+     * Expected after recovery
+     *   Alice visible   : title, status, assignee
+     *   Charlie visible : title, status, assignee
+     */
+    const { alice, aliceStorage } = setupRecoveryActors();
+    const { mapId } = await createSharedTaskMap(alice, {
+      title: "Fix login bug",
+    });
+
+    const mapAfterRestart = await crashAfterServerAckBeforeLocalPersist(
+      alice,
+      aliceStorage,
+      mapId,
+      { status: "review" },
+    );
+
+    // Divergent edits (2 edits > 1 lost transaction)
+    mapAfterRestart.set("assignee", "bob", "trusting");
+    mapAfterRestart.set("priority", "high", "trusting");
+
+    alice.connectToSyncServer();
+
+    await waitForRecovery(() => {
+      const content = alice.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("status") === "review";
+    });
+
+    // Charlie connects fresh after recovery
+    const charlie = setupTestNode();
+    charlie.addStorage();
+    charlie.connectToSyncServer();
+
+    const charlieMap = (await loadCoValueOrFail(
+      charlie.node,
+      mapId,
+    )) as RawCoMap;
+    expectTaskFields(charlieMap, {
+      title: "Fix login bug",
+      status: "review",
+      assignee: "bob",
+      priority: "high",
+    });
+  }, 15000);
+
+  test("repairs alice while preserving other local sessions that did not mismatch", async () => {
+    /**
+     * A second session on the same agent made edits that are not
+     * involved in the mismatch. Recovery should only rewrite the
+     * mismatched session, not collapse unrelated sessions.
+     *
+     * Topology
+     *   Alice(session1) --------> Jazz Cloud <-------- Alice(session2)
+     *
+     * Before reconnect
+     *   session1 disk   : title
+     *   session1 server : title, status
+     *   session2        : assignee (via server)
+     *
+     * Expected after recovery
+     *   session1 rewritten : title, status
+     *   session2 preserved : assignee
+     *   conflict session   : priority, archived
+     *   visible map        : title, status, assignee, priority, archived
+     */
+    const { alice, aliceStorage } = setupRecoveryActors();
+    const { mapId } = await createSharedTaskMap(alice, {
+      title: "Fix login bug",
+    });
+
+    // Spawn a second session for alice's agent
+    const alice2 = alice.spawnNewSession();
+    alice2.addStorage();
+    alice2.connectToSyncServer();
+
+    // Second session makes edits (synced via server)
+    const mapOnAlice2 = (await loadCoValueOrFail(
+      alice2.node,
+      mapId,
+    )) as RawCoMap;
+    mapOnAlice2.set("assignee", "carol", "trusting");
+    await mapOnAlice2.core.waitForSync();
+
+    // Wait for alice's original session to see session2's edits
+    await waitForRecovery(() => {
+      const content = alice.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("assignee") === "carol";
+    });
+
+    // Now crash alice's session1
+    const mapAfterRestart = await crashAfterServerAckBeforeLocalPersist(
+      alice,
+      aliceStorage,
+      mapId,
+      { status: "review" },
+    );
+
+    // Make divergent edits (more than 1 to exceed server count)
+    mapAfterRestart.set("priority", "high", "trusting");
+    mapAfterRestart.set("archived", "false", "trusting");
+
+    // Reconnect — triggers recovery on session1 only
+    alice.connectToSyncServer();
+
+    await waitForRecovery(() => {
+      const content = alice.node
+        .getCoValue(mapId)
+        .getCurrentContent() as RawCoMap;
+      return content?.get("status") === "review";
+    });
+
+    const recovered = alice.node
+      .getCoValue(mapId)
+      .getCurrentContent() as RawCoMap;
+    expectTaskFields(recovered, {
+      title: "Fix login bug",
+      status: "review",
+      priority: "high",
+      archived: "false",
+    });
+    // Session2's edits (assignee from alice2) should also be preserved
+    expect(recovered.get("assignee")).toBe("carol");
+  }, 15000);
 });
