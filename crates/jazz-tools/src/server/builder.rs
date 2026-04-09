@@ -13,9 +13,7 @@ use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::server::{
-    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ExternalIdentityStore, ServerState,
-};
+use crate::server::{CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -144,19 +142,9 @@ impl ServerBuilder {
         log_auth_config(&auth_config, &self.catalogue_authority);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
-        let external_identity_store = Arc::new(self.build_external_identity_store()?);
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-        let external_identity_rows = external_identity_store
-            .list_external_identities(self.app_id)
-            .await
-            .map_err(|e| format!("failed to load external identities: {e}"))?;
-
-        let mut external_identities = HashMap::with_capacity(external_identity_rows.len());
-        for row in external_identity_rows {
-            external_identities.insert((row.issuer, row.subject), row.principal_id);
-        }
 
         let state = Arc::new(ServerState {
             runtime,
@@ -168,8 +156,6 @@ impl ServerBuilder {
             catalogue_authority: self.catalogue_authority.clone(),
             jwks_cache,
             http_client,
-            external_identity_store,
-            external_identities: RwLock::new(external_identities),
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
@@ -289,67 +275,6 @@ impl ServerBuilder {
             ServerStorageMode::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
     }
-
-    fn build_external_identity_store(&self) -> Result<ExternalIdentityStore, String> {
-        match &self.storage_mode {
-            ServerStorageMode::Persistent { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-
-                #[cfg(feature = "rocksdb")]
-                {
-                    let db_path = meta_dir.join("jazz.rocksdb");
-                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                        .map_err(|e| {
-                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                        })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
-                }
-                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
-                {
-                    let db_path = meta_dir.join("jazz.sqlite");
-                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                    })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
-                }
-                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
-                {
-                    ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
-                }
-            }
-            #[cfg(feature = "sqlite")]
-            ServerStorageMode::PersistentSqlite { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-                let db_path = meta_dir.join("jazz.sqlite");
-                let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                    format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                })?;
-                ExternalIdentityStore::new_with_storage(Box::new(storage))
-            }
-            #[cfg(feature = "rocksdb")]
-            ServerStorageMode::PersistentRocksDb { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-                let db_path = meta_dir.join("jazz.rocksdb");
-                let storage =
-                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                    })?;
-                ExternalIdentityStore::new_with_storage(Box::new(storage))
-            }
-            ServerStorageMode::InMemory => {
-                ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
-            }
-        }
-    }
 }
 
 fn server_sync_manager() -> SyncManager {
@@ -427,9 +352,8 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
     };
     if auth_config.is_configured() {
         info!(
-            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
-            auth_config.allow_anonymous,
-            auth_config.allow_demo,
+            "Auth configured: self_signed={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+            auth_config.allow_self_signed,
             auth_config.jwks_url.is_some(),
             auth_config.backend_secret.is_some(),
             auth_config.admin_secret.is_some(),
@@ -437,8 +361,8 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         );
     } else {
         info!(
-            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
-            auth_config.allow_anonymous, auth_config.allow_demo, authority_mode
+            "Auth configured: self_signed={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
+            auth_config.allow_self_signed, authority_mode
         );
     }
 }
@@ -448,7 +372,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn in_memory_builder_creates_working_external_identity_store() {
+    async fn in_memory_builder_creates_working_server() {
         let app_id = AppId::from_name("builder-test-app");
         let built = ServerBuilder::new(app_id)
             .with_in_memory_storage()
@@ -456,25 +380,6 @@ mod tests {
             .await
             .expect("build server");
 
-        built
-            .state
-            .external_identity_store
-            .create_external_identity(
-                app_id,
-                "https://issuer.example",
-                "subject-123",
-                "principal-123",
-            )
-            .await
-            .expect("create external identity");
-
-        let existing = built
-            .state
-            .external_identity_store
-            .get_external_identity(app_id, "https://issuer.example", "subject-123")
-            .await
-            .expect("query external identity");
-
-        assert!(existing.is_some());
+        assert_eq!(built.state.app_id, app_id);
     }
 }

@@ -392,113 +392,72 @@ mod integration_tests {
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Test link-external endpoint idempotency and conflict behavior.
     #[tokio::test]
-    async fn test_link_external_idempotent_and_conflict() {
+    async fn test_self_signed_jwt_auth_sync() {
         let server = TestServer::start().await;
-        let token = make_jwt_with_issuer(
-            "external-user",
-            json!({"role": "user"}),
-            JWT_SECRET,
-            "https://issuer.example",
+        let seed = jazz_tools::self_signed_auth::generate_seed();
+        let key = jazz_tools::self_signed_auth::derive_signing_key(&seed);
+        let token = jazz_tools::self_signed_auth::mint_token(
+            &key,
+            "00000000-0000-0000-0000-000000000001",
             None,
-        );
+        )
+        .unwrap();
 
-        let first = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
             .send()
             .await
             .unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
-        let first_json: serde_json::Value = first.json().await.unwrap();
-        assert_eq!(first_json["created"], json!(true));
 
-        let second = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(second.status(), StatusCode::OK);
-        let second_json: serde_json::Value = second.json().await.unwrap();
-        assert_eq!(second_json["created"], json!(false));
-
-        let conflict = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-b")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn test_link_external_returns_expired_for_expired_jwt() {
-        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
-            "test-jwks-kid",
-            "secret-expired-link",
-        )])
-        .await;
-        let expired = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 60;
-        let token = make_jwt_with_exp(
-            "external-user",
-            json!({"role": "user"}),
-            "secret-expired-link",
-            expired,
-            Some("https://issuer.example"),
-            None,
-        );
+    async fn test_self_signed_wrong_audience_rejected() {
+        let server = TestServer::start().await;
+        let seed = jazz_tools::self_signed_auth::generate_seed();
+        let key = jazz_tools::self_signed_auth::derive_signing_key(&seed);
+        let token = jazz_tools::self_signed_auth::mint_token(&key, "wrong-audience", None).unwrap();
 
-        let response = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
             .send()
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "expired");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn test_link_external_returns_disabled_when_jwt_auth_is_not_configured() {
-        let server = TestServer::start_without_jwks().await;
-        let token = make_jwt_with_issuer(
-            "external-user",
-            json!({"role": "user"}),
-            JWT_SECRET,
-            "https://issuer.example",
+    async fn test_self_signed_tampered_signature_rejected() {
+        let server = TestServer::start().await;
+        let seed = jazz_tools::self_signed_auth::generate_seed();
+        let key = jazz_tools::self_signed_auth::derive_signing_key(&seed);
+        let mut token = jazz_tools::self_signed_auth::mint_token(
+            &key,
+            "00000000-0000-0000-0000-000000000001",
             None,
-        );
+        )
+        .unwrap();
+        token.push('X'); // corrupt signature
 
-        let response = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
             .send()
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "disabled");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Create a valid catalogue sync body for testing admin auth.

@@ -3,7 +3,6 @@ import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
 const mocks = vi.hoisted(() => {
-  const resolveLocalAuthDefaults = vi.fn();
   const createDb = vi.fn();
   const createDbFromInspectedPage = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
@@ -33,7 +32,6 @@ const mocks = vi.hoisted(() => {
   }
 
   return {
-    resolveLocalAuthDefaults,
     createDb,
     createDbFromInspectedPage,
     trackPromise,
@@ -43,7 +41,6 @@ const mocks = vi.hoisted(() => {
       initError = error;
     },
     reset() {
-      resolveLocalAuthDefaults.mockReset();
       createDb.mockReset();
       createDbFromInspectedPage.mockReset();
       trackPromise.mockReset();
@@ -52,10 +49,6 @@ const mocks = vi.hoisted(() => {
     },
   };
 });
-
-vi.mock("../runtime/local-auth.js", () => ({
-  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
-}));
 
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
@@ -93,29 +86,22 @@ describe("svelte/createJazzClient", () => {
 
   it("SV-U01: initialises orchestrator and shuts down cleanly", async () => {
     const config: DbConfig = { appId: "svelte-unit-1" };
-    const resolvedConfig: DbConfig = {
-      appId: "svelte-unit-1",
-      localAuthMode: "anonymous",
-      localAuthToken: "test-token",
-    };
     const session: Session = {
-      user_id: "local:alice",
-      claims: { auth_mode: "local", local_mode: "anonymous" },
+      user_id: "alice",
+      claims: { auth_mode: "external", subject: "alice" },
     };
     const db = createMockDb("test-app", session);
 
-    mocks.resolveLocalAuthDefaults.mockReturnValue(resolvedConfig);
     mocks.createDb.mockResolvedValue(db);
 
     const client = await createJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
-    expect(mocks.resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
-    expect(mocks.createDb).toHaveBeenCalledWith(resolvedConfig);
+    expect(mocks.createDb).toHaveBeenCalledWith(config);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
-    expect(manager.config).toEqual({ appId: resolvedConfig.appId });
+    expect(manager.config).toEqual({ appId: config.appId });
     expect(manager.db).toBe(db);
     expect(manager.init).toHaveBeenCalledTimes(1);
 
@@ -135,7 +121,6 @@ describe("svelte/createJazzClient", () => {
     const config: DbConfig = { appId: "svelte-unit-2" };
     const dbError = new Error("createDb failed");
 
-    mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockRejectedValue(dbError);
 
     await expect(createJazzClient(config)).rejects.toBe(dbError);
@@ -147,7 +132,6 @@ describe("svelte/createJazzClient", () => {
     const initError = new Error("orchestrator init failed");
     const db = createMockDb();
 
-    mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
     mocks.setInitError(initError);
 
@@ -167,7 +151,6 @@ describe("svelte/createJazzClient", () => {
     };
     const db = createMockDb();
 
-    mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
 
     await createJazzClient(config);

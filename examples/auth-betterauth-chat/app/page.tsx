@@ -1,14 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
+import { type DbConfig, loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
+import { JazzProvider, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
-function ChatShell(): React.JSX.Element {
+function ChatShell({ selfSignedSeed }: { selfSignedSeed: string }): React.JSX.Element {
   const db = useDb();
   const authState = db.getAuthState();
   const session = authState.session;
@@ -29,10 +29,17 @@ function ChatShell(): React.JSX.Element {
   }
 
   async function handleSignUp(email: string, password: string) {
+    const proofToken = mintSelfSignedToken(selfSignedSeed, DEFAULT_APP_ID);
+
     const res = await authClient.signUp.email({
       email,
       name: email,
       password,
+      fetchOptions: {
+        headers: {
+          "x-jazz-self-signed-proof": proofToken,
+        },
+      },
     });
 
     if (res.error) {
@@ -48,7 +55,9 @@ function ChatShell(): React.JSX.Element {
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={authState.status === "authenticated" && session?.claims.auth_mode !== "local"}
+          loggedIn={
+            authState.status === "authenticated" && session?.claims.auth_mode !== "self-signed"
+          }
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -102,10 +111,7 @@ export default function Page(): React.JSX.Element {
   const { data: authSession, isPending: authPending } = authClient.useSession();
   const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(true);
-  const localAuth = React.useMemo(
-    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
-    [],
-  );
+  const selfSignedSeed = React.useMemo(() => loadOrCreateIdentitySeed(DEFAULT_APP_ID), []);
 
   React.useEffect(() => {
     if (authPending) {
@@ -153,12 +159,10 @@ export default function Page(): React.JSX.Element {
       };
     }
 
-    return {
-      ...sharedConfig,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
-    };
-  }, [initialJwtToken, localAuth.localAuthMode, localAuth.localAuthToken]);
+    // Self-signed fallback: mint a fresh JWT from the local identity seed
+    const selfSignedToken = mintSelfSignedToken(selfSignedSeed.seed, DEFAULT_APP_ID);
+    return { ...sharedConfig, jwtToken: selfSignedToken };
+  }, [initialJwtToken, selfSignedSeed]);
 
   if (authPending || tokenPending) {
     return <p className="loading-state">Connecting to BetterAuth...</p>;
@@ -171,7 +175,7 @@ export default function Page(): React.JSX.Element {
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
       <BetterAuthJazzSync>
-        <ChatShell />
+        <ChatShell selfSignedSeed={selfSignedSeed.seed} />
       </BetterAuthJazzSync>
     </JazzProvider>
   );

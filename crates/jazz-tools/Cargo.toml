@@ -21,7 +21,7 @@ rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
-transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
+transport-http = ["transport", "dep:reqwest", "dep:bytes"]
 client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
 server = [
   "runtime-tokio",
@@ -32,7 +32,6 @@ server = [
   "dep:tower-http",
   "dep:async-stream",
   "dep:jsonwebtoken",
-  "dep:base64",
   "dep:bytes",
   "dep:reqwest",
 ]
@@ -69,6 +68,9 @@ small-map = "0.1"
 bitvec = "1.0"
 ahash = "0.8"
 sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
+sha1 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
@@ -81,7 +83,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
 async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "9", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 
 reqwest = { version = "0.12", default-features = false, features = [
   "json",

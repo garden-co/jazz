@@ -8,8 +8,7 @@ const adminSecret = "world-tour-dev-secret";
 const server = await startLocalJazzServer({
   port,
   adminSecret,
-  allowAnonymous: true,
-  allowDemo: true,
+  allowSelfSigned: true,
 });
 
 await pushSchemaCatalogue({

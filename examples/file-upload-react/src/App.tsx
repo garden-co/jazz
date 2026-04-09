@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
   attachDevTools,
-  getActiveSyntheticAuth,
   JazzProvider,
   useAll,
   useDb,
   useJazzClient,
   useSession,
 } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken, type DbConfig } from "jazz-tools";
 import { app, type UploadWithIncludes, type File as JazzFile } from "../schema.js";
 import { Logo } from "./Logo.js";
 
@@ -48,14 +47,14 @@ function readEnvAppId(): string | undefined {
 
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-2473-7006-857e-dd676070304b";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    jwtToken,
     ...overrides,
   };
 }

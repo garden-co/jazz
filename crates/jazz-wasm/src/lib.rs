@@ -51,6 +51,7 @@
 pub mod driver_bridge;
 pub mod query;
 pub mod runtime;
+pub mod self_signed;
 pub mod types;
 
 // Re-export main types for JavaScript

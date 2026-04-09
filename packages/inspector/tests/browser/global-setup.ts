@@ -42,6 +42,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   process.env.PUBLISHED_SCHEMA_HASH = publishedSchemaHash;
 
+  const jwtToken = serverHandle.jwtForUser("test-token");
   const client = await JazzClient.connect({
     appId: APP_ID,
     schema: app.wasmSchema,
@@ -49,8 +50,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     env: TEST_ENV,
     userBranch: TEST_BRANCH,
     adminSecret: ADMIN_SECRET,
-    localAuthMode: "demo",
-    localAuthToken: "test-token",
+    jwtToken,
   });
 
   const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);

@@ -1,5 +1,6 @@
 import * as React from "react";
-import { getActiveSyntheticAuth, JazzProvider, type DbConfig } from "jazz-tools/react-native";
+import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 import {
   ActivityIndicator,
   Platform,
@@ -17,8 +18,6 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-type LocalAuthMode = Extract<DbConfig["localAuthMode"], "anonymous" | "demo">;
-
 const defaultServerUrl = Platform.select({
   android: "http://10.0.2.2:1625",
   ios: "http://127.0.0.1:1625",
@@ -29,9 +28,7 @@ const defaultAppId = "00000000-0000-0000-0000-000000000002";
 type ExpoPublicEnvKey =
   | "EXPO_PUBLIC_JAZZ_APP_ID"
   | "EXPO_PUBLIC_JAZZ_SERVER_URL"
-  | "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
-  | "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
-  | "EXPO_PUBLIC_JAZZ_LOCAL_TOKEN";
+  | "EXPO_PUBLIC_JAZZ_ADMIN_SECRET";
 
 const runtimeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
   .process?.env;
@@ -46,17 +43,9 @@ function readExpoPublicEnv(key: ExpoPublicEnvKey): string | undefined {
         ? typeof process !== "undefined"
           ? process.env.EXPO_PUBLIC_JAZZ_SERVER_URL
           : undefined
-        : key === "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
-          ? typeof process !== "undefined"
-            ? process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET
-            : undefined
-          : key === "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
-            ? typeof process !== "undefined"
-              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_MODE
-              : undefined
-            : typeof process !== "undefined"
-              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN
-              : undefined;
+        : typeof process !== "undefined"
+          ? process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET
+          : undefined;
 
   return bundledValue ?? runtimeEnv?.[key];
 }
@@ -64,36 +53,18 @@ function readExpoPublicEnv(key: ExpoPublicEnvKey): string | undefined {
 const envAppId = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_APP_ID");
 const envServerUrl = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_SERVER_URL");
 const envAdminSecret = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_ADMIN_SECRET");
-const envLocalMode = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_MODE");
-const envLocalToken = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_TOKEN");
-
-const syntheticAuthCache = new Map<string, ReturnType<typeof getActiveSyntheticAuth>>();
-
-function parseLocalAuthMode(mode: string | undefined): LocalAuthMode | undefined {
-  if (mode === "anonymous" || mode === "demo") return mode;
-  return undefined;
-}
-
-function getStableSyntheticAuth(appId: string) {
-  const cached = syntheticAuthCache.get(appId);
-  if (cached) return cached;
-  const created = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-  syntheticAuthCache.set(appId, created);
-  return created;
-}
 
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;
-  const syntheticAuth = getStableSyntheticAuth(appId);
-  const envMode = parseLocalAuthMode(envLocalMode);
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   return {
     appId,
     env: overrides.env ?? "dev",
     userBranch: overrides.userBranch ?? "main",
     serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    localAuthMode: overrides.localAuthMode ?? envMode ?? syntheticAuth.localAuthMode,
-    localAuthToken: overrides.localAuthToken ?? envLocalToken ?? syntheticAuth.localAuthToken,
+    jwtToken,
     adminSecret: overrides.adminSecret ?? envAdminSecret,
     ...overrides,
   };

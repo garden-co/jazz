@@ -24,6 +24,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 import { App } from "../../src/App";
 import { Game } from "../../src/Game";
 import { FUEL_TYPES } from "../../src/game/constants";
@@ -81,6 +82,11 @@ function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
+}
+
 async function mountApp(opts: {
   appId?: string;
   dbName?: string;
@@ -88,12 +94,10 @@ async function mountApp(opts: {
   playerId?: string;
   physicsSpeed?: number;
   spawnX?: number;
-  localAuthToken?: string;
-  localAuthMode?: string;
+  jwtToken?: string;
   adminSecret?: string;
 }): Promise<HTMLDivElement> {
-  const { physicsSpeed, spawnX, playerId, localAuthToken, localAuthMode, adminSecret, ...config } =
-    opts;
+  const { physicsSpeed, spawnX, playerId, jwtToken, adminSecret, ...config } = opts;
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -106,9 +110,7 @@ async function mountApp(opts: {
           config: {
             appId: config.appId ?? APP_ID,
             ...config,
-            ...(localAuthToken
-              ? { localAuthMode: localAuthMode ?? "anonymous", localAuthToken }
-              : {}),
+            ...(jwtToken ? { jwtToken } : {}),
             ...(adminSecret ? { adminSecret } : {}),
           },
           playerId: playerId ?? crypto.randomUUID(),
@@ -542,14 +544,17 @@ describe("Moon Lander — Cross-Client Sync", () => {
      * within SYNC_TIMEOUT.
      */
     const serverUrl = await commands.startFreshTestServer("full-phase2");
-    const sharedToken = `full-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sharedToken = selfSignedTokenFor(
+      `full-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      APP_ID_MULTI,
+    );
 
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-a"),
         serverUrl,
-        localAuthToken: sharedToken,
+        jwtToken: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });
@@ -558,7 +563,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-b"),
         serverUrl,
-        localAuthToken: sharedToken,
+        jwtToken: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
+import { JazzProvider, useDb } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -85,10 +86,10 @@ export function App() {
   const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
     readStoredAuthSession(DEFAULT_APP_ID),
   );
-  const localAuth = React.useMemo(
-    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
-    [],
-  );
+  const selfSignedToken = React.useMemo(() => {
+    const seed = loadOrCreateIdentitySeed(DEFAULT_APP_ID);
+    return mintSelfSignedToken(seed.seed, DEFAULT_APP_ID);
+  }, []);
 
   const config = React.useMemo((): DbConfig => {
     const sharedConfig = {
@@ -108,10 +109,9 @@ export function App() {
 
     return {
       ...sharedConfig,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
+      jwtToken: selfSignedToken,
     };
-  }, [localAuth.localAuthMode, localAuth.localAuthToken, storedAuthSession]);
+  }, [selfSignedToken, storedAuthSession]);
 
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>

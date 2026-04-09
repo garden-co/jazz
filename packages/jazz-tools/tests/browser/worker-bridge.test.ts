@@ -23,6 +23,7 @@ import {
 import {
   blockTestingServerNetwork,
   getTestingServerInfo,
+  getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
   unblockTestingServerNetwork,
 } from "./testing-server.js";
@@ -1030,9 +1031,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
-    const sharedLocalAuthToken = `sync-network-recover-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sharedUserId = `sync-network-recover-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken);
+    const sharedJwt = await getTestingServerJwtForUser(sharedUserId);
+    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedUserId);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -1042,8 +1044,7 @@ describe("Worker Bridge with OPFS", () => {
       schemaJson: JSON.stringify(schema),
       serverUrl,
       adminSecret,
-      localAuthMode: "anonymous",
-      localAuthToken: sharedLocalAuthToken,
+      jwtToken: sharedJwt,
     });
 
     const baselineTitle = `baseline-network-recover-${Date.now()}`;
@@ -1167,9 +1168,10 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the earlier offline worker write also promotes to B + fresh edge client
    */
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
-    const sharedLocalAuthToken = `sync-offline-reconnect-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sharedUserId = `sync-offline-reconnect-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
+    const sharedJwt = await getTestingServerJwtForUser(sharedUserId);
+    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedUserId);
     const dbAProbe = attachWorkerMessageProbe(dbA);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
@@ -1180,8 +1182,7 @@ describe("Worker Bridge with OPFS", () => {
       schemaJson: JSON.stringify(schema),
       serverUrl,
       adminSecret,
-      localAuthMode: "anonymous",
-      localAuthToken: sharedLocalAuthToken,
+      jwtToken: sharedJwt,
     });
 
     const baselineTitle = `baseline-before-offline-${Date.now()}`;

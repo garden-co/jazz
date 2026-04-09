@@ -78,7 +78,6 @@ const mocks = vi.hoisted(() => {
   return {
     MockNapiRuntime,
     MockJazzClient,
-    resolveLocalAuthDefaults,
     runtimeCtor,
     inMemoryRuntimeCtor,
     runtimeInstances,
@@ -87,7 +86,6 @@ const mocks = vi.hoisted(() => {
     createDbFromClient,
     createdDbs,
     reset() {
-      resolveLocalAuthDefaults.mockReset();
       runtimeCtor.mockReset();
       inMemoryRuntimeCtor.mockReset();
       runtimeInstances.length = 0;
@@ -110,10 +108,6 @@ vi.mock("../runtime/client.js", async () => {
     JazzClient: mocks.MockJazzClient,
   };
 });
-
-vi.mock("../runtime/local-auth.js", () => ({
-  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
-}));
 
 vi.mock("../runtime/db.js", () => ({
   createDbFromClient: mocks.createDbFromClient,
@@ -141,7 +135,6 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
-    mocks.resolveLocalAuthDefaults.mockImplementation((config) => config);
   });
 
   it("BC-U01: lazily initializes runtime/client on first access", () => {

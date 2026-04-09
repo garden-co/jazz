@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Row, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
-import { deriveLocalPrincipalId } from "./client-session.js";
 
 const schemaWithTodos = {
   todos: {
@@ -602,18 +601,18 @@ describe("JazzClient schema order", () => {
           ],
         },
       },
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
+      jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
     });
 
     await client.query(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }));
     client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), () => {});
 
     const expectedSession = JSON.stringify({
-      user_id: await deriveLocalPrincipalId("test-app", "anonymous", "device-token"),
+      user_id: "alice",
       claims: {
-        auth_mode: "local",
-        local_mode: "anonymous",
+        role: "reader",
+        auth_mode: "external",
+        subject: "alice",
       },
     });
 

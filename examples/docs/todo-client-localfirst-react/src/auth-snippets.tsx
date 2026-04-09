@@ -1,10 +1,5 @@
-import { useState } from "react";
-import {
-  getActiveSyntheticAuth,
-  JazzProvider,
-  SyntheticUserSwitcher,
-  useLinkExternalIdentity,
-} from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 function TodoApp() {
   return null;
@@ -26,85 +21,25 @@ export function AnonymousAuthApp() {
 }
 // #endregion auth-anon-react
 
-// #region auth-anon-token-react
-export function AnonymousAuthWithTokenApp() {
+// #region auth-self-signed-react
+const selfSignedAppId = "my-app";
+const selfSignedSeed = loadOrCreateIdentitySeed(selfSignedAppId);
+const selfSignedJwtToken = mintSelfSignedToken(selfSignedSeed.seed, selfSignedAppId);
+
+export function SelfSignedAuthApp() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
-        localAuthMode: "anonymous",
-        localAuthToken: "device-token-123",
+        appId: selfSignedAppId,
+        serverUrl: "http://127.0.0.1:4200",
+        jwtToken: selfSignedJwtToken,
       }}
     >
       <TodoApp />
     </JazzProvider>
   );
 }
-// #endregion auth-anon-token-react
-
-// #region auth-demo-react
-const demoAuthAppId = "my-app";
-const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-
-export function DemoAuthApp() {
-  return (
-    <>
-      <SyntheticUserSwitcher appId={demoAuthAppId} defaultMode="demo" />
-      <JazzProvider
-        config={{
-          appId: demoAuthAppId,
-          serverUrl: "http://127.0.0.1:4200",
-          localAuthMode: demoAuthActive.localAuthMode,
-          localAuthToken: demoAuthActive.localAuthToken,
-        }}
-      >
-        <TodoApp />
-      </JazzProvider>
-    </>
-  );
-}
-// #endregion auth-demo-react
-
-// #region auth-external-react
-const appId = "my-app";
-const jazzServerUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-
-export function ExternalAuthApp() {
-  const [hasJwt, setHasJwt] = useState(false);
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
-  async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    setHasJwt(true);
-  }
-
-  return (
-    <JazzProvider
-      key={hasJwt ? "jwt" : "local"}
-      config={
-        hasJwt
-          ? {
-              appId,
-              serverUrl: jazzServerUrl,
-              jwtToken: providerJwt,
-            }
-          : {
-              appId,
-              serverUrl: jazzServerUrl,
-            }
-      }
-    >
-      <button onClick={() => onSignedIn()}>Sign in</button>
-      <TodoApp />
-    </JazzProvider>
-  );
-}
-// #endregion auth-external-react
+// #endregion auth-self-signed-react
 
 // #region auth-jwt-react
 export function JwtAuthApp() {

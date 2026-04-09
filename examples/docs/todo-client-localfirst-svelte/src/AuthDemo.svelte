@@ -1,27 +1,25 @@
-<!-- #region auth-demo-svelte -->
+<!-- #region auth-self-signed-svelte -->
 <script lang="ts">
   import {
     createJazzClient,
     JazzSvelteProvider,
-    SyntheticUserSwitcher,
-    getActiveSyntheticAuth,
   } from 'jazz-tools/svelte';
+  import { loadOrCreateIdentitySeed, mintSelfSignedToken } from 'jazz-tools';
 
   const appId = 'my-app';
-  const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   const client = createJazzClient({
     appId,
     serverUrl: 'http://127.0.0.1:4200',
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    jwtToken,
   });
 </script>
 
-<SyntheticUserSwitcher {appId} defaultMode="demo" />
 <JazzSvelteProvider {client}>
   {#snippet children({ db })}
     <slot />
   {/snippet}
 </JazzSvelteProvider>
-<!-- #endregion auth-demo-svelte -->
+<!-- #endregion auth-self-signed-svelte -->

@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import { type DbConfig, loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -18,6 +18,11 @@ import type { DbConfig } from "jazz-tools";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -47,8 +52,7 @@ describe("React Todo App E2E", () => {
   async function mountApp(config: {
     appId?: string;
     serverUrl?: string;
-    localAuthMode?: "anonymous" | "demo";
-    localAuthToken?: string;
+    jwtToken?: string;
     adminSecret?: string;
     driver?: DbConfig["driver"];
   }): Promise<HTMLDivElement> {
@@ -279,16 +283,14 @@ describe("React Todo App E2E", () => {
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      localAuthMode: "demo",
-      localAuthToken: "react-sync-user-a",
+      jwtToken: selfSignedTokenFor("react-sync-user-a", APP_ID),
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      localAuthMode: "demo",
-      localAuthToken: "react-sync-user-b",
+      jwtToken: selfSignedTokenFor("react-sync-user-b", APP_ID),
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -330,15 +332,13 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "react-memory-user-a",
+      jwtToken: selfSignedTokenFor("react-memory-user-a", APP_ID),
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "react-memory-user-b",
+      jwtToken: selfSignedTokenFor("react-memory-user-b", APP_ID),
       driver: { type: "memory" },
     });
 

@@ -71,17 +71,13 @@ enum Commands {
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
 
-        /// Enable anonymous local auth (X-Jazz-Local-Mode: anonymous).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_ANONYMOUS")]
-        allow_anonymous: bool,
+        /// Enable self-signed Ed25519 JWT auth.
+        #[arg(long, env = "JAZZ_ALLOW_SELF_SIGNED")]
+        allow_self_signed: bool,
 
-        /// Enable demo local auth (X-Jazz-Local-Mode: demo).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_DEMO")]
-        allow_demo: bool,
+        /// Required audience for self-signed JWTs.
+        #[arg(long, env = "JAZZ_SELF_SIGNED_AUDIENCE")]
+        self_signed_audience: Option<String>,
 
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
@@ -134,8 +130,8 @@ async fn main() {
             data_dir,
             in_memory,
             jwks_url,
-            allow_anonymous,
-            allow_demo,
+            allow_self_signed,
+            self_signed_audience,
             backend_secret,
             admin_secret,
             catalogue_authority,
@@ -143,19 +139,20 @@ async fn main() {
             catalogue_authority_admin_secret,
         } => {
             let node_env_mode = resolve_node_env_mode();
-            let allow_anonymous = match node_env_mode {
-                NodeEnvMode::Production => allow_anonymous,
+            let allow_self_signed = match node_env_mode {
+                NodeEnvMode::Production => allow_self_signed,
                 NodeEnvMode::DevelopmentLike => true,
             };
-            let allow_demo = match node_env_mode {
-                NodeEnvMode::Production => allow_demo,
-                NodeEnvMode::DevelopmentLike => true,
+            let self_signed_audience = match (&self_signed_audience, node_env_mode) {
+                (Some(aud), _) => Some(aud.clone()),
+                (None, NodeEnvMode::DevelopmentLike) if allow_self_signed => Some(app_id.clone()),
+                _ => self_signed_audience,
             };
 
             let auth_config = AuthConfig {
                 jwks_url,
-                allow_anonymous,
-                allow_demo,
+                allow_self_signed,
+                self_signed_audience,
                 backend_secret,
                 admin_secret,
             };

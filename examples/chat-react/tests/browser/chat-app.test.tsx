@@ -10,6 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,6 +18,11 @@ import { TEST_PORT, APP_ID } from "./test-constants.js";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -54,8 +60,7 @@ describe("Chat App E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      jwtToken?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -393,8 +398,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-a-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`chat-access-user-a-${Date.now()}`, APP_ID),
     });
 
     await waitFor(
@@ -481,8 +485,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-b-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`chat-access-user-b-${Date.now()}`, APP_ID),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers

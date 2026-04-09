@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import { type DbConfig, loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,6 +16,11 @@ import type { DbConfig } from "jazz-tools";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -263,16 +268,14 @@ describe("Svelte Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "svelte-sync-user-a",
+      jwtToken: selfSignedTokenFor("svelte-sync-user-a", APP_ID),
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "svelte-sync-user-b",
+      jwtToken: selfSignedTokenFor("svelte-sync-user-b", APP_ID),
       adminSecret: ADMIN_SECRET,
     });
 

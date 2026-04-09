@@ -12,8 +12,15 @@ use std::time::Duration;
 use bytes::BytesMut;
 use futures::StreamExt;
 use jazz_tools::jazz_transport::ServerEvent;
+use jazz_tools::self_signed_auth;
 use reqwest::Client;
 use tempfile::TempDir;
+
+fn mint_test_token() -> String {
+    let seed = self_signed_auth::generate_seed();
+    let key = self_signed_auth::derive_signing_key(&seed);
+    self_signed_auth::mint_token(&key, "00000000-0000-0000-0000-000000000001", None).unwrap()
+}
 
 /// Test server handle - kills process on drop.
 struct TestServer {
@@ -231,8 +238,7 @@ async fn test_stream_connection_receives_connected_event() {
     // Connect to events endpoint with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-test-user")
+        .header("Authorization", format!("Bearer {}", mint_test_token()))
         .send()
         .await
         .expect("connect to events");
@@ -276,8 +282,7 @@ async fn test_stream_heartbeat() {
 
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-heartbeat-user")
+        .header("Authorization", format!("Bearer {}", mint_test_token()))
         .send()
         .await
         .expect("connect to events");
@@ -310,8 +315,7 @@ async fn test_sync_payload_broadcast_to_stream_client() {
     // Connect to binary stream with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-broadcast-user")
+        .header("Authorization", format!("Bearer {}", mint_test_token()))
         .send()
         .await
         .expect("connect to events");

@@ -7,7 +7,7 @@
 
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { getTestingServerInfo } from "./testing-server.js";
+import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -258,19 +258,15 @@ export class TestCleanup {
  * Equivalent of Rust `TestingClient::builder().with_server(...).connect()`.
  * The returned Db is automatically tracked by `ctx` for cleanup.
  */
-export async function createSyncedDb(
-  ctx: TestCleanup,
-  label: string,
-  localAuthToken: string,
-): Promise<Db> {
+export async function createSyncedDb(ctx: TestCleanup, label: string, userId: string): Promise<Db> {
   const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+  const jwtToken = await getTestingServerJwtForUser(userId);
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
-      localAuthMode: "anonymous",
-      localAuthToken,
+      jwtToken,
       adminSecret,
     }),
   );

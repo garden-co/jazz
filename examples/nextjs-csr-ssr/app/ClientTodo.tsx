@@ -2,14 +2,19 @@
 
 import { app } from "../schema";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
+
+const nextAppId = process.env.NEXT_PUBLIC_APP_ID!;
+const nextSeed = loadOrCreateIdentitySeed(nextAppId);
+const nextJwtToken = mintSelfSignedToken(nextSeed.seed, nextAppId);
 
 export default function ClientTodo() {
   return (
     <JazzProvider
       config={{
-        appId: process.env.NEXT_PUBLIC_APP_ID!,
+        appId: nextAppId,
         serverUrl: process.env.NEXT_PUBLIC_SYNC_SERVER_URL!,
-        localAuthMode: "anonymous",
+        jwtToken: nextJwtToken,
         driver: { type: "memory" },
       }}
     >

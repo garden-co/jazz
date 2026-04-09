@@ -6,9 +6,9 @@ use super::support::{
     has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
+use jazz_tools::self_signed_auth;
 use jazz_tools::server::TestingServer;
 use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
@@ -466,18 +466,15 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
         boolean_policy_document_values("bob", "Bob Only", false)
     );
 
-    let anonymous_user_id = derive_local_principal_id(
-        server.app_id(),
-        LocalAuthMode::Anonymous,
-        "anonymous-owner-restricted-device",
-    );
+    let anon_seed = self_signed_auth::generate_seed();
+    let anon_key = self_signed_auth::derive_signing_key(&anon_seed);
+    let anonymous_user_id = self_signed_auth::derive_user_id(&anon_key.verifying_key());
     let anonymous = connect_ready_claims(
         &server,
         &schema,
         &anonymous_user_id,
         json!({
-            "auth_mode": "local",
-            "local_mode": "anonymous"
+            "auth_mode": "self-signed"
         }),
         "documents",
         READY_TIMEOUT,

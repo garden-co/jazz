@@ -2,7 +2,8 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
-import { APP_ORIGIN } from "../../constants";
+import { APP_ORIGIN, DEFAULT_APP_ID } from "../../constants";
+import { verifySelfSignedProofToken } from "./verify-self-signed-proof";
 
 const authMemoryDb: MemoryDB = {
   account: [],
@@ -25,6 +26,23 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
       autoSignIn: true,
       minPasswordLength: 1,
       requireEmailVerification: false,
+    },
+    databaseHooks: {
+      user: {
+        create: {
+          async before(user, ctx) {
+            // If the client sent a self-signed proof token, verify it and
+            // use the proven userId so that the BetterAuth account preserves
+            // the same identity the user had before signing up.
+            const proofToken = ctx?.headers?.get("x-jazz-self-signed-proof");
+            if (proofToken) {
+              const provedUserId = verifySelfSignedProofToken(proofToken, DEFAULT_APP_ID);
+              return { data: { ...user, id: provedUserId } };
+            }
+            return { data: user };
+          },
+        },
+      },
     },
     plugins: [
       nextCookies(),

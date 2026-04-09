@@ -34,6 +34,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers (same conventions as chat-app.test.tsx)
@@ -41,6 +42,11 @@ import { TEST_PORT, APP_ID } from "./test-constants.js";
 
 function uniqueDbName(label: string): string {
   return `test-send-perm-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -75,8 +81,7 @@ describe("Send permission — private chat INSERT policy", () => {
     config: {
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      jwtToken?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -184,8 +189,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-alice-a-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`send-perm-alice-a-${Date.now()}`, APP_ID),
     });
 
     // Alice's app auto-creates a public chat first; navigate to a private one
@@ -235,8 +239,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-alice-b-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`send-perm-alice-b-${Date.now()}`, APP_ID),
     });
 
     await waitFor(
@@ -297,8 +300,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const bobContainer = await mountApp({
       dbName: uniqueDbName("bob-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-bob-b-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`send-perm-bob-b-${Date.now()}`, APP_ID),
     });
 
     // InviteHandler should redirect Bob to the chat after inserting chatMember

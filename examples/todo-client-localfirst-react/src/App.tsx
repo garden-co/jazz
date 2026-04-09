@@ -1,11 +1,6 @@
 import * as React from "react";
-import {
-  JazzProvider,
-  getActiveSyntheticAuth,
-  attachDevTools,
-  useJazzClient,
-} from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken, type DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { app } from "../schema.js";
 
@@ -19,14 +14,14 @@ function readEnvAppId(): string | undefined {
 // #region context-setup-react
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-23f3-7227-818f-51eb1d178b6b";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    jwtToken,
     ...overrides,
   };
 }

@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,6 +17,11 @@ import { TEST_PORT, APP_ID } from "./test-constants.js";
 
 function uniqueDbName(label: string): string {
   return `test-settings-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -52,8 +58,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      jwtToken?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -288,8 +293,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-alice"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-alice-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`settings-alice-${Date.now()}`, APP_ID),
     });
 
     await waitFor(
@@ -312,8 +316,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-bob"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-bob-${Date.now()}`,
+      jwtToken: selfSignedTokenFor(`settings-bob-${Date.now()}`, APP_ID),
     });
 
     // Wait for Bob to see the chat

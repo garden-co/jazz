@@ -10,8 +10,7 @@ export interface RemoteBrowserDbCreateInput {
   schemaJson: string;
   serverUrl?: string;
   adminSecret?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
+  jwtToken?: string;
   logLevel?: DbConfig["logLevel"];
 }
 
@@ -94,8 +93,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    localAuthMode: input.localAuthMode,
-    localAuthToken: input.localAuthToken,
+    jwtToken: input.jwtToken,
     adminSecret: input.adminSecret,
     logLevel: input.logLevel,
   });

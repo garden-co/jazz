@@ -1,11 +1,15 @@
-<!-- #region auth-anon-token-svelte -->
+<!-- #region auth-self-signed-token-svelte -->
 <script lang="ts">
   import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+  import { loadOrCreateIdentitySeed, mintSelfSignedToken } from 'jazz-tools';
+
+  const appId = 'my-app';
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   const client = createJazzClient({
-    appId: 'my-app',
-    localAuthMode: 'anonymous',
-    localAuthToken: 'device-token-123',
+    appId,
+    jwtToken,
   });
 </script>
 
@@ -14,4 +18,4 @@
     <slot />
   {/snippet}
 </JazzSvelteProvider>
-<!-- #endregion auth-anon-token-svelte -->
+<!-- #endregion auth-self-signed-token-svelte -->

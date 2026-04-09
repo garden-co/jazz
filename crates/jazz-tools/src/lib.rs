@@ -10,6 +10,7 @@ pub mod query_manager;
 pub mod routes;
 pub mod runtime_core;
 pub mod schema_manager;
+pub mod self_signed_auth;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod storage;

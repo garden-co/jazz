@@ -490,11 +490,19 @@ describe("TS Query API", () => {
     });
 
     it("selects and filters permission magic columns end to end", async () => {
+      // Craft a minimal JWT so the runtime resolves a user session for permission testing.
+      const jwtPayload = JSON.stringify({
+        sub: "magic-columns-user",
+        aud: "test-app",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const jwtToken = `eyJhbGciOiJub25lIn0.${Buffer.from(jwtPayload).toString("base64url")}.sig`;
+
       const db = await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
-        localAuthMode: "anonymous",
-        localAuthToken: "magic-columns-user",
+        jwtToken,
       });
 
       const { id: projectId } = insertProject(db, "Announcements");

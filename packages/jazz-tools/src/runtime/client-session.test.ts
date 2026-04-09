@@ -1,11 +1,5 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  deriveLocalPrincipalId,
-  deriveLocalPrincipalIdSync,
-  resolveClientSessionSync,
-  resolveClientSessionStateSync,
-} from "./client-session.js";
+import { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
@@ -32,8 +26,6 @@ describe("client session resolution", () => {
     const session = resolveClientSessionSync({
       appId: "app-jwt-principal",
       jwtToken: jwt,
-      localAuthMode: "demo",
-      localAuthToken: "device-a",
     });
 
     expect(session).toEqual({
@@ -68,59 +60,14 @@ describe("client session resolution", () => {
     });
   });
 
-  it("derives local principal id with the server-compatible hash format", async () => {
-    const appId = "app-local";
-    const mode = "anonymous";
-    const token = "device-token";
-    const digest = createHash("sha256")
-      .update(`${appId}:${mode}:${token}`, "utf8")
-      .digest("base64");
-    const expected = `local:${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
-
-    expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
-    expect(deriveLocalPrincipalIdSync(appId, mode, token)).toBe(expected);
-
-    const session = resolveClientSessionSync({
-      appId,
-      localAuthMode: mode,
-      localAuthToken: token,
-    });
-    expect(session).toEqual({
-      user_id: expected,
-      claims: {
-        auth_mode: "local",
-        local_mode: mode,
-      },
-    });
-    expect(
-      resolveClientSessionStateSync({ appId, localAuthMode: mode, localAuthToken: token }),
-    ).toEqual({
-      transport: "local",
-      session: {
-        user_id: expected,
-        claims: {
-          auth_mode: "local",
-          local_mode: mode,
-        },
-      },
-    });
-  });
-
-  it("falls back to local auth when jwt cannot be parsed", () => {
+  it("returns null session when jwt cannot be parsed", () => {
     const state = resolveClientSessionStateSync({
       appId: "fallback-app",
       jwtToken: "not-a-jwt",
-      localAuthMode: "demo",
-      localAuthToken: "device-token",
     });
 
-    expect(state.transport).toBe("local");
-    expect(state.session).toMatchObject({
-      claims: {
-        auth_mode: "local",
-        local_mode: "demo",
-      },
-    });
+    expect(state.transport).toBeNull();
+    expect(state.session).toBeNull();
   });
 
   it("returns null when no auth is configured", () => {

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { deriveLocalPrincipalId } from "../../src/runtime/client-session.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
@@ -475,8 +474,6 @@ async function createServerDb(
   options: {
     includeAdminSecret?: boolean;
     includeJwt?: boolean;
-    localAuthMode?: "anonymous" | "demo";
-    localAuthToken?: string;
   } = {},
 ): Promise<Db> {
   const { serverUrl, adminSecret } = await getTestingServerInfo();
@@ -489,12 +486,6 @@ async function createServerDb(
   };
   if (options.includeJwt !== false) {
     config.jwtToken = await getTestingServerJwtForUser(sub, claims);
-  }
-  if (options.localAuthMode) {
-    config.localAuthMode = options.localAuthMode;
-  }
-  if (options.localAuthToken) {
-    config.localAuthToken = options.localAuthToken;
   }
   return createDb(config);
 }
@@ -1714,50 +1705,21 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   let unsubscribeDenied: (() => void) | null = null;
 
   try {
-    const localAuthMode = "anonymous" as const;
-    const seedLocalToken = `${dbPrefix}-b5-seed-token`;
-    const allowedLocalToken = `${dbPrefix}-b5-allowed-token`;
-    const deniedLocalToken = `${dbPrefix}-b5-denied-token`;
-    const intermediateLocalToken = `${dbPrefix}-b5-intermediate-token`;
-    const allowedPrincipalId = await deriveLocalPrincipalId(
-      appId,
-      localAuthMode,
-      allowedLocalToken,
-    );
-    const deniedPrincipalId = await deriveLocalPrincipalId(appId, localAuthMode, deniedLocalToken);
-    const intermediatePrincipalId = await deriveLocalPrincipalId(
-      appId,
-      localAuthMode,
-      intermediateLocalToken,
-    );
+    const allowedPrincipalId = `${dbPrefix}-b5-allowed`;
+    const deniedPrincipalId = `${dbPrefix}-b5-denied`;
+    const intermediatePrincipalId = `${dbPrefix}-b5-intermediate`;
     const allowedSession = {
       user_id: allowedPrincipalId,
-      claims: {
-        auth_mode: "local",
-        local_mode: localAuthMode,
-      },
+      claims: {},
     };
     const deniedSession = {
       user_id: deniedPrincipalId,
-      claims: {
-        auth_mode: "local",
-        local_mode: localAuthMode,
-      },
+      claims: {},
     };
 
-    // Seed with a sync-enabled client, then validate with two non-privileged
-    // browser clients that authenticate only via local-auth HTTP headers.
-    seedDb = await createServerDb(
-      appId,
-      `${dbPrefix}-seed`,
-      "realistic-b5-seed",
-      {},
-      {
-        includeJwt: false,
-        localAuthMode,
-        localAuthToken: seedLocalToken,
-      },
-    );
+    // Seed with a privileged client, then validate with two non-privileged
+    // browser clients that authenticate via JWT.
+    seedDb = await createServerDb(appId, `${dbPrefix}-seed`, `${dbPrefix}-b5-seed`);
     const seeded = await seedPermissionDataset(seedDb, b5, permissionSchema, {
       allowedOwnerId: allowedPrincipalId,
       deniedOwnerId: deniedPrincipalId,
@@ -1778,26 +1740,16 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     allowedDb = await createServerDb(
       appId,
       `${dbPrefix}-allowed`,
-      "realistic-b5-allowed",
+      allowedPrincipalId,
       {},
-      {
-        includeAdminSecret: false,
-        includeJwt: false,
-        localAuthMode,
-        localAuthToken: allowedLocalToken,
-      },
+      { includeAdminSecret: false },
     );
     deniedDb = await createServerDb(
       appId,
       `${dbPrefix}-denied`,
-      "realistic-b5-denied",
+      deniedPrincipalId,
       {},
-      {
-        includeAdminSecret: false,
-        includeJwt: false,
-        localAuthMode,
-        localAuthToken: deniedLocalToken,
-      },
+      { includeAdminSecret: false },
     );
 
     let warmAllowedVisible = 0;

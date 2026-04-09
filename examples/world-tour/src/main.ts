@@ -1,5 +1,6 @@
 import { createApp, h } from "vue";
-import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/vue";
+import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 import App from "./App.vue";
 import { appId, isPublicMode } from "./constants";
 
@@ -10,12 +11,9 @@ const clientConfig: Parameters<typeof createJazzClient>[0] = {
   serverUrl: import.meta.env.VITE_JAZZ_SERVER_URL ?? "http://localhost:4200",
 };
 
-if (isPublicMode) {
-  clientConfig.localAuthMode = "anonymous";
-} else {
-  const auth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-  clientConfig.localAuthMode = auth.localAuthMode;
-  clientConfig.localAuthToken = auth.localAuthToken;
+if (!isPublicMode) {
+  const seed = loadOrCreateIdentitySeed(appId);
+  clientConfig.jwtToken = mintSelfSignedToken(seed.seed, appId);
 }
 
 const client = createJazzClient(clientConfig);

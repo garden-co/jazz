@@ -222,8 +222,8 @@ impl TestingServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_self_signed: true,
+            self_signed_audience: Some(app_id.to_string()),
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
         };

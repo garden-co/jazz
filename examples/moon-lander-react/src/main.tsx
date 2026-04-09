@@ -24,13 +24,13 @@ function main() {
   // means the local player row and deposits persist, avoiding ghost duplicates.
   const dbName = params.get("dbName") ?? `moon-lander-${playerId.slice(0, 8)}`;
 
-  const localAuthToken = params.get("localAuthToken") ?? undefined;
+  const jwtToken = params.get("jwtToken") ?? undefined;
   const adminSecret = params.get("adminSecret") ?? undefined;
 
   console.info(
     "[moon-lander] Connecting to Jazz server at %s (token=%s, admin=%s)",
     serverUrl,
-    localAuthToken ? "yes" : "auto",
+    jwtToken ? "yes" : "auto",
     adminSecret ? "yes" : "no",
   );
 
@@ -44,7 +44,7 @@ function main() {
         appId,
         dbName,
         serverUrl,
-        ...(localAuthToken ? { localAuthMode: "anonymous" as const, localAuthToken } : {}),
+        ...(jwtToken ? { jwtToken } : {}),
         ...(adminSecret ? { adminSecret } : {}),
       }}
     />,

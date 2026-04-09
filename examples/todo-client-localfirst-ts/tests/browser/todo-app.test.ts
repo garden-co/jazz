@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 import { app } from "../../schema.js";
-import { createDb, DbConfig } from "jazz-tools";
+import { createDb, DbConfig, loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,6 +17,11 @@ import { createDb, DbConfig } from "jazz-tools";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function selfSignedTokenFor(userLabel: string, appId: string): string {
+  const seed = loadOrCreateIdentitySeed(userLabel);
+  return mintSelfSignedToken(seed.seed, appId);
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -268,16 +273,14 @@ describe("Vanilla TS Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-a",
+      jwtToken: selfSignedTokenFor("ts-sync-user-a", APP_ID),
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-b",
+      jwtToken: selfSignedTokenFor("ts-sync-user-b", APP_ID),
       adminSecret: ADMIN_SECRET,
     });
 

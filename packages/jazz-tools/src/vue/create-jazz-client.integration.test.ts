@@ -71,18 +71,15 @@ describe("vue/create-jazz-client integration", () => {
     }
   }, 15000);
 
-  it("VU-I02: local auth defaults return a non-null local session in local mode", async () => {
+  it("VU-I02: no-auth client returns null session", async () => {
     let client: JazzClient | null = null;
 
     try {
       client = await createJazzClient({
-        appId: makeAppId("local-session"),
-        localAuthMode: "anonymous",
+        appId: makeAppId("no-auth-session"),
       });
 
-      expect(client.session).not.toBeNull();
-      expect(client.session?.claims.auth_mode).toBe("local");
-      expect(client.session?.claims.local_mode).toBe("anonymous");
+      expect(client.session).toBeNull();
     } finally {
       if (client) {
         await client.shutdown();

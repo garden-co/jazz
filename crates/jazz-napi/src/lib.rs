@@ -18,6 +18,8 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use jazz_tools::self_signed_auth;
 use std::sync::{Arc, Mutex, Weak};
 
 use jazz_tools::binding_support::{
@@ -184,8 +186,8 @@ struct DevServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
+    allow_self_signed: Option<bool>,
+    self_signed_audience: Option<String>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
     catalogue_authority: Option<String>,
@@ -1348,7 +1350,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowSelfSigned?: boolean; selfSignedAudience?: string; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1379,8 +1381,11 @@ impl DevServer {
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
-            allow_anonymous: opts.allow_anonymous.unwrap_or(false),
-            allow_demo: opts.allow_demo.unwrap_or(false),
+            allow_self_signed: opts.allow_self_signed.unwrap_or(true),
+            self_signed_audience: Some(
+                opts.self_signed_audience
+                    .unwrap_or_else(|| opts.app_id.clone()),
+            ),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
         };
@@ -1500,6 +1505,62 @@ pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
     serde_json::to_value(&schema)
         .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
+}
+
+// ---------------------------------------------------------------------------
+// Self-signed auth bindings
+// ---------------------------------------------------------------------------
+
+/// Generate a new 32-byte identity seed, returned as base64url.
+#[napi(js_name = "generateIdentitySeed")]
+pub fn generate_identity_seed() -> String {
+    let seed = self_signed_auth::generate_seed();
+    self_signed_auth::encode_seed(&seed)
+}
+
+/// Derive the canonical userId from a base64url-encoded seed.
+#[napi(js_name = "deriveSelfSignedUserId")]
+pub fn derive_self_signed_user_id(seed_b64: String) -> napi::Result<String> {
+    let seed_bytes = self_signed_auth::decode_seed(&seed_b64).map_err(napi::Error::from_reason)?;
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("seed must be 32 bytes"))?;
+    let key = self_signed_auth::derive_signing_key(&seed);
+    Ok(self_signed_auth::derive_user_id(&key.verifying_key()))
+}
+
+/// Mint a self-signed JWT from a base64url-encoded seed.
+#[napi(js_name = "mintSelfSignedToken")]
+pub fn mint_self_signed_token(
+    seed_b64: String,
+    audience: String,
+    ttl_secs: Option<u32>,
+) -> napi::Result<String> {
+    let seed_bytes = self_signed_auth::decode_seed(&seed_b64).map_err(napi::Error::from_reason)?;
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("seed must be 32 bytes"))?;
+    let key = self_signed_auth::derive_signing_key(&seed);
+    self_signed_auth::mint_token(&key, &audience, ttl_secs.map(u64::from))
+        .map_err(napi::Error::from_reason)
+}
+
+/// Derive userId from a base64url-encoded raw Ed25519 public key.
+#[napi(js_name = "deriveUserIdFromPublicKey")]
+pub fn derive_user_id_from_public_key(pub_key_b64: String) -> napi::Result<String> {
+    self_signed_auth::derive_user_id_from_b64(&pub_key_b64).map_err(napi::Error::from_reason)
+}
+
+/// Verify a self-signed JWT and return the authenticated userId.
+///
+/// Performs the full 10-step verification from the spec.
+/// Throws if the token is invalid, expired, or has a wrong audience.
+/// Used server-side for proof-of-possession during BetterAuth registration.
+#[napi(js_name = "verifySelfSignedToken")]
+pub fn verify_self_signed_token(token: String, expected_audience: String) -> napi::Result<String> {
+    let result = self_signed_auth::verify_token(&token, &expected_audience)
+        .map_err(napi::Error::from_reason)?;
+    Ok(result.user_id)
 }
 
 #[cfg(test)]

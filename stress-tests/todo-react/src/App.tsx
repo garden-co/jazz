@@ -1,11 +1,6 @@
 import { useState, useEffect } from "react";
-import {
-  JazzProvider,
-  getActiveSyntheticAuth,
-  attachDevTools,
-  useJazzClient,
-} from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken, type DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
 import { app } from "../schema";
@@ -73,14 +68,14 @@ if (!serverUrl) {
   throw new Error("JAZZ_SERVER_URL is required");
 }
 
-const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+const seed = loadOrCreateIdentitySeed(appId);
+const jwtToken = mintSelfSignedToken(seed.seed, appId);
 const config: DbConfig = {
   appId,
   env: import.meta.env.DEV ? "dev" : "prod",
   userBranch: "main",
   devMode: import.meta.env.DEV,
-  localAuthMode: active.localAuthMode,
-  localAuthToken: active.localAuthToken,
+  jwtToken,
   serverUrl,
 };
 

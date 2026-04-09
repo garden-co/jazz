@@ -1,4 +1,4 @@
-export { TestingServer } from "jazz-napi";
+export { TestingServer, verifySelfSignedToken } from "jazz-napi";
 export {
   pushSchemaCatalogue,
   startLocalJazzServer,

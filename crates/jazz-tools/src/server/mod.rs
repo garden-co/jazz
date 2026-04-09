@@ -13,13 +13,11 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, SyncPayload};
 
 mod builder;
-mod external_identity_store;
 mod hosted;
 #[cfg(feature = "test-utils")]
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder};
-pub use external_identity_store::{ExternalIdentityRow, ExternalIdentityStore};
 pub use hosted::HostedServer;
 #[cfg(feature = "test-utils")]
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
@@ -178,10 +176,6 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     /// JWKS cache with TTL and on-demand refresh for key rotation.
     pub jwks_cache: Option<JwksCache>,
-    /// Persistent external identity mapping store.
-    pub external_identity_store: Arc<ExternalIdentityStore>,
-    /// In-memory cache: (issuer, subject) -> principal_id.
-    pub external_identities: RwLock<HashMap<(String, String), String>>,
     /// Clients that lost their SSE stream, waiting to be reaped after TTL.
     pub disconnect_candidates: RwLock<HashMap<ClientId, DisconnectCandidate>>,
     /// Client state TTL. Default: 5 minutes.

@@ -1,4 +1,5 @@
-import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react";
+import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { loadOrCreateIdentitySeed, mintSelfSignedToken } from "jazz-tools";
 import { Suspense } from "react";
 
 type DbConfig = Parameters<typeof createJazzClient>[0];
@@ -16,14 +17,14 @@ const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "019d4349-2486-7021-a33e-566b
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL || undefined;
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? APP_ID;
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    jwtToken,
     ...(SERVER_URL ? { serverUrl: SERVER_URL } : {}),
     ...overrides,
   };

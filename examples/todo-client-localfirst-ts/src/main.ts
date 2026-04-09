@@ -1,7 +1,7 @@
 import {
   createDb,
-  createSyntheticUserSwitcher,
-  getActiveSyntheticAuth,
+  loadOrCreateIdentitySeed,
+  mintSelfSignedToken,
   type DbConfig,
   type Db,
 } from "jazz-tools";
@@ -58,14 +58,14 @@ export async function startApp(
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
   const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
-  const activeAuth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+  const seed = loadOrCreateIdentitySeed(appId);
+  const jwtToken = mintSelfSignedToken(seed.seed, appId);
 
   const resolvedConfig: DbConfig = {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: activeAuth.localAuthMode,
-    localAuthToken: activeAuth.localAuthToken,
+    jwtToken,
     ...config,
   };
 
@@ -76,16 +76,6 @@ export async function startApp(
   const sessionUserId = session?.user_id ?? null;
 
   // Build DOM
-  const authControls = document.createElement("div");
-  authControls.id = "auth-controls";
-  container.appendChild(authControls);
-
-  const switcher = createSyntheticUserSwitcher({
-    appId: resolvedConfig.appId,
-    container: authControls,
-    defaultMode: "demo",
-  });
-
   const h1 = document.createElement("h1");
   h1.textContent = "Todos";
   container.appendChild(h1);
@@ -175,7 +165,6 @@ export async function startApp(
     db,
     destroy: async () => {
       unsubscribe();
-      switcher.destroy();
       await db.shutdown();
       container.innerHTML = "";
     },
