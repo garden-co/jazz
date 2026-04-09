@@ -41,13 +41,13 @@ pub fn vendored_link_plan(
         ),
         "aarch64-unknown-linux-gnu" => (
             StdCppLib::StdCxx,
-            "sha256:6dedfe2b2770e437085c4f9e5ea6cc663eedb07700b9a503175d46c0dc9966d3",
-            "0ad965bfadc9e19ef04ac7d4f61040186bea3bdb1ca4787db530e79f8548b433",
+            "sha256:7e00966e869532780fbbc2cfb5d881e89b3beca8573941864d37bc351aaf231a",
+            "75aa0bec87eecd7c4a803ccf2ed337ae08e575ed79d74c9e1164bfcf7db31119",
         ),
         "x86_64-unknown-linux-gnu" => (
             StdCppLib::StdCxx,
-            "sha256:1980c15f9a6c90bbb095749c3006050b30f7b1fe0e2f985a7130658edb52c3fc",
-            "0cfd274a299a63b1d83467279d96e1fcc0662a81360d126ec48c7cc4be03891d",
+            "sha256:66af20476b451d3a6745b22181d1cd29412371771826622308866578a2521a17",
+            "ebd96a6946ce24f46714d22be84622f1a2f5b975976eb0a9376bd3f739df8fd9",
         ),
         _ => return None,
     };
