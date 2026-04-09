@@ -28,14 +28,6 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
-  packages: read
-
-env:
-  GITHUB_ACTOR: ${{ github.actor }}
-  GITHUB_TOKEN: ${{ github.token }}
-
 jobs:
   release-push-gate:
     name: Gate release push trigger
