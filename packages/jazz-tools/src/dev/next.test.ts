@@ -212,6 +212,41 @@ describe("withJazz", () => {
       "conflicting Jazz dev runtime configuration",
     );
   }, 30_000);
+
+  it("throws when env-driven existing-server config changes in one process", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-env-conflict-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const serverHandle = await devServer.startLocalJazzServer({
+      appId: "00000000-0000-0000-0000-000000000101",
+      port: await getAvailablePort(),
+      adminSecret: "next-env-conflict-admin",
+    });
+
+    try {
+      process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = serverHandle.url;
+      process.env.NEXT_PUBLIC_JAZZ_APP_ID = serverHandle.appId;
+
+      const wrapped = withJazz(
+        {},
+        {
+          adminSecret: "next-env-conflict-admin",
+          schemaDir,
+        },
+      );
+
+      await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+
+      process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = "http://127.0.0.1:59999";
+      process.env.NEXT_PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000202";
+
+      await expect(resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE)).rejects.toThrow(
+        "conflicting Jazz dev runtime configuration",
+      );
+    } finally {
+      await serverHandle.stop();
+    }
+  }, 30_000);
 });
 
 describe("dev barrel", () => {

@@ -55,6 +55,8 @@ type ManagedRuntimeConfig = {
   server: boolean | string | Record<string, unknown>;
   adminSecret: string | null;
   appId: string | null;
+  publicServerUrl: string | null;
+  publicAppId: string | null;
 };
 
 const DEVELOPMENT_PHASE = "phase-development-server";
@@ -139,6 +141,8 @@ function getManagedRuntimeConfig(options: JazzPluginOptions): ManagedRuntimeConf
     server: normalizeServerOption(options.server),
     adminSecret: options.adminSecret ?? null,
     appId: options.appId ?? null,
+    publicServerUrl: process.env[PUBLIC_SERVER_URL_ENV] ?? null,
+    publicAppId: process.env[PUBLIC_APP_ID_ENV] ?? null,
   };
 }
 
@@ -148,12 +152,9 @@ function serializeManagedRuntimeConfig(config: ManagedRuntimeConfig): string {
 
 function assertCompatibleManagedRuntime(options: JazzPluginOptions): void {
   const requestedSignature = serializeManagedRuntimeConfig(getManagedRuntimeConfig(options));
-  if (runtime && runtimeConfigSignature && runtimeConfigSignature !== requestedSignature) {
-    throw new Error(
-      `${LOG_PREFIX} conflicting Jazz dev runtime configuration; call __resetJazzNextPluginForTests() before switching dev options`,
-    );
-  }
-  if (initPromise && initConfigSignature && initConfigSignature !== requestedSignature) {
+  const matchesInitial = initConfigSignature === requestedSignature;
+  const matchesRuntime = runtimeConfigSignature === requestedSignature;
+  if ((runtime || initPromise) && !matchesInitial && !matchesRuntime) {
     throw new Error(
       `${LOG_PREFIX} conflicting Jazz dev runtime configuration; call __resetJazzNextPluginForTests() before switching dev options`,
     );
@@ -257,7 +258,7 @@ async function initializeManagedRuntime(options: JazzPluginOptions): Promise<Man
       process.env[PUBLIC_SERVER_URL_ENV] = serverUrl;
 
       runtime = { appId, serverUrl, adminSecret };
-      runtimeConfigSignature = requestedSignature;
+      runtimeConfigSignature = serializeManagedRuntimeConfig(getManagedRuntimeConfig(options));
       return runtime;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
