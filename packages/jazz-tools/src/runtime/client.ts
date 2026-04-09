@@ -848,6 +848,7 @@ export class JazzClient {
     if (this.useBackendSyncAuth) {
       return {
         backendSecret: this.context.backendSecret,
+        adminSecret: this.context.adminSecret,
       };
     }
 
@@ -1515,7 +1516,7 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.rejectPendingRemoteSyncWaiters(new Error("Client shutdown"));
+    this.resolvePendingRemoteSyncWaiters();
     this.streamController.stop();
 
     // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
