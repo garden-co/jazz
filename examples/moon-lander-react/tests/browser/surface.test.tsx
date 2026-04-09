@@ -55,6 +55,11 @@ async function mountGame(props: Record<string, unknown> = {}): Promise<HTMLDivEl
   return el;
 }
 
+async function tapKey(key: string, code: string, holdMs = 120): Promise<void> {
+  await holdKey(key, holdMs, code);
+  await waitFrames(2);
+}
+
 afterEach(async () => {
   await unmountAll(mounts);
 });
@@ -75,10 +80,7 @@ describe("Moon Lander — Start Mode", () => {
 
     expect(readStr(el, "player-mode")).toBe("start");
 
-    pressKey(" ", "Space");
-    await waitFrames(2);
-    releaseKey(" ", "Space");
-
+    await tapKey(" ", "Space");
     await waitForAttr(el, "player-mode", "descending", 3000);
   });
 
@@ -113,10 +115,7 @@ describe("Moon Lander — Lander Interaction", () => {
   it("pressing E after landing exits the lander to walking mode", async () => {
     const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
 
-    pressKey("e", "KeyE");
-    await waitFrames(5);
-    releaseKey("e", "KeyE");
-
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
   });
 
@@ -136,9 +135,8 @@ describe("Moon Lander — Lander Interaction", () => {
     );
     const landerX = readNum(el, "lander-x");
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     // Walk away
     await holdKey("d", 80, "KeyD");
@@ -151,19 +149,26 @@ describe("Moon Lander — Lander Interaction", () => {
   it("pressing E near the lander re-enters it", async () => {
     const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     // Walk a short distance away then back
-    await holdKey("d", 50, "KeyD");
-    await waitFrames(3);
-    await holdKey("a", 50, "KeyA");
-    await waitFrames(3);
+    await holdKey("d", 120, "KeyD");
+    await waitFor(
+      () => readNum(el, "player-x") > SPAWN_X + 20,
+      2000,
+      "player should walk away from the lander before returning",
+    );
 
-    pressKey("e", "KeyE");
-    await waitFrames(5);
-    releaseKey("e", "KeyE");
+    pressKey("a", "KeyA");
+    await waitFor(
+      () =>
+        Math.abs(readNum(el, "player-x") - readNum(el, "lander-x")) <= LANDER_INTERACT_RADIUS - 5,
+      3000,
+      "player should walk back within lander interact radius",
+    );
+    await tapKey("e", "KeyE");
+    releaseKey("a", "KeyA");
 
     await waitForAttr(el, "player-mode", "in_lander", 3000);
   });
@@ -171,9 +176,8 @@ describe("Moon Lander — Lander Interaction", () => {
   it("pressing E when far from lander does nothing", async () => {
     const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     // Walk far away
     await holdKey("d", 200, "KeyD");
@@ -183,9 +187,7 @@ describe("Moon Lander — Lander Interaction", () => {
     const landerX = readNum(el, "lander-x");
     expect(Math.abs(playerX - landerX)).toBeGreaterThan(LANDER_INTERACT_RADIUS);
 
-    pressKey("e", "KeyE");
-    await waitFrames(10);
-    releaseKey("e", "KeyE");
+    await tapKey("e", "KeyE");
 
     expect(readStr(el, "player-mode")).toBe("walking");
   });
@@ -199,9 +201,8 @@ describe("Moon Lander — Walking", () => {
   it("astronaut walks right with D key", async () => {
     const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     const x0 = readNum(el, "player-x");
     await holdKey("d", 50, "KeyD");
@@ -213,9 +214,8 @@ describe("Moon Lander — Walking", () => {
   it("astronaut walks left with A key", async () => {
     const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     const x0 = readNum(el, "player-x");
     await holdKey("a", 50, "KeyA");
@@ -254,9 +254,8 @@ describe("Moon Lander — Walking", () => {
 
     const landerX = readNum(el, "lander-x");
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     // Walk right
     await holdKey("d", 80, "KeyD");
@@ -291,15 +290,12 @@ describe("Moon Lander — Jump", () => {
   it("Space triggers a jump that rises above ground and returns", async () => {
     const el = await mountGame({ initialMode: "landed" });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     expect(readNum(el, "player-y")).toBe(GROUND_LEVEL);
 
-    pressKey(" ", "Space");
-    await waitFrames(2);
-    releaseKey(" ", "Space");
+    await tapKey(" ", "Space");
 
     // Should rise above ground (Y increases downward, so < GROUND_LEVEL = higher up)
     await waitFor(
@@ -322,13 +318,10 @@ describe("Moon Lander — Jump", () => {
   it("W key also triggers a jump while walking", async () => {
     const el = await mountGame({ initialMode: "landed" });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
-    pressKey("w", "KeyW");
-    await waitFrames(2);
-    releaseKey("w", "KeyW");
+    await tapKey("w", "KeyW");
 
     await waitFor(() => readNum(el, "player-y") < GROUND_LEVEL, 2000, "W key should trigger jump");
   });
@@ -340,13 +333,10 @@ describe("Moon Lander — Jump", () => {
      */
     const el = await mountGame({ initialMode: "landed" });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
-    pressKey(" ", "Space");
-    await waitFrames(2);
-    releaseKey(" ", "Space");
+    await tapKey(" ", "Space");
 
     let minY = GROUND_LEVEL;
     const deadline = Date.now() + 3000;
@@ -365,22 +355,17 @@ describe("Moon Lander — Jump", () => {
   it("cannot double-jump while airborne", async () => {
     const el = await mountGame({ initialMode: "landed" });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
-    pressKey(" ", "Space");
-    await waitFrames(2);
-    releaseKey(" ", "Space");
+    await tapKey(" ", "Space");
 
     await waitFor(() => readNum(el, "player-y") < GROUND_LEVEL, 2000, "should be airborne");
 
     const yMidAir = readNum(el, "player-y");
 
     // Try second jump mid-air
-    pressKey(" ", "Space");
-    await waitFrames(2);
-    releaseKey(" ", "Space");
+    await tapKey(" ", "Space");
 
     await new Promise((r) => setTimeout(r, 100));
     // Should not boost significantly higher than mid-air position
@@ -402,33 +387,35 @@ describe("Moon Lander — World Wrapping", () => {
     const spawnX = MOON_SURFACE_WIDTH - 100;
     const el = await mountGame({ initialMode: "landed", spawnX });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     expect(readNum(el, "player-x")).toBeGreaterThan(MOON_SURFACE_WIDTH - 200);
 
     // Walk right to cross the boundary (~1200px/s at 10x, 200ms covers ~240px)
-    await holdKey("d", 200, "KeyD");
-    await waitFrames(5);
-
-    expect(readNum(el, "player-x")).toBeLessThan(MOON_SURFACE_WIDTH / 2);
+    await holdKey("d", 350, "KeyD");
+    await waitFor(
+      () => readNum(el, "player-x") < MOON_SURFACE_WIDTH / 2,
+      3000,
+      "walking right should wrap to the left side",
+    );
   });
 
   it("walking off the left edge wraps to the right side", async () => {
     const spawnX = 100;
     const el = await mountGame({ initialMode: "landed", spawnX });
 
-    pressKey("e", "KeyE");
+    await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
 
     expect(readNum(el, "player-x")).toBeLessThan(200);
 
-    await holdKey("a", 200, "KeyA");
-    await waitFrames(5);
-
-    expect(readNum(el, "player-x")).toBeGreaterThan(MOON_SURFACE_WIDTH / 2);
+    await holdKey("a", 350, "KeyA");
+    await waitFor(
+      () => readNum(el, "player-x") > MOON_SURFACE_WIDTH / 2,
+      3000,
+      "walking left should wrap to the right side",
+    );
   });
 
   it("descent position wraps around the world boundary", async () => {
