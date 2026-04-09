@@ -1,4 +1,7 @@
 import { createServer as createNetServer } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DevServer } from "jazz-napi";
 import { loadCompiledSchema } from "../schema-loader.js";
 import {
@@ -83,30 +86,70 @@ async function allocateAutoPort(): Promise<number> {
   throw new Error("Failed to allocate a local Jazz server port.");
 }
 
+async function createOwnedDataDir(): Promise<string> {
+  return await mkdtemp(join(tmpdir(), "jazz-dev-server-"));
+}
+
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
   const appId = options.appId ?? DEFAULT_APP_ID;
   const port = options.port ?? (await allocateAutoPort());
+  const ownsPort = options.port === undefined;
+  const ownsDataDir = options.inMemory !== true && options.dataDir === undefined;
+  const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
 
-  const server = await DevServer.start({
-    appId,
-    port,
-    dataDir: options.dataDir,
-    inMemory: options.inMemory,
-    jwksUrl: options.jwksUrl,
-    allowAnonymous: options.allowAnonymous,
-    allowDemo: options.allowDemo,
-    backendSecret: options.backendSecret,
-    adminSecret: options.adminSecret,
-    catalogueAuthority: options.catalogueAuthority,
-    catalogueAuthorityUrl: options.catalogueAuthorityUrl,
-    catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
-  });
+  let server;
+  try {
+    server = await DevServer.start({
+      appId,
+      port,
+      dataDir,
+      inMemory: options.inMemory,
+      jwksUrl: options.jwksUrl,
+      allowAnonymous: options.allowAnonymous,
+      allowDemo: options.allowDemo,
+      backendSecret: options.backendSecret,
+      adminSecret: options.adminSecret,
+      catalogueAuthority: options.catalogueAuthority,
+      catalogueAuthorityUrl: options.catalogueAuthorityUrl,
+      catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
+    });
+  } catch (error) {
+    if (ownsPort) {
+      autoAllocatedPorts.delete(port);
+    }
+    if (ownsDataDir && dataDir) {
+      await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    throw error;
+  }
 
   if (options.enableLogs === true) {
     console.log(`[jazz-server] started on ${server.url}`);
   }
+
+  let stopPromise: Promise<void> | null = null;
+  const stop = async () => {
+    if (stopPromise) {
+      return await stopPromise;
+    }
+
+    stopPromise = (async () => {
+      try {
+        await server.stop();
+      } finally {
+        if (ownsPort) {
+          autoAllocatedPorts.delete(port);
+        }
+        if (ownsDataDir && dataDir) {
+          await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+    })();
+
+    return await stopPromise;
+  };
 
   return {
     appId: server.appId,
@@ -115,7 +158,7 @@ export async function startLocalJazzServer(
     dataDir: server.dataDir,
     adminSecret: server.adminSecret ?? undefined,
     backendSecret: server.backendSecret ?? undefined,
-    stop: () => server.stop(),
+    stop,
   };
 }
 
