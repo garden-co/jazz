@@ -8,7 +8,9 @@
  *   - Jump: Space/W while walking triggers a floaty lunar hop
  *   - World wrapping: walking or thrusting off one edge reappears at the other
  *
- * All tests mount <Game> directly (no Jazz sync) with physicsSpeed=10.
+ * Tests default to physicsSpeed=10, but transient interaction assertions may
+ * override that with a slower speed so the DOM-observed snapshot state does
+ * not skip over short-lived motion.
  */
 
 import { act } from "react";
@@ -30,6 +32,7 @@ import {
 } from "./test-helpers";
 
 const SPEED = 10;
+const OBSERVABLE_SPEED = 4;
 /** Fixed spawn position (mid-world to avoid wrapping edge cases). */
 const SPAWN_X = 4800;
 
@@ -147,13 +150,17 @@ describe("Moon Lander — Lander Interaction", () => {
   });
 
   it("pressing E near the lander re-enters it", async () => {
-    const el = await mountGame({ initialMode: "landed", spawnX: SPAWN_X });
+    const el = await mountGame({
+      initialMode: "landed",
+      spawnX: SPAWN_X,
+      physicsSpeed: OBSERVABLE_SPEED,
+    });
 
     await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
 
     // Walk a short distance away then back
-    await holdKey("d", 120, "KeyD");
+    await holdKey("d", 200, "KeyD");
     await waitFor(
       () => readNum(el, "player-x") > SPAWN_X + 20,
       2000,
@@ -161,16 +168,17 @@ describe("Moon Lander — Lander Interaction", () => {
     );
 
     pressKey("a", "KeyA");
-    await waitFor(
-      () =>
-        Math.abs(readNum(el, "player-x") - readNum(el, "lander-x")) <= LANDER_INTERACT_RADIUS - 5,
-      3000,
-      "player should walk back within lander interact radius",
-    );
-    await tapKey("e", "KeyE");
-    releaseKey("a", "KeyA");
-
-    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    const interactPulse = setInterval(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "e", code: "KeyE", bubbles: true }),
+      );
+    }, 25);
+    try {
+      await waitForAttr(el, "player-mode", "in_lander", 3000);
+    } finally {
+      clearInterval(interactPulse);
+      releaseKey("a", "KeyA");
+    }
   });
 
   it("pressing E when far from lander does nothing", async () => {
@@ -288,7 +296,7 @@ describe("Moon Lander — Jump", () => {
    *        posY rises above GROUND_LEVEL, then returns
    */
   it("Space triggers a jump that rises above ground and returns", async () => {
-    const el = await mountGame({ initialMode: "landed" });
+    const el = await mountGame({ initialMode: "landed", physicsSpeed: OBSERVABLE_SPEED });
 
     await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
@@ -316,7 +324,7 @@ describe("Moon Lander — Jump", () => {
   });
 
   it("W key also triggers a jump while walking", async () => {
-    const el = await mountGame({ initialMode: "landed" });
+    const el = await mountGame({ initialMode: "landed", physicsSpeed: OBSERVABLE_SPEED });
 
     await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
@@ -331,7 +339,7 @@ describe("Moon Lander — Jump", () => {
      * With JUMP_VELOCITY=-140 and JUMP_GRAVITY=200,
      * theoretical peak = 140²/(2×200) = 49px.
      */
-    const el = await mountGame({ initialMode: "landed" });
+    const el = await mountGame({ initialMode: "landed", physicsSpeed: OBSERVABLE_SPEED });
 
     await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
@@ -353,7 +361,7 @@ describe("Moon Lander — Jump", () => {
   });
 
   it("cannot double-jump while airborne", async () => {
-    const el = await mountGame({ initialMode: "landed" });
+    const el = await mountGame({ initialMode: "landed", physicsSpeed: OBSERVABLE_SPEED });
 
     await tapKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
