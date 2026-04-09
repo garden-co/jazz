@@ -1549,8 +1549,8 @@ impl<S: Storage> PermissionR5State<S> {
 }
 
 fn realistic_r1_crud(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}",
         scenario.id.to_lowercase(),
@@ -1577,8 +1577,8 @@ fn realistic_r1_crud(c: &mut Criterion) {
 }
 
 fn realistic_r1_crud_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop",
         scenario.id.to_lowercase(),
@@ -1606,8 +1606,8 @@ fn realistic_r1_crud_single_hop(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}",
         scenario.id.to_lowercase(),
@@ -1634,9 +1634,9 @@ fn realistic_r2_reads(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
-    let seed_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop",
         scenario.id.to_lowercase(),
@@ -1664,9 +1664,9 @@ fn realistic_r2_reads_single_hop(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let read_scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_with_churn.json");
-    let write_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_with_churn",
         read_scenario.id.to_lowercase(),
@@ -1694,8 +1694,8 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_single_hop_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop_rocksdb",
         scenario.id.to_lowercase(),
@@ -1741,8 +1741,8 @@ fn realistic_r1_crud_single_hop_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_single_hop_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop_sqlite",
         scenario.id.to_lowercase(),
@@ -1784,9 +1784,9 @@ fn realistic_r1_crud_single_hop_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_single_hop_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
-    let seed_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop_rocksdb",
         scenario.id.to_lowercase(),
@@ -1833,9 +1833,9 @@ fn realistic_r2_reads_single_hop_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_single_hop_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
-    let seed_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop_sqlite",
         scenario.id.to_lowercase(),
@@ -1878,9 +1878,9 @@ fn realistic_r2_reads_single_hop_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_with_write_churn_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let read_scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_with_churn.json");
-    let write_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_with_churn_rocksdb",
         read_scenario.id.to_lowercase(),
@@ -1919,9 +1919,9 @@ fn realistic_r2_reads_with_write_churn_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_with_write_churn_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let read_scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_with_churn.json");
-    let write_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_with_churn_sqlite",
         read_scenario.id.to_lowercase(),
@@ -1956,8 +1956,8 @@ fn realistic_r2_reads_with_write_churn_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_rocksdb",
         scenario.id.to_lowercase(),
@@ -1995,8 +1995,8 @@ fn realistic_r1_crud_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_sqlite",
         scenario.id.to_lowercase(),
@@ -2033,8 +2033,8 @@ fn realistic_r1_crud_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}_rocksdb",
         scenario.id.to_lowercase(),
@@ -2072,8 +2072,8 @@ fn realistic_r2_reads_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}_sqlite",
         scenario.id.to_lowercase(),
@@ -2215,7 +2215,7 @@ fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
 fn realistic_r3_cold_load_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r4_fanout_updates.json",
         "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
@@ -2260,7 +2260,7 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r4_fanout_updates_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r4_fanout_updates.json",
         "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
@@ -2324,7 +2324,7 @@ fn realistic_r4_fanout_updates_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r4_fanout_updates_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r4_fanout_updates.json",
         "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
@@ -2448,7 +2448,7 @@ fn realistic_r5_permission_recursive(c: &mut Criterion) {
     run_permission_scenario(
         c,
         "realistic_phase1/permission_recursive",
-        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        r5_permission_recursive_scenario_path(),
     );
 }
 
@@ -2468,7 +2468,7 @@ fn realistic_r5_permission_recursive_rocksdb(c: &mut Criterion) {
     run_storage_permission_scenario(
         c,
         "realistic_phase1/permission_recursive_rocksdb",
-        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        r5_permission_recursive_scenario_path(),
         |recursive_depth| {
             let tempdir = TempDir::new().expect("create tempdir for rocksdb permission benchmark");
             let db_path = tempdir.path().join(format!(
@@ -2492,7 +2492,7 @@ fn realistic_r5_permission_recursive_sqlite(c: &mut Criterion) {
     run_storage_permission_scenario(
         c,
         "realistic_phase1/permission_recursive_sqlite",
-        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        r5_permission_recursive_scenario_path(),
         |recursive_depth| {
             let tempdir = TempDir::new().expect("create tempdir for sqlite permission benchmark");
             let db_path = tempdir.path().join(format!(
@@ -2559,8 +2559,8 @@ fn realistic_r6_permission_write_heavy_sqlite(c: &mut Criterion) {
 fn realistic_r6_permission_write_heavy_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r7_hotspot_history(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
     let benchmark_name = format!(
         "{}_{}_hot{}",
         scenario.id.to_lowercase(),
@@ -2592,8 +2592,8 @@ fn realistic_r7_hotspot_history(c: &mut Criterion) {
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r7_hotspot_history_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
     let benchmark_name = format!(
         "{}_{}_hot{}_rocksdb",
         scenario.id.to_lowercase(),
@@ -2636,8 +2636,8 @@ fn realistic_r7_hotspot_history_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r7_hotspot_history_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
     let benchmark_name = format!(
         "{}_{}_hot{}_sqlite",
         scenario.id.to_lowercase(),
@@ -2675,7 +2675,7 @@ fn realistic_r7_hotspot_history_sqlite(c: &mut Criterion) {
 fn realistic_r7_hotspot_history_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r8_many_branches_write(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2705,7 +2705,7 @@ fn realistic_r8_many_branches_write(c: &mut Criterion) {
 }
 
 fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2739,7 +2739,7 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
 }
 
 fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2774,7 +2774,7 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
 }
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2822,7 +2822,7 @@ fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2867,7 +2867,7 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
 fn realistic_r8_many_branches_cold_load_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
         "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
@@ -2944,7 +2944,7 @@ fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -3073,7 +3073,7 @@ fn realistic_r8_many_branches_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -3202,7 +3202,7 @@ fn realistic_r8_many_branches_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r9_subscribed_write_path_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
         "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
@@ -3287,7 +3287,7 @@ fn realistic_r9_subscribed_write_path_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r9_subscribed_write_path_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
         "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
@@ -3791,6 +3791,48 @@ fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
     } else {
         default_path
     }
+}
+
+fn r1_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r1_crud_sustained.json",
+        "benchmarks/realistic/ci/scenarios/r1_crud_sustained.json",
+    )
+}
+
+fn r2_sustained_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r2_reads_sustained.json",
+        "benchmarks/realistic/ci/scenarios/r2_reads_sustained.json",
+    )
+}
+
+fn r2_reads_with_churn_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r2_reads_with_churn.json",
+        "benchmarks/realistic/ci/scenarios/r2_reads_with_churn.json",
+    )
+}
+
+fn r5_permission_recursive_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        "benchmarks/realistic/ci/scenarios/r5_permission_recursive.json",
+    )
+}
+
+fn r7_hotspot_history_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r7_hotspot_history.json",
+        "benchmarks/realistic/ci/scenarios/r7_hotspot_history.json",
+    )
+}
+
+fn profile_config_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/profiles/s.json",
+        "benchmarks/realistic/ci/profiles/s.json",
+    )
 }
 
 fn configured_sample_size(default_size: usize) -> usize {
