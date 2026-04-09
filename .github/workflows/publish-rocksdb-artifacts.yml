@@ -1,0 +1,66 @@
+name: Publish RocksDB Artifacts
+
+on:
+  push:
+    branches:
+      - vendored-rocksdb-archives
+  workflow_dispatch:
+
+concurrency:
+  group: publish-rocksdb-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runs_on: macos-14
+            setup_script: brew install llvm jq
+          - target: x86_64-apple-darwin
+            runs_on: macos-14
+            setup_script: brew install llvm jq
+          - target: aarch64-unknown-linux-gnu
+            runs_on: ubuntu-22.04
+            setup_script: |
+              sudo apt-get update
+              sudo apt-get install -y jq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          - target: x86_64-unknown-linux-gnu
+            runs_on: ubuntu-22.04
+            setup_script: |
+              sudo apt-get update
+              sudo apt-get install -y jq gcc g++
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: Install target toolchain
+        run: ${{ matrix.setup_script }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Publish RocksDB artifacts to GHCR
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-rocksdb-artifacts.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rocksdb-artifact-manifest-${{ matrix.target }}
+          path: dist/rocksdb/manifest.json

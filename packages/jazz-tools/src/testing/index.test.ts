@@ -166,6 +166,31 @@ describe("startLocalJazzServer", () => {
     await server.stop();
   }, 15_000);
 
+  it("allocates a fresh port when no explicit port is provided", async () => {
+    const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
+    const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
+
+    const firstServer = await startLocalJazzServer({
+      appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      dataDir: join(firstRoot, "data-dir"),
+    });
+    const firstPort = firstServer.port;
+    await firstServer.stop();
+
+    const secondServer = await startLocalJazzServer({
+      appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      dataDir: join(secondRoot, "data-dir"),
+    });
+
+    try {
+      expect(secondServer.port).not.toBe(firstPort);
+      const healthResponse = await fetch(`${secondServer.url}/health`);
+      expect(healthResponse.status).toBe(200);
+    } finally {
+      await secondServer.stop();
+    }
+  }, 20_000);
+
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");
     const dataDir = join(captureRoot, "data-dir");
