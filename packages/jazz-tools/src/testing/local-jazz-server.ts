@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCompiledSchema } from "../schema-loader.js";
@@ -10,18 +11,22 @@ import {
 } from "../runtime/schema-fetch.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
-const DEFAULT_PORT = 1625;
 const HEALTH_POLL_INTERVAL_MS = 100;
 const HEALTH_REQUEST_TIMEOUT_MS = 1_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 2_000;
 const DEFAULT_STDERR_MAX_CHARS = 8_192;
+const AUTO_PORT_MIN = 20_000;
+const AUTO_PORT_RANGE = 20_000;
 
 const activeServers = new Set<{
   child: ChildProcess;
   ownsDataDir: boolean;
   dataDir: string;
 }>();
+const autoAllocatedPorts = new Set<number>();
+
+let nextAutoPort = AUTO_PORT_MIN + Math.floor(Math.random() * AUTO_PORT_RANGE);
 
 let installedProcessHooks = false;
 
@@ -87,6 +92,38 @@ async function isHealthy(port: number): Promise<boolean> {
   }
 }
 
+async function canBindPort(port: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const server = createNetServer();
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.listen(port, "127.0.0.1", () => {
+      server.close((error) => {
+        void error;
+        resolve(true);
+      });
+    });
+  });
+}
+
+async function allocateAutoPort(): Promise<number> {
+  for (let attempts = 0; attempts < AUTO_PORT_RANGE; attempts += 1) {
+    const candidate = nextAutoPort;
+    nextAutoPort = AUTO_PORT_MIN + ((nextAutoPort - AUTO_PORT_MIN + 1) % AUTO_PORT_RANGE);
+    if (autoAllocatedPorts.has(candidate)) {
+      continue;
+    }
+    if (!(await canBindPort(candidate))) {
+      continue;
+    }
+    autoAllocatedPorts.add(candidate);
+    return candidate;
+  }
+
+  throw new Error("Failed to allocate a local Jazz server port.");
+}
+
 function installProcessHooks(): void {
   if (installedProcessHooks) {
     return;
@@ -146,7 +183,7 @@ export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
   const appId = options.appId ?? DEFAULT_APP_ID;
-  const port = options.port ?? DEFAULT_PORT;
+  const port = options.port ?? (await allocateAutoPort());
   const healthTimeoutMs = options.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
   const binaryPath = options.binaryPath ?? defaultBinaryPath();
   const ownsDataDir = options.dataDir === undefined;
