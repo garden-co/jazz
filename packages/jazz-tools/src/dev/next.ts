@@ -9,6 +9,7 @@ import { watchSchema } from "./schema-watcher.js";
 export interface JazzServerOptions {
   port?: number;
   adminSecret?: string;
+  backendSecret?: string;
   appId?: string;
   allowAnonymous?: boolean;
   allowDemo?: boolean;
@@ -48,6 +49,7 @@ type ManagedRuntime = {
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  backendSecret?: string;
 };
 
 type ManagedRuntimeConfig = {
@@ -122,7 +124,7 @@ function resolveSchemaDir(options: JazzPluginOptions): string {
 function normalizeServerOption(
   server: JazzPluginOptions["server"],
 ): ManagedRuntimeConfig["server"] {
-  if (server === undefined) return true;
+  if (server === undefined || server === true) return true;
   if (server === false || typeof server === "string") return server;
   return Object.keys(server)
     .sort()
@@ -217,6 +219,7 @@ async function initializeManagedRuntime(options: JazzPluginOptions): Promise<Man
           appId,
           port: serverConfig.port ?? 0,
           adminSecret,
+          backendSecret: serverConfig.backendSecret,
           allowAnonymous: serverConfig.allowAnonymous,
           allowDemo: serverConfig.allowDemo,
           dataDir: serverConfig.dataDir,
@@ -254,10 +257,15 @@ async function initializeManagedRuntime(options: JazzPluginOptions): Promise<Man
 
       installShutdownHooks();
 
+      const backendSecret = serverHandle?.backendSecret;
+
       process.env[PUBLIC_APP_ID_ENV] = appId;
       process.env[PUBLIC_SERVER_URL_ENV] = serverUrl;
+      if (backendSecret) {
+        process.env.BACKEND_SECRET = backendSecret;
+      }
 
-      runtime = { appId, serverUrl, adminSecret };
+      runtime = { appId, serverUrl, adminSecret, backendSecret };
       runtimeConfigSignature = serializeManagedRuntimeConfig(getManagedRuntimeConfig(options));
       return runtime;
     } catch (error) {
@@ -300,6 +308,7 @@ export function withJazz(
         ...merged.env,
         [PUBLIC_APP_ID_ENV]: managed.appId,
         [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
+        ...(managed.backendSecret ? { BACKEND_SECRET: managed.backendSecret } : {}),
       },
     };
   };

@@ -11,8 +11,8 @@ export const auth = betterAuth({
       },
       jwt: {
         issuer: "https://your-app.example.com",
-        definePayload: ({ user }: { user: { role?: string } }) => ({
-          claims: { role: user.role ?? "" },
+        definePayload: ({ user }) => ({
+          claims: { role: (user as { role?: string }).role ?? "" },
         }),
       },
     }),
