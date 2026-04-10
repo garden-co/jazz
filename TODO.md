@@ -4,8 +4,8 @@
 
 ### High
 
-- [**forward-inherits-select-bug**](todo/issues/forward-inherits-select-bug.md) — Forward `INHERITS VIA <fk>` select policies fail to expose child rows to sessions that should inherit access from the parent row.
 - [**change-user-id-on-live-client**](todo/issues/change-user-id-on-live-client.md) — Changing auth principal on a live Jazz client is currently unsupported. We need a focused follow-up
+- [**forward-inherits-select-bug**](todo/issues/forward-inherits-select-bug.md) — Forward `INHERITS VIA <fk>` select policies fail to expose child rows to sessions that should inherit access from the parent row.
 - [**stale-client-cache-after-scope-removal**](todo/issues/stale-client-cache-after-scope-removal.md) — When a row is deleted (or otherwise exits a query's result set) while a client has no active server-side subscription for that query, the client's local object manager retains stale data indefinitely. Subsequent one-shot `query()` calls with `tier: "edge"` return the stale row because the server never sends the deletion to the client — it considers the object "out of scope" and skips it.
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**update-inherits-policy-bug**](todo/issues/update-inherits-policy-bug.md) — UPDATE operations fail with PolicyDenied even when an INHERITS chain should grant access.
@@ -34,6 +34,4 @@
 
 ## Projects
 
-- [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
-- [**auth-expiry-and-auth-state**](todo/projects/auth-expiry-and-auth-state/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
