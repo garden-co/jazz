@@ -91,10 +91,12 @@ export const jazzPluginClient = () => {
         name: "jazz-plugin",
         hooks: {
           async onRequest(context) {
-            context.headers.set(
-              "x-jazz-auth-generation",
-              String(authGeneration),
-            );
+            if (context.url.toString().includes("/get-session")) {
+              context.headers.set(
+                "x-jazz-auth-generation",
+                String(authGeneration),
+              );
+            }
             if (
               SIGNUP_URLS.some((url) => context.url.toString().includes(url))
             ) {

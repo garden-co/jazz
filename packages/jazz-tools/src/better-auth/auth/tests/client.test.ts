@@ -620,44 +620,65 @@ describe("Better-Auth client plugin", () => {
       // Since authGeneration increments after sign-in, the stale response's
       // generation number will be older, preventing an unintended logout.
 
-      const capturedRequests: Request[] = [];
+      const capturedHeaders: any[] = [];
       let resolveStaleSession: (value: Response) => void;
       const staleSessionPromise = new Promise<Response>((resolve) => {
         resolveStaleSession = resolve;
       });
 
-      customFetchImpl.mockImplementation((request: Request) => {
-        capturedRequests.push(request.clone());
-        if (request.url.toString().includes("/get-session")) {
-          return staleSessionPromise;
-        }
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              user: {
-                id: "user-1",
-                email: "test@jazz.dev",
-                name: "Matteo",
-              },
-              jazzAuth: {
-                accountID: credentials.accountID,
-                secretSeed: credentials.secretSeed,
-                accountSecret: credentials.accountSecret,
-                provider: "better-auth",
-              },
-            }),
-          ),
-        );
-      });
+      customFetchImpl.mockImplementation(
+        (urlOrRequest: string | Request, init?: RequestInit) => {
+          const headers =
+            urlOrRequest instanceof Request
+              ? urlOrRequest.headers
+              : init?.headers || {};
+          capturedHeaders.push(headers);
 
-      const staleSessionFetch = authClient.$fetch("/get-session", {
-        method: "GET",
-      });
+          const url =
+            urlOrRequest instanceof Request ? urlOrRequest.url : urlOrRequest;
+
+          if (url.toString().includes("/get-session")) {
+            return staleSessionPromise;
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                user: {
+                  id: "user-1",
+                  email: "test@jazz.dev",
+                  name: "Matteo",
+                },
+                jazzAuth: {
+                  accountID: credentials.accountID,
+                  secretSeed: credentials.secretSeed,
+                  accountSecret: credentials.accountSecret,
+                  provider: "better-auth",
+                },
+              }),
+            ),
+          );
+        },
+      );
+
+      const staleSessionFetch = authClient.getSession();
+
+      // We need to wait a tick for onRequest to be called and customFetchImpl to be triggered
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const getHeader = (headers: any, name: string) => {
+        if (!headers) return null;
+        if (typeof headers.get === "function") return headers.get(name);
+        if (Array.isArray(headers)) {
+          const pair = (headers as string[][]).find(
+            (h) => h[0]?.toLowerCase() === name.toLowerCase(),
+          );
+          return pair ? pair[1] : null;
+        }
+        return headers[name] || headers[name.toLowerCase()] || null;
+      };
 
       // Verify the stale request had authGeneration=0 in the header
-      expect(capturedRequests[0]?.headers.get("x-jazz-auth-generation")).toBe(
-        "0",
-      );
+      expect(getHeader(capturedHeaders[0], "x-jazz-auth-generation")).toBe("0");
 
       // Now sign in, which increments authGeneration to 1
       await authClient.signIn.email({
@@ -667,10 +688,10 @@ describe("Better-Auth client plugin", () => {
 
       expect(authSecretStorage.isAuthenticated).toBe(true);
 
-      // Verify the sign-in request had authGeneration=0 before increment
-      expect(capturedRequests[1]?.headers.get("x-jazz-auth-generation")).toBe(
-        "0",
-      );
+      // Verify the sign-in request had no x-jazz-auth-generation header (it is gated to get-session)
+      expect(
+        getHeader(capturedHeaders[1], "x-jazz-auth-generation"),
+      ).toBeNull();
 
       // Resolve the stale get-session response with null
       resolveStaleSession!(new Response(JSON.stringify(null)));
