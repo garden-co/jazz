@@ -11,21 +11,32 @@ describe("DbConfig auth validation", () => {
     };
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
   });
+});
 
-  it("rejects setting both auth.seedStore and jwtToken", async () => {
+describe("getSelfSignedToken", () => {
+  it("returns a token for a self-signed session", async () => {
     const { createDb } = await import("./db.js");
-    const fakeSeedStore = {
-      loadSeed: async () => null,
-      saveSeed: async () => {},
-      clearSeed: async () => {},
-      getOrCreateSeed: async () => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    };
-    const config: DbConfig = {
+    const db = await createDb({
       appId: "test-app",
-      auth: { seedStore: fakeSeedStore },
-      jwtToken: "some-jwt",
-    };
-    await expect(createDb(config)).rejects.toThrow("mutually exclusive");
+      auth: { seed: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+    });
+
+    const token = await db.getSelfSignedToken({ audience: "test-audience" });
+    expect(token).toBeTypeOf("string");
+    expect(token!.split(".")).toHaveLength(3);
+    await db.shutdown();
+  });
+
+  it("returns null for a non-self-signed session", async () => {
+    const { createDb } = await import("./db.js");
+    const db = await createDb({
+      appId: "test-app",
+      jwtToken: "dummy-jwt",
+    });
+
+    const token = await db.getSelfSignedToken({ audience: "test-audience" });
+    expect(token).toBeNull();
+    await db.shutdown();
   });
 });
 

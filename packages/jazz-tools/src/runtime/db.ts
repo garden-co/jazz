@@ -38,7 +38,7 @@ import {
   type FileWriteOptions,
 } from "./file-storage.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
-import type { SeedStore } from "./seed-store.js";
+
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
@@ -100,7 +100,7 @@ export interface DbConfig {
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
   /** Self-signed auth via a local seed. Mutually exclusive with jwtToken. */
-  auth?: { seed: string } | { seedStore: SeedStore };
+  auth?: { seed: string };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -432,10 +432,12 @@ export class Db {
       if (!wasmModule) return;
 
       const ttlSeconds = 3600;
+      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
       const newToken = wasmModule.WasmRuntime.mintSelfSignedToken(
         this._selfSignedSeed,
         this.config.appId,
-        ttlSeconds,
+        BigInt(ttlSeconds),
+        nowSeconds,
       );
       this.updateAuthToken(newToken);
       this.scheduleSelfSignedRefresh(ttlSeconds);
@@ -1077,6 +1079,35 @@ export class Db {
 
   getAuthState(): AuthState {
     return this.authStateStore.getState();
+  }
+
+  /**
+   * Mint a short-lived self-signed JWT proving possession of the current identity.
+   * Returns `null` if the current session is not self-signed.
+   */
+  async getSelfSignedToken(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    if (!this._selfSignedSeed) {
+      return null;
+    }
+
+    const wasmModule = this.wasmModule;
+    if (!wasmModule) {
+      return null;
+    }
+
+    const ttl = options?.ttlSeconds ?? 60;
+    const audience = options?.audience ?? this.config.appId;
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+
+    return wasmModule.WasmRuntime.mintSelfSignedToken(
+      this._selfSignedSeed,
+      audience,
+      BigInt(ttl),
+      nowSeconds,
+    );
   }
 
   onAuthChanged(listener: (state: AuthState) => void): () => void {
@@ -1740,12 +1771,17 @@ export async function createDb(config: DbConfig): Promise<Db> {
   // Self-signed auth: resolve seed and mint a JWT
   let selfSignedSeed: string | null = null;
   if (config.auth) {
-    const seed =
-      "seed" in config.auth ? config.auth.seed : await config.auth.seedStore.getOrCreateSeed();
+    const seed = config.auth.seed;
     selfSignedSeed = seed;
 
     const wasmModule = await loadWasmModule(config.runtimeSources);
-    const jwtToken = wasmModule.WasmRuntime.mintSelfSignedToken(seed, config.appId, 3600);
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const jwtToken = wasmModule.WasmRuntime.mintSelfSignedToken(
+      seed,
+      config.appId,
+      BigInt(3600),
+      nowSeconds,
+    );
     resolvedConfig = { ...resolvedConfig, jwtToken };
   }
 
