@@ -27,8 +27,10 @@ time, such as:
 - delete markers
 - engine/user metadata
 
-Today those engine-managed fields live alongside the encoded row payload in storage records, so the
-runtime does not have to jump between a "table layer" and a separate hidden history system.
+Conceptually, the whole row-version record lives in one row-format value space that includes both
+application columns and reserved engine columns. Some Rust types still expose the application
+portion separately for convenience, but that is an implementation detail rather than a different
+storage model.
 
 ### Visible entries and row histories
 
@@ -44,7 +46,7 @@ The simplest picture is:
 
 ```text
 todos
-  visible: (branch, row_id) -> current winner + current payload
+  visible: (branch, row_id) -> current winner for that branch view
   history: (row_id, version_id) -> row versions over time
 ```
 
