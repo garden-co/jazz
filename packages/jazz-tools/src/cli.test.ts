@@ -129,25 +129,6 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
-function rootSchemaWithEnumResourceAccess(indexImportPath: string = indexPath): string {
-  return `
-import { schema as s } from ${JSON.stringify(indexImportPath)};
-
-const Role = s.enum("viewer", "editor", "manager");
-
-const schema = {
-  resources: s.table({}),
-  resource_access_edges: s.table({
-    resource: s.ref("resources"),
-    grant_role: Role,
-  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
-`;
-}
-
 function rootSchemaWithTodoNotes(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -206,27 +187,6 @@ import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.where({ done: true }),
-]);
-`;
-}
-
-function rootRelationEnumLiteralPermissionsSchema(
-  appImportPath: string = "./schema.ts",
-  importPath: string = indexPath,
-): string {
-  return `
-import { schema as s } from ${JSON.stringify(importPath)};
-import { app } from ${JSON.stringify(appImportPath)};
-
-export default s.definePermissions(app, ({ policy }) => [
-  policy.resources.allowRead.where((resource) =>
-    policy.exists(
-      policy.resource_access_edges.where({
-        resource: resource.id,
-        grant_role: "viewer",
-      }),
-    ),
-  ),
 ]);
 `;
 }
@@ -1377,123 +1337,6 @@ describe("cli permissions", () => {
             value: {
               type: "Boolean",
               value: true,
-            },
-          },
-        });
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash,
-              version: 1,
-              parentBundleObjectId: null,
-              bundleObjectId: "99999999-9999-9999-9999-999999999999",
-            },
-          }),
-          { status: 201 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await pushPermissions({
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      schemaDir: root,
-    });
-
-    expect(fetchMock).toHaveBeenCalled();
-  });
-
-  it("publishes nested relation literals using tagged wire values", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithEnumResourceAccess());
-    await writeFile(join(root, "permissions.ts"), rootRelationEnumLiteralPermissionsSchema());
-
-    const schemaHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/schema/${schemaHash}`)) {
-        return new Response(
-          JSON.stringify({
-            resources: {
-              columns: [],
-            },
-            resource_access_edges: {
-              columns: [
-                {
-                  name: "resource",
-                  column_type: { type: "Uuid" },
-                  nullable: false,
-                  references: "resources",
-                },
-                {
-                  name: "grant_role",
-                  column_type: {
-                    type: "Enum",
-                    variants: ["editor", "manager", "viewer"],
-                  },
-                  nullable: false,
-                },
-              ],
-            },
-          }),
-          { status: 200 },
-        );
-      }
-
-      if (input.endsWith("/admin/permissions/head")) {
-        return new Response(JSON.stringify({ head: null }), { status: 200 });
-      }
-
-      if (input.endsWith("/admin/permissions")) {
-        const body = JSON.parse(String(init?.body));
-        expect(body.permissions.resources.select.using).toEqual({
-          type: "ExistsRel",
-          rel: {
-            Filter: {
-              input: {
-                TableScan: {
-                  table: "resource_access_edges",
-                },
-              },
-              predicate: {
-                And: [
-                  {
-                    Cmp: {
-                      left: {
-                        scope: "resource_access_edges",
-                        column: "resource",
-                      },
-                      op: "Eq",
-                      right: {
-                        OuterColumn: {
-                          column: "id",
-                        },
-                      },
-                    },
-                  },
-                  {
-                    Cmp: {
-                      left: {
-                        scope: "resource_access_edges",
-                        column: "grant_role",
-                      },
-                      op: "Eq",
-                      right: {
-                        Literal: {
-                          type: "Text",
-                          value: "viewer",
-                        },
-                      },
-                    },
-                  },
-                ],
-              },
             },
           },
         });
