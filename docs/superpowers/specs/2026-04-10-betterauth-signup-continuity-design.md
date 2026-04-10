@@ -21,7 +21,7 @@ This design intentionally covers only new sign-ups from an existing self-signed 
 - The continuity source of truth is the current self-signed Jazz identity already loaded in the browser
 - Sign-up must fail if the client cannot prove that self-signed identity
 - Better Auth must persist the proved Jazz `userId` as `user.id`
-- The runtime API for proof minting is explicit: `db.getSelfSignedToken({ ttlSeconds?: number }): Promise<string | null>`
+- The runtime API for proof minting is explicit: `db.getSelfSignedToken({ ttlSeconds?: number, audience?: string }): Promise<string | null>`
 - `db.getSelfSignedToken(...)` returns `null` for non-self-signed sessions
 - The visible sign-up form does not change
 
@@ -40,7 +40,7 @@ This design intentionally covers only new sign-ups from an existing self-signed 
 The runtime exposes one continuity-proof API:
 
 ```ts
-db.getSelfSignedToken({ ttlSeconds?: number }): Promise<string | null>
+db.getSelfSignedToken({ ttlSeconds?: number, audience?: string }): Promise<string | null>
 ```
 
 Behavior:
@@ -48,8 +48,9 @@ Behavior:
 - returns a freshly minted self-signed JWT when the current Jazz session is self-signed
 - returns `null` when the current session is not self-signed
 - throws for real runtime failures such as initialization problems or signing errors
+- when `audience` is provided, sets the JWT `aud` claim to that value
 
-The token subject is the current Jazz `userId`. The TTL is short-lived and intended for one sign-up attempt, with the example client requesting roughly 60 seconds.
+The token subject is the current Jazz `userId`. The TTL is short-lived and intended for one sign-up attempt, with the example client requesting roughly 60 seconds. The `audience` field lets the client specify who the token is intended for — the server then validates that the token's `aud` matches its own expected value, preventing tokens minted for one service from being accepted by another.
 
 This API is intentionally narrow. It proves possession of the local Jazz identity without exposing a generic "current auth token" abstraction.
 
@@ -60,10 +61,9 @@ The Better Auth example keeps the current sign-up UI and changes only the submit
 On sign-up submit:
 
 1. Read the current Jazz identity from the existing client/runtime state.
-2. Call `db.getSelfSignedToken({ ttlSeconds: 60 })`.
+2. Call `db.getSelfSignedToken({ ttlSeconds: 60, audience: "betterauth-signup" })`.
 3. If the result is `null`, fail locally and do not call Better Auth sign-up.
 4. Call `authClient.signUp.email(...)` with the existing visible fields plus:
-   - `currentUserId`
    - `proofToken`
 5. Continue with the existing post-sign-up authenticated flow.
 
@@ -75,30 +75,54 @@ The Better Auth example keeps the stock sign-up endpoint and adds continuity log
 
 ### Before-hook validation
 
-A Better Auth `hooks.before` handler on `/sign-up/email` reads `currentUserId` and `proofToken` from the request body and validates the proof token server-side.
+A Better Auth `hooks.before` handler on `/sign-up/email` reads `proofToken` from the request body and validates the proof token server-side.
 
 Validation rules:
 
 - the proof token must parse as a self-signed Jazz JWT
 - the proof token must be validly signed
 - the proof token must not be expired
-- the proof token audience must match the current Jazz app / server configuration
+- the proof token `aud` claim must equal the expected audience string (e.g. `"betterauth-signup"`)
 - the proof token must represent the self-signed issuer/auth mode expected by the Jazz verifier
-- the proof token subject must equal `currentUserId`
+
+The proved Jazz `userId` is extracted from the validated token's subject claim — the client never sends it separately, eliminating any mismatch surface.
 
 If any check fails, the request is rejected and no Better Auth user is created.
 
-After successful validation, the handler stores the proved Jazz `userId` in request-local state for the rest of the sign-up request.
+After successful validation, the handler injects the proved Jazz `userId` into the request body by returning a modified context:
+
+```ts
+return {
+  context: {
+    ...ctx,
+    body: { ...ctx.body, provedUserId },
+  },
+};
+```
+
+This uses Better Auth's built-in hook mechanism for passing data downstream — no `AsyncLocalStorage`, `WeakMap`, or mutation needed.
 
 ### User create override
 
-`databaseHooks.user.create.before` reads the proved Jazz `userId` from request-local state and overwrites the pending Better Auth user payload:
+`databaseHooks.user.create.before` reads `provedUserId` from the body (which Better Auth passes through as extra fields) and overwrites the user id:
 
 ```ts
-user.id = provedUserId;
+user: {
+  create: {
+    before: async (user, ctx) => {
+      const provedUserId = ctx.context.body?.provedUserId;
+      if (!provedUserId) {
+        throw new APIError("BAD_REQUEST", {
+          message: "Missing proved identity — refusing to create user",
+        });
+      }
+      return { data: { ...user, id: provedUserId } };
+    },
+  },
+}
 ```
 
-This is the only persistence mutation introduced by the demo. Better Auth still owns the rest of the sign-up flow.
+If `provedUserId` is missing (sign-up reached persistence without passing through proof validation), the hook throws rather than falling back to a generated id. This is the only persistence mutation introduced by the demo. Better Auth still owns the rest of the sign-up flow.
 
 ## Identity Outcome
 
@@ -120,10 +144,9 @@ Client-side failure:
 
 Server-side failure:
 
-- if the request omits `currentUserId` or `proofToken`, reject sign-up
+- if the request omits `proofToken`, reject sign-up
 - if token verification fails, reject sign-up
-- if the proved subject does not match `currentUserId`, reject sign-up
-- if request-local proved identity is missing by the time persistence runs, reject sign-up rather than falling back to a generated Better Auth id
+- if `provedUserId` is missing from the body by the time `databaseHooks.user.create.before` runs, throw rather than falling back to a generated Better Auth id
 
 There is no fallback path that silently creates a new Better Auth-specific identity.
 
@@ -152,6 +175,6 @@ Add a sign-up rejection test that verifies the example does not create a user wh
 
 ## Implementation Notes
 
-- This design deliberately uses `databaseHooks.user.create.before` instead of Better Auth `generateId`
-- That is a conscious simplification for the demo: request-aware proof validation fits naturally in hooks, while `generateId` is not request-aware in the documented Better Auth API
+- This design deliberately uses `databaseHooks.user.create.before` instead of Better Auth `generateId` — `generateId` only receives the model name, not request context, so it cannot validate proof tokens
+- Data flows from the before-hook to the database hook via Better Auth's built-in context-return mechanism (`return { context: { ...ctx, body: { ...ctx.body, provedUserId } } }`) — no external state management needed
 - The demo teaches the continuity invariant, not Better Auth internals
