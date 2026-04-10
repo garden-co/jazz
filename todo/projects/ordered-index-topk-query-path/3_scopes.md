@@ -65,10 +65,10 @@ These tests run against the current Sort+LimitOffset path and define the expecte
 - [ ] Include `skip_past: Option<(&Value, ObjectId)>` cursor parameter for resume-after semantics
 - [ ] Implement `index_scan_ordered` for MemoryStorage (BTreeMap::range + .rev() + take + skip + cursor resume)
 - [ ] Implement `index_scan_ordered` for OpfsBTreeStorage
-- [ ] Implement `index_scan_ordered` for FjallStorage
+- [ ] Implement `index_scan_ordered` for the current durable native backend(s)
 - [ ] Add `index_count(table, column, branch, value) -> usize` to the `Storage` trait (exact match cardinality)
 - [ ] Add `index_count_all(table, column, branch) -> usize` to the `Storage` trait (total index cardinality)
-- [ ] Implement `index_count` and `index_count_all` for all three backends (MemoryStorage: O(1) via hash lookup + set size / running counter; OpfsBTree and Fjall: prefix key count)
+- [ ] Implement `index_count` and `index_count_all` for the supported backends (MemoryStorage: O(1) via hash lookup + set size / running counter; durable ordered backends: prefix key count)
 - [ ] Unit tests: ordered scan ascending/descending, take/skip, cursor resume, empty index, single-value index, IEEE 754 ±0.0 handling
 - [ ] Unit tests: index_count and index_count_all correctness after insert/remove sequences
 
