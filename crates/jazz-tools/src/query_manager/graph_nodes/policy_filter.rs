@@ -16,7 +16,7 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement,
+    LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -131,7 +131,7 @@ impl PolicyFilterNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
 
@@ -211,7 +211,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -244,7 +244,7 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
         let evaluator = PolicyContextEvaluator::new(&self.schema, &self.session, &self.branch);
         let mut visited_referencing = HashSet::new();
@@ -306,7 +306,7 @@ impl PolicyFilterNode {
 
     /// Evaluate INHERITS without context - fails closed.
     ///
-    /// INHERITS requires ObjectManager access to load parent rows.
+    /// INHERITS requires storage-backed access to load parent rows.
     /// When called without context (via regular process()), we fail closed
     /// for security. Use process_with_context() for proper INHERITS evaluation.
     ///
@@ -443,12 +443,12 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
         TupleElement::Row {
             id,
             content,
-            commit_id,
+            version_id,
             row_provenance,
         } => Some(Row::new(
             *id,
             content.clone(),
-            *commit_id,
+            *version_id,
             row_provenance.clone(),
         )),
         TupleElement::Id(_) => None, // Not materialized
@@ -656,6 +656,62 @@ mod tests {
 
         let row = make_row("user1", "eng", "Doc 1");
         assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn inherits_context_passes_parent_table_hint_to_loader() {
+        let parent_id = ObjectId::new();
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor {
+                name: "parent_id".into(),
+                column_type: ColumnType::Uuid,
+                nullable: false,
+                references: Some(TableName::new("folders")),
+                default: None,
+            },
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+
+        let mut schema = Schema::new();
+        schema.insert(TableName::new("documents"), descriptor.clone().into());
+        schema.insert(
+            TableName::new("folders"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        );
+
+        let node = PolicyFilterNode::new(
+            descriptor.clone(),
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "parent_id".into(),
+                max_depth: Some(1),
+            },
+            Session::new("user1"),
+            schema,
+            "documents",
+        );
+
+        let data = encode_row(
+            &descriptor,
+            &[Value::Uuid(parent_id), Value::Text("Doc 1".into())],
+        )
+        .unwrap();
+        let row = Row::new(
+            ObjectId::new(),
+            data,
+            CommitId([0; 32]),
+            crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+        );
+        let storage = crate::storage::MemoryStorage::new();
+        let mut seen = Vec::new();
+
+        let allowed = node.evaluate_with_context(&row, &storage, &mut |id, hint| {
+            seen.push((id, hint));
+            None
+        });
+
+        assert!(!allowed);
+        assert_eq!(seen, vec![(parent_id, Some(TableName::new("folders")))]);
     }
 
     #[test]

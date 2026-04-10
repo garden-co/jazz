@@ -39,7 +39,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         table_name: &str,
         local_policy_override: Option<&PolicyExpr>,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -99,7 +99,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         target_table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -138,7 +138,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for source_row_id in candidate_ids {
-            let Some(source_row) = row_loader(source_row_id) else {
+            let Some(source_row) = row_loader(source_row_id, Some(source_table_name)) else {
                 continue;
             };
 
@@ -154,7 +154,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             let source_row = Row::new(
                 source_row_id,
                 source_row.data,
-                source_row.commit_id,
+                source_row.version_id,
                 source_row.row_provenance,
             );
             if self.evaluate_row_access(
@@ -183,7 +183,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -291,7 +291,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         _table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -328,12 +328,12 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
         visited.insert(parent_id);
 
-        let parent_row = match row_loader(parent_id) {
+        let parent_table_name = *parent_table;
+        let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
             None => return false,
         };
 
-        let parent_table_name = *parent_table;
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
             None => return false,
@@ -354,7 +354,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         let parent_row = Row::new(
             parent_id,
             parent_row.data,
-            parent_row.commit_id,
+            parent_row.version_id,
             parent_row.row_provenance,
         );
         self.evaluate_expr_with_context(
@@ -378,7 +378,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -419,7 +419,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {

@@ -156,11 +156,8 @@ function signJwt(sub: string, secret: string, options?: { principalId?: string }
 
 function makeSyncPayload() {
   return {
-    ObjectUpdated: {
-      object_id: randomUUID(),
-      metadata: null,
-      branch_name: "main",
-      commits: [],
+    QueryUnsubscription: {
+      query_id: 1,
     },
   };
 }

@@ -6,7 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
+use jazz_tools::commit::CommitId;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
+use jazz_tools::transport_protocol::SyncBatchRequest;
+use jazz_tools::{ObjectId, metadata::RowProvenance};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -107,26 +112,31 @@ impl TestServer {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_dir.path().to_str().expect("temp dir path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .envs(extra_env)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_dir.path().to_str().expect("temp dir path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .envs(extra_env)
+        .stdout(Stdio::null());
 
-        let server = Self {
+        if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        }
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
+
+        let mut server = Self {
             process,
             port,
             _data_dir: data_dir,
@@ -141,9 +151,12 @@ impl TestServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -303,7 +316,7 @@ fn auth_jwks_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock auth_jwks test guard")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
@@ -324,18 +337,26 @@ fn get_free_port() -> u16 {
     listener.local_addr().expect("port local_addr").port()
 }
 
-fn sync_body() -> Value {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }]
-    })
+fn sync_body() -> SyncBatchRequest {
+    let row_id = ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        RowProvenance::for_insert(row_id.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    SyncBatchRequest {
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+        client_id: ClientId::new(),
+    }
 }
 
 fn encode_session(user_id: &str) -> String {

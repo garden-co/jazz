@@ -33,7 +33,7 @@ use jazz_tools::query_manager::types::{
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::manager::PermissionsHeadSummary;
-use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
+use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
 use jazz_tools::storage::RocksDBStorage;
 use jazz_tools::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
@@ -796,7 +796,12 @@ fn parse_test_delay_ms(raw: &str) -> Option<Duration> {
 }
 
 fn test_delay_server_send_object_updated(payload: &SyncPayload) -> Option<Duration> {
-    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+    if !matches!(
+        payload,
+        SyncPayload::RowVersionCreated { .. }
+            | SyncPayload::RowVersionNeeded { .. }
+            | SyncPayload::RowVersionStateChanged { .. }
+    ) {
         return None;
     }
 
@@ -1967,7 +1972,7 @@ impl AppRuntime {
         let storage = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 
-        rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
+        rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id)?;
 
         let connection_event_hub_clone = connection_event_hub.clone();
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {

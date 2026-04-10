@@ -1,57 +1,65 @@
-//! Storage conformance test suite.
-//!
-//! Shared tests that any `Storage` backend can plug into with one macro invocation.
-//! Each `test_*` function exercises a single contract of the `Storage` trait.
+//! Storage conformance test suite for the row-history/raw-table storage model.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
 use std::ops::Bound;
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{SchemaHash, Value};
-use crate::storage::{CatalogueLensSeen, CatalogueManifestOp, Storage};
+use crate::catalogue::CatalogueEntry;
+use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
+use crate::object::ObjectId;
+use crate::query_manager::types::Value;
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::storage::{IndexMutation, Storage};
 use crate::sync_manager::DurabilityTier;
 
 /// Factory type for persistence tests that reopen storage at a given path.
 pub type PersistentStorageFactory = dyn Fn(&std::path::Path) -> Box<dyn Storage>;
 
-/// Build a commit with the given content, author, and parents.
-pub fn make_commit(content: &[u8], author: ObjectId, parents: &[CommitId]) -> Commit {
-    Commit {
-        parents: parents.iter().copied().collect(),
-        content: content.to_vec(),
-        timestamp: 1_700_000_000_000_000,
-        author: author.to_string(),
-        metadata: None,
-        stored_state: Default::default(),
-        ack_state: Default::default(),
-    }
+fn make_row_version(
+    row_id: ObjectId,
+    branch: &str,
+    updated_at: u64,
+    value: &[u8],
+) -> StoredRowVersion {
+    StoredRowVersion::new(
+        row_id,
+        branch,
+        Vec::new(),
+        value.to_vec(),
+        RowProvenance::for_insert(row_id.to_string(), updated_at),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    )
+}
+
+fn make_visible_entry(
+    current_row: StoredRowVersion,
+    history_rows: &[StoredRowVersion],
+) -> VisibleRowEntry {
+    VisibleRowEntry::rebuild(current_row, history_rows)
 }
 
 // ============================================================================
-// Object storage tests
+// Object metadata tests
 // ============================================================================
 
 pub fn test_object_create_and_load_metadata(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let alice = ObjectId::new();
+    let object_id = ObjectId::new();
+    let metadata = HashMap::from([
+        ("owner".to_string(), "alice".to_string()),
+        ("role".to_string(), "admin".to_string()),
+    ]);
 
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    meta.insert("role".to_string(), "admin".to_string());
+    storage.put_metadata(object_id, metadata.clone()).unwrap();
 
-    storage.create_object(alice, meta.clone()).unwrap();
-
-    let loaded = storage.load_object_metadata(alice).unwrap().unwrap();
-    assert_eq!(loaded, meta);
+    assert_eq!(storage.load_metadata(object_id).unwrap().unwrap(), metadata);
 }
 
 pub fn test_object_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
     let storage = factory();
-    let unknown = ObjectId::new();
-
-    let result = storage.load_object_metadata(unknown).unwrap();
-    assert!(result.is_none());
+    assert!(storage.load_metadata(ObjectId::new()).unwrap().is_none());
 }
 
 pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -59,407 +67,160 @@ pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let alice = ObjectId::new();
     let bob = ObjectId::new();
 
-    let mut alice_meta = HashMap::new();
-    alice_meta.insert("owner".to_string(), "alice".to_string());
-
-    let mut bob_meta = HashMap::new();
-    bob_meta.insert("owner".to_string(), "bob".to_string());
-
-    storage.create_object(alice, alice_meta.clone()).unwrap();
-    storage.create_object(bob, bob_meta.clone()).unwrap();
-
-    let loaded_alice = storage.load_object_metadata(alice).unwrap().unwrap();
-    let loaded_bob = storage.load_object_metadata(bob).unwrap().unwrap();
-
-    assert_eq!(loaded_alice, alice_meta);
-    assert_eq!(loaded_bob, bob_meta);
-    assert_ne!(loaded_alice, loaded_bob);
-}
-
-// ============================================================================
-// Branch & commit tests
-// ============================================================================
-
-pub fn test_branch_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let storage = factory();
-    let obj = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let result = storage.load_branch(obj, &branch).unwrap();
-    assert!(result.is_none());
-}
-
-pub fn test_commit_append_and_load(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"alice's first edit", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert_eq!(loaded.commits[0].content, b"alice's first edit");
-    assert_eq!(loaded.commits[0].id(), c1_id);
-    // Single root commit => tails should contain that commit
-    assert!(loaded.tails.contains(&c1_id));
-}
-
-pub fn test_commit_append_chain(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  c1 ("draft v1")  -->  c2 ("draft v2")
-    //  (root)                (parent: c1)
-    //
-    //  After appending both, tails should point to c2 (the tip),
-    //  and both commits should be loadable.
-
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"draft v1", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let c2 = make_commit(b"draft v2", alice, &[c1_id]);
-    let c2_id = c2.id();
-    storage.append_commit(alice, &branch, c2).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 2);
-
-    let ids: HashSet<CommitId> = loaded.commits.iter().map(|c| c.id()).collect();
-    assert!(ids.contains(&c1_id));
-    assert!(ids.contains(&c2_id));
-
-    // Tails should reflect the tip (c2)
-    assert!(loaded.tails.contains(&c2_id));
-}
-
-pub fn test_commit_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"first", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let c2 = make_commit(b"second", alice, &[c1_id]);
-    let c2_id = c2.id();
-    storage.append_commit(alice, &branch, c2).unwrap();
-
-    storage.delete_commit(alice, &branch, c1_id).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert_eq!(loaded.commits[0].id(), c2_id);
-}
-
-pub fn test_branch_tails_set_and_clear(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"root", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    // Set explicit tails
-    let mut explicit_tails = HashSet::new();
-    explicit_tails.insert(c1_id);
     storage
-        .set_branch_tails(alice, &branch, Some(explicit_tails.clone()))
+        .put_metadata(
+            alice,
+            HashMap::from([("owner".to_string(), "alice".to_string())]),
+        )
+        .unwrap();
+    storage
+        .put_metadata(
+            bob,
+            HashMap::from([("owner".to_string(), "bob".to_string())]),
+        )
         .unwrap();
 
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.tails, explicit_tails);
-
-    // Clear tails
-    storage.set_branch_tails(alice, &branch, None).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert!(loaded.tails.is_empty());
-}
-
-pub fn test_multiple_branches_independent(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  Object: tasks
-    //
-    //  "main" branch (alice):   c_main ("publish v1")
-    //  "draft" branch (bob):    c_draft ("wip notes")
-    //
-    //  Each branch loads independently without cross-contamination.
-
-    let mut storage = factory();
-    let tasks = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
-
-    let mut meta = HashMap::new();
-    meta.insert("type".to_string(), "tasks".to_string());
-    storage.create_object(tasks, meta).unwrap();
-
-    let alice = ObjectId::new();
-    let bob = ObjectId::new();
-
-    let c_main = make_commit(b"publish v1", alice, &[]);
-    let c_main_id = c_main.id();
-    storage.append_commit(tasks, &main_branch, c_main).unwrap();
-
-    let c_draft = make_commit(b"wip notes", bob, &[]);
-    let c_draft_id = c_draft.id();
-    storage
-        .append_commit(tasks, &draft_branch, c_draft)
-        .unwrap();
-
-    let loaded_main = storage.load_branch(tasks, &main_branch).unwrap().unwrap();
-    assert_eq!(loaded_main.commits.len(), 1);
-    assert_eq!(loaded_main.commits[0].id(), c_main_id);
-
-    let loaded_draft = storage.load_branch(tasks, &draft_branch).unwrap().unwrap();
-    assert_eq!(loaded_draft.commits.len(), 1);
-    assert_eq!(loaded_draft.commits[0].id(), c_draft_id);
+    assert_eq!(
+        storage.load_metadata(alice).unwrap().unwrap()["owner"],
+        "alice"
+    );
+    assert_eq!(storage.load_metadata(bob).unwrap().unwrap()["owner"], "bob");
 }
 
 // ============================================================================
-// Index operation tests
+// Ordered raw-table tests
+// ============================================================================
+
+pub fn test_raw_table_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "alice", b"hello").unwrap();
+    assert_eq!(
+        storage.raw_table_get("users", "alice").unwrap(),
+        Some(b"hello".to_vec())
+    );
+
+    storage.raw_table_delete("users", "alice").unwrap();
+    assert_eq!(storage.raw_table_get("users", "alice").unwrap(), None);
+}
+
+pub fn test_raw_table_scan_prefix(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "alice/1", b"a").unwrap();
+    storage.raw_table_put("users", "alice/2", b"b").unwrap();
+    storage.raw_table_put("users", "bob/1", b"c").unwrap();
+
+    let rows = storage.raw_table_scan_prefix("users", "alice/").unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("alice/1".to_string(), b"a".to_vec()),
+            ("alice/2".to_string(), b"b".to_vec()),
+        ]
+    );
+}
+
+pub fn test_raw_table_scan_range(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "01", b"a").unwrap();
+    storage.raw_table_put("users", "02", b"b").unwrap();
+    storage.raw_table_put("users", "03", b"c").unwrap();
+
+    let rows = storage
+        .raw_table_scan_range("users", Some("02"), Some("04"))
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("02".to_string(), b"b".to_vec()),
+            ("03".to_string(), b"c".to_vec()),
+        ]
+    );
+}
+
+// ============================================================================
+// Index tests
 // ============================================================================
 
 pub fn test_index_insert_and_exact_lookup(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row_alice = ObjectId::new();
+    let row_id = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row_alice,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), row_id)
         .unwrap();
 
-    let results = storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(results, vec![row_alice]);
-
-    let empty = storage.index_lookup("users", "name", "main", &Value::Text("bob".to_string()));
-    assert!(empty.is_empty());
+    assert_eq!(
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![row_id]
+    );
 }
 
 pub fn test_index_duplicate_values(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row1 = ObjectId::new();
-    let row2 = ObjectId::new();
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
 
     storage
-        .index_insert("users", "age", "main", &Value::Integer(30), row1)
+        .index_insert("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
     storage
-        .index_insert("users", "age", "main", &Value::Integer(30), row2)
+        .index_insert("users", "age", "main", &Value::Integer(25), bob)
         .unwrap();
 
-    let mut results = storage.index_lookup("users", "age", "main", &Value::Integer(30));
-    results.sort();
-    let mut expected = vec![row1, row2];
+    let mut rows = storage.index_lookup("users", "age", "main", &Value::Integer(25));
+    rows.sort();
+    let mut expected = vec![alice, bob];
     expected.sort();
-    assert_eq!(results, expected);
+    assert_eq!(rows, expected);
 }
 
 pub fn test_index_remove(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row1 = ObjectId::new();
-    let row2 = ObjectId::new();
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
 
     storage
-        .index_insert("users", "age", "main", &Value::Integer(25), row1)
+        .index_insert("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
     storage
-        .index_insert("users", "age", "main", &Value::Integer(25), row2)
+        .index_insert("users", "age", "main", &Value::Integer(25), bob)
         .unwrap();
-
     storage
-        .index_remove("users", "age", "main", &Value::Integer(25), row1)
+        .index_remove("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
 
-    let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
-    assert_eq!(results, vec![row2]);
-}
-
-pub fn test_index_range_inclusive_exclusive(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_28 = ObjectId::new();
-    let row_30 = ObjectId::new();
-    let row_35 = ObjectId::new();
-
-    for (age, row) in [
-        (20, row_20),
-        (25, row_25),
-        (28, row_28),
-        (30, row_30),
-        (35, row_35),
-    ] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // [25, 30) — inclusive start, exclusive end
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Included(&Value::Integer(25)),
-        Bound::Excluded(&Value::Integer(30)),
+    assert_eq!(
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![bob]
     );
-    results.sort();
-    let mut expected = vec![row_25, row_28];
-    expected.sort();
-    assert_eq!(results, expected);
 }
 
-pub fn test_index_range_unbounded_start(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_26 = ObjectId::new();
-    let row_30 = ObjectId::new();
-
-    for (age, row) in [(20, row_20), (25, row_25), (26, row_26), (30, row_30)] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // (Unbounded, Excluded(26))
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Unbounded,
-        Bound::Excluded(&Value::Integer(26)),
-    );
-    results.sort();
-    let mut expected = vec![row_20, row_25];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_range_unbounded_end(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_30 = ObjectId::new();
-
-    for (age, row) in [(20, row_20), (25, row_25), (30, row_30)] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // [25, Unbounded)
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Included(&Value::Integer(25)),
-        Bound::Unbounded,
-    );
-    results.sort();
-    let mut expected = vec![row_25, row_30];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_scan_all(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_index_range(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let row1 = ObjectId::new();
     let row2 = ObjectId::new();
     let row3 = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row1,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(20), row1)
         .unwrap();
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("bob".to_string()),
-            row2,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), row2)
         .unwrap();
     storage
-        .index_insert(
+        .index_insert("users", "age", "main", &Value::Integer(30), row3)
+        .unwrap();
+
+    assert_eq!(
+        storage.index_range(
             "users",
-            "name",
+            "age",
             "main",
-            &Value::Text("carol".to_string()),
-            row3,
-        )
-        .unwrap();
-
-    let mut results = storage.index_scan_all("users", "name", "main");
-    results.sort();
-    let mut expected = vec![row1, row2, row3];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_cross_table_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let user_row = ObjectId::new();
-    let post_row = ObjectId::new();
-
-    storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            user_row,
-        )
-        .unwrap();
-    storage
-        .index_insert(
-            "posts",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            post_row,
-        )
-        .unwrap();
-
-    let user_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(user_results, vec![user_row]);
-
-    let post_results =
-        storage.index_lookup("posts", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(post_results, vec![post_row]);
+            Bound::Included(&Value::Integer(25)),
+            Bound::Unbounded,
+        ),
+        vec![row2, row3]
+    );
 }
 
 pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -468,178 +229,313 @@ pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>)
     let draft_row = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            main_row,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), main_row)
         .unwrap();
     storage
-        .index_insert(
-            "users",
-            "name",
-            "draft",
-            &Value::Text("alice".to_string()),
-            draft_row,
-        )
+        .index_insert("users", "age", "draft", &Value::Integer(25), draft_row)
         .unwrap();
 
-    let main_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(main_results, vec![main_row]);
-
-    let draft_results =
-        storage.index_lookup("users", "name", "draft", &Value::Text("alice".to_string()));
-    assert_eq!(draft_results, vec![draft_row]);
-}
-
-pub fn test_index_value_types(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_int = ObjectId::new();
-    let row_text = ObjectId::new();
-    let row_uuid = ObjectId::new();
-    let uuid_val = ObjectId::new();
-
-    storage
-        .index_insert("users", "age", "main", &Value::Integer(42), row_int)
-        .unwrap();
-    storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row_text,
-        )
-        .unwrap();
-    storage
-        .index_insert("users", "ref_id", "main", &Value::Uuid(uuid_val), row_uuid)
-        .unwrap();
-
-    let int_results = storage.index_lookup("users", "age", "main", &Value::Integer(42));
-    assert_eq!(int_results, vec![row_int]);
-
-    let text_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(text_results, vec![row_text]);
-
-    let uuid_results = storage.index_lookup("users", "ref_id", "main", &Value::Uuid(uuid_val));
-    assert_eq!(uuid_results, vec![row_uuid]);
-}
-
-// ============================================================================
-// Ack tier test
-// ============================================================================
-
-pub fn test_store_and_load_ack_tier(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"synced edit", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    storage
-        .store_ack_tier(c1_id, DurabilityTier::Worker)
-        .unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert!(
-        loaded.commits[0]
-            .ack_state
-            .confirmed_tiers
-            .contains(&DurabilityTier::Worker)
-    );
-}
-
-// ============================================================================
-// Catalogue manifest tests
-// ============================================================================
-
-pub fn test_catalogue_manifest_schema_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::SchemaSeen {
-                object_id: obj_id,
-                schema_hash,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
-}
-
-pub fn test_catalogue_manifest_lens_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let source = SchemaHash::from_bytes([0x22; 32]);
-    let target = SchemaHash::from_bytes([0x33; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::LensSeen {
-                object_id: obj_id,
-                source_hash: source,
-                target_hash: target,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    let lens = manifest.lens_seen.get(&obj_id).unwrap();
     assert_eq!(
-        *lens,
-        CatalogueLensSeen {
-            source_hash: source,
-            target_hash: target,
-        }
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![main_row]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "age", "draft", &Value::Integer(25)),
+        vec![draft_row]
     );
 }
 
-pub fn test_catalogue_manifest_idempotent(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x44; 32]);
+// ============================================================================
+// Row-region tests
+// ============================================================================
 
-    let op = CatalogueManifestOp::SchemaSeen {
-        object_id: obj_id,
-        schema_hash,
+pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let version = make_row_version(row_id, "main", 10, b"alice");
+    let version_id = version.version_id();
+
+    storage
+        .append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![version.clone()]
+    );
+    assert_eq!(
+        storage
+            .scan_history_region("users", "main", HistoryScan::Row { row_id })
+            .unwrap(),
+        vec![version]
+    );
+    assert_eq!(
+        storage
+            .load_visible_region_frontier("users", "main", row_id)
+            .unwrap(),
+        Some(vec![version_id])
+    );
+}
+
+pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let version = make_row_version(row_id, "main", 10, b"alice");
+
+    storage
+        .append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
+        .unwrap();
+
+    storage
+        .patch_row_region_rows_by_batch(
+            "users",
+            version.batch_id,
+            None,
+            Some(DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+    storage
+        .patch_row_region_rows_by_batch(
+            "users",
+            version.batch_id,
+            None,
+            Some(DurabilityTier::Worker),
+        )
+        .unwrap();
+
+    let visible = storage
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap();
+    let history = storage
+        .scan_history_region("users", "main", HistoryScan::Row { row_id })
+        .unwrap();
+
+    assert_eq!(
+        visible.and_then(|row| row.confirmed_tier),
+        Some(DurabilityTier::EdgeServer)
+    );
+    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+}
+
+pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let main_row = make_row_version(ObjectId::new(), "main", 10, b"main");
+    let draft_row = make_row_version(ObjectId::new(), "draft", 20, b"draft");
+
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![main_row]
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "draft").unwrap(),
+        vec![draft_row]
+    );
+}
+
+pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let main_row = make_row_version(row_id, "main", 10, b"main");
+    let draft_row = make_row_version(row_id, "draft", 20, b"draft");
+
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .scan_visible_region_row_versions("users", row_id)
+            .unwrap(),
+        vec![draft_row, main_row]
+    );
+}
+
+pub fn test_apply_row_mutation_combines_row_and_index_effects(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let row_id = ObjectId::new();
+    let version = make_row_version(row_id, "main", 10, b"alice");
+    let visible_entry = make_visible_entry(version.clone(), std::slice::from_ref(&version));
+    let index_mutations = [IndexMutation::Insert {
+        table: "users",
+        column: "name",
+        branch: "main",
+        value: Value::Text("alice".to_string()),
+        row_id,
+    }];
+
+    storage
+        .apply_row_mutation(
+            "users",
+            std::slice::from_ref(&version),
+            std::slice::from_ref(&visible_entry),
+            &index_mutations,
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage
+            .load_history_row_version("users", row_id, version.version_id())
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+        vec![row_id]
+    );
+}
+
+// ============================================================================
+// Catalogue tests
+// ============================================================================
+
+pub fn test_catalogue_entry_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let object_id = ObjectId::new();
+    let entry = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            ),
+            ("schema_hash".to_string(), "abc123".to_string()),
+        ]),
+        content: br#"{"tables":["users"]}"#.to_vec(),
     };
 
-    storage
-        .append_catalogue_manifest_op(app_id, op.clone())
-        .unwrap();
-    storage.append_catalogue_manifest_op(app_id, op).unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.len(), 1);
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
+    storage.upsert_catalogue_entry(&entry).unwrap();
+    assert_eq!(
+        storage.load_catalogue_entry(object_id).unwrap(),
+        Some(entry)
+    );
 }
 
-pub fn test_catalogue_manifest_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let storage = factory();
-    let unknown_app = ObjectId::new();
+pub fn test_catalogue_entry_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let low_id = ObjectId::from_uuid(uuid::Uuid::nil());
+    let high_id = ObjectId::new();
 
-    let result = storage.load_catalogue_manifest(unknown_app).unwrap();
-    assert!(result.is_none());
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: high_id,
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueLens.to_string(),
+            )]),
+            content: b"lens".to_vec(),
+        })
+        .unwrap();
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: low_id,
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"schema".to_vec(),
+        })
+        .unwrap();
+
+    let scanned = storage.scan_catalogue_entries().unwrap();
+    assert_eq!(scanned.len(), 2);
+    assert_eq!(scanned[0].object_id, low_id);
+    assert_eq!(scanned[1].object_id, high_id);
+}
+
+pub fn test_catalogue_entry_upsert_replaces_existing(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let object_id = ObjectId::new();
+    let first = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([(
+            MetadataKey::Type.to_string(),
+            ObjectType::CataloguePermissionsHead.to_string(),
+        )]),
+        content: b"v1".to_vec(),
+    };
+    let second = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CataloguePermissionsHead.to_string(),
+            ),
+            ("note".to_string(), "updated".to_string()),
+        ]),
+        content: b"v2".to_vec(),
+    };
+
+    storage.upsert_catalogue_entry(&first).unwrap();
+    storage.upsert_catalogue_entry(&second).unwrap();
+
+    assert_eq!(
+        storage.load_catalogue_entry(object_id).unwrap(),
+        Some(second)
+    );
+}
+
+pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let storage = factory();
+    assert!(
+        storage
+            .load_catalogue_entry(ObjectId::new())
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ============================================================================
@@ -650,21 +546,31 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
 
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let object_id = ObjectId::new();
     let row_id = ObjectId::new();
+    let version = make_row_version(row_id, "main", 10, b"alice");
 
-    // Write phase
     {
         let mut storage = factory(path);
-
-        let mut meta = HashMap::new();
-        meta.insert("owner".to_string(), "alice".to_string());
-        storage.create_object(alice, meta).unwrap();
-
-        let c1 = make_commit(b"persistent edit", alice, &[]);
-        storage.append_commit(alice, &branch, c1).unwrap();
-
+        storage
+            .put_metadata(
+                object_id,
+                HashMap::from([("owner".to_string(), "alice".to_string())]),
+            )
+            .unwrap();
+        storage.raw_table_put("users", "alice", b"hello").unwrap();
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&version))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&make_visible_entry(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )),
+            )
+            .unwrap();
         storage
             .index_insert(
                 "users",
@@ -674,25 +580,30 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
                 row_id,
             )
             .unwrap();
-
         storage.flush();
         storage.close().unwrap();
     }
 
-    // Reopen and verify
     {
         let storage = factory(path);
-
-        let meta = storage.load_object_metadata(alice).unwrap().unwrap();
-        assert_eq!(meta.get("owner").unwrap(), "alice");
-
-        let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert_eq!(loaded.commits[0].content, b"persistent edit");
-
-        let results =
-            storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-        assert_eq!(results, vec![row_id]);
+        assert_eq!(
+            storage.load_metadata(object_id).unwrap().unwrap()["owner"],
+            "alice"
+        );
+        assert_eq!(
+            storage.raw_table_get("users", "alice").unwrap(),
+            Some(b"hello".to_vec())
+        );
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap(),
+            Some(version.clone())
+        );
+        assert_eq!(
+            storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+            vec![row_id]
+        );
     }
 }
 
@@ -700,111 +611,72 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
 
-    {
-        let storage = factory(path);
-        storage.close().unwrap();
-    }
-
-    // Reopening at the same path should succeed
-    {
-        let storage = factory(path);
-        storage.close().unwrap();
-    }
+    factory(path).close().unwrap();
+    factory(path).close().unwrap();
 }
 
 // ============================================================================
 // Multi-actor test
 // ============================================================================
 
-pub fn test_alice_bob_concurrent_branches(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  Object: tasks
-    //
-    //  alice -> "main" branch:  commit "alice publishes"
-    //           index: users/name/main = "alice" -> row_alice
-    //
-    //  bob   -> "draft" branch: commit "bob drafts"
-    //           index: users/name/draft = "bob" -> row_bob
-    //
-    //  Verify: branches and indices are fully isolated.
-
+pub fn test_alice_bob_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let tasks = ObjectId::new();
+    let main_row = make_row_version(ObjectId::new(), "main", 10, b"alice");
+    let draft_row = make_row_version(ObjectId::new(), "draft", 20, b"bob");
 
-    let mut meta = HashMap::new();
-    meta.insert("type".to_string(), "tasks".to_string());
-    storage.create_object(tasks, meta).unwrap();
-
-    let alice = ObjectId::new();
-    let bob = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
-
-    // Alice writes to main
-    let c_alice = make_commit(b"alice publishes", alice, &[]);
-    let c_alice_id = c_alice.id();
-    storage.append_commit(tasks, &main_branch, c_alice).unwrap();
-
-    let row_alice = ObjectId::new();
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
     storage
         .index_insert(
             "users",
             "name",
             "main",
             &Value::Text("alice".to_string()),
-            row_alice,
+            main_row.row_id,
         )
         .unwrap();
-
-    // Bob writes to draft
-    let c_bob = make_commit(b"bob drafts", bob, &[]);
-    let c_bob_id = c_bob.id();
-    storage.append_commit(tasks, &draft_branch, c_bob).unwrap();
-
-    let row_bob = ObjectId::new();
     storage
         .index_insert(
             "users",
             "name",
             "draft",
             &Value::Text("bob".to_string()),
-            row_bob,
+            draft_row.row_id,
         )
         .unwrap();
 
-    // Verify branch isolation
-    let loaded_main = storage.load_branch(tasks, &main_branch).unwrap().unwrap();
-    assert_eq!(loaded_main.commits.len(), 1);
-    assert_eq!(loaded_main.commits[0].id(), c_alice_id);
-
-    let loaded_draft = storage.load_branch(tasks, &draft_branch).unwrap().unwrap();
-    assert_eq!(loaded_draft.commits.len(), 1);
-    assert_eq!(loaded_draft.commits[0].id(), c_bob_id);
-
-    // Verify index isolation
-    let main_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(main_results, vec![row_alice]);
-    let main_bob = storage.index_lookup("users", "name", "main", &Value::Text("bob".to_string()));
-    assert!(main_bob.is_empty());
-
-    let draft_results =
-        storage.index_lookup("users", "name", "draft", &Value::Text("bob".to_string()));
-    assert_eq!(draft_results, vec![row_bob]);
-    let draft_alice =
-        storage.index_lookup("users", "name", "draft", &Value::Text("alice".to_string()));
-    assert!(draft_alice.is_empty());
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![main_row.clone()]
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "draft").unwrap(),
+        vec![draft_row.clone()]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+        vec![main_row.row_id]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "draft", &Value::Text("bob".to_string())),
+        vec![draft_row.row_id]
+    );
 }
 
 // ============================================================================
 // Macros
 // ============================================================================
 
-/// Generate `#[test]` functions for all non-persistence conformance tests.
-///
-/// Usage:
-/// ```ignore
-/// storage_conformance_tests!(memory, || Box::new(MemoryStorage::default()));
-/// ```
 #[macro_export]
 macro_rules! storage_conformance_tests {
     ($prefix:ident, $factory:expr) => {
@@ -828,33 +700,18 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn branch_load_nonexistent_returns_none() {
-                conformance::test_branch_load_nonexistent_returns_none(&$factory);
+            fn raw_table_round_trip() {
+                conformance::test_raw_table_round_trip(&$factory);
             }
 
             #[test]
-            fn commit_append_and_load() {
-                conformance::test_commit_append_and_load(&$factory);
+            fn raw_table_scan_prefix() {
+                conformance::test_raw_table_scan_prefix(&$factory);
             }
 
             #[test]
-            fn commit_append_chain() {
-                conformance::test_commit_append_chain(&$factory);
-            }
-
-            #[test]
-            fn commit_delete() {
-                conformance::test_commit_delete(&$factory);
-            }
-
-            #[test]
-            fn branch_tails_set_and_clear() {
-                conformance::test_branch_tails_set_and_clear(&$factory);
-            }
-
-            #[test]
-            fn multiple_branches_independent() {
-                conformance::test_multiple_branches_independent(&$factory);
+            fn raw_table_scan_range() {
+                conformance::test_raw_table_scan_range(&$factory);
             }
 
             #[test]
@@ -873,28 +730,8 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn index_range_inclusive_exclusive() {
-                conformance::test_index_range_inclusive_exclusive(&$factory);
-            }
-
-            #[test]
-            fn index_range_unbounded_start() {
-                conformance::test_index_range_unbounded_start(&$factory);
-            }
-
-            #[test]
-            fn index_range_unbounded_end() {
-                conformance::test_index_range_unbounded_end(&$factory);
-            }
-
-            #[test]
-            fn index_scan_all() {
-                conformance::test_index_scan_all(&$factory);
-            }
-
-            #[test]
-            fn index_cross_table_isolation() {
-                conformance::test_index_cross_table_isolation(&$factory);
+            fn index_range() {
+                conformance::test_index_range(&$factory);
             }
 
             #[test]
@@ -903,53 +740,58 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn index_value_types() {
-                conformance::test_index_value_types(&$factory);
+            fn row_region_round_trip() {
+                conformance::test_row_region_round_trip(&$factory);
             }
 
             #[test]
-            fn store_and_load_ack_tier() {
-                conformance::test_store_and_load_ack_tier(&$factory);
+            fn row_region_patch_state_monotonic() {
+                conformance::test_row_region_patch_state_monotonic(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_schema_seen() {
-                conformance::test_catalogue_manifest_schema_seen(&$factory);
+            fn row_region_branch_isolation() {
+                conformance::test_row_region_branch_isolation(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_lens_seen() {
-                conformance::test_catalogue_manifest_lens_seen(&$factory);
+            fn row_region_cross_branch_visible_heads() {
+                conformance::test_row_region_cross_branch_visible_heads(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_idempotent() {
-                conformance::test_catalogue_manifest_idempotent(&$factory);
+            fn apply_row_mutation_combines_row_and_index_effects() {
+                conformance::test_apply_row_mutation_combines_row_and_index_effects(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_nonexistent_returns_none() {
-                conformance::test_catalogue_manifest_nonexistent_returns_none(&$factory);
+            fn catalogue_entry_round_trip() {
+                conformance::test_catalogue_entry_round_trip(&$factory);
             }
 
             #[test]
-            fn alice_bob_concurrent_branches() {
-                conformance::test_alice_bob_concurrent_branches(&$factory);
+            fn catalogue_entry_scan_returns_sorted_entries() {
+                conformance::test_catalogue_entry_scan_returns_sorted_entries(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_upsert_replaces_existing() {
+                conformance::test_catalogue_entry_upsert_replaces_existing(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_nonexistent_returns_none() {
+                conformance::test_catalogue_entry_nonexistent_returns_none(&$factory);
+            }
+
+            #[test]
+            fn alice_bob_branch_isolation() {
+                conformance::test_alice_bob_branch_isolation(&$factory);
             }
         }
     };
 }
 
-/// Generate all conformance tests including persistence tests.
-///
-/// Usage:
-/// ```ignore
-/// storage_conformance_tests_persistent!(
-///     my_backend,
-///     || Box::new(MyStorage::open_temp().unwrap()),
-///     |path| Box::new(MyStorage::open(path).unwrap())
-/// );
-/// ```
 #[macro_export]
 macro_rules! storage_conformance_tests_persistent {
     ($prefix:ident, $factory:expr, $reopen_factory:expr) => {

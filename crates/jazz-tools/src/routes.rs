@@ -1733,17 +1733,26 @@ mod tests {
             .with_state(state)
     }
 
-    /// A minimal valid `SyncPayload::ObjectUpdated` as a `serde_json::Value`,
-    /// suitable for embedding in batch request bodies.
-    fn object_updated_payload(object_id: &str) -> Value {
-        serde_json::json!({
-            "ObjectUpdated": {
-                "object_id": object_id,
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        })
+    /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
+    /// in batch request bodies.
+    fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
+        let row_id =
+            ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
+        let row = crate::row_histories::StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::<crate::commit::CommitId>::new(),
+            b"alice".to_vec(),
+            crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
+            Default::default(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+
+        crate::sync_manager::SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1753,16 +1762,6 @@ mod tests {
         admin_secret: Option<String>,
         body: Option<Value>,
     }
-
-    // -------------------------------------------------------------------------
-    // Batch sync handler tests
-    //
-    // These are RED: the /sync endpoint currently expects
-    // {"payload":…,"client_id":…} (singular). Sending the new always-array
-    // {"payloads":[…],"client_id":…} body currently returns 422. These tests
-    // will go green once SyncPayloadRequest is replaced with SyncBatchRequest
-    // and sync_handler returns {"results":[…]}.
-    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn sync_batch_accepts_two_payloads_and_returns_ok_results() {
@@ -1778,13 +1777,13 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
-        let body = serde_json::json!({
-            "payloads": [
-                object_updated_payload("00000000-0000-0000-0000-000000000001"),
-                object_updated_payload("00000000-0000-0000-0000-000000000002"),
+        let body = SyncBatchRequest {
+            payloads: vec![
+                row_version_created_payload("00000000-0000-0000-0000-000000000001"),
+                row_version_created_payload("00000000-0000-0000-0000-000000000002"),
             ],
-            "client_id": client_id,
-        });
+            client_id,
+        };
 
         let response = app
             .oneshot(
@@ -1817,10 +1816,12 @@ mod tests {
         // No auth headers → 401 before any payloads are applied
         let app = make_sync_test_app("test-backend-secret").await;
 
-        let body = serde_json::json!({
-            "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
-            "client_id": ClientId::new(),
-        });
+        let body = SyncBatchRequest {
+            payloads: vec![row_version_created_payload(
+                "00000000-0000-0000-0000-000000000001",
+            )],
+            client_id: ClientId::new(),
+        };
 
         let response = app
             .oneshot(
@@ -1852,14 +1853,14 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
-        let payloads: Vec<Value> = (0..60)
-            .map(|i| object_updated_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
+        let payloads: Vec<crate::sync_manager::SyncPayload> = (0..60)
+            .map(|i| row_version_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
             .collect();
 
-        let body = serde_json::json!({
-            "payloads": payloads,
-            "client_id": client_id,
-        });
+        let body = SyncBatchRequest {
+            payloads,
+            client_id,
+        };
 
         let response = app
             .oneshot(

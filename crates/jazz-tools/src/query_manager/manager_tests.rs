@@ -2,20 +2,57 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 use smallvec::smallvec;
 
-use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session as PolicySession;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema, TableName,
+    TablePolicies, TableSchema, Value,
 };
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
+use crate::test_row_history::{
+    apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
+    put_test_row_metadata,
+};
+
+#[derive(Debug, Clone)]
+struct IncomingRowVersion {
+    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: String,
+}
+
+impl IncomingRowVersion {
+    fn row_provenance(&self) -> RowProvenance {
+        RowProvenance::for_insert(self.author.clone(), self.timestamp)
+    }
+
+    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowVersion {
+        let metadata = row_provenance_metadata(&self.row_provenance(), None)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        StoredRowVersion::new(
+            object_id,
+            branch,
+            self.parents.iter().copied().collect::<Vec<_>>(),
+            self.content.clone(),
+            self.row_provenance(),
+            metadata,
+            state,
+            None,
+        )
+    }
+}
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -79,29 +116,70 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
+fn get_branch_for_user_branch(qm: &QueryManager, user_branch: &str) -> String {
+    ComposedBranchName::new(
+        &qm.schema_context().env,
+        qm.schema_context().current_hash,
+        user_branch,
+    )
+    .to_branch_name()
+    .as_str()
+    .to_string()
+}
+
+fn connect_server(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    server_id: crate::sync_manager::ServerId,
+) {
+    qm.sync_manager_mut()
+        .add_server_with_storage(server_id, false, storage);
+}
+
+fn connect_client(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    client_id: crate::sync_manager::ClientId,
+) {
+    qm.sync_manager_mut()
+        .add_client_with_storage(storage, client_id);
+}
+
+fn connect_query_manager_upstream(
+    qm: &mut QueryManager,
+    storage: &MemoryStorage,
+    server_id: crate::sync_manager::ServerId,
+) {
+    qm.add_server_with_storage(storage, server_id, false);
+}
+
+fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowVersion {
+    let row_locator = storage
+        .load_row_locator(row_id)
+        .unwrap()
+        .expect("row locator should exist");
+    storage
+        .load_visible_region_row(row_locator.table.as_str(), branch, row_id)
+        .unwrap()
+        .expect("visible row should exist")
+}
+
 fn stored_row_commit(
     parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
-) -> crate::commit::Commit {
-    let author = author.into();
-    crate::commit::Commit {
+) -> IncomingRowVersion {
+    IncomingRowVersion {
         parents,
         content,
         timestamp,
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(author.clone(), timestamp),
-            None,
-        )),
-        author,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
+        author: author.into(),
     }
 }
 
 fn add_row_commit(
-    qm: &mut QueryManager,
+    _qm: &mut QueryManager,
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
@@ -111,22 +189,61 @@ fn add_row_commit(
     author: impl Into<String>,
 ) -> crate::commit::CommitId {
     let author = author.into();
-    qm.sync_manager_mut()
-        .object_manager
-        .add_commit_with_timestamp(
-            storage,
-            object_id,
-            branch,
-            parents,
-            content,
-            timestamp,
-            author.clone(),
-            Some(row_provenance_metadata(
-                &RowProvenance::for_insert(author, timestamp),
-                None,
-            )),
-        )
-        .unwrap()
+    let provenance = if parents.is_empty() {
+        RowProvenance::for_insert(author.clone(), timestamp)
+    } else {
+        RowProvenance {
+            created_by: author.clone(),
+            created_at: 1_000,
+            updated_by: author.clone(),
+            updated_at: timestamp,
+        }
+    };
+    let row = StoredRowVersion::new(
+        object_id,
+        branch,
+        parents,
+        content,
+        provenance,
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let version_id = row.version_id();
+    apply_test_row_version(storage, object_id, branch, row).unwrap();
+    version_id
+}
+
+fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> HashMap<String, String> {
+    load_test_row_metadata(storage, row_id).expect("row metadata should be available")
+}
+
+fn test_row_tip_ids(
+    storage: &MemoryStorage,
+    row_id: ObjectId,
+    branch: impl AsRef<str>,
+) -> Vec<crate::commit::CommitId> {
+    load_test_row_tip_ids(storage, row_id, branch.as_ref())
+        .expect("row branch tips should be available")
+}
+
+fn receive_row_commit(
+    qm: &mut QueryManager,
+    _storage: &mut MemoryStorage,
+    object_id: ObjectId,
+    branch: &str,
+    commit: IncomingRowVersion,
+) -> crate::commit::CommitId {
+    let row = commit.to_row(object_id, branch, RowState::VisibleDirect);
+    let version_id = row.version_id();
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        },
+    });
+    version_id
 }
 
 use crate::object::ObjectId;
@@ -739,7 +856,7 @@ fn column_count_mismatch_error() {
 }
 
 #[test]
-fn insert_returns_handle_with_commit_id() {
+fn insert_returns_handle_with_version_id() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -763,7 +880,52 @@ fn insert_returns_handle_with_commit_id() {
     assert_eq!(inserted.1[1], Value::Integer(100));
 
     // Handle should have a valid row commit ID
-    assert!(handle.row_commit_id.0 != [0; 32]);
+    assert!(handle.row_version_id.0 != [0; 32]);
+}
+
+#[test]
+fn insert_materializes_visible_and_history_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let descriptor = schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch = get_branch(&qm);
+    let visible = storage.scan_visible_region("users", &branch).unwrap();
+    let history = storage
+        .scan_history_region(
+            "users",
+            &branch,
+            HistoryScan::Row {
+                row_id: handle.row_id,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(visible.len(), 1);
+    assert_eq!(history, visible);
+
+    let stored = &history[0];
+    assert_eq!(stored.row_id, handle.row_id);
+    assert_eq!(stored.branch, branch);
+    assert_eq!(stored.state, RowState::VisibleDirect);
+    assert!(!stored.is_deleted);
+    assert_eq!(
+        decode_row(&descriptor, &stored.data).unwrap(),
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
 }
 
 #[test]
@@ -886,6 +1048,35 @@ fn subscription_updates_after_insert_and_process() {
     assert_eq!(
         updates[0].delta.added[0].id, handle.row_id,
         "Delta should identify the inserted row"
+    );
+}
+
+#[test]
+fn query_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query)
+        .expect("visible-row query should succeed without legacy object-backed storage");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
     );
 }
 
@@ -1173,8 +1364,8 @@ fn synced_update_updates_column_indices() {
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
-    // This test verifies that updates received via sync (receive_commit)
-    // correctly update column indices using old_content from AllObjectUpdate.
+    // This test verifies that direct synced commits (receive_commit)
+    // update indices through the row-native update lane.
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -1188,12 +1379,7 @@ fn synced_update_updates_column_indices() {
     // Receive object with table metadata
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     // Encode the initial row data (name="Alice", score=100)
     let descriptor = RowDescriptor::new(vec![
@@ -1208,13 +1394,9 @@ fn synced_update_updates_column_indices() {
 
     // Receive the first commit (insert)
     let commit1 = stored_row_commit(smallvec![], initial_data.clone(), 1000, author.to_string());
-    let commit1_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit1)
-        .unwrap();
+    let commit1_id = receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit1);
 
-    // Process to handle the AllObjectUpdate
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Query by name="Alice" → finds row
@@ -1255,12 +1437,9 @@ fn synced_update_updates_column_indices() {
         2000,
         author.to_string(),
     );
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit2);
 
-    // Process to handle the AllObjectUpdate with old_content
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Query by name="Alice" → empty (old value removed from index)
@@ -1313,41 +1492,51 @@ fn synced_update_updates_column_indices() {
 }
 
 #[test]
-#[should_panic(expected = "missing old_content for historical sync update")]
-fn synced_update_missing_old_content_panics_fail_fast() {
-    use crate::object::BranchName;
-    use crate::object_manager::AllObjectUpdate;
+fn synced_insert_materializes_visible_and_history_rows() {
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
+    let descriptor = schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
+    let row_id = crate::object::ObjectId::new();
 
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    put_test_row_metadata(&mut storage, row_id, metadata);
+
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit = stored_row_commit(smallvec![], row_data, 1000, row_id.to_string());
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit);
+
     qm.process(&mut storage);
 
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let visible = storage.scan_visible_region("users", &branch).unwrap();
+    let history = storage
+        .scan_history_region("users", &branch, HistoryScan::Row { row_id })
+        .unwrap();
 
-    // Simulate a historical sync update where ObjectManager couldn't provide
-    // old_content. We should fail-fast rather than accept index staleness.
-    qm.handle_object_update(
-        &mut storage,
-        AllObjectUpdate {
-            object_id: handle.row_id,
-            metadata,
-            branch_name: BranchName::new(&branch),
-            commit_ids: vec![],
-            is_new_object: false,
-            previous_commit_ids: vec![handle.row_commit_id],
-            old_content: None,
-        },
+    assert_eq!(visible.len(), 1);
+    assert_eq!(history, visible);
+
+    let stored = &history[0];
+    assert_eq!(stored.row_id, row_id);
+    assert_eq!(stored.branch, branch);
+    assert_eq!(stored.state, RowState::VisibleDirect);
+    assert!(!stored.is_deleted);
+    assert_eq!(
+        decode_row(&descriptor, &stored.data).unwrap(),
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
     );
 }
 
@@ -1389,9 +1578,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     let row_id = ObjectId::new();
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     let live_data = encode_row(
         &live_descriptor,
@@ -1403,10 +1590,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     )
     .unwrap();
     let commit = stored_row_commit(smallvec![], live_data, 1000, row_id.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &live_branch, commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &live_branch, commit);
     qm.process(&mut storage);
 
     assert!(
@@ -1445,14 +1629,9 @@ fn synced_insert_appears_in_subscription_delta() {
     // Receive object with table metadata
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // NOW subscribe to query (after subscribe_all but before receive_commit)
+    // Subscribe before the synced row arrives.
     let query = qm.query("users").build();
     let sub_id = qm.subscribe(query).unwrap();
 
@@ -1469,12 +1648,9 @@ fn synced_insert_appears_in_subscription_delta() {
 
     // Receive the commit (insert)
     let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit);
 
-    // Process to handle the AllObjectUpdate
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Verify subscription delta contains the added row
@@ -1497,6 +1673,7 @@ fn synced_insert_appears_in_subscription_delta() {
 #[test]
 fn synced_update_is_visible_in_query() {
     use crate::query_manager::encoding::encode_row;
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
     // Verify that synced updates (same row, new content) update indices correctly
     // and are visible in subsequent queries.
@@ -1507,9 +1684,6 @@ fn synced_update_is_visible_in_query() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
     // Insert a row locally first
     let insert_handle = qm
         .insert(
@@ -1519,10 +1693,11 @@ fn synced_update_is_visible_in_query() {
         )
         .unwrap();
     let row_id = insert_handle.row_id;
-    let first_commit_id = insert_handle.row_commit_id;
+    let first_commit_id = insert_handle.row_version_id;
 
     // Process to settle the initial insert
     qm.process(&mut storage);
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Verify initial data is queryable
     let query = qm
@@ -1549,13 +1724,17 @@ fn synced_update_is_visible_in_query() {
     let update_commit = stored_row_commit(
         smallvec![first_commit_id],
         updated_data,
-        2000,
+        base_timestamp + 1,
         author.to_string(),
     );
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, update_commit)
-        .unwrap();
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        },
+    });
 
     // Process to handle the synced update
     qm.process(&mut storage);
@@ -1600,9 +1779,6 @@ fn synced_row_visible_in_filtered_subscription() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
     // Subscribe to filtered query: users with score > 25
     let query = qm
         .query("users")
@@ -1623,9 +1799,7 @@ fn synced_row_visible_in_filtered_subscription() {
 
     let mut metadata_1 = HashMap::new();
     metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id_1, metadata_1);
+    put_test_row_metadata(&mut storage, row_id_1, metadata_1);
 
     let data_1 = encode_row(
         &descriptor,
@@ -1634,10 +1808,7 @@ fn synced_row_visible_in_filtered_subscription() {
     .unwrap();
 
     let commit_1 = stored_row_commit(smallvec![], data_1, 1000, author_1.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_1, &branch, commit_1)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id_1, &branch, commit_1);
 
     qm.process(&mut storage);
 
@@ -1667,9 +1838,7 @@ fn synced_row_visible_in_filtered_subscription() {
 
     let mut metadata_2 = HashMap::new();
     metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id_2, metadata_2);
+    put_test_row_metadata(&mut storage, row_id_2, metadata_2);
 
     let data_2 = encode_row(
         &descriptor,
@@ -1678,10 +1847,7 @@ fn synced_row_visible_in_filtered_subscription() {
     .unwrap();
 
     let commit_2 = stored_row_commit(smallvec![], data_2, 2000, author_2.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_2, &branch, commit_2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id_2, &branch, commit_2);
 
     qm.process(&mut storage);
 
@@ -1775,17 +1941,52 @@ fn local_update_emits_subscription_delta() {
 }
 
 #[test]
+fn update_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    reader_qm
+        .update(
+            &mut storage,
+            handle.row_id,
+            &[Value::Text("Alice Updated".into()), Value::Integer(200)],
+        )
+        .expect(
+            "update should succeed from visible-row state without legacy object-backed storage",
+        );
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("Alice Updated".into()), Value::Integer(200)]
+    );
+}
+
+#[test]
 fn synced_update_emits_subscription_delta() {
     use crate::query_manager::encoding::encode_row;
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
     // Verify that synced updates (receive_commit) cause subscription to emit update delta
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Insert a row locally first
     let handle = qm
@@ -1796,7 +1997,7 @@ fn synced_update_emits_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
+    let first_commit_id = handle.row_version_id;
 
     // Subscribe to all users
     let query = qm.query("users").build();
@@ -1805,6 +2006,8 @@ fn synced_update_emits_subscription_delta() {
     // Process to get the initial add
     qm.process(&mut storage);
     let _updates = qm.take_updates(); // Clear initial add
+    let branch = get_branch(&qm);
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Now simulate a synced update
     let descriptor = RowDescriptor::new(vec![
@@ -1821,14 +2024,17 @@ fn synced_update_emits_subscription_delta() {
     let update_commit = stored_row_commit(
         smallvec![first_commit_id],
         updated_data,
-        2000,
+        base_timestamp + 1,
         author.to_string(),
     );
-    let branch = get_branch(&qm);
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, update_commit)
-        .unwrap();
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        },
+    });
 
     // Process
     qm.process(&mut storage);
@@ -2194,10 +2400,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
 
     // Add a "server" that we'll receive updates from
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
+    connect_server(&mut qm, &storage, server_id);
 
     // Subscribe to users table
     let query = qm.query("users").build();
@@ -2227,6 +2430,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     .unwrap();
 
     let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
+    let row = commit.to_row(row_id, &branch, RowState::VisibleDirect);
 
     // Object metadata marking it as a "users" table row
     let mut obj_metadata = std::collections::HashMap::new();
@@ -2235,14 +2439,12 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     // Push the sync message through SyncManager's inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(server_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
-            metadata: Some(crate::sync_manager::ObjectMetadata {
+        payload: SyncPayload::RowVersionCreated {
+            metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata: obj_metadata,
             }),
-            branch_name: branch.into(),
-            commits: vec![commit],
+            row,
         },
     });
 
@@ -2282,9 +2484,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
 
     // Add a "server"
     let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
+    connect_server(&mut qm, &storage, server_id);
     // Insert a row locally first
     let handle = qm
         .insert(
@@ -2294,7 +2494,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
+    let first_commit_id = handle.row_version_id;
 
     // Subscribe to users
     let query = qm.query("users").build();
@@ -2303,6 +2503,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     // Process to get initial state
     qm.process(&mut storage);
     let _ = qm.take_updates(); // Clear initial delta
+    let base_timestamp = load_visible_row(&storage, row_id, &branch).updated_at;
 
     // Now simulate receiving an update from sync (as if another peer modified the row)
     let descriptor = RowDescriptor::new(vec![
@@ -2318,18 +2519,17 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     let update_commit = stored_row_commit(
         smallvec![first_commit_id],
         updated_data,
-        2000,
+        base_timestamp + 1,
         row_id.to_string(),
     );
+    let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
 
     // Push the update through SyncManager inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(server_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
+        payload: SyncPayload::RowVersionCreated {
             metadata: None, // No metadata needed for existing object
-            branch_name: branch.into(),
-            commits: vec![update_commit],
+            row,
         },
     });
 
@@ -2358,7 +2558,6 @@ fn sync_inbox_update_flows_to_subscription_delta() {
 fn two_peer_sync_insert_reaches_subscription() {
     // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
     // This demonstrates the conceptual flow even though we construct the payload manually
-    use crate::object::BranchName;
     use crate::query_manager::encoding::decode_row;
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
@@ -2369,14 +2568,13 @@ fn two_peer_sync_insert_reaches_subscription() {
     let (mut peer_a, mut storage_a) = create_query_manager(sync_manager_a, schema.clone());
     let (mut peer_b, mut storage_b) = create_query_manager(sync_manager_b, schema);
 
-    // Peer B subscribes to all objects and sets up query subscription
-    peer_b.sync_manager_mut().object_manager.subscribe_all();
+    // Peer B sets up query subscription
     let query = peer_b.query("users").build();
     let sub_id = peer_b.subscribe(query).unwrap();
 
     // Peer B adds a "server" (representing Peer A)
     let peer_a_as_server = ServerId::new();
-    peer_b.sync_manager_mut().add_server(peer_a_as_server);
+    connect_server(&mut peer_b, &storage_b, peer_a_as_server);
 
     // Process both to initialize
     peer_a.process(&mut storage_a);
@@ -2393,35 +2591,21 @@ fn two_peer_sync_insert_reaches_subscription() {
         .unwrap();
     let row_id = handle.row_id;
 
-    // Get the actual commit data from Peer A's ObjectManager
+    // Read the actual row metadata and visible version from storage.
     // This simulates "what would be sent over the wire"
     let branch_name = get_branch(&peer_a);
-    let (row_data, metadata) = {
-        let obj = peer_a
-            .sync_manager_mut()
-            .object_manager
-            .get(row_id)
-            .expect("Object should be available");
-        let branch = obj.branches.get(&BranchName::new(&branch_name)).unwrap();
-        let tip_id = branch.tips.iter().next().unwrap();
-        let commit = branch.commits.get(tip_id).unwrap();
-        (commit.content.clone(), obj.metadata.clone())
-    };
-
-    // Construct the sync payload as it would appear on the wire
-    let commit = stored_row_commit(smallvec![], row_data, 1000, row_id.to_string());
+    let metadata = test_row_metadata(&storage_a, row_id);
+    let row = load_visible_row(&storage_a, row_id, &branch_name);
 
     // Send to Peer B via SyncManager inbox
     peer_b.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(peer_a_as_server),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
-            metadata: Some(crate::sync_manager::ObjectMetadata {
+        payload: SyncPayload::RowVersionCreated {
+            metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata,
             }),
-            branch_name: branch_name.clone().into(),
-            commits: vec![commit],
+            row,
         },
     });
 
@@ -2575,7 +2759,6 @@ fn delete_already_deleted_row_fails() {
 fn soft_delete_with_concurrent_tips_uses_lww() {
     // Test that soft deleting an object with two concurrent tips results
     // in a soft delete commit with content from the LWW winner (highest timestamp).
-    use crate::commit::{Commit, StoredState};
     use crate::object::BranchName;
     use crate::query_manager::encoding::encode_row;
 
@@ -2596,11 +2779,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     // Get the initial commit as the common parent
     let branch = get_branch(&qm);
     let branch_name = BranchName::new(&branch);
-    let initial_tips: Vec<_> = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
+    let initial_tips: Vec<_> = test_row_tip_ids(&storage, handle.row_id, &branch)
         .iter()
         .copied()
         .collect();
@@ -2615,6 +2794,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .unwrap()
         .columns
         .clone();
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
 
     // Commit A: lower timestamp, content "TipA"
     let content_a = encode_row(
@@ -2622,18 +2802,12 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         &[Value::Text("TipA".into()), Value::Integer(100)],
     )
     .unwrap();
-    let commit_a = Commit {
-        author: handle.row_id.to_string(),
-        parents: smallvec![parent],
-        content: content_a,
-        timestamp: 1000, // Lower timestamp
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(handle.row_id.to_string(), 1000),
-            None,
-        )),
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
+    let commit_a = stored_row_commit(
+        smallvec![parent],
+        content_a,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
 
     // Commit B: higher timestamp, content "TipB" - this should win
     let content_b = encode_row(
@@ -2641,38 +2815,22 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         &[Value::Text("TipB".into()), Value::Integer(200)],
     )
     .unwrap();
-    let commit_b = Commit {
-        author: handle.row_id.to_string(),
-        parents: smallvec![parent],
-        content: content_b.clone(),
-        timestamp: 2000, // Higher timestamp - LWW winner
-        metadata: Some(row_provenance_metadata(
-            &RowProvenance::for_insert(handle.row_id.to_string(), 2000),
-            None,
-        )),
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
+    let commit_b = stored_row_commit(
+        smallvec![parent],
+        content_b.clone(),
+        base_timestamp + 2,
+        handle.row_id.to_string(),
+    );
 
     // Add both commits to create concurrent tips
     // We need to receive these as synced commits
-    let commit_a_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_a)
-        .unwrap();
-    let commit_b_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_b)
-        .unwrap();
+    let commit_a_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_a);
+    let commit_b_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_b);
+
+    qm.process(&mut storage);
 
     // Verify we now have concurrent tips
-    let tips: Vec<_> = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
+    let tips: Vec<_> = test_row_tip_ids(&storage, handle.row_id, &branch)
         .iter()
         .copied()
         .collect();
@@ -2680,37 +2838,22 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     assert!(tips.contains(&commit_a_id));
     assert!(tips.contains(&commit_b_id));
 
-    // Process updates
-    qm.process(&mut storage);
-
     // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
     let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
 
     // Get the delete commit and verify its content
-    let obj = qm
-        .sync_manager_mut()
-        .object_manager
-        .get(handle.row_id)
-        .expect("Object should be available");
-    {
-        let branch = obj.branches.get(&branch_name).unwrap();
-        let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
+    let delete_row = load_visible_row(&storage, handle.row_id, branch_name.as_str());
 
-        // Verify the soft delete commit has content from the LWW winner (TipB)
-        assert_eq!(
-            delete_commit.content, content_b,
-            "Soft delete should preserve content from LWW winner"
-        );
-
-        // Also verify metadata
-        assert_eq!(
-            delete_commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str())),
-            Some(&"soft".to_string())
-        );
-    }
+    assert_eq!(
+        delete_row.version_id(),
+        delete_handle.delete_version_id,
+        "visible row should be the delete version"
+    );
+    assert_eq!(
+        delete_row.data, content_b,
+        "Soft delete should preserve content from LWW winner"
+    );
+    assert_eq!(delete_row.delete_kind, Some(DeleteKind::Soft));
 
     // Additionally verify that querying with include_deleted shows the correct content
     let query = qm.query("users").include_deleted().build();
@@ -2984,6 +3127,84 @@ fn undelete_hard_deleted_row_fails() {
     }
 }
 
+#[test]
+fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _hard_delete = writer_qm.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let result = reader_qm.undelete(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    );
+    match result {
+        Err(QueryError::RowHardDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowHardDeleted for visible-only hard delete, got {other:?}"),
+    }
+}
+
+#[test]
+fn undelete_syncs_row_version_created_to_server() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId::new();
+    connect_server(&mut qm, &storage, server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    qm.delete(&mut storage, handle.row_id).unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let undeleted = qm
+        .undelete(
+            &mut storage,
+            handle.row_id,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("undelete should forward the restored row upstream");
+
+    match &forwarded.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, handle.row_id);
+            assert_eq!(row.version_id(), undeleted.row_version_id);
+            assert!(!row.is_deleted);
+            assert!(!row.is_soft_deleted());
+            assert!(!row.is_hard_deleted());
+        }
+        other => panic!("undelete should sync as RowVersionCreated, got {other:?}"),
+    }
+}
+
 // ========================================================================
 // Truncate Tests
 // ========================================================================
@@ -3013,6 +3234,46 @@ fn truncate_soft_deleted_row() {
     // Verify row is completely gone
     assert!(!qm.row_is_indexed(&storage, "users", handle.row_id));
     assert!(!qm.row_is_deleted(&storage, "users", handle.row_id));
+}
+
+#[test]
+fn hard_delete_syncs_row_version_created_to_server() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId::new();
+    connect_server(&mut qm, &storage, server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let hard_delete = qm.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("hard delete should forward the tombstone upstream");
+
+    match &forwarded.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, handle.row_id);
+            assert_eq!(row.version_id(), hard_delete.delete_version_id);
+            assert!(row.is_deleted);
+            assert!(row.is_hard_deleted());
+            assert_eq!(row.data, Vec::<u8>::new());
+        }
+        other => panic!("hard delete should sync as RowVersionCreated, got {other:?}"),
+    }
 }
 
 #[test]
@@ -3206,6 +3467,36 @@ fn hard_delete_emits_removal_delta() {
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
     assert!(updates[0].delta.added.is_empty());
     assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
+fn delete_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    reader_qm.delete(&mut storage, handle.row_id).expect(
+        "delete should succeed from visible-row state without legacy object-backed storage",
+    );
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
+    assert!(
+        rows.is_empty(),
+        "soft-deleted row should disappear from normal current-state queries"
+    );
+    assert!(reader_qm.row_is_deleted(&storage, "users", handle.row_id));
 }
 
 #[test]
@@ -6246,63 +6537,6 @@ fn configure_legacy_client_with_current_permissions(qm: &mut QueryManager) {
     qm.set_authorization_schema(current_documents_permission_schema());
 }
 
-fn current_renamed_documents_permission_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("files"),
-        TableSchema::with_policies(
-            RowDescriptor::new(vec![
-                ColumnDescriptor::new("title", ColumnType::Text),
-                ColumnDescriptor::new("owner_id", ColumnType::Text),
-            ]),
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_update(
-                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-                )
-                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        ),
-    );
-    schema
-}
-
-fn legacy_documents_to_renamed_current_permissions_lens() -> crate::schema_manager::lens::Lens {
-    let legacy_schema = legacy_documents_schema();
-    let current_schema = current_renamed_documents_permission_schema();
-    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
-    let current_hash = crate::query_manager::types::SchemaHash::compute(&current_schema);
-    let mut transform = crate::schema_manager::lens::LensTransform::new();
-    transform.push(
-        crate::schema_manager::lens::LensOp::RenameTable {
-            old_name: "documents".to_string(),
-            new_name: "files".to_string(),
-        },
-        false,
-    );
-    transform.push(
-        crate::schema_manager::lens::LensOp::AddColumn {
-            table: "files".to_string(),
-            column: "owner_id".to_string(),
-            column_type: ColumnType::Text,
-            default: Value::Text("alice".into()),
-        },
-        false,
-    );
-    crate::schema_manager::lens::Lens::new(legacy_hash, current_hash, transform)
-}
-
-fn configure_legacy_client_with_renamed_current_permissions(qm: &mut QueryManager) {
-    let legacy_schema = legacy_documents_schema();
-    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
-    let mut known_schemas = std::collections::HashMap::new();
-    known_schemas.insert(legacy_hash, legacy_schema);
-    qm.set_known_schemas(std::sync::Arc::new(known_schemas));
-    qm.register_lens(legacy_documents_to_renamed_current_permissions_lens());
-    qm.set_authorization_schema(current_renamed_documents_permission_schema());
-}
-
 fn legacy_join_provenance_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
@@ -6460,6 +6694,87 @@ fn policy_filters_select_results() {
         2,
         "Bob should see 2 docs (his own 2 docs)"
     );
+}
+
+#[test]
+fn policy_filtered_query_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = policy_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handles = vec![
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("alice".into()),
+                    Value::Text("eng".into()),
+                    Value::Text("Alice's eng doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("eng".into()),
+                    Value::Text("Bob's eng doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("sales".into()),
+                    Value::Text("Bob's sales doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("charlie".into()),
+                    Value::Text("design".into()),
+                    Value::Text("Charlie's design doc".into()),
+                ],
+            )
+            .unwrap(),
+    ];
+    writer_qm.process(&mut storage);
+
+    for _handle in handles {}
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let alice_session = PolicySession::new("alice").with_claims(json!({"teams": ["eng"]}));
+    let query = reader_qm.query("documents").build();
+    let sub_id = reader_qm
+        .subscribe_with_session(query, Some(alice_session), None)
+        .unwrap();
+
+    reader_qm.process(&mut storage);
+
+    let results = reader_qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+
+    let titles: Vec<_> = results
+        .iter()
+        .filter_map(|(_, row)| match &row[2] {
+            Value::Text(title) => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(titles.contains(&"Alice's eng doc"));
+    assert!(titles.contains(&"Bob's eng doc"));
 }
 
 #[test]
@@ -6778,120 +7093,6 @@ fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_tr
 }
 
 #[test]
-fn local_subscription_uses_current_permissions_after_table_rename_lens_transform() {
-    let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
-    configure_legacy_client_with_renamed_current_permissions(&mut qm);
-
-    qm.insert(
-        &mut storage,
-        "documents",
-        &[Value::Text("Legacy doc".into())],
-    )
-    .unwrap();
-
-    let query = qm.query("documents").build();
-    let alice_sub = qm
-        .subscribe_with_session(query.clone(), Some(PolicySession::new("alice")), None)
-        .unwrap();
-    let bob_sub = qm
-        .subscribe_with_session(query, Some(PolicySession::new("bob")), None)
-        .unwrap();
-
-    qm.process(&mut storage);
-
-    let alice_results = qm.get_subscription_results(alice_sub);
-    assert_eq!(
-        alice_results.len(),
-        1,
-        "Alice should see the legacy row after table-rename auth transform"
-    );
-    assert_eq!(alice_results[0].1, vec![Value::Text("Legacy doc".into())]);
-    assert!(
-        qm.get_subscription_results(bob_sub).is_empty(),
-        "Bob should be filtered out by the renamed current permission schema"
-    );
-}
-
-#[test]
-fn local_write_permissions_use_current_permissions_after_table_rename_lens_transform() {
-    let sync_manager = SyncManager::new();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
-    configure_legacy_client_with_renamed_current_permissions(&mut qm);
-
-    let inserted = qm
-        .insert_with_session(
-            &mut storage,
-            "documents",
-            &[Value::Text("Alice insert".into())],
-            Some(&PolicySession::new("alice")),
-        )
-        .expect("alice insert should be allowed by renamed current permissions");
-
-    let insert_err = qm
-        .insert_with_session(
-            &mut storage,
-            "documents",
-            &[Value::Text("Bob insert".into())],
-            Some(&PolicySession::new("bob")),
-        )
-        .expect_err("bob insert should be denied by renamed current permissions");
-    assert_eq!(
-        insert_err,
-        QueryError::PolicyDenied {
-            table: TableName::new("documents"),
-            operation: crate::query_manager::policy::Operation::Insert,
-        }
-    );
-
-    let update_err = qm
-        .update_with_session(
-            &mut storage,
-            inserted.row_id,
-            &[Value::Text("Bob edit".into())],
-            Some(&PolicySession::new("bob")),
-        )
-        .expect_err("bob update should be denied by renamed current permissions");
-    assert_eq!(
-        update_err,
-        QueryError::PolicyDenied {
-            table: TableName::new("documents"),
-            operation: crate::query_manager::policy::Operation::Update,
-        }
-    );
-
-    qm.update_with_session(
-        &mut storage,
-        inserted.row_id,
-        &[Value::Text("Alice edit".into())],
-        Some(&PolicySession::new("alice")),
-    )
-    .expect("alice update should be allowed by renamed current permissions");
-
-    let delete_err = qm
-        .delete_with_session(
-            &mut storage,
-            inserted.row_id,
-            Some(&PolicySession::new("bob")),
-        )
-        .expect_err("bob delete should be denied by renamed current permissions");
-    assert_eq!(
-        delete_err,
-        QueryError::PolicyDenied {
-            table: TableName::new("documents"),
-            operation: crate::query_manager::policy::Operation::Delete,
-        }
-    );
-
-    qm.delete_with_session(
-        &mut storage,
-        inserted.row_id,
-        Some(&PolicySession::new("alice")),
-    )
-    .expect("alice delete should be allowed by renamed current permissions");
-}
-
-#[test]
 fn server_join_query_uses_current_permissions_for_joined_provenance() {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -6926,10 +7127,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
 
     let mut user_metadata = HashMap::new();
     user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    let user_id = server_qm
-        .sync_manager_mut()
-        .object_manager
-        .create(&mut storage, Some(user_metadata));
+    let user_id = create_test_row(&mut storage, Some(user_metadata));
     add_row_commit(
         &mut server_qm,
         &mut storage,
@@ -6947,10 +7145,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
 
     let mut post_metadata = HashMap::new();
     post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
-    let post_id = server_qm
-        .sync_manager_mut()
-        .object_manager
-        .create(&mut storage, Some(post_metadata));
+    let post_id = create_test_row(&mut storage, Some(post_metadata));
     add_row_commit(
         &mut server_qm,
         &mut storage,
@@ -6973,7 +7168,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     );
 
     let client_id = ClientId::new();
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
     let session = PolicySession::new("alice");
     server_qm
         .sync_manager_mut()
@@ -6998,151 +7193,15 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|entry| matches!(entry.payload, SyncPayload::RowVersionNeeded { .. }))
         .collect();
 
     assert!(
-        object_updates.is_empty(),
+        row_updates.is_empty(),
         "Joined rows should be filtered when current permissions deny any contributing provenance row"
-    );
-}
-
-#[test]
-fn server_subscription_uses_current_permissions_after_table_rename_lens_transform() {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
-    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
-
-    // legacy branch: documents(title)
-    //                |
-    //                | RenameTable documents -> files
-    //                | AddColumn owner_id = "alice"
-    //                v
-    // current auth:  files(title, owner_id) with owner-based select policy
-    let authorization_schema = current_renamed_documents_permission_schema();
-    let structural_schema: Schema = authorization_schema
-        .iter()
-        .map(|(table_name, table_schema)| {
-            let mut structural = table_schema.clone();
-            structural.policies = TablePolicies::default();
-            (*table_name, structural)
-        })
-        .collect();
-    let legacy_schema = legacy_documents_schema();
-    let legacy_hash = SchemaHash::compute(&legacy_schema);
-    let legacy_branch = ComposedBranchName::new("dev", legacy_hash, "main")
-        .to_branch_name()
-        .as_str()
-        .to_string();
-
-    let sync_manager = SyncManager::new();
-    let mut server_qm = QueryManager::new(sync_manager);
-    server_qm.set_current_schema(structural_schema, "dev", "main");
-    server_qm.add_live_schema(legacy_schema.clone());
-    server_qm.register_lens(legacy_documents_to_renamed_current_permissions_lens());
-    server_qm.set_authorization_schema(authorization_schema);
-
-    let mut known_schemas = HashMap::new();
-    known_schemas.insert(legacy_hash, legacy_schema);
-    server_qm.set_known_schemas(Arc::new(known_schemas));
-
-    let mut storage = MemoryStorage::new();
-    let author = ObjectId::new();
-
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
-    metadata.insert(
-        MetadataKey::OriginSchemaHash.to_string(),
-        legacy_hash.to_string(),
-    );
-    let document_id = server_qm
-        .sync_manager_mut()
-        .object_manager
-        .create(&mut storage, Some(metadata));
-    add_row_commit(
-        &mut server_qm,
-        &mut storage,
-        document_id,
-        &legacy_branch,
-        vec![],
-        encode_row(
-            &RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
-            &[Value::Text("Legacy doc".into())],
-        )
-        .unwrap(),
-        1000,
-        author.to_string(),
-    );
-
-    let alice = ClientId::new();
-    server_qm.sync_manager_mut().add_client(alice);
-    let alice_session = PolicySession::new("alice");
-    server_qm
-        .sync_manager_mut()
-        .set_client_session(alice, alice_session.clone());
-
-    let bob = ClientId::new();
-    server_qm.sync_manager_mut().add_client(bob);
-    let bob_session = PolicySession::new("bob");
-    server_qm
-        .sync_manager_mut()
-        .set_client_session(bob, bob_session.clone());
-
-    let query = QueryBuilder::new("files").branch(&legacy_branch).build();
-
-    server_qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(alice),
-        payload: SyncPayload::QuerySubscription {
-            query_id: QueryId(1),
-            query: Box::new(query.clone()),
-            session: Some(alice_session),
-            propagation: crate::sync_manager::QueryPropagation::Full,
-        },
-    });
-    server_qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(bob),
-        payload: SyncPayload::QuerySubscription {
-            query_id: QueryId(2),
-            query: Box::new(query),
-            session: Some(bob_session),
-            propagation: crate::sync_manager::QueryPropagation::Full,
-        },
-    });
-
-    server_qm.process(&mut storage);
-
-    let outbox = server_qm.sync_manager_mut().take_outbox();
-    let alice_updates: Vec<_> = outbox
-        .iter()
-        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == alice))
-        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
-        .collect();
-    let bob_updates: Vec<_> = outbox
-        .iter()
-        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == bob))
-        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
-        .collect();
-
-    assert_eq!(
-        alice_updates.len(),
-        1,
-        "Alice should receive the renamed legacy row after current-permissions auth filtering"
-    );
-    assert!(
-        alice_updates.iter().any(|entry| matches!(
-            &entry.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == document_id
-        )),
-        "Alice should receive the legacy document object"
-    );
-    assert!(
-        bob_updates.is_empty(),
-        "Bob should be filtered out by the current renamed permission schema"
     );
 }
 
@@ -7179,7 +7238,8 @@ fn index_key_includes_branch() {
     assert_eq!(current_branch_results[0].1[0], Value::Text("Alice".into()));
 
     // Verify the row is NOT visible on a different branch.
-    let other_branch_query = qm.query("users").branch("some-other-branch").build();
+    let other_branch = get_branch_for_user_branch(&qm, "some-other-branch");
+    let other_branch_query = qm.query("users").branch(&other_branch).build();
     let other_branch_results = execute_query(&mut qm, &mut storage, other_branch_query).unwrap();
     assert!(
         other_branch_results.is_empty(),
@@ -7208,7 +7268,8 @@ fn query_builder_single_branch_uses_correct_index() {
 
     // Query specifying a different branch should return no results
     // (since we haven't inserted on that branch)
-    let query = qm.query("users").branch("draft").build();
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+    let query = qm.query("users").branch(&draft_branch).build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 0, "Should not find row on draft branch");
 }
@@ -7244,14 +7305,46 @@ fn query_builder_explicit_main_branch() {
 }
 
 #[test]
+fn query_on_composed_noncurrent_branch_reads_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
+
+    let inserted = qm
+        .insert_on_branch(
+            &mut storage,
+            "users",
+            &draft_branch,
+            &[Value::Text("Dora".into()), Value::Integer(42)],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage.index_lookup("users", "_id", &draft_branch, &Value::Uuid(inserted.row_id)),
+        vec![inserted.row_id]
+    );
+
+    let query = qm.query("users").branch(&draft_branch).build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("Dora".into()));
+}
+
+#[test]
 fn query_multi_branch_requires_explicit_branch() {
     // Verify Query.branches field exists and works
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (qm, _storage) = create_query_manager(sync_manager, schema);
+    let main_branch = get_branch(&qm);
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
 
     // Multi-branch query with explicit branches
-    let query = qm.query("users").branches(&["main", "draft"]).build();
+    let query = qm
+        .query("users")
+        .branches(&[main_branch.as_str(), draft_branch.as_str()])
+        .build();
     assert_eq!(query.branches.len(), 2);
     assert!(query.is_multi_branch());
 
@@ -7269,7 +7362,7 @@ fn join_query_with_multiple_branches_reads_all_branches() {
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let main_branch = get_branch(&qm);
-    let draft_branch = "draft";
+    let draft_branch = get_branch_for_user_branch(&qm, "draft");
 
     qm.insert(&mut storage, "users", &[Value::Text("alice".into())])
         .unwrap();
@@ -7283,21 +7376,21 @@ fn join_query_with_multiple_branches_reads_all_branches() {
     qm.insert_on_branch(
         &mut storage,
         "users",
-        draft_branch,
+        &draft_branch,
         &[Value::Text("dora".into())],
     )
     .unwrap();
     qm.insert_on_branch(
         &mut storage,
         "posts",
-        draft_branch,
+        &draft_branch,
         &[Value::Text("dora".into()), Value::Text("draft post".into())],
     )
     .unwrap();
 
     let query = qm
         .query("users")
-        .branches(&[main_branch.as_str(), draft_branch])
+        .branches(&[main_branch.as_str(), draft_branch.as_str()])
         .join("posts")
         .on("users.name", "posts.owner_name")
         .build();
@@ -7329,17 +7422,12 @@ fn handle_object_update_respects_branch() {
     // Get the actual schema branch
     let schema_branch = get_branch(&qm);
 
-    // Subscribe to all objects
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
     let row_id = crate::object::ObjectId::new();
     let author = row_id;
 
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
+    put_test_row_metadata(&mut storage, row_id, metadata);
 
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("name", ColumnType::Text),
@@ -7353,10 +7441,7 @@ fn handle_object_update_respects_branch() {
 
     // Receive commit on "other-branch" (not the schema's branch)
     let commit = stored_row_commit(smallvec![], row_data.clone(), 1000, author.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, "other-branch", commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, "other-branch", commit);
 
     qm.process(&mut storage);
 
@@ -7373,15 +7458,10 @@ fn handle_object_update_respects_branch() {
     let row_id2 = crate::object::ObjectId::new();
     let mut metadata2 = HashMap::new();
     metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id2, metadata2);
+    put_test_row_metadata(&mut storage, row_id2, metadata2);
 
     let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id2, &schema_branch, commit2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id2, &schema_branch, commit2);
 
     qm.process(&mut storage);
 
@@ -7814,7 +7894,7 @@ fn server_builds_query_graph_on_subscription() {
 
     // Add a client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     // Client sends QuerySubscription for score > 50
     let query = server_qm
@@ -7834,36 +7914,85 @@ fn server_builds_query_graph_on_subscription() {
 
     server_qm.process(&mut storage);
 
-    // Server should send ObjectUpdated for matching users (Alice, Charlie)
+    // Server should send RowVersionNeeded for matching users (Alice, Charlie)
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    // Filter for ObjectUpdated messages to this client
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
-        .collect();
-
-    assert_eq!(
-        object_updates.len(),
-        2,
-        "Should send 2 ObjectUpdated messages for matching users"
-    );
-
-    // Verify the correct ObjectIds were sent
-    let sent_ids: std::collections::HashSet<_> = object_updates
-        .iter()
-        .filter_map(|e| {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(object_id)
-            } else {
-                None
-            }
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
         })
         .collect();
 
+    assert_eq!(
+        row_updates.len(),
+        2,
+        "Should send 2 RowVersionNeeded messages for matching users"
+    );
+
+    let sent_ids: std::collections::HashSet<_> = row_updates.into_iter().collect();
+
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn server_subscription_reads_visible_region_after_legacy_commit_history_is_removed() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    writer_qm.process(&mut storage);
+
+    let (mut server_qm, _) = create_query_manager(SyncManager::new(), schema);
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let row_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        row_updates.len(),
+        1,
+        "server subscription should settle from visible rows without legacy object-backed storage"
+    );
+    assert_eq!(row_updates[0], handle.row_id);
 }
 
 #[test]
@@ -7918,7 +8047,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     // Query references a table that does not exist in schema.
     let invalid_query = QueryBuilder::new("no_such_table").build();
@@ -7968,11 +8097,11 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut server_qm, &storage, upstream_id);
     let _ = server_qm.sync_manager_mut().take_outbox();
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let valid_query = server_qm.query("users").build();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -8067,7 +8196,7 @@ fn server_pushes_new_matches() {
 
     // Add client and subscribe
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let query = server_qm
         .query("users")
@@ -8099,25 +8228,28 @@ fn server_pushes_new_matches() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should send ObjectUpdated for new matching user
+    // Should send RowVersionNeeded for new matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         1,
-        "Should send 1 ObjectUpdated for new matching user"
+        "Should send 1 RowVersionNeeded for new matching user"
     );
 
-    // Verify it's Charlie
-    if let SyncPayload::ObjectUpdated { object_id, .. } = &object_updates[0].payload {
-        assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
-    }
+    assert_eq!(
+        row_updates[0], handle2.row_id,
+        "Should send Charlie's ObjectId"
+    );
 }
 
 #[test]
@@ -8141,7 +8273,7 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
     let client_b = ClientId::new();
     let client_c = ClientId::new();
     for client_id in [client_a, client_b, client_c] {
-        server_qm.sync_manager_mut().add_client(client_id);
+        connect_client(&mut server_qm, &storage, client_id);
     }
 
     for (client_id, query_id, query, propagation) in [
@@ -8226,7 +8358,7 @@ fn server_does_not_push_non_matching() {
 
     // Add client and subscribe to score > 50
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(client_id);
+    connect_client(&mut server_qm, &storage, client_id);
 
     let query = server_qm
         .query("users")
@@ -8256,19 +8388,19 @@ fn server_does_not_push_non_matching() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should NOT send ObjectUpdated for non-matching user
+    // Should NOT send RowVersionNeeded for non-matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| matches!(e.payload, SyncPayload::RowVersionNeeded { .. }))
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         0,
-        "Should NOT send ObjectUpdated for non-matching user"
+        "Should NOT send RowVersionNeeded for non-matching user"
     );
 }
 
@@ -8287,7 +8419,7 @@ fn subscribe_with_sync_sends_to_servers() {
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
 
     // Clear initial outbox (full sync to server)
     let _ = client_qm.sync_manager_mut().take_outbox();
@@ -8327,7 +8459,7 @@ fn subscribe_with_sync_local_only_sends_to_connected_tier() {
     let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
     let _ = client_qm.sync_manager_mut().take_outbox();
 
     let query = client_qm
@@ -8364,7 +8496,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    worker_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut worker_qm, &_storage, server_id);
     let _ = worker_qm.sync_manager_mut().take_outbox();
 
     let query = worker_qm
@@ -8415,7 +8547,7 @@ fn add_server_replays_existing_local_query_subscriptions() {
     );
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.add_server(server_id);
+    connect_query_manager_upstream(&mut client_qm, &_storage, server_id);
 
     let outbox = client_qm.sync_manager_mut().take_outbox();
     let replayed: Vec<_> = outbox
@@ -8457,7 +8589,7 @@ fn add_server_replays_local_only_query_subscriptions() {
         .unwrap();
 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.add_server(server_id);
+    connect_query_manager_upstream(&mut client_qm, &_storage, server_id);
     let outbox = client_qm.sync_manager_mut().take_outbox();
 
     let replayed: Vec<_> = outbox
@@ -8484,7 +8616,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    client_qm.sync_manager_mut().add_server(server_id);
+    connect_server(&mut client_qm, &_storage, server_id);
 
     // Subscribe with sync
     let query = client_qm
@@ -8533,11 +8665,11 @@ fn mid_tier_forwards_query_subscription_upstream() {
 
     // Add upstream server
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
 
     // Add downstream client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // Clear the outbox (add_server queues full sync)
     let _ = mid_tier.sync_manager_mut().take_outbox();
@@ -8587,10 +8719,10 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
     let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
 
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_client(&mut mid_tier, &storage, client_id);
     let _ = mid_tier.sync_manager_mut().take_outbox();
 
     let query = mid_tier
@@ -8633,7 +8765,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
     let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
 
     let downstream_client = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_client(downstream_client);
+    connect_client(&mut mid_tier, &storage, downstream_client);
 
     let query = mid_tier
         .query("users")
@@ -8653,7 +8785,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
     let _ = mid_tier.sync_manager_mut().take_outbox();
 
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.add_server(upstream_id);
+    connect_query_manager_upstream(&mut mid_tier, &storage, upstream_id);
 
     let outbox = mid_tier.sync_manager_mut().take_outbox();
     let replayed: Vec<_> = outbox
@@ -8683,8 +8815,8 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // First, establish subscription
     let query = mid_tier
@@ -8736,7 +8868,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     use crate::object::ObjectId;
     use crate::sync_manager::{
-        ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
+        ClientId, Destination, InboxEntry, RowMetadata, ServerId, Source, SyncPayload,
     };
     use uuid::Uuid;
 
@@ -8748,8 +8880,8 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
-    mid_tier.sync_manager_mut().add_client(client_id);
+    connect_server(&mut mid_tier, &storage, upstream_id);
+    connect_client(&mut mid_tier, &storage, client_id);
 
     // Insert a matching row locally first (so it's in scope)
     let handle = mid_tier
@@ -8763,7 +8895,6 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
 
     // Get the schema branch
     let branch_str = get_branch(&mid_tier);
-    let branch_name = crate::object::BranchName::new(&branch_str);
 
     // Establish client subscription
     let query = mid_tier
@@ -8794,34 +8925,26 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     )
     .unwrap();
 
-    let current_tips: smallvec::SmallVec<[_; 2]> = mid_tier
-        .sync_manager()
-        .object_manager
-        .get(handle.row_id)
-        .unwrap()
-        .branches
-        .get(&branch_name)
-        .unwrap()
-        .tips
-        .iter()
-        .copied()
-        .collect();
-
     let author = ObjectId::new();
-    let commit = stored_row_commit(current_tips, row_data, 2000, author.to_string());
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch_str).updated_at;
+    let commit = stored_row_commit(
+        smallvec![handle.row_version_id],
+        row_data,
+        base_timestamp + 1,
+        author.to_string(),
+    );
+    let row = commit.to_row(handle.row_id, &branch_str, RowState::VisibleDirect);
 
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(upstream_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: handle.row_id,
-            metadata: Some(ObjectMetadata {
+        payload: SyncPayload::RowVersionCreated {
+            metadata: Some(RowMetadata {
                 id: handle.row_id,
                 metadata: [("table".to_string(), "users".to_string())]
                     .into_iter()
                     .collect(),
             }),
-            branch_name,
-            commits: vec![commit],
+            row,
         },
     });
     mid_tier.process(&mut storage);
@@ -8832,13 +8955,16 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     let relayed: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id))
+        .filter(|e| match &e.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => row.row_id == handle.row_id,
+            _ => false,
+        })
         .collect();
 
     assert_eq!(
         relayed.len(),
         1,
-        "Mid-tier should relay ObjectUpdated from upstream to client with matching scope"
+        "Mid-tier should relay matching row versions downstream"
     );
 }
 
@@ -9017,8 +9143,8 @@ fn e2e_client_receives_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
 
     // Clear initial sync messages (we want query-driven sync)
     let _ = client.sync_manager_mut().take_outbox();
@@ -9090,8 +9216,8 @@ fn e2e_client_receives_paginated_server_data_on_cold_offset_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9149,8 +9275,8 @@ fn e2e_client_receives_paginated_server_data_on_cold_offset_only_subscription() 
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client.query("users").order_by("score").offset(2).build();
@@ -9223,8 +9349,8 @@ fn e2e_client_receives_array_subquery_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9299,8 +9425,8 @@ fn e2e_client_receives_recursive_hop_server_data_via_subscription() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     let query = client
@@ -9363,8 +9489,8 @@ fn e2e_client_receives_new_matching_row() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes to users with score > 50
@@ -9435,8 +9561,8 @@ fn e2e_client_does_not_receive_non_matching_row() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes to users with score > 50
@@ -9536,8 +9662,8 @@ fn e2e_permissions_prevent_sync() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes as Alice (user_id = "alice")
@@ -9604,8 +9730,8 @@ fn e2e_permissions_prevent_new_row_sync() {
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
 
-    client.sync_manager_mut().add_server(server_id);
-    server.sync_manager_mut().add_client(client_id);
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
     let _ = client.sync_manager_mut().take_outbox();
 
     // Client subscribes as Alice
@@ -9759,12 +9885,12 @@ fn e2e_three_tier_policy_dependencies_must_sync_downstream() {
 
     client
         .sync_manager_mut()
-        .add_server(edge_server_id_for_client);
-    edge.sync_manager_mut().add_client(client_id_on_edge);
+        .add_server_with_storage(edge_server_id_for_client, false, &client_io);
+    connect_client(&mut edge, &edge_io, client_id_on_edge);
     edge.sync_manager_mut()
         .set_client_role(client_id_on_edge, ClientRole::Peer);
-    edge.sync_manager_mut().add_server(core_server_id_for_edge);
-    core.sync_manager_mut().add_client(edge_id_on_core);
+    connect_server(&mut edge, &edge_io, core_server_id_for_edge);
+    connect_client(&mut core, &core_io, edge_id_on_core);
     core.sync_manager_mut()
         .set_client_role(edge_id_on_core, ClientRole::Peer);
 
@@ -9874,10 +10000,10 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
 
     client
         .sync_manager_mut()
-        .add_server(edge_server_id_for_client);
-    edge.sync_manager_mut().add_client(client_id_on_edge);
-    edge.sync_manager_mut().add_server(core_server_id_for_edge);
-    core.sync_manager_mut().add_client(edge_id_on_core);
+        .add_server_with_storage(edge_server_id_for_client, false, &client_io);
+    connect_client(&mut edge, &edge_io, client_id_on_edge);
+    connect_server(&mut edge, &edge_io, core_server_id_for_edge);
+    connect_client(&mut core, &core_io, edge_id_on_core);
 
     let _ = client.sync_manager_mut().take_outbox();
     let _ = edge.sync_manager_mut().take_outbox();
@@ -9948,7 +10074,7 @@ fn remove_client_cleans_up_server_subscriptions() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
+    connect_client(&mut server_qm, &storage, alice);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query.clone());
@@ -9996,8 +10122,8 @@ fn remove_client_preserves_other_clients_subscriptions() {
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
-    server_qm.sync_manager_mut().add_client(bob);
+    connect_client(&mut server_qm, &storage, alice);
+    connect_client(&mut server_qm, &storage, bob);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query.clone());
@@ -10040,19 +10166,28 @@ fn remove_client_cleans_active_policy_checks() {
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
     let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
-    server_qm.sync_manager_mut().add_client(bob);
+    connect_client(&mut server_qm, &_storage, alice);
+    connect_client(&mut server_qm, &_storage, bob);
 
     let obj_id = crate::object::ObjectId::new();
-    let branch_name = crate::object::BranchName::new("main");
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
         id: PendingUpdateId(id),
         client_id,
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: None,
-            branch_name,
-            commits: vec![],
+        payload: SyncPayload::RowVersionCreated {
+            metadata: Some(crate::sync_manager::RowMetadata {
+                id: obj_id,
+                metadata: HashMap::from([(MetadataKey::Table.to_string(), "users".to_string())]),
+            }),
+            row: StoredRowVersion::new(
+                obj_id,
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(obj_id.to_string(), 1_000),
+                HashMap::new(),
+                RowState::VisibleDirect,
+                None,
+            ),
         },
         session: crate::query_manager::session::Session {
             user_id: format!("{client_id}"),
@@ -10072,7 +10207,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
-            branch: branch_name,
+            branch: crate::object::BranchName::new("main"),
             pending_check: make_check(1, alice),
         },
     );
@@ -10081,7 +10216,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
-            branch: branch_name,
+            branch: crate::object::BranchName::new("main"),
             pending_check: make_check(2, bob),
         },
     );
@@ -10115,7 +10250,7 @@ fn remove_client_is_idempotent() {
     let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
 
     let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    server_qm.sync_manager_mut().add_client(alice);
+    connect_client(&mut server_qm, &storage, alice);
 
     let query = server_qm.query("users").build();
     push_query_subscription(&mut server_qm, alice, 1, query);

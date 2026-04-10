@@ -6,15 +6,674 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
-use crate::storage::MemoryStorage;
+use crate::storage::{
+    MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, Storage, StorageError,
+};
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
 };
+use crate::test_row_history::load_test_row_tip_ids;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSyncSender>;
+
+struct RowRegionReadFailingStorage {
+    inner: MemoryStorage,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LegacyStorageCallCounts;
+
+struct LegacyPersistenceObservingStorage {
+    inner: MemoryStorage,
+    _calls: Arc<Mutex<LegacyStorageCallCounts>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RowMutationCallCounts {
+    row_mutation_calls: usize,
+    separate_index_mutation_calls: usize,
+    flush_wal_calls: usize,
+}
+
+struct RowMutationObservingStorage {
+    inner: MemoryStorage,
+    calls: Arc<Mutex<RowMutationCallCounts>>,
+}
+
+impl RowRegionReadFailingStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+        }
+    }
+}
+
+impl LegacyPersistenceObservingStorage {
+    fn new(calls: Arc<Mutex<LegacyStorageCallCounts>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            _calls: calls,
+        }
+    }
+}
+
+impl RowMutationObservingStorage {
+    fn new(calls: Arc<Mutex<RowMutationCallCounts>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            calls,
+        }
+    }
+}
+
+impl Storage for RowRegionReadFailingStorage {
+    fn put_metadata(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_metadata(id, metadata)
+    }
+
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
+    }
+
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_histories::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[crate::row_histories::VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _row_id: ObjectId,
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-history reads deliberately disabled in this test".to_string(),
+        ))
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_region(table, branch, scan)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
+
+impl Storage for LegacyPersistenceObservingStorage {
+    fn put_metadata(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_metadata(id, metadata)
+    }
+
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
+    }
+
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_histories::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[crate::row_histories::VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.load_visible_region_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_region(table, branch, scan)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
+
+impl Storage for RowMutationObservingStorage {
+    fn put_metadata(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_metadata(id, metadata)
+    }
+
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_metadata(id)
+    }
+
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        self.inner.scan_metadata()
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_histories::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[crate::row_histories::VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowVersion],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner
+            .apply_row_mutation(table, history_rows, visible_entries, index_mutations)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.load_visible_region_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_region(table, branch, scan)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().separate_index_mutation_calls += 1;
+        self.inner.apply_index_mutations(mutations)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.calls.lock().unwrap().flush_wal_calls += 1;
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
 
 fn test_schema() -> Schema {
     SchemaBuilder::new()
@@ -137,6 +796,19 @@ fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemorySt
     core
 }
 
+fn create_runtime_with_boxed_storage(
+    schema: Schema,
+    app_name: &str,
+    storage: Box<dyn Storage>,
+) -> BoxedStorageTestCore {
+    let app_id = AppId::from_name(app_name);
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    core.immediate_tick();
+    core
+}
+
 fn create_test_runtime() -> TestCore {
     create_runtime_with_schema(test_schema(), "test-app")
 }
@@ -206,15 +878,26 @@ fn execute_runtime_query_with_propagation(
     session: Option<Session>,
     propagation: crate::sync_manager::QueryPropagation,
 ) -> Vec<(ObjectId, Vec<Value>)> {
-    let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-
-    let mut future = core.query_with_propagation(
+    execute_runtime_query_with_durability_and_propagation(
+        core,
         query,
         session,
         ReadDurabilityOptions::default(),
         propagation,
-    );
+    )
+}
+
+fn execute_runtime_query_with_durability_and_propagation(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+    durability: ReadDurabilityOptions,
+    propagation: crate::sync_manager::QueryPropagation,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    let mut future = core.query_with_propagation(query, session, durability, propagation);
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Ok(results)) => results,
@@ -364,13 +1047,11 @@ fn outbox_has_object_update_for_client(
         matches!(
             &entry.destination,
             Destination::Client(dest_client_id) if *dest_client_id == client_id
-        ) && matches!(
-            &entry.payload,
-            SyncPayload::ObjectUpdated {
-                object_id: payload_object_id,
-                ..
-            } if *payload_object_id == object_id
-        )
+        ) && match &entry.payload {
+            SyncPayload::RowVersionNeeded { row, .. }
+            | SyncPayload::RowVersionCreated { row, .. } => row.row_id == object_id,
+            _ => false,
+        }
     })
 }
 
@@ -401,6 +1082,38 @@ fn test_runtime_core_insert_query() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, object_id);
     assert_eq!(results[0].1, row_values);
+}
+
+#[test]
+fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
+    let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
+    let user_id = ObjectId::new();
+    let (row_object_id, _) = old_runtime
+        .insert("users", user_insert_values(user_id, "Alice"), None)
+        .expect("insert should succeed before restart");
+
+    let storage = old_runtime.into_storage();
+    let mut restarted = create_runtime_with_storage(test_schema(), "restart-sync-test", storage);
+
+    let server_id = ServerId::new();
+    restarted.add_server(server_id);
+    restarted.batched_tick();
+
+    let messages = restarted.sync_sender().take();
+    let synced_row = messages.iter().find(|message| match &message.payload {
+        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        _ => false,
+    });
+
+    assert!(
+        synced_row.is_some(),
+        "row visible before restart should replay to a new server after restart; messages: {}",
+        messages
+            .iter()
+            .map(|message| format!("{:?}", message.payload))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 #[test]
@@ -875,18 +1588,25 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
 
 #[test]
 fn test_park_sync_message() {
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
     use crate::sync_manager::{Source, SyncPayload};
 
     let mut core = create_test_runtime();
 
     let message = InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_histories::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_histories::RowState::VisibleDirect,
+                None,
+            ),
         },
     };
     core.park_sync_message(message);
@@ -950,30 +1670,22 @@ fn create_3tier_rc() -> ThreeTierRC {
 
     // Topology: A ↔ B ↔ C
     {
-        let sm = b
-            .schema_manager_mut()
+        b.add_client(a_client_of_b, None);
+        b.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(a_client_of_b);
-        sm.set_client_role(a_client_of_b, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(a_client_of_b, ClientRole::Peer);
     }
-    a.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(b_server_for_a);
+    a.add_server(b_server_for_a);
 
     {
-        let sm = c
-            .schema_manager_mut()
+        c.add_client(b_client_of_c, None);
+        c.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(b_client_of_c);
-        sm.set_client_role(b_client_of_c, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(b_client_of_c, ClientRole::Peer);
     }
-    b.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(c_server_for_b);
+    b.add_server(c_server_for_b);
 
     // Initial tick + clear initial sync messages
     a.immediate_tick();
@@ -1202,17 +1914,13 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     let c_server_for_b = ServerId::new();
 
     {
-        let sm = b
-            .schema_manager_mut()
+        b.add_client(a_client_of_b, None);
+        b.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(a_client_of_b);
-        sm.set_client_role(a_client_of_b, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(a_client_of_b, ClientRole::Peer);
     }
-    a.schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .add_server(b_server_for_a);
+    a.add_server(b_server_for_a);
 
     // Clear any startup sync traffic.
     a.immediate_tick();
@@ -1245,12 +1953,11 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
 
     // Bring up B <-> C after B already has active downstream query state.
     {
-        let sm = c
-            .schema_manager_mut()
+        c.add_client(b_client_of_c, None);
+        c.schema_manager_mut()
             .query_manager_mut()
-            .sync_manager_mut();
-        sm.add_client(b_client_of_c);
-        sm.set_client_role(b_client_of_c, ClientRole::Peer);
+            .sync_manager_mut()
+            .set_client_role(b_client_of_c, ClientRole::Peer);
     }
     b.add_server(c_server_for_b);
     b.batched_tick();
@@ -1366,6 +2073,162 @@ fn rc_insert_data_syncs_to_server() {
 }
 
 #[test]
+fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-version-direct-sync-test",
+        Box::new(RowRegionReadFailingStorage::new()),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    let row_sync = messages
+        .iter()
+        .find(|entry| matches!(&entry.payload, SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_id))
+        .expect("insert should still sync the row upstream");
+
+    match &row_sync.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, row_id);
+        }
+        other => {
+            panic!("local row writes should sync using the authored row version, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn rc_row_writes_do_not_touch_legacy_commit_storage() {
+    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-no-legacy-commit-storage",
+        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        LegacyStorageCallCounts::default(),
+        "row writes should persist only via row histories, not legacy branch commit storage"
+    );
+}
+
+#[test]
+fn rc_local_row_writes_batch_row_and_index_mutations() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-storage-mutation",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        RowMutationCallCounts {
+            row_mutation_calls: 3,
+            separate_index_mutation_calls: 0,
+            flush_wal_calls: 0,
+        },
+        "local row writes should persist row history, visible heads, and index changes in one storage mutation"
+    );
+}
+
+#[test]
+fn rc_batched_tick_skips_flush_wal_without_storage_writes() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-no-flush",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        0,
+        "read-only batched ticks should not flush the WAL"
+    );
+}
+
+#[test]
+fn rc_batched_tick_flushes_wal_after_local_write() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-flush-after-write",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        1,
+        "a batched tick after a local write should flush the WAL once"
+    );
+}
+
+#[test]
+fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-batched-query-settled",
+        Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::QuerySettled {
+            query_id: crate::sync_manager::QueryId(1),
+            tier: DurabilityTier::Worker,
+            through_seq: 1,
+        },
+    });
+    core.batched_tick();
+
+    assert_eq!(
+        calls.lock().unwrap().flush_wal_calls,
+        0,
+        "query-settled notifications alone should not flush the WAL"
+    );
+}
+
+#[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =
@@ -1428,6 +2291,94 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
         Ok(None) => panic!("Receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
+}
+
+#[test]
+fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
+    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-no-legacy-ack-storage",
+        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let ((row_id, _row_values), mut receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let version_id = core
+        .storage
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted insert should materialize a visible row")
+        .version_id();
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    });
+    core.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(())),
+        "row persisted receiver should resolve from row-version state changes alone"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        LegacyStorageCallCounts::default(),
+        "row durability updates should not touch legacy durability-ack storage"
+    );
+}
+
+#[test]
+fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_id() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let row_version_id = *load_test_row_tip_ids(s.a.storage(), row_id, branch_name)
+        .unwrap()
+        .iter()
+        .next()
+        .expect("insert should create one visible tip");
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::RowVersionStateChanged {
+            row_id: ObjectId::new(),
+            branch_name,
+            version_id: row_version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "row persisted receivers should ignore row-version acks for a different row, even if the raw version id matches"
+    );
 }
 
 #[test]
@@ -1636,6 +2587,47 @@ fn rc_query_settled_tier_holds() {
 }
 
 #[test]
+fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row() {
+    let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    // Worker frontier completion is enough to unblock the first snapshot. With
+    // immediate local updates, the locally-authored row should still be visible
+    // even though it has not reached EdgeServer durability yet.
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(results.len(), 1, "Should have one locally pending row");
+            assert_eq!(results[0].0, id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve once the initial frontier is complete"),
+    }
+}
+
+#[test]
 fn rc_query_settled_tier_empty_resolves() {
     let mut s = create_3tier_rc();
 
@@ -1671,6 +2663,92 @@ fn rc_query_settled_tier_empty_resolves() {
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
         Poll::Pending => panic!("Query should resolve after Worker QuerySettled"),
     }
+}
+
+#[test]
+fn query_reads_pick_row_versions_by_required_durability_tier() {
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "tier-aware-visible-row",
+        SyncManager::new(),
+    );
+    let branch_name = core.schema_manager().branch_name().to_string();
+
+    // Row history:
+    //   v1 --(global)--> visible for global queries
+    //    \
+    //     `-- v2 --(worker)--> current head for worker queries
+    let row_id = ObjectId::new();
+    let (object_id, _) = core
+        .insert("users", user_insert_values(row_id, "Alice-global"), None)
+        .unwrap();
+    core.immediate_tick();
+
+    let first_visible = core
+        .storage()
+        .load_visible_region_row("users", &branch_name, object_id)
+        .unwrap()
+        .expect("first visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "users",
+            first_visible.batch_id,
+            None,
+            Some(DurabilityTier::GlobalServer),
+        )
+        .unwrap();
+
+    core.update(
+        object_id,
+        vec![("name".into(), Value::Text("Alice-worker".into()))],
+        None,
+    )
+    .unwrap();
+    core.immediate_tick();
+
+    let second_visible = core
+        .storage()
+        .load_visible_region_row("users", &branch_name, object_id)
+        .unwrap()
+        .expect("second visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "users",
+            second_visible.batch_id,
+            None,
+            Some(DurabilityTier::Worker),
+        )
+        .unwrap();
+
+    let worker_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let global_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::GlobalServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+
+    assert_eq!(
+        worker_rows,
+        vec![(object_id, user_row_values(row_id, "Alice-worker"))]
+    );
+    assert_eq!(
+        global_rows,
+        vec![(object_id, user_row_values(row_id, "Alice-global"))]
+    );
 }
 
 #[test]
@@ -1712,16 +2790,18 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.batched_tick();
     let b_out = s.b.sync_sender().take();
 
-    // Force QuerySettled before ObjectUpdated to expose ordering assumptions.
+    // Force QuerySettled before row delivery to expose ordering assumptions.
     let mut settled_to_a = Vec::new();
-    let mut updates_to_a = Vec::new();
+    let mut rows_to_a = Vec::new();
+    let mut row_state_to_a = Vec::new();
     for entry in b_out {
         if entry.destination != Destination::Client(s.a_client_of_b) {
             continue;
         }
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
-            payload @ SyncPayload::ObjectUpdated { .. } => updates_to_a.push(payload),
+            payload @ SyncPayload::RowVersionNeeded { .. } => rows_to_a.push(payload),
+            payload @ SyncPayload::RowVersionStateChanged { .. } => row_state_to_a.push(payload),
             _ => {}
         }
     }
@@ -1730,16 +2810,12 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         !settled_to_a.is_empty(),
         "Expected QuerySettled notification for A"
     );
-    assert!(
-        !updates_to_a.is_empty(),
-        "Expected ObjectUpdated payload for A"
-    );
-
+    assert!(!rows_to_a.is_empty(), "Expected row payload for A");
     // Mirror connected stream initialization: first expected seq is 1.
     s.a.set_next_expected_server_sequence(s.b_server_for_a, 1);
 
     let mut next_update_seq = 1u64;
-    let settled_seq_base = updates_to_a.len() as u64 + 1;
+    let settled_seq_base = (rows_to_a.len() + row_state_to_a.len()) as u64 + 1;
 
     for (idx, payload) in settled_to_a.into_iter().enumerate() {
         s.a.park_sync_message_with_sequence(
@@ -1755,10 +2831,20 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
 
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should stay pending until lower sequence ObjectUpdated arrives"
+        "Query should stay pending until lower sequence row payload arrives"
     );
 
-    for payload in updates_to_a {
+    for payload in rows_to_a {
+        s.a.park_sync_message_with_sequence(
+            InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload,
+            },
+            next_update_seq,
+        );
+        next_update_seq += 1;
+    }
+    for payload in row_state_to_a {
         s.a.park_sync_message_with_sequence(
             InboxEntry {
                 source: Source::Server(s.b_server_for_a),
@@ -1781,7 +2867,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
             assert_eq!(results[0].0, row_id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after ObjectUpdated and QuerySettled"),
+        Poll::Pending => panic!("Query should resolve after row payload and QuerySettled"),
     }
 }
 
@@ -1854,7 +2940,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         )
         .unwrap();
 
-    // Initial delivery should still wait for the requested remote tier.
+    // Initial delivery should still wait for the initial remote frontier.
     let (first_id, _row_values) =
         s.a.insert(
             "users",
@@ -1867,34 +2953,41 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     let calls = received.lock().unwrap();
     assert!(
         calls.is_empty(),
-        "Initial delivery should wait for EdgeServer settlement"
+        "Initial delivery should wait for query frontier completion"
     );
     drop(calls);
 
-    // Worker settlement is not enough for an EdgeServer subscription.
+    // Worker frontier completion is enough to unblock the first snapshot. With
+    // immediate local updates, the locally-authored row is shown immediately
+    // while its EdgeServer durability is still pending.
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
-    assert!(
-        received.lock().unwrap().is_empty(),
-        "Worker tier should not unlock first delivery for EdgeServer reads"
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "First callback should happen after frontier completion"
     );
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "First callback should contain the local row"
+    );
+    assert_eq!(calls[0][0].0, first_id);
+    drop(calls);
 
-    // Reach EdgeServer settlement for the initial snapshot.
+    // Reach EdgeServer settlement for the first row. This should not emit a
+    // second visible delta because the row is already on screen via the local
+    // pending overlay.
     pump_b_to_c(&mut s);
     pump_c_to_b_to_a(&mut s);
 
     let calls = received.lock().unwrap();
-    assert!(
-        !calls.is_empty(),
-        "First delivery should happen once EdgeServer settlement is reached"
-    );
-    let first_delivery = &calls[0];
     assert_eq!(
-        first_delivery.len(),
+        calls.len(),
         1,
-        "First snapshot should include one row"
+        "Tier promotion should not emit a second visible delta for the same row"
     );
-    assert_eq!(first_delivery[0].0, first_id);
     drop(calls);
 
     // After initial delivery, local updates should callback immediately.
@@ -2206,7 +3299,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     );
     // NO immediate_tick() here — matches WASM openPersistent flow
 
-    // persist_schema — creates catalogue object in ObjectManager
+    // persist_schema — stages a catalogue object before the first tick
     let schema_obj_id = core.persist_schema();
 
     // add_server — should call queue_full_sync_to_server which includes the catalogue
@@ -2219,16 +3312,11 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     // Check that the catalogue was sent
     let messages = core.sync_sender().take();
     let catalogue_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated {
-            object_id,
-            metadata,
-            ..
-        } = &m.payload
-        {
-            *object_id == schema_obj_id
-                && metadata
-                    .as_ref()
-                    .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry.object_id == schema_obj_id
+                && entry
+                    .metadata
+                    .get(crate::metadata::MetadataKey::Type.as_str())
                     .map(|t| t == crate::metadata::ObjectType::CatalogueSchema.as_str())
                     .unwrap_or(false)
         } else {
@@ -2236,10 +3324,10 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
         }
     });
     let permissions_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| {
                     t == crate::metadata::ObjectType::CataloguePermissions.as_str()
                         || t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str()
@@ -2298,10 +3386,10 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
 
     let messages = core.sync_sender().take();
     let bundle_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str())
                 .unwrap_or(false)
         } else {
@@ -2309,10 +3397,10 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
         }
     });
     let head_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str())
                 .unwrap_or(false)
         } else {
@@ -2358,14 +3446,12 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let catalogue_msg = messages.iter().find(|m| {
         matches!(
             &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_obj_id
+            SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == schema_obj_id
         )
     });
-    let row_msg = messages.iter().find(|m| {
-        matches!(
-            &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
-        )
+    let row_msg = messages.iter().find(|m| match &m.payload {
+        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        _ => false,
     });
 
     assert!(
@@ -2536,7 +3622,7 @@ fn remove_client_blocked_by_parked_sync_messages() {
     // Sweep tries to reap alice → remove_client returns false because
     // parked_sync_messages contains an entry from alice.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -2545,11 +3631,18 @@ fn remove_client_blocked_by_parked_sync_messages() {
     // Park a message from alice (simulates push_sync_inbox before batched_tick)
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_histories::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_histories::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 
@@ -2574,7 +3667,7 @@ fn remove_client_succeeds_after_parked_messages_drained() {
     //
     // After batched_tick processes the parked message, remove_client succeeds.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -2582,11 +3675,18 @@ fn remove_client_succeeds_after_parked_messages_drained() {
 
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_histories::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_histories::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 
@@ -2614,7 +3714,7 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
     // alice disconnects → remove_client(alice) succeeds because
     // the parked message is from bob, not alice.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -2625,11 +3725,18 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
     // Park a message from bob
     core.park_sync_message(InboxEntry {
         source: Source::Client(bob),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_histories::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"bob".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_histories::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 

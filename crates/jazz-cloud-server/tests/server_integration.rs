@@ -3,10 +3,14 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
+use jazz_tools::commit::CommitId;
 use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
 use jazz_tools::schema_manager::encode_schema;
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -83,7 +87,7 @@ impl ServerProcess {
 
         let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             client: Client::new(),
@@ -96,9 +100,12 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -269,18 +276,26 @@ fn basic_auth_header(username: &str, password: &str) -> String {
     )
 }
 
-fn sync_body() -> Value {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }]
-    })
+fn sync_body() -> SyncBatchRequest {
+    let row_id = jazz_tools::ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        jazz_tools::metadata::RowProvenance::for_insert(row_id.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    SyncBatchRequest {
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+        client_id: ClientId::new(),
+    }
 }
 
 fn get_free_port() -> u16 {
@@ -742,7 +757,6 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     let schema_hash = SchemaHash::compute(&schema);
     let encoded_schema = encode_schema(&schema);
     let object_id = schema_hash.to_object_id().to_string();
-    let author_id = Uuid::new_v4().to_string();
     let mut metadata = std::collections::HashMap::new();
     metadata.insert(
         MetadataKey::Type.as_str().to_string(),
@@ -760,22 +774,12 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     let sync_payload = json!({
         "client_id": Uuid::new_v4().to_string(),
         "payloads": [{
-            "ObjectUpdated": {
+            "CatalogueEntryUpdated": {
+                "entry": {
                 "object_id": object_id,
-                "metadata": {
-                    "id": object_id,
-                    "metadata": metadata
-                },
-                "branch_name": "main",
-                "commits": [
-                    {
-                        "parents": [],
-                        "content": encoded_schema,
-                        "timestamp": 1,
-                        "author": author_id,
-                        "metadata": null
-                    }
-                ]
+                "metadata": metadata,
+                "content": encoded_schema
+                }
             }
         }]
     });

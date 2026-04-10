@@ -6,12 +6,11 @@ use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
-use crate::schema_manager::{
-    LensTransformer, origin_schema_hash_from_metadata, resolve_current_table_name,
-    translate_table_name_to_schema,
-};
+use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
+use crate::sync_manager::{
+    ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, QueryId, SyncPayload,
+};
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
@@ -30,42 +29,14 @@ enum WriteSchemaResolution {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
-    pub commit_id: CommitId,
+    pub version_id: CommitId,
     pub content: Vec<u8>,
-    pub is_soft_deleted: bool,
 }
 
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn resolve_current_table_for_context(
-    schema_context: &crate::schema_manager::SchemaContext,
-    original_table_name: &str,
-    origin_schema_hash: Option<&SchemaHash>,
-) -> TableName {
-    resolve_current_table_name(schema_context, original_table_name, origin_schema_hash)
-        .map(|name| TableName::new(&name))
-        .unwrap_or_else(|| TableName::new(original_table_name))
-}
-
-fn translate_current_table_for_schema(
-    schema_context: &crate::schema_manager::SchemaContext,
-    current_table: TableName,
-    original_schema_hash: SchemaHash,
-) -> TableName {
-    if original_schema_hash == schema_context.current_hash {
-        return current_table;
-    }
-
-    translate_table_name_to_schema(
-        schema_context,
-        current_table.as_str(),
-        &original_schema_hash,
-    )
-    .map(|name| TableName::new(&name))
-    .unwrap_or(current_table)
-}
-
 pub(super) struct RowTransformContext<'a> {
+    pub(super) table: &'a str,
     pub(super) branch_schema_map:
         &'a std::collections::HashMap<String, crate::query_manager::types::SchemaHash>,
     pub(super) schema_context: &'a crate::schema_manager::SchemaContext,
@@ -103,25 +74,22 @@ impl QueryManager {
         branch_name: BranchName,
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
-        let object = self
-            .sync_manager
-            .object_manager
-            .get_or_load(object_id, storage, &branches)?;
-        let branch = object.branches.get(&branch_name)?;
-        branch
-            .tips
-            .iter()
-            .filter_map(|tip_id| branch.commits.get(tip_id))
-            .max_by_key(|commit| commit.timestamp)
-            .and_then(|commit| commit.row_provenance())
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let (_, row) = self.load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
+            &self.schema_context,
+            &branch_schema_map,
+        )?;
+        Some(row.row_provenance())
     }
 
-    fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
+    fn payload_row_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
         match payload {
-            SyncPayload::ObjectUpdated { commits, .. } => commits
-                .iter()
-                .max_by_key(|commit| commit.timestamp)
-                .and_then(|commit| commit.row_provenance()),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_provenance()),
             _ => None,
         }
     }
@@ -263,7 +231,7 @@ impl QueryManager {
         &self,
         table: &str,
         content: &[u8],
-        commit_id: CommitId,
+        version_id: CommitId,
         branch_name: BranchName,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
@@ -291,7 +259,7 @@ impl QueryManager {
 
         let transformer = LensTransformer::new(auth_context, table);
         transformer
-            .transform(content, commit_id, source_hash)
+            .transform(content, version_id, source_hash)
             .ok()
             .map(|result| result.data)
     }
@@ -305,38 +273,24 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (original_table, origin_schema_hash, tip_commit_id, tip_content, tip_provenance) = {
-            let object = self
-                .sync_manager
-                .object_manager
-                .get_or_load(object_id, storage, &branches)?;
-            let table = object.original_table_name();
-            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
-            let branch = object.branches.get(&branch_name)?;
-            let tip = branch
-                .tips
-                .iter()
-                .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
-                .max_by_key(|(_, commit)| commit.timestamp)?;
-            if tip.1.content.is_empty() {
-                return None;
-            }
-            Some((
-                table,
-                origin_schema_hash,
-                tip.0,
-                tip.1.content.clone(),
-                tip.1.row_provenance()?,
-            ))
-        }?;
-
-        let current_table = resolve_current_table_for_context(
+        let (table, row) = self.load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
             auth_context,
-            original_table,
-            origin_schema_hash.as_ref(),
-        );
+            source_branch_schema_map,
+        )?;
+        if row.is_hard_deleted() {
+            return None;
+        }
+
+        let tip_commit_id = row.version_id();
+        let tip_content = row.data.clone();
+        let tip_provenance = row.row_provenance();
+
         let transformed = self.transform_content_to_authorization_schema(
-            current_table.as_str(),
+            &table,
             &tip_content,
             tip_commit_id,
             branch_name,
@@ -393,7 +347,7 @@ impl QueryManager {
         );
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId| {
+        let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
             self.load_row_for_authorization_context(
                 storage,
                 related_id,
@@ -428,48 +382,24 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((original_table, origin_schema_hash, tip_content, tip_provenance)) = ({
-            let Some(object) = self
-                .sync_manager
-                .object_manager
-                .get_or_load(object_id, storage, &branches)
-            else {
-                return false;
-            };
-            let table = object.original_table_name();
-            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
-            let Some(branch) = object.branches.get(&branch_name) else {
-                return false;
-            };
-            let Some(tip_commit) = branch
-                .tips
-                .iter()
-                .filter_map(|tip_id| branch.commits.get(tip_id))
-                .max_by_key(|commit| commit.timestamp)
-            else {
-                return false;
-            };
-            if tip_commit.content.is_empty() {
-                return false;
-            }
-            let Some(tip_provenance) = tip_commit.row_provenance() else {
-                return false;
-            };
-            Some((
-                table,
-                origin_schema_hash,
-                tip_commit.content.clone(),
-                tip_provenance,
-            ))
-        }) else {
+        let Some((table, row)) = self.load_best_visible_row_version(
+            storage,
+            object_id,
+            &branches,
+            None,
+            auth_context,
+            source_branch_schema_map,
+        ) else {
             return false;
         };
+        if row.is_hard_deleted() {
+            return false;
+        }
 
-        let table_name = resolve_current_table_for_context(
-            auth_context,
-            original_table,
-            origin_schema_hash.as_ref(),
-        );
+        let tip_content = row.data.clone();
+        let tip_provenance = row.row_provenance();
+
+        let table_name = TableName::new(&table);
         let Some(select_policy) = auth_schema
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select.using.as_ref())
@@ -642,78 +572,11 @@ impl QueryManager {
         normalized
     }
 
-    pub(super) fn resolve_latest_row_with_schema_transform(
-        id: ObjectId,
-        obj: &crate::object::Object,
-        branches: &[String],
-        context: &mut RowTransformContext<'_>,
-    ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
-
-        for branch_name in branches {
-            let branch_name = BranchName::new(branch_name);
-            let Some(branch) = obj.branches.get(&branch_name) else {
-                continue;
-            };
-            for &tip_id in &branch.tips {
-                let Some(commit) = branch.commits.get(&tip_id) else {
-                    continue;
-                };
-                let is_soft_deleted = commit.is_soft_deleted();
-                match &best {
-                    None => {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            branch_name,
-                            is_soft_deleted,
-                        ));
-                    }
-                    Some((best_ts, best_id, _, _, _))
-                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
-                    {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            branch_name,
-                            is_soft_deleted,
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let (_, commit_id, content, branch_name, is_soft_deleted) = best?;
-        if content.is_empty() {
-            return None;
-        }
-        let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
-        let current_table = resolve_current_table_for_context(
-            context.schema_context,
-            obj.original_table_name(),
-            origin_schema_hash.as_ref(),
-        );
-        Self::transform_row_with_schema(
-            id,
-            current_table.as_str(),
-            content,
-            commit_id,
-            branch_name,
-            is_soft_deleted,
-            context,
-        )
-    }
-
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
-        current_table: &str,
         content: Vec<u8>,
-        commit_id: CommitId,
+        version_id: CommitId,
         branch_name: BranchName,
-        is_soft_deleted: bool,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
         let source_hash = context.branch_schema_map.get(branch_name.as_str()).copied();
@@ -721,25 +584,24 @@ impl QueryManager {
         if let Some(source_hash) = source_hash
             && source_hash != context.schema_context.current_hash
         {
-            let transformer = LensTransformer::new(context.schema_context, current_table);
-            match transformer.transform(&content, commit_id, source_hash) {
+            let transformer = LensTransformer::new(context.schema_context, context.table);
+            match transformer.transform(&content, version_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
-                        commit_id,
+                        version_id,
                         content: result.data,
-                        is_soft_deleted,
                     });
                 }
                 Err(err) => {
                     context.schema_warnings.record(
-                        current_table,
+                        context.table,
                         source_hash,
                         context.schema_context.current_hash,
                     );
                     tracing::debug!(
                         row_id = %id,
-                        table = current_table,
+                        table = context.table,
                         source_branch = %branch_name,
                         source_schema = %source_hash.short(),
                         target_schema = %context.schema_context.current_hash.short(),
@@ -753,19 +615,8 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
-            commit_id,
+            version_id,
             content,
-            is_soft_deleted,
-        })
-    }
-
-    fn branch_has_live_tip(branch: &crate::object::Branch) -> bool {
-        branch.tips.iter().any(|tip_id| {
-            branch
-                .commits
-                .get(tip_id)
-                .map(|commit| !commit.content.is_empty())
-                .unwrap_or(false)
         })
     }
 
@@ -785,12 +636,11 @@ impl QueryManager {
             .unwrap_or(false)
     }
 
-    fn scope_with_policy_context_rows_from_object_manager(
+    fn scope_with_policy_context_rows<H: Storage + ?Sized>(
         base_scope: &HashSet<(ObjectId, BranchName)>,
         graph: &super::graph::QueryGraph,
         branches: &[String],
-        object_manager: &crate::object_manager::ObjectManager,
-        schema_context: &crate::schema_manager::SchemaContext,
+        storage: &H,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
 
@@ -804,24 +654,28 @@ impl QueryManager {
         }
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        for (object_id, object) in &object_manager.objects {
-            let original_table = object.original_table_name();
-            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
-            let current_table = resolve_current_table_for_context(
-                schema_context,
-                original_table,
-                origin_schema_hash.as_ref(),
-            );
-            if !policy_tables.iter().any(|table| *table == current_table) {
+        let Ok(objects) = storage.scan_row_locators() else {
+            return scope;
+        };
+        for (object_id, row_locator) in objects {
+            let table_name = row_locator.table.as_str();
+            if !policy_tables
+                .iter()
+                .any(|table| table.as_str() == table_name)
+            {
                 continue;
             }
 
             for branch_name in &branch_names {
-                let Some(branch) = object.branches.get(branch_name) else {
+                let Some(row) = storage
+                    .load_visible_region_row(table_name, branch_name.as_str(), object_id)
+                    .ok()
+                    .flatten()
+                else {
                     continue;
                 };
-                if Self::branch_has_live_tip(branch) {
-                    scope.insert((*object_id, *branch_name));
+                if !row.is_hard_deleted() {
+                    scope.insert((object_id, *branch_name));
                 }
             }
         }
@@ -839,6 +693,7 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_subscriptions();
         let mut deferred = Vec::new();
         let mut schema_warning_notifications = Vec::new();
+        let mut settled_notifications = Vec::new();
 
         for sub in pending {
             let Some((schema_for_compile, subscription_context)) =
@@ -907,37 +762,27 @@ impl QueryManager {
 
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
+            let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
-            let mut transform_context = RowTransformContext {
-                branch_schema_map: &branch_schema_map,
-                schema_context: &subscription_context,
-                schema_warnings: &mut schema_warnings,
-            };
             {
-                let om = &mut self.sync_manager.object_manager;
-                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    let obj = om.get_or_load(id, storage_ref, &branches)?;
-                    let resolved = Self::resolve_latest_row_with_schema_transform(
-                        id,
-                        obj,
-                        &branches,
-                        &mut transform_context,
-                    )?;
-                    if resolved.is_soft_deleted && !include_deleted {
-                        return None;
-                    }
-                    let commit = obj
-                        .branches
-                        .get(&resolved.branch_name)
-                        .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                    Some(LoadedRow::new(
-                        resolved.content,
-                        resolved.commit_id,
-                        commit.row_provenance()?,
-                        [(id, resolved.branch_name)].into_iter().collect(),
-                    ))
-                };
+                let row_loader =
+                    |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                        Self::load_visible_row_for_query(
+                            storage_ref,
+                            id,
+                            table_hint.as_ref().map(TableName::as_str),
+                            &branches,
+                            None,
+                            None,
+                            include_deleted,
+                            &subscription_context,
+                            &branch_schema_map,
+                            &table,
+                            super::graph_nodes::output::QuerySubscriptionId(sub.query_id.0),
+                            &mut schema_warnings,
+                        )
+                    };
 
                 let _delta = graph.settle(storage_ref, row_loader);
             }
@@ -967,25 +812,25 @@ impl QueryManager {
             };
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
-                let om = &self.sync_manager.object_manager;
-                Self::scope_with_policy_context_rows_from_object_manager(
-                    &result_scope,
-                    &graph,
-                    &branches,
-                    om,
-                    &subscription_context,
-                )
+                Self::scope_with_policy_context_rows(&result_scope, &graph, &branches, storage_ref)
             } else {
                 result_scope
             };
 
             // Set scope in SyncManager (triggers initial sync)
-            self.sync_manager.set_client_query_scope(
+            self.sync_manager.set_client_query_scope_with_storage(
+                storage_ref,
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
                 session_for_policy.clone(),
             );
+
+            let settled_tier = self
+                .sync_manager
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Worker);
+            settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
@@ -1009,7 +854,7 @@ impl QueryManager {
                     branches,
                     last_scope: scope,
                     needs_recompile: false,
-                    settled_once: false,
+                    settled_once: true,
                     propagation: sub.propagation,
                     reported_schema_warnings,
                 },
@@ -1018,6 +863,11 @@ impl QueryManager {
 
         for (client_id, warning) in schema_warning_notifications {
             self.sync_manager.emit_schema_warning(client_id, warning);
+        }
+
+        for (client_id, query_id, tier) in settled_notifications {
+            self.sync_manager
+                .emit_query_settled(client_id, query_id, tier);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -1063,7 +913,7 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
-        let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
+        let mut settled_notifications: Vec<(ClientId, QueryId, DurabilityTier)> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -1074,41 +924,31 @@ impl QueryManager {
                 continue;
             };
             let branches = &sub.branches;
+            let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
-            let mut transform_context = RowTransformContext {
-                branch_schema_map: &branch_schema_map,
-                schema_context: &sub.schema_context,
-                schema_warnings: &mut schema_warnings,
-            };
 
             // Row loader for this subscription
             let new_scope = {
                 {
-                    let om = &mut self.sync_manager.object_manager;
-                    let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        let obj = om.get_or_load(id, storage, branches)?;
-                        let resolved = Self::resolve_latest_row_with_schema_transform(
-                            id,
-                            obj,
-                            branches,
-                            &mut transform_context,
-                        )?;
-                        if resolved.is_soft_deleted && !include_deleted {
-                            return None;
-                        }
-                        let commit = obj
-                            .branches
-                            .get(&resolved.branch_name)
-                            .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                        Some(LoadedRow::new(
-                            resolved.content,
-                            resolved.commit_id,
-                            commit.row_provenance()?,
-                            [(id, resolved.branch_name)].into_iter().collect(),
-                        ))
-                    };
+                    let row_loader =
+                        |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                            Self::load_visible_row_for_query(
+                                storage,
+                                id,
+                                table_hint.as_ref().map(TableName::as_str),
+                                branches,
+                                None,
+                                None,
+                                include_deleted,
+                                &sub.schema_context,
+                                &branch_schema_map,
+                                &table,
+                                super::graph_nodes::output::QuerySubscriptionId(query_id.0),
+                                &mut schema_warnings,
+                            )
+                        };
 
                     let _delta = sub.graph.settle(storage, row_loader);
                 }
@@ -1125,7 +965,11 @@ impl QueryManager {
                 // Emit QuerySettled on first settlement
                 if !sub.settled_once {
                     sub.settled_once = true;
-                    settled_notifications.push((client_id, query_id));
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Worker);
+                    settled_notifications.push((client_id, query_id, settled_tier));
                 }
 
                 // Check if scope changed
@@ -1141,13 +985,11 @@ impl QueryManager {
                     )
                 };
                 if self.should_sync_policy_context_rows(client_id) {
-                    let om = &self.sync_manager.object_manager;
-                    Self::scope_with_policy_context_rows_from_object_manager(
+                    Self::scope_with_policy_context_rows(
                         &result_scope,
                         &sub.graph,
                         branches,
-                        om,
-                        &sub.schema_context,
+                        storage,
                     )
                 } else {
                     result_scope
@@ -1163,8 +1005,9 @@ impl QueryManager {
 
         // Apply scope updates
         for (client_id, query_id, new_scope, session) in scope_updates {
-            self.sync_manager
-                .set_client_query_scope(client_id, query_id, new_scope, session);
+            self.sync_manager.set_client_query_scope_with_storage(
+                storage, client_id, query_id, new_scope, session,
+            );
         }
 
         for (client_id, warning) in schema_warning_notifications {
@@ -1172,8 +1015,9 @@ impl QueryManager {
         }
 
         // Emit QuerySettled notifications
-        for (client_id, query_id) in settled_notifications {
-            self.sync_manager.emit_query_settled(client_id, query_id);
+        for (client_id, query_id, tier) in settled_notifications {
+            self.sync_manager
+                .emit_query_settled(client_id, query_id, tier);
         }
     }
 
@@ -1198,9 +1042,8 @@ impl QueryManager {
 
     fn resolve_write_table_schema(
         &mut self,
-        current_table_name: TableName,
+        table_name: TableName,
         branch_name: BranchName,
-        schema_context: &crate::schema_manager::SchemaContext,
     ) -> WriteSchemaResolution {
         let parsed_branch = ComposedBranchName::parse(&branch_name);
         let schema_hash = self
@@ -1221,11 +1064,8 @@ impl QueryManager {
                 return WriteSchemaResolution::PendingSchema;
             };
 
-            let branch_table_name =
-                translate_current_table_for_schema(schema_context, current_table_name, schema_hash);
-
             return schema
-                .get(&branch_table_name)
+                .get(&table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1238,7 +1078,7 @@ impl QueryManager {
         {
             return self
                 .schema
-                .get(&current_table_name)
+                .get(&table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1250,7 +1090,7 @@ impl QueryManager {
         if self.known_schemas.is_empty() && !self.schema.is_empty() {
             return self
                 .schema
-                .get(&current_table_name)
+                .get(&table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1270,8 +1110,8 @@ impl QueryManager {
         storage: &mut H,
         mut check: PendingPermissionCheck,
     ) {
-        let original_table = match check.metadata.get(MetadataKey::Table.as_str()) {
-            Some(t) => t.clone(),
+        let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
+            Some(t) => TableName::new(t),
             None => {
                 tracing::trace!(
                     operation = ?check.operation,
@@ -1282,49 +1122,14 @@ impl QueryManager {
                 return;
             }
         };
-        let origin_schema_hash = origin_schema_hash_from_metadata(&check.metadata);
 
-        let branch_name = match &check.payload {
-            SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
-            SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
-            _ => BranchName::new(self.current_branch()),
-        };
-        let object_id = match &check.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => *object_id,
-            SyncPayload::ObjectTruncated { object_id, .. } => *object_id,
-            _ => ObjectId::new(),
-        };
+        let branch_name = check
+            .payload
+            .branch_name()
+            .unwrap_or_else(|| BranchName::new(self.current_branch()));
+        let object_id = check.payload.object_id().unwrap_or_default();
 
-        let authorization_parts = self.authorization_schema_for_branch(&branch_name);
-        let table_name = authorization_parts
-            .as_ref()
-            .map(|(_, auth_context)| {
-                resolve_current_table_for_context(
-                    auth_context,
-                    &original_table,
-                    origin_schema_hash.as_ref(),
-                )
-            })
-            .or_else(|| {
-                self.schema_context.is_initialized().then(|| {
-                    resolve_current_table_for_context(
-                        &self.schema_context,
-                        &original_table,
-                        origin_schema_hash.as_ref(),
-                    )
-                })
-            })
-            .unwrap_or_else(|| TableName::new(&original_table));
-        let write_schema_context = authorization_parts
-            .as_ref()
-            .map(|(_, auth_context)| auth_context.clone())
-            .unwrap_or_else(|| self.schema_context.clone());
-
-        let branch_table_schema = match self.resolve_write_table_schema(
-            table_name,
-            branch_name,
-            &write_schema_context,
-        ) {
+        let branch_table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
             WriteSchemaResolution::Resolved(schema) => *schema,
             WriteSchemaResolution::PendingSchema => {
                 let wait_started_at = check
@@ -1388,7 +1193,7 @@ impl QueryManager {
             return;
         }
 
-        let (auth_schema, auth_context) = match authorization_parts {
+        let (auth_schema, auth_context) = match self.authorization_schema_for_branch(&branch_name) {
             Some(parts) => parts,
             None => {
                 if !self.authorization_schema_required {
@@ -1481,7 +1286,7 @@ impl QueryManager {
             }
         };
         let provenance = match check.operation {
-            Operation::Insert => Self::payload_tip_provenance(&check.payload),
+            Operation::Insert => Self::payload_row_provenance(&check.payload),
             Operation::Delete => self.current_row_provenance(storage, object_id, branch_name),
             Operation::Update | Operation::Select => None,
         };
@@ -1567,7 +1372,7 @@ impl QueryManager {
         let check_policy = table_schema.policies.update.with_check.as_ref();
         let source_branch_schema_map = self.branch_schema_map.clone();
         let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
-        let new_provenance = Self::payload_tip_provenance(&check.payload);
+        let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
             self.sync_manager.approve_permission_check(storage, check);
@@ -1774,35 +1579,41 @@ impl QueryManager {
         let mut to_approve = Vec::new();
         let mut to_reject = Vec::new();
 
-        // Create row loader for settling
-        let om = &mut self.sync_manager.object_manager;
-        let storage_ref: &dyn Storage = storage;
-
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
-            let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let branch_state = obj.branches.get(&branch)?;
-                let tip_id = branch_state.tips.iter().next()?;
-                let commit = branch_state.commits.get(tip_id)?;
-                if commit.content.is_empty() {
-                    return None;
-                }
-                Some(LoadedRow::new(
-                    commit.content.clone(),
-                    *tip_id,
-                    commit.row_provenance()?,
-                    [(id, branch)].into_iter().collect(),
-                ))
-            };
+            let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+            let mut row_loader =
+                |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+                    let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
+                        storage,
+                        id,
+                        table_hint.as_ref().map(TableName::as_str),
+                        &branches,
+                        None,
+                        &self.schema_context,
+                        &branch_schema_map,
+                    )?;
+                    if row.is_hard_deleted() {
+                        return None;
+                    }
+                    let version_id = row.version_id();
+                    let provenance = row.row_provenance();
+                    let source_branch = BranchName::new(&row.branch);
+                    Some(LoadedRow::new(
+                        row.data,
+                        version_id,
+                        provenance,
+                        [(id, source_branch)].into_iter().collect(),
+                    ))
+                };
 
             // Settle all graphs
             let all_complete = state
                 .graphs
                 .iter_mut()
-                .all(|g| g.settle(storage_ref, &mut row_loader));
+                .all(|g| g.settle(storage, &mut row_loader));
 
             if all_complete {
                 // All graphs settled - check results

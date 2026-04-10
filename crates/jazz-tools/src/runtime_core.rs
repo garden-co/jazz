@@ -35,19 +35,20 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
-use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
+use crate::row_format::decode_row;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowVersionKey, ServerId,
+};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -230,6 +231,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     pub(crate) storage: S,
     scheduler: Sch,
     sync_sender: Sy,
+    /// True when storage was mutated since the last WAL flush barrier.
+    storage_write_pending_flush: bool,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -251,9 +254,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
+    /// Watchers for persistence acks: (row version, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<RowVersionKey, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
@@ -267,6 +270,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             storage,
             scheduler,
             sync_sender,
+            storage_write_pending_flush: false,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -306,6 +310,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage.flush_wal();
     }
 
+    pub(crate) fn mark_storage_write_pending_flush(&mut self) {
+        self.storage_write_pending_flush = true;
+    }
+
+    pub(crate) fn clear_storage_write_pending_flush(&mut self) {
+        self.storage_write_pending_flush = false;
+    }
+
     /// Consume RuntimeCore and return the Storage.
     /// Used for cold-start testing to transfer driver state.
     pub fn into_storage(self) -> S {
@@ -330,6 +342,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Persist the current schema to the catalogue for server sync.
     pub fn persist_schema(&mut self) -> ObjectId {
         let id = self.schema_manager.persist_schema(&mut self.storage);
+        self.mark_storage_write_pending_flush();
         info!(object_id = %id, "persisted schema to catalogue");
         id
     }
@@ -345,6 +358,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let id = self
             .schema_manager
             .persist_schema_object(&mut self.storage, &schema);
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         id
     }
@@ -361,6 +375,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             permissions,
             expected_parent_bundle_object_id,
         )?;
+        if id.is_some() {
+            self.mark_storage_write_pending_flush();
+        }
         self.immediate_tick();
         Ok(id)
     }
@@ -371,6 +388,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .publish_lens(&mut self.storage, lens)
             .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(id)
     }

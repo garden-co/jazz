@@ -12,7 +12,7 @@ use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
-use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
+use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
 use crate::server::{
     CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ExternalIdentityStore, ServerState,
 };
@@ -226,7 +226,7 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => {
                 let mut schema_manager =
                     SchemaManager::new_server(sync_manager, self.app_id, "prod");
-                rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, self.app_id)
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
                     .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
                 Ok(schema_manager)
             }

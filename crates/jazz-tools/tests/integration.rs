@@ -54,7 +54,7 @@ impl TestServer {
                 )
             });
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             data_dir,
@@ -95,7 +95,7 @@ impl TestServer {
                 )
             });
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             data_dir,
@@ -129,22 +129,25 @@ impl TestServer {
         );
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let client = Client::new();
         let url = format!("{}/health", self.base_url());
 
-        for i in 0..50 {
+        for i in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!("jazz-tools server exited before becoming ready: {status}");
+            }
             match client.get(&url).send().await {
                 Ok(_) => return,
                 Err(e) => {
-                    if i == 49 {
+                    if i == 199 {
                         eprintln!("Last error: {:?}", e);
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("Server failed to become ready within 5 seconds");
+        panic!("Server failed to become ready within 20 seconds");
     }
 }
 
