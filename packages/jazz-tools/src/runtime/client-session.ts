@@ -297,7 +297,7 @@ export function resolveJwtSession(jwtToken: string): Session | null {
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.auth_mode = "external";
+  claims.auth_mode = issuer === "urn:jazz:self-signed" ? "self-signed" : "external";
   if (subject) claims.subject = subject;
   if (issuer) claims.issuer = issuer;
   if (!isRecord(claimsSource) && claimsSource !== undefined) {

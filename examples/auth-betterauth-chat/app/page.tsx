@@ -39,12 +39,13 @@ function ChatShell(): React.JSX.Element {
       throw new Error("Sign up requires an active Jazz session");
     }
 
+    // proofToken is a custom field consumed by our server-side sign-up hook
     const res = await authClient.signUp.email({
       email,
       name: email,
       password,
       proofToken,
-    });
+    } as Parameters<typeof authClient.signUp.email>[0]);
 
     if (res.error) {
       throw new Error(res.error.message);

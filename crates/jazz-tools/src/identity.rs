@@ -20,16 +20,19 @@ struct SelfSignedClaims<'a> {
     sub: &'a str,
     aud: &'a str,
     jazz_pub_key: &'a str,
+    auth_mode: &'a str,
     iat: u64,
     exp: u64,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SelfSignedClaimsRaw {
     iss: Option<String>,
     sub: Option<String>,
     aud: Option<String>,
     jazz_pub_key: Option<String>,
+    auth_mode: Option<String>,
     iat: Option<u64>,
     exp: Option<u64>,
 }
@@ -45,15 +48,32 @@ struct JwtHeaderRaw {
     alg: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct VerifiedSelfSigned {
     pub user_id: String,
     pub public_key_bytes: [u8; 32],
 }
 
+/// Mint a self-signed token using the current system time.
+/// Panics on platforms where `SystemTime` is unavailable (e.g. wasm32).
 pub fn mint_self_signed_token(
     seed: &[u8; 32],
     audience: &str,
     ttl_seconds: u64,
+) -> Result<String, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    mint_self_signed_token_at(seed, audience, ttl_seconds, now)
+}
+
+/// Mint a self-signed token with an explicit timestamp (for WASM or testing).
+pub fn mint_self_signed_token_at(
+    seed: &[u8; 32],
+    audience: &str,
+    ttl_seconds: u64,
+    now_seconds: u64,
 ) -> Result<String, String> {
     let signing_key = derive_signing_key(seed, SIGN_DOMAIN);
     let verifying_key = signing_key.verifying_key();
@@ -62,6 +82,13 @@ pub fn mint_self_signed_token(
 
     let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
 
+    // Normalize audience: if it's already a UUID use it as-is, otherwise
+    // derive a deterministic UUIDv5 (DNS namespace) — matching AppId::from_name.
+    let normalized_aud = match Uuid::parse_str(audience) {
+        Ok(uuid) => uuid.to_string(),
+        Err(_) => Uuid::new_v5(&Uuid::NAMESPACE_DNS, audience.as_bytes()).to_string(),
+    };
+
     let header = JwtHeader {
         alg: "EdDSA",
         typ: "JWT",
@@ -69,17 +96,15 @@ pub fn mint_self_signed_token(
     let header_json = serde_json::to_string(&header).map_err(|e| e.to_string())?;
     let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
+    let now = now_seconds;
     let exp = now + ttl_seconds;
 
     let claims = SelfSignedClaims {
         iss: SELF_SIGNED_ISSUER,
         sub: &user_id_str,
-        aud: audience,
+        aud: &normalized_aud,
         jazz_pub_key: &pub_key_b64,
+        auth_mode: "self-signed",
         iat: now,
         exp,
     };
@@ -105,6 +130,12 @@ pub fn verify_self_signed_token_with_max_ttl(
     expected_audience: &str,
     max_ttl_seconds: u64,
 ) -> Result<VerifiedSelfSigned, String> {
+    // Normalize expected audience the same way as minting
+    let normalized_expected = match Uuid::parse_str(expected_audience) {
+        Ok(uuid) => uuid.to_string(),
+        Err(_) => Uuid::new_v5(&Uuid::NAMESPACE_DNS, expected_audience.as_bytes()).to_string(),
+    };
+
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
         return Err("invalid token: expected 3 parts".to_string());
@@ -131,10 +162,16 @@ pub fn verify_self_signed_token_with_max_ttl(
     if claims.iss.as_deref() != Some(SELF_SIGNED_ISSUER) {
         return Err(format!("invalid issuer: {:?}", claims.iss));
     }
-    if claims.aud.as_deref() != Some(expected_audience) {
+    if claims.aud.as_deref() != Some(normalized_expected.as_str()) {
         return Err(format!(
-            "audience mismatch: expected {expected_audience:?}, got {:?}",
+            "audience mismatch: expected {normalized_expected:?}, got {:?}",
             claims.aud
+        ));
+    }
+    if claims.auth_mode.as_deref() != Some("self-signed") {
+        return Err(format!(
+            "invalid auth_mode: expected \"self-signed\", got {:?}",
+            claims.auth_mode
         ));
     }
 
@@ -297,6 +334,88 @@ mod tests {
         let token = mint_self_signed_token(&alice_seed(), "my-app", 3600).unwrap();
         let result = verify_self_signed_token_with_max_ttl(&token, "my-app", 1800);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_token_with_extra_claims() {
+        // Manually build a token with an injected "role" claim
+        let seed = alice_seed();
+        let signing_key = derive_signing_key(&seed, SIGN_DOMAIN);
+        let verifying_key = signing_key.verifying_key();
+        let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+        let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
+
+        let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
+        let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": SELF_SIGNED_ISSUER,
+            "sub": user_id.to_string(),
+            "aud": "my-app",
+            "jazz_pub_key": pub_key_b64,
+            "auth_mode": "self-signed",
+            "iat": now,
+            "exp": now + 3600,
+            "role": "admin",
+        });
+        let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let token = format!("{}.{}", signing_input, sig_b64);
+
+        let result = verify_self_signed_token(&token, "my-app");
+        assert!(
+            result.is_err(),
+            "token with extra 'role' claim must be rejected"
+        );
+        assert!(
+            result.unwrap_err().contains("unknown field"),
+            "error should mention unknown field"
+        );
+    }
+
+    #[test]
+    fn reject_token_with_wrong_auth_mode() {
+        let seed = alice_seed();
+        let signing_key = derive_signing_key(&seed, SIGN_DOMAIN);
+        let verifying_key = signing_key.verifying_key();
+        let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+        let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
+
+        let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
+        let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": SELF_SIGNED_ISSUER,
+            "sub": user_id.to_string(),
+            "aud": "my-app",
+            "jazz_pub_key": pub_key_b64,
+            "auth_mode": "external",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+
+        let signing_input = format!("{}.{}", header_b64, claims_b64);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let token = format!("{}.{}", signing_input, sig_b64);
+
+        let result = verify_self_signed_token(&token, "my-app");
+        assert!(
+            result.is_err(),
+            "token with auth_mode 'external' must be rejected"
+        );
     }
 
     #[test]
