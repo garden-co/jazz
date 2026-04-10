@@ -8,6 +8,7 @@ import {
   NotLoaded,
   type RefEncoded,
   type RefsToResolve,
+  SchemaUnionNoMatchingVariantError,
   TypeSym,
   createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
@@ -173,7 +174,28 @@ export class SubscriptionScope<D extends CoValue> {
           }
 
           this.migrating = true;
-          const instance = instantiateRefEncodedFromRaw(this.schema, value);
+          let instance: CoValue;
+          try {
+            instance = instantiateRefEncodedFromRaw(this.schema, value);
+          } catch (error) {
+            // A discriminated union whose stored value doesn't match any
+            // declared variant would otherwise hang load() — the throw
+            // escapes into cojson's async update loop and nothing settles.
+            // Treat it as unavailable so load() resolves. Other
+            // instantiation errors (e.g. CoVector dimension mismatch) keep
+            // throwing loudly, as they indicate schema drift that callers
+            // should surface.
+            if (!(error instanceof SchemaUnionNoMatchingVariantError)) {
+              throw error;
+            }
+            this.migrationFailed = true;
+            this.migrated = true;
+            console.error(
+              `Schema instantiation failed for ${this.id}: ${error.message}`,
+            );
+            this.handleUpdate(CoValueLoadingState.UNAVAILABLE);
+            return;
+          }
           try {
             applyCoValueMigrations(instance);
           } catch (error) {

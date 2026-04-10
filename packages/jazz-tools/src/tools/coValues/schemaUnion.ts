@@ -23,6 +23,19 @@ import {
 } from "../internal.js";
 
 /**
+ * Thrown by a discriminated union's `fromRaw` when the stored value doesn't
+ * match any declared variant. Caught at the subscription layer so that
+ * `load()` can settle as unavailable instead of hanging, since the throw
+ * would otherwise disappear into cojson's async update loop.
+ */
+export class SchemaUnionNoMatchingVariantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SchemaUnionNoMatchingVariantError";
+  }
+}
+
+/**
  * Extends `SchemaUnion` with a non-abstract constructor.
  */
 export type SchemaUnionConcreteSubclass<V extends CoValue> =

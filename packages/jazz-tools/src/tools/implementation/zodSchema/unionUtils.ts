@@ -8,6 +8,7 @@ import {
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
   SchemaUnionDiscriminator,
+  SchemaUnionNoMatchingVariantError,
   createCoreCoMapSchema,
 } from "../../internal.js";
 import {
@@ -118,7 +119,7 @@ export function schemaUnionDiscriminatorFor(
         }
       }
 
-      throw new Error(
+      throw new SchemaUnionNoMatchingVariantError(
         "co.discriminatedUnion() of collaborative types with no matching discriminator value found",
       );
     };
