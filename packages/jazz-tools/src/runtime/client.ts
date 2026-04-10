@@ -617,6 +617,9 @@ export class JazzClient {
     resolve: () => void;
     reject: (error: Error) => void;
   }> = [];
+  private readonly inFlightServerSyncs = new Set<Promise<void>>();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   private constructor(
     runtime: Runtime,
@@ -1517,12 +1520,25 @@ export class JazzClient {
    */
   async shutdown(): Promise<void> {
     this.resolvePendingRemoteSyncWaiters();
-    this.streamController.stop();
-
-    // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
-    if (this.runtime.close) {
-      await this.runtime.close();
+    if (this.shutdownPromise) {
+      return await this.shutdownPromise;
     }
+
+    this.shutdownPromise = (async () => {
+      this.shuttingDown = true;
+
+      // Stop accepting new server-bound outbox work before tearing down sync.
+      this.runtime.onSyncMessageToSend(() => undefined);
+      this.streamController.stop();
+      await this.waitForInFlightServerSyncs();
+
+      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+      if (this.runtime.close) {
+        await this.runtime.close();
+      }
+    })();
+
+    return await this.shutdownPromise;
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
@@ -1589,20 +1605,41 @@ export class JazzClient {
     });
   }
 
-  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
-    const serverUrl = this.streamController.getServerUrl();
-    if (!serverUrl) return;
+  private async waitForInFlightServerSyncs(): Promise<void> {
+    while (this.inFlightServerSyncs.size > 0) {
+      await Promise.allSettled(this.inFlightServerSyncs);
+    }
+  }
 
-    await sendSyncPayload(
-      serverUrl,
-      payloadJson,
-      isCatalogue,
-      {
-        ...this.getSyncAuth(),
-        clientId: this.serverClientId,
-        pathPrefix: this.streamController.getPathPrefix(),
-      },
-      "[client] ",
+  private trackServerSync(pending: Promise<void>): Promise<void> {
+    let tracked: Promise<void>;
+    tracked = pending.finally(() => {
+      this.inFlightServerSyncs.delete(tracked);
+    });
+    this.inFlightServerSyncs.add(tracked);
+    return tracked;
+  }
+
+  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
+    if (this.shuttingDown) {
+      return Promise.resolve();
+    }
+
+    const serverUrl = this.streamController.getServerUrl();
+    if (!serverUrl) return Promise.resolve();
+
+    return this.trackServerSync(
+      sendSyncPayload(
+        serverUrl,
+        payloadJson,
+        isCatalogue,
+        {
+          ...this.getSyncAuth(),
+          clientId: this.serverClientId,
+          pathPrefix: this.streamController.getPathPrefix(),
+        },
+        "[client] ",
+      ),
     );
   }
 }

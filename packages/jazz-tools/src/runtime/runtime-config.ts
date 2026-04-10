@@ -1,6 +1,6 @@
 import type { RuntimeSourcesConfig } from "./context.js";
 
-function isHttpModuleUrl(moduleUrl: string): boolean {
+function isHttpUrl(moduleUrl: string): boolean {
   const protocol = new URL(moduleUrl).protocol;
   return protocol === "http:" || protocol === "https:";
 }
@@ -26,6 +26,22 @@ function resolveConfiguredBaseUrl(
   }
 
   return new URL(baseUrl, locationHref).href;
+}
+
+function resolveDerivedWasmUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  allowHttpPageFallback: boolean,
+): string | null {
+  if (
+    !locationHref ||
+    isHttpUrl(runtimeModuleUrl) ||
+    (!allowHttpPageFallback && isHttpUrl(locationHref))
+  ) {
+    return null;
+  }
+
+  return new URL("jazz_wasm_bg.wasm", resolveBrowserAssetBase(locationHref)).href;
 }
 
 export function resolveRuntimeConfigSyncInitInput(
@@ -58,11 +74,35 @@ export function resolveRuntimeConfigWasmUrl(
     }
   }
 
-  if (!locationHref || isHttpModuleUrl(runtimeModuleUrl)) {
-    return null;
+  // In any web-hosted context (HTTP/HTTPS page), we are inside a bundled app.
+  // Bundlers (Vite, Turbopack, webpack) transform the `new URL('*.wasm', import.meta.url)`
+  // pattern in jazz_wasm.js and bake in the correct asset URL at build time.
+  // Returning null lets wasm-bindgen use that bundler-resolved URL.
+  // We only fall through to compute a root-relative URL when the page is served
+  // from a non-HTTP origin (e.g. file://) — a static HTML page with the WASM
+  // copied to the same directory.
+  return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, false);
+}
+
+export function resolveWorkerBootstrapWasmUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  runtime?: RuntimeSourcesConfig,
+): string | null {
+  if (runtime?.wasmUrl) {
+    return resolveConfiguredUrl(runtime.wasmUrl, locationHref);
   }
 
-  return new URL("jazz_wasm_bg.wasm", resolveBrowserAssetBase(locationHref)).href;
+  if (runtime?.baseUrl) {
+    const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
+    if (baseUrl) {
+      return new URL("jazz_wasm_bg.wasm", baseUrl).href;
+    }
+  }
+
+  // Worker bootstrap still needs an explicit wasm URL when the page is HTTP-hosted
+  // but the runtime module itself is bundled from a file:// URL.
+  return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, true);
 }
 
 export function resolveRuntimeConfigWorkerUrl(
@@ -81,7 +121,7 @@ export function resolveRuntimeConfigWorkerUrl(
     }
   }
 
-  if (!locationHref || isHttpModuleUrl(runtimeModuleUrl)) {
+  if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
     return new URL("../worker/jazz-worker.js", runtimeModuleUrl).href;
   }
 

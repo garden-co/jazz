@@ -1,0 +1,10 @@
+{
+  "title": "Recipes",
+  "pages": [
+    "user-owned-data",
+    "shared-access",
+    "real-time-collaborative-list",
+    "nested-data",
+    "auth-provider-integration"
+  ]
+}

@@ -14,23 +14,27 @@ Traditional migration systems run a linear sequence and require peers to converg
 
 ## Workflow
 
-1. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-2. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools@alpha validate` to catch authoring errors
-   before connecting.
-3. **Connect a dev client**&hairsp;—&hairsp;on development servers (`NODE_ENV` unset or anything except
-   `production`), clients auto-publish the new structural schema hash when they connect. This
-   teaches the server the new hash but does not create compatibility edges for existing data.
-4. **Generate a migration stub**&hairsp;—&hairsp;once Jazz reports the old and new hash pair, run:
+1. If this is the first migration you are creating, run:
 
    ```bash
-   npx jazz-tools@alpha migrations create <fromHash> <toHash>
+   npx jazz-tools@alpha migrations create
    ```
 
-   This writes a typed `defineMigration(...)` file into `migrations/` with the structural diff
-   pre-filled and `from`/`to` schema witnesses for type safety.
+   This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
-5. **Review and customise**&hairsp;—&hairsp;rename the file to something meaningful, adjust defaults, add
-   backwards defaults if needed (see below).
+2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools@alpha validate` to catch authoring errors
+   before connecting.
+4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
+
+   ```bash
+   npx jazz-tools@alpha migrations create --name <your-migration-name>
+   ```
+
+   By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
+   current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
+
+5. **Review and customise**&hairsp;—&hairsp; the migration, if needed (see below).
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
@@ -84,19 +88,61 @@ When a newer schema drops a column that older clients still expect, define a bac
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
+## Migrating historical schemas
+
+Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
+Existing data will still be available, but you will not be able to read it until you create a migration.
+
+This is particularly useful when you are iterating on a feature that is not yet ready to be released.
+
+The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
+
+In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
+
+```bash
+npx jazz-tools@alpha migrations create --fromHash <fromHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
+```
+
+`--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
+server and saves a snapshot in `migrations/snapshots/`.
+
 ## Exporting the compiled schema
 
-`npx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. This is useful for inspecting the exact schema the runtime sees, or for piping into external tooling.
+`npx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
+also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
 npx jazz-tools@alpha schema export
 npx jazz-tools@alpha schema export --schema-dir ./packages/app
+npx jazz-tools@alpha schema export --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
 ```
 
-| Flag                  | Default           | Description                                 |
-| --------------------- | ----------------- | ------------------------------------------- |
-| `--schema-dir <path>` | current directory | Path to app root containing `schema.ts`     |
-| `--format json`       | `json`            | Output format (only `json` supported today) |
+Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it
+loads the schema from the local snapshot folder or, if missing, from the server.
+`--schema-dir` and `--schema-hash` are mutually exclusive.
+
+| Flag                   | Default             | Description                                                     |
+| ---------------------- | ------------------- | --------------------------------------------------------------- |
+| `--schema-dir <path>`  | current directory   | Path to app root containing `schema.ts`                         |
+| `--schema-hash <hash>` | none                | Export a stored structural schema by hash                       |
+| `--migrations-dir <p>` | `./migrations`      | Path to migrations directory and snapshot folder                |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`   | Server URL used when `--schema-hash` is not available locally   |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET` | Admin secret used when `--schema-hash` is not available locally |
+
+## Migration flags
+
+`migrations create` uses flags rather than positional hashes.
+
+| Flag                   | Default             | Description                                      |
+| ---------------------- | ------------------- | ------------------------------------------------ |
+| `--schema-dir <path>`  | current directory   | Path to app root containing `schema.ts`          |
+| `--migrations-dir <p>` | `./migrations`      | Path to migrations directory and snapshot folder |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`   | Server URL used when resolving missing schema    |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET` | Admin secret used when resolving missing schema  |
+| `--fromHash <hash>`    | latest snapshot     | Optional source schema hash                      |
+| `--toHash <hash>`      | current schema      | Optional target schema hash                      |
+| `--name <name>`        | `unnamed`           | Optional migration filename label                |
 
 ## Next steps
 

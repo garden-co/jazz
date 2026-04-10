@@ -65,9 +65,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-
       - name: Build sandbox binary
         run: |
           mkdir -p .artifacts/jazz-tools
@@ -149,6 +146,30 @@ jobs:
             examples/todo-client-localfirst-expo/android/gradle/wrapper/gradle-wrapper.properties
             crates/jazz-rn/android/**/*.gradle*
             crates/jazz-rn/android/gradle.properties
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$SDK_ROOT" ]; then
+            echo "::error::ANDROID_SDK_ROOT and ANDROID_HOME are both unset"
+            exit 1
+          fi
+
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+          rm -rf "${SDK_ROOT}/ndk/27.1.12297006"
+          rm -rf "${SDK_ROOT}/.temp"
+          rm -rf "${HOME}/.android/cache"
+
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+          sdkmanager --install "ndk;27.1.12297006"
 
       - name: Install Vercel Sandbox CLI
         run: npm install -g sandbox

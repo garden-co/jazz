@@ -12,7 +12,7 @@ export interface FetchStoredWasmSchemaOptions {
 export async function fetchStoredWasmSchema(
   serverUrl: string,
   options: FetchStoredWasmSchemaOptions,
-): Promise<{ schema: WasmSchema }> {
+): Promise<{ schema: WasmSchema; publishedAt: number | null }> {
   const schemaUrl = buildEndpointUrl(
     serverUrl,
     `/schema/${encodeURIComponent(options.schemaHash)}`,
@@ -32,8 +32,15 @@ export async function fetchStoredWasmSchema(
     throw new Error(`Schema fetch failed: ${response.status} ${response.statusText}${detail}`);
   }
 
-  const schema = (await response.json()) as WasmSchema;
-  return { schema };
+  const body = (await response.json()) as {
+    schema: WasmSchema;
+    publishedAt?: number | null;
+  };
+
+  return {
+    schema: body.schema,
+    publishedAt: body.publishedAt ?? null,
+  };
 }
 
 export interface FetchStoredSchemasOptions {

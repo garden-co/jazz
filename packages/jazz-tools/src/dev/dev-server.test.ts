@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { getAvailablePort } from "./test-helpers.js";
@@ -54,5 +55,32 @@ describe("startLocalJazzServer via DevServer", () => {
     handle = null;
 
     await expect(fetch(`${url}/health`).then((r) => r.ok)).rejects.toThrow();
+  }, 30_000);
+
+  it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
+    let first: LocalJazzServerHandle | null = null;
+    let second: LocalJazzServerHandle | null = null;
+
+    try {
+      first = await startLocalJazzServer();
+      const firstDataDir = first.dataDir;
+      expect(firstDataDir).not.toBe("./data");
+      await access(firstDataDir);
+
+      await first.stop();
+      first = null;
+      await expect(access(firstDataDir)).rejects.toThrow();
+
+      second = await startLocalJazzServer();
+      expect(second.dataDir).not.toBe(firstDataDir);
+      await access(second.dataDir);
+    } finally {
+      if (first) {
+        await first.stop();
+      }
+      if (second) {
+        await second.stop();
+      }
+    }
   }, 30_000);
 });

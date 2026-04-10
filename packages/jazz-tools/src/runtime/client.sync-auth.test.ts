@@ -61,10 +61,20 @@ function unauthenticatedResponse(code: "expired" | "missing" | "invalid" | "disa
   } as Response;
 }
 
+function okResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: new Headers(),
+  } as Response;
+}
+
 function makeRuntime() {
   let outboxCallback: RuntimeSyncOutboxCallback | null = null;
   const addServer = vi.fn();
   const removeServer = vi.fn();
+  const close = vi.fn();
 
   const runtime: Runtime = {
     insert: () => ({ id: "row-1", values: [] }),
@@ -84,6 +94,7 @@ function makeRuntime() {
     },
     addServer,
     removeServer,
+    close,
     addClient: () => "runtime-client-id",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
@@ -93,6 +104,7 @@ function makeRuntime() {
     runtime,
     addServer,
     removeServer,
+    close,
     sendServerPayload(payload = '{"kind":"sync"}', isCatalogue = false) {
       if (!outboxCallback) {
         throw new Error("outbox callback not registered");
@@ -145,6 +157,64 @@ describe("JazzClient sync auth handling", () => {
     expect(removeServer).toHaveBeenCalledTimes(1);
 
     await client.shutdown();
+    stream.close();
+  });
+
+  it("waits for in-flight sync posts during shutdown and ignores new outbox work", async () => {
+    const stream = openConnectedStream("server-client-id");
+    const syncResponseControl: { resolve?: (response: Response) => void } = {};
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/events")) {
+        return Promise.resolve(stream.response);
+      }
+      if (url.endsWith("/sync")) {
+        return new Promise<Response>((resolve) => {
+          syncResponseControl.resolve = resolve;
+        });
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const { runtime, addServer, close, sendServerPayload } = makeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {},
+      serverUrl: "http://localhost:3000",
+      backendSecret: "backend-secret",
+    });
+
+    await vi.waitFor(() => expect(addServer).toHaveBeenCalledWith(null, null));
+
+    sendServerPayload('{"kind":"first"}');
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://localhost:3000/sync",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    let shutdownResolved = false;
+    const shutdownPromise = client.shutdown().then(() => {
+      shutdownResolved = true;
+    });
+
+    await Promise.resolve();
+    expect(shutdownResolved).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+
+    sendServerPayload('{"kind":"second"}');
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/sync"))).toHaveLength(1);
+
+    const releaseSyncResponse = syncResponseControl.resolve;
+    if (!releaseSyncResponse) {
+      throw new Error("expected /sync fetch to capture a response resolver");
+    }
+    releaseSyncResponse(okResponse());
+    await shutdownPromise;
+
+    expect(close).toHaveBeenCalledTimes(1);
     stream.close();
   });
 });
