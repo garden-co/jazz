@@ -494,6 +494,10 @@ async function connectStream(): Promise<void> {
     Accept: "application/octet-stream",
   };
   applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
+  const schemaHash = runtime?.getSchemaHash?.();
+  if (schemaHash) {
+    headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
+  }
 
   streamAbortController = new AbortController();
   let streamConnectTimedOut = false;

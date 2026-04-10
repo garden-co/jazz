@@ -136,6 +136,44 @@ pub(crate) fn log_schema_warning(
     );
 }
 
+pub(crate) fn log_connection_schema_diagnostics(
+    diagnostics: &ConnectionSchemaDiagnostics,
+    origin: Option<&str>,
+) {
+    let client_hash = short_hash(&diagnostics.client_schema_hash);
+
+    if let Some(permissions_hash) = diagnostics.disconnected_permissions_schema_hash {
+        let permissions_hash = short_hash(&permissions_hash);
+        tracing::error!(
+            origin = origin,
+            client_schema_hash = %client_hash,
+            permissions_schema_hash = %permissions_hash,
+            "Your declared schema {} is disconnected from the schema used to enforce permissions: {}. Reads and writes may fail until you add a migration. To recover, run `npx jazz-tools@alpha migrations create --fromHash {} --toHash {}`.",
+            client_hash,
+            permissions_hash,
+            permissions_hash,
+            client_hash,
+        );
+    }
+
+    if !diagnostics.unreachable_schema_hashes.is_empty() {
+        let unreachable_hashes: Vec<String> = diagnostics
+            .unreachable_schema_hashes
+            .iter()
+            .map(short_hash)
+            .collect();
+        tracing::warn!(
+            origin = origin,
+            client_schema_hash = %client_hash,
+            unreachable_schema_hashes = ?unreachable_hashes,
+            "Server knows schema branches that are unreachable from your declared schema {}: {}. Some data may be missing from reads until you add migrations. To recover, run `npx jazz-tools@alpha migrations create --fromHash <unreachableHash> --toHash {}` for each listed schema.",
+            client_hash,
+            unreachable_hashes.join(", "),
+            client_hash,
+        );
+    }
+}
+
 impl SyncManager {
     pub fn new() -> Self {
         Self {
