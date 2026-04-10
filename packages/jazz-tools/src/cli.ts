@@ -34,7 +34,7 @@ export interface BuildOptions {
 
 export interface SchemaExportOptions {
   schemaDir: string;
-  format: "json";
+  migrationsDir?: string;
   schemaHash?: string;
   serverUrl?: string;
   adminSecret?: string;
@@ -92,10 +92,6 @@ export async function validate(options: BuildOptions): Promise<void> {
 }
 
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
-  if (options.format !== "json") {
-    throw new Error(`Unsupported schema export format: ${options.format}`);
-  }
-
   if (options.schemaHash) {
     const schema = await resolveExportedSchemaByHash(options);
     process.stdout.write(`${JSON.stringify(schema, null, 2)}\n`);
@@ -103,7 +99,7 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
   }
 
   const currentSchema = await loadCurrentSchema(options.schemaDir);
-  await ensureLocalSnapshot(options.schemaDir, currentSchema);
+  await ensureLocalSnapshot(options.schemaDir, options.migrationsDir, currentSchema);
   process.stdout.write(`${JSON.stringify(currentSchema.schema, null, 2)}\n`);
 }
 
@@ -236,12 +232,16 @@ function defaultMigrationsDir(schemaDir: string): string {
   return join(schemaDir, "migrations");
 }
 
+function resolvedMigrationsDir(schemaDir: string, migrationsDir?: string): string {
+  return migrationsDir ?? defaultMigrationsDir(schemaDir);
+}
+
 function snapshotsDirForMigrations(migrationsDir: string): string {
   return join(migrationsDir, "snapshots");
 }
 
-function snapshotsDir(schemaDir: string): string {
-  return snapshotsDirForMigrations(defaultMigrationsDir(schemaDir));
+function snapshotsDir(schemaDir: string, migrationsDir?: string): string {
+  return snapshotsDirForMigrations(resolvedMigrationsDir(schemaDir, migrationsDir));
 }
 
 interface SnapshotEntry {
@@ -281,8 +281,11 @@ async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
   );
 }
 
-async function listLocalSnapshotEntries(schemaDir: string): Promise<SnapshotEntry[]> {
-  return listSnapshotEntries(snapshotsDir(schemaDir));
+async function listLocalSnapshotEntries(
+  schemaDir: string,
+  migrationsDir?: string,
+): Promise<SnapshotEntry[]> {
+  return listSnapshotEntries(snapshotsDir(schemaDir, migrationsDir));
 }
 
 async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
@@ -291,10 +294,11 @@ async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<
 
 async function resolveLocalSnapshotEntry(
   schemaDir: string,
+  migrationsDir: string | undefined,
   hash: string,
   label: string,
 ): Promise<SnapshotEntry | null> {
-  const entries = await listLocalSnapshotEntries(schemaDir);
+  const entries = await listLocalSnapshotEntries(schemaDir, migrationsDir);
   if (entries.length === 0) {
     return null;
   }
@@ -320,10 +324,11 @@ async function resolveLocalSnapshotEntry(
 
 async function loadLocalSnapshotSchema(
   schemaDir: string,
+  migrationsDir: string | undefined,
   hash: string,
   label: string,
 ): Promise<{ hash: string; schema: WasmSchema } | null> {
-  const entry = await resolveLocalSnapshotEntry(schemaDir, hash, label);
+  const entry = await resolveLocalSnapshotEntry(schemaDir, migrationsDir, hash, label);
   if (!entry) {
     return null;
   }
@@ -336,26 +341,29 @@ async function loadLocalSnapshotSchema(
 
 async function writeSnapshotSchema(
   schemaDir: string,
+  migrationsDir: string | undefined,
   hash: string,
   schema: WasmSchema,
+  timestamp: string = createTimestamp(),
 ): Promise<string> {
-  const dir = snapshotsDir(schemaDir);
+  const dir = snapshotsDir(schemaDir, migrationsDir);
   await mkdir(dir, { recursive: true });
-  const filePath = join(dir, snapshotFilename(hash));
+  const filePath = join(dir, snapshotFilename(hash, timestamp));
   await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
   return filePath;
 }
 
 async function ensureLocalSnapshot(
   schemaDir: string,
+  migrationsDir: string | undefined,
   schema: { hash: string; schema: WasmSchema },
 ): Promise<string | null> {
-  const entries = await listLocalSnapshotEntries(schemaDir);
+  const entries = await listLocalSnapshotEntries(schemaDir, migrationsDir);
   if (entries.some((entry) => entry.hash === schema.hash)) {
     return null;
   }
 
-  return writeSnapshotSchema(schemaDir, schema.hash, schema.schema);
+  return writeSnapshotSchema(schemaDir, migrationsDir, schema.hash, schema.schema);
 }
 
 async function writeSnapshotSchemaForMigrations(
@@ -397,7 +405,12 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 
 async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promise<WasmSchema> {
   const schemaHash = normalizeSchemaHashInput(options.schemaHash!, "schema hash");
-  const local = await loadLocalSnapshotSchema(options.schemaDir, schemaHash, "schema hash");
+  const local = await loadLocalSnapshotSchema(
+    options.schemaDir,
+    options.migrationsDir,
+    schemaHash,
+    "schema hash",
+  );
   if (local) {
     return local.schema;
   }
@@ -419,14 +432,18 @@ async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promis
           "schema hash",
           (await fetchSchemaHashes(serverUrl, { adminSecret })).hashes,
         );
-  const schema = (
-    await fetchStoredWasmSchema(serverUrl, {
-      adminSecret,
-      schemaHash: resolvedHash,
-    })
-  ).schema;
-  await writeSnapshotSchema(options.schemaDir, resolvedHash, schema);
-  return schema;
+  const storedSchema = await fetchStoredWasmSchema(serverUrl, {
+    adminSecret,
+    schemaHash: resolvedHash,
+  });
+  await writeSnapshotSchema(
+    options.schemaDir,
+    options.migrationsDir,
+    resolvedHash,
+    storedSchema.schema,
+    createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
+  );
+  return storedSchema.schema;
 }
 
 let wasmModulePromise: Promise<any> | null = null;
@@ -979,6 +996,17 @@ function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
+function createSnapshotTimestampFromPublishedAt(
+  publishedAt: number | null | undefined,
+  fallbackNow: Date = new Date(),
+): string {
+  if (typeof publishedAt !== "number" || !Number.isFinite(publishedAt) || publishedAt < 0) {
+    return createTimestamp(fallbackNow);
+  }
+
+  return createTimestamp(new Date(publishedAt));
+}
+
 function normalizeMigrationName(name: string): string {
   const normalized = name
     .trim()
@@ -1215,14 +1243,19 @@ async function resolveHistoricalSchema(
   const resolvedAdminSecret = requireSchemaExportServerValue(adminSecret, "adminSecret");
 
   try {
-    const schema = (
-      await fetchStoredWasmSchema(resolvedServerUrl, {
-        adminSecret: resolvedAdminSecret,
-        schemaHash: resolvedHash,
-      })
-    ).schema;
-    await writeSnapshotSchemaForMigrations(migrationsDir, snapshotFilename(resolvedHash), schema);
-    return { hash: resolvedHash, schema };
+    const storedSchema = await fetchStoredWasmSchema(resolvedServerUrl, {
+      adminSecret: resolvedAdminSecret,
+      schemaHash: resolvedHash,
+    });
+    await writeSnapshotSchemaForMigrations(
+      migrationsDir,
+      snapshotFilename(
+        resolvedHash,
+        createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
+      ),
+      storedSchema.schema,
+    );
+    return { hash: resolvedHash, schema: storedSchema.schema };
   } catch (error) {
     if (error instanceof Error && /Schema fetch failed: 404/i.test(error.message)) {
       throw new Error(`No stored schema found for ${label} ${resolvedHash}.`);
@@ -1474,7 +1507,7 @@ if (isMainModule()) {
     const subcommand = process.argv[3] ?? "";
     if (subcommand !== "export") {
       console.error(
-        "Usage: node dist/cli.js schema export [--schema-dir <path> | --schema-hash <hash>] [--server-url <url>] [--admin-secret <secret>] [--format json]",
+        "Usage: node dist/cli.js schema export [--schema-dir <path> | --schema-hash <hash>] [--migrations-dir <path>] [--server-url <url>] [--admin-secret <secret>]",
       );
       process.exit(1);
     }
@@ -1488,18 +1521,14 @@ if (isMainModule()) {
     }
 
     const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-    const formatValue = getFlagValue(args, "--format") ?? "json";
-    if (formatValue !== "json") {
-      console.error(`Unsupported schema export format: ${formatValue}`);
-      process.exit(1);
-    }
-
     exportSchema({
       schemaDir,
+      migrationsDir: getFlagValue(args, "--migrations-dir")
+        ? resolve(process.cwd(), getFlagValue(args, "--migrations-dir")!)
+        : undefined,
       schemaHash,
       serverUrl: getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL,
       adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
-      format: "json",
     }).catch((err) => {
       console.error(err.message);
       process.exit(1);
@@ -1574,9 +1603,9 @@ if (isMainModule()) {
     console.log("\nSchema export options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
+    console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-    console.log("  --format json         Output the compiled schema as JSON");
     console.log("\nPermissions options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");

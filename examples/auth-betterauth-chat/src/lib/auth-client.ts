@@ -1,9 +1,11 @@
 import { jwtClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 
+// #region betterauth-client
 export const authClient = createAuthClient({
   plugins: [jwtClient()],
 });
+// #endregion betterauth-client
 
 export async function getJwtFromBetterAuth(): Promise<string | null> {
   try {

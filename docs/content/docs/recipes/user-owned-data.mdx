@@ -1,0 +1,68 @@
+---
+title: "User-owned data"
+description: "End-to-end walkthrough of the most common Jazz pattern: data that belongs to the user who created it."
+reviewedAt: "f7048c19"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+This recipe covers building an app where users own their own data and no-one else can see it, covering schema, permissions, querying, and inserting.
+
+## Schema
+
+There's no need to add an explicit owner column needed&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-schema
+</include>
+
+See [Defining tables](/docs/schemas/defining-tables) for the full schema DSL.
+
+## Permissions
+
+Match `$createdBy` to the `session.user_id` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can allow all users to insert.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-permissions
+</include>
+
+These rules are enforced on the server. See [Permissions](/docs/auth/permissions) for combinators, `allowedTo`, and more complex options.
+
+## Querying
+
+The table's permissions already scope results to the current user, so queries don't need a separate owner filter.
+
+<include cwd lang="tsx" meta='title="MyTodos.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-query
+</include>
+
+See [Queries](/docs/reading/queries) for subscriptions, one-shot queries, and durability tiers.
+
+## Inserting
+
+`$createdBy` is set automatically on insert, so we don't need to set an owner.
+
+<include cwd lang="tsx" meta='title="AddTodo.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-insert
+</include>
+
+<Accordions type="single">
+<Accordion title="Durable inserts">
+
+Use `insertDurable` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
+
+</Accordion>
+<Accordion title="Explicit owners for transferable ownership">
+
+If ownership can be transferred after creation, use an explicit `owner_id` column instead of `$createdBy`.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-schema-explicit
+</include>
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-permissions-explicit
+</include>
+
+</Accordion>
+</Accordions>

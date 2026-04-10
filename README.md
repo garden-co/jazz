@@ -25,7 +25,9 @@ For docs-only builds (for example on Vercel), set `JAZZ_SKIP_RN_DEPS=1` to skip 
 JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
 ```
 
-Vercel builds can use `scripts/install-vercel-deps.sh`, which installs `libclang` for the host distro and then runs the same Rust bootstrap in docs-only mode.
+Vercel builds can use `scripts/install-vercel-deps.sh`, which runs the same Rust bootstrap in docs-only mode without the React Native extras.
+
+Supported server targets now fetch a pinned prebuilt RocksDB archive from GHCR into a local cache on the first build, then reuse that cached archive on later builds. The default GHCR package is public, so normal builds do not need credentials for that fast path. If the package ever becomes private again, `JAZZ_ROCKSDB_GHCR_USERNAME` plus `JAZZ_ROCKSDB_GHCR_PASSWORD` (or `GHCR_USERNAME` plus `CR_PAT`) can opt back into authenticated pulls. The repo still uses checked-in RocksDB bindings, so `libclang` is no longer required for the fallback source-build path either. To regenerate and publish the supported archive set, run `bash scripts/publish-rocksdb-artifacts.sh`.
 
 ## Package versioning
 
