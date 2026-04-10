@@ -46,6 +46,7 @@ import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
+  resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
 
@@ -995,7 +996,7 @@ export class Db {
     const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
     const wasmUrl = syncInitInput
       ? null
-      : resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, runtimeSources);
+      : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
     const workerUrl = appendWorkerRuntimeWasmUrl(
       resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
       wasmUrl,
