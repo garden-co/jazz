@@ -36,16 +36,19 @@ A `StoredRowVersion` is one concrete version of that logical row. It carries:
 - confirmed durability tier
 - delete markers
 - engine/user metadata
-- the encoded application payload
+- the application row values
 
-In other words, Jazz keeps the user row and the engine fields in one coherent storage model. In the current structs, the application columns travel as an encoded `data` payload produced by `row_format`, while the engine-owned fields live alongside it on the row-history record.
+Conceptually, a stored row version is one row-format record containing both the application columns
+and the reserved engine columns. The current Rust type still exposes the application portion through
+its `data` field for convenience, but that is an implementation detail rather than a separate
+architectural layer.
 
 ### 3. Visible row entry
 
 A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pair. It stores:
 
 - the current winning version id
-- the current encoded row payload
+- the current visible row values for that branch view
 - optional tier-specific winner ids for `worker`, `edge`, and `global`
 
 That lets ordinary reads stay fast while still allowing lower-tier queries to resolve older settled winners when needed.

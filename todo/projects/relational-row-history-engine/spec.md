@@ -59,7 +59,10 @@ todos
   history: (row_id, version_id) -> stored row versions over time
 ```
 
-The current implementation keeps the application payload encoded through `row_format` and stores the engine-managed fields alongside it on the row-history records and visible entries.
+Conceptually, the whole row-version shape belongs to one shared row-format universe containing both
+application columns and engine-managed columns. The current Rust types still expose the application
+portion separately in places, but that should be understood as an implementation convenience rather
+than as the intended architecture.
 
 That gives Jazz one coherent storage story:
 
