@@ -370,6 +370,7 @@ export class Db {
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private _selfSignedSeed: string | null = null;
+  private selfSignedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -406,9 +407,41 @@ export class Db {
     this.authStateStore = createAuthStateStore(config);
   }
 
-  /** @internal Store the seed used for self-signed auth (for token refresh). */
-  setSelfSignedSeed(seed: string): void {
+  /** @internal Store the seed used for self-signed auth and schedule token refresh. */
+  initSelfSignedAuth(seed: string, ttlSeconds: number): void {
     this._selfSignedSeed = seed;
+    this.scheduleSelfSignedRefresh(ttlSeconds);
+  }
+
+  private scheduleSelfSignedRefresh(ttlSeconds: number): void {
+    if (this.selfSignedRefreshTimer) {
+      clearTimeout(this.selfSignedRefreshTimer);
+    }
+    // Refresh at 80% of TTL
+    const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
+    this.selfSignedRefreshTimer = setTimeout(() => {
+      this.refreshSelfSignedToken();
+    }, refreshMs);
+  }
+
+  private refreshSelfSignedToken(): void {
+    if (!this._selfSignedSeed || this.isShuttingDown) return;
+
+    try {
+      const wasmModule = this.wasmModule;
+      if (!wasmModule) return;
+
+      const ttlSeconds = 3600;
+      const newToken = wasmModule.WasmRuntime.mintSelfSignedToken(
+        this._selfSignedSeed,
+        this.config.appId,
+        ttlSeconds,
+      );
+      this.updateAuthToken(newToken);
+      this.scheduleSelfSignedRefresh(ttlSeconds);
+    } catch (e) {
+      console.error("Failed to refresh self-signed token:", e);
+    }
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -1389,6 +1422,10 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    if (this.selfSignedRefreshTimer) {
+      clearTimeout(this.selfSignedRefreshTimer);
+      this.selfSignedRefreshTimer = null;
+    }
     this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
@@ -1727,7 +1764,7 @@ export async function createDb(config: DbConfig): Promise<Db> {
   }
 
   if (selfSignedSeed) {
-    db.setSelfSignedSeed(selfSignedSeed);
+    db.initSelfSignedAuth(selfSignedSeed, 3600);
   }
 
   return db;
