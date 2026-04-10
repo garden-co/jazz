@@ -17,6 +17,7 @@ import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema } from "../schema-loader.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
@@ -109,15 +110,17 @@ const TIMESTAMP_SCHEMA: WasmSchema = {
   },
 };
 
-let todoServerWasmSchemaPromise: Promise<WasmSchema> | null = null;
+let todoServerCompiledSchemaPromise: Promise<
+  Awaited<ReturnType<typeof loadCompiledSchema>>
+> | null = null;
 
-async function loadTodoServerWasmSchema(): Promise<WasmSchema> {
-  if (!todoServerWasmSchemaPromise) {
-    todoServerWasmSchemaPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR).then(
-      (compiled) => compiled.wasmSchema,
-    );
+async function loadTodoServerCompiledSchema(): Promise<
+  Awaited<ReturnType<typeof loadCompiledSchema>>
+> {
+  if (!todoServerCompiledSchemaPromise) {
+    todoServerCompiledSchemaPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR);
   }
-  return await todoServerWasmSchemaPromise;
+  return await todoServerCompiledSchemaPromise;
 }
 
 const simpleTodosTable: TableProxy<SimpleTodo, SimpleTodoInit> = {
@@ -597,26 +600,6 @@ async function createTempDir(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), prefix));
 }
 
-type TempRuntimeData = {
-  dataRoot: string;
-  dataPath: string;
-};
-
-async function createTempRuntimeData(prefix: string): Promise<TempRuntimeData> {
-  const dataRoot = await createTempDir(prefix);
-  return {
-    dataRoot,
-    dataPath: join(dataRoot, "runtime.db"),
-  };
-}
-
-async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<void> {
-  if (!data) {
-    return;
-  }
-  await rm(data.dataRoot, { recursive: true, force: true });
-}
-
 describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const { NapiRuntime } = await loadNapiModule();
@@ -784,7 +767,6 @@ describe("NAPI integration", () => {
 
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
     const captureServer = await startSyncCaptureServer();
-    let runtimeData: TempRuntimeData | null = null;
     let context: {
       asBackend(): Db;
       shutdown(): Promise<void>;
@@ -792,12 +774,11 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      runtimeData = await createTempRuntimeData("jazz-napi-backend-sync-");
       context = createJazzContext({
         appId: `napi-backend-sync-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        driver: { type: "memory" },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
       });
@@ -836,7 +817,6 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(runtimeData);
       await captureServer.stop();
     }
   }, 20_000);
@@ -844,7 +824,6 @@ describe("NAPI integration", () => {
   it("replays active backend query subscriptions after the events stream reconnects", async () => {
     const captureServer = await startSyncCaptureServer();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    let runtimeData: TempRuntimeData | null = null;
     let context: {
       asBackend(): Db;
       shutdown(): Promise<void>;
@@ -852,12 +831,11 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      runtimeData = await createTempRuntimeData("jazz-napi-backend-reconnect-");
       context = createJazzContext({
         appId: `napi-backend-reconnect-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        driver: { type: "memory" },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
       });
@@ -896,18 +874,18 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(runtimeData);
       await captureServer.stop();
     }
   }, 25_000);
 
   it("applies createJazzContext(...).forSession() mutations through high-level Db APIs", async () => {
+    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-session-secret";
     const adminSecret = "napi-session-admin-secret";
-    let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
+      port,
       backendSecret,
       adminSecret,
     });
@@ -928,15 +906,19 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
-      const todoServerSchema = await loadTodoServerWasmSchema();
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
+      const { wasmSchema: todoServerSchema, permissions: todoServerPermissions = {} } =
+        await loadTodoServerCompiledSchema();
+      const todoServerRuntimeSchema = mergePermissionsIntoWasmSchema(
+        todoServerSchema,
+        todoServerPermissions,
+      );
+      const policyTodosTable = makePolicyTodosTable(todoServerRuntimeSchema);
 
-      runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        permissions: todoServerPermissions,
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
         env: "test",
@@ -1048,18 +1030,18 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(runtimeData);
       await server.stop();
     }
   }, 60_000);
 
   it("extracts JWT request auth and applies createJazzContext(...).forRequest() mutations via Db", async () => {
+    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-request-secret";
     const adminSecret = "napi-request-admin-secret";
-    let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
+      port,
       backendSecret,
       adminSecret,
     });
@@ -1080,16 +1062,20 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
-      const todoServerSchema = await loadTodoServerWasmSchema();
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
+      const { wasmSchema: todoServerSchema, permissions: todoServerPermissions = {} } =
+        await loadTodoServerCompiledSchema();
+      const todoServerRuntimeSchema = mergePermissionsIntoWasmSchema(
+        todoServerSchema,
+        todoServerPermissions,
+      );
+      const policyTodosTable = makePolicyTodosTable(todoServerRuntimeSchema);
+      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerRuntimeSchema);
 
-      runtimeData = await createTempRuntimeData("jazz-napi-request-runtime-");
       context = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        permissions: todoServerPermissions,
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
         env: "test",
@@ -1177,22 +1163,22 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(runtimeData);
       await server.stop();
     }
   }, 60_000);
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
+    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-query-backend-secret";
     const adminSecret = "napi-query-admin-secret";
     const rowTitles = (rows: PolicyTodo[]): string[] => rows.map((row) => row.title).sort();
-    let writerRuntimeData: TempRuntimeData | null = null;
-    let readerRuntimeData: TempRuntimeData | null = null;
 
     const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({
       appId,
+      port,
+      inMemory: true,
       jwksUrl: jwks.url,
       backendSecret,
       adminSecret,
@@ -1225,17 +1211,21 @@ describe("NAPI integration", () => {
         userBranch: "main",
       });
       mark("schema catalogue pushed");
-      const todoServerSchema = await loadTodoServerWasmSchema();
+      const { wasmSchema: todoServerSchema, permissions: todoServerPermissions = {} } =
+        await loadTodoServerCompiledSchema();
+      const todoServerRuntimeSchema = mergePermissionsIntoWasmSchema(
+        todoServerSchema,
+        todoServerPermissions,
+      );
       mark("server schema loaded");
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
+      const policyTodosTable = makePolicyTodosTable(todoServerRuntimeSchema);
+      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerRuntimeSchema);
 
-      writerRuntimeData = await createTempRuntimeData("jazz-napi-query-writer-");
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "persistent", dataPath: writerRuntimeData.dataPath },
+        permissions: todoServerPermissions,
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
         env: "test",
@@ -1243,12 +1233,11 @@ describe("NAPI integration", () => {
         tier: "worker",
       });
       mark("writer contexts created");
-      readerRuntimeData = await createTempRuntimeData("jazz-napi-query-reader-");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
+        permissions: todoServerPermissions,
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
         env: "test",
@@ -1405,21 +1394,19 @@ describe("NAPI integration", () => {
         await readerContext.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(writerRuntimeData);
-      await cleanupTempRuntimeData(readerRuntimeData);
       await server.stop();
       await jwks.stop();
     }
   }, 60_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
+    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-e2e-backend-secret";
     const adminSecret = "napi-e2e-admin-secret";
-    let writerRuntimeData: TempRuntimeData | null = null;
-    let readerRuntimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
+      port,
       backendSecret,
       adminSecret,
     });
@@ -1442,21 +1429,19 @@ describe("NAPI integration", () => {
         schemaDir: BASIC_SCHEMA_DIR,
       });
 
-      writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "persistent", dataPath: writerRuntimeData.dataPath },
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
       });
-      readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
       });
@@ -1504,13 +1489,11 @@ describe("NAPI integration", () => {
         (rows) => !rows.some((row) => row.id === rowId),
       );
       await readerContext.shutdown();
-      await cleanupTempRuntimeData(readerRuntimeData);
-      readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-reopen-");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
+        driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
       });
@@ -1529,8 +1512,6 @@ describe("NAPI integration", () => {
         await readerContext.shutdown();
       }
       await settleAsyncSyncWork();
-      await cleanupTempRuntimeData(writerRuntimeData);
-      await cleanupTempRuntimeData(readerRuntimeData);
       await server.stop();
     }
   }, 60_000);
