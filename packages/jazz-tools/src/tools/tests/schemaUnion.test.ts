@@ -2,6 +2,7 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   Account,
+  CoValueLoadingState,
   CryptoProvider,
   Loaded,
   co,
@@ -94,6 +95,24 @@ describe("SchemaUnion", () => {
     expect(loadedSliderWidget.type).toBe("slider");
     assertLoaded(loadedCheckboxWidget);
     expect(loadedCheckboxWidget.type).toBe("checkbox");
+  });
+
+  it("load() settles as unavailable when the stored value matches no declared variant", async () => {
+    const slider = SliderWidget.create(
+      { type: "slider", min: 0, max: 100 },
+      { owner: me },
+    );
+
+    // Union that doesn't include "slider" — the runtime discriminator will
+    // throw SchemaUnionNoMatchingVariantError from inside the subscription
+    // callback. load() must settle as unavailable rather than hang (async
+    // path) or reject (sync path).
+    const CheckboxOnlyUnion = co.discriminatedUnion("type", [CheckboxWidget]);
+    const loaded = await CheckboxOnlyUnion.load(slider.$jazz.id, {
+      loadAs: me,
+    });
+
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   it("should integrate with subscribeToCoValue correctly", async () => {

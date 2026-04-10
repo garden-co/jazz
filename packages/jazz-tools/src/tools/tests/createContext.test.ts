@@ -16,6 +16,7 @@ import {
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
   MockSessionProvider,
+  z,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
 import {
@@ -143,6 +144,69 @@ describe("createContext methods", () => {
         coValueClassFromCoValueClassOrSchema(CustomAccount),
       );
     });
+
+    test("rejects when the migration throws synchronously", async () => {
+      const CustomAccount = co.account().withMigration(() => {
+        throw new Error("migration failed");
+      });
+
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const credentials: Credentials = {
+        accountID: account.$jazz.id,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      };
+
+      await expect(
+        createJazzContextFromExistingCredentials({
+          credentials,
+          peers: [getPeerConnectedToTestSyncServer()],
+          crypto: Crypto,
+          AccountSchema: CustomAccount,
+          sessionProvider: randomSessionProvider,
+          asActiveAccount: true,
+        }),
+      ).rejects.toThrow("migration failed");
+    }, 2000);
+
+    test("does not hang when an account migration loads a discriminated union with no matching variant", async () => {
+      const TypeA = co.map({ type: z.literal("a"), data: z.string() });
+      const TypeB = co.map({ type: z.literal("b"), data: z.string() });
+
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+      const typeAValue = TypeA.create({ type: "a", data: "hello" }, account);
+
+      // Schema only knows TypeB, so loading a TypeA value through it used
+      // to throw from the async subscription callback and leave load()
+      // unsettled, hanging the account migration and createContext with it.
+      const UnionBOnly = co.discriminatedUnion("type", [TypeB]);
+
+      const AccountSchema = co
+        .account()
+        .withMigration(async (loadedAccount) => {
+          await UnionBOnly.load(typeAValue.$jazz.id, {
+            loadAs: loadedAccount,
+          });
+        });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials: {
+          accountID: account.$jazz.id,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        },
+        peers: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        AccountSchema,
+        sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
+      });
+      expect(context.account).toBeDefined();
+      context.done();
+    }, 2000);
 
     test("calls onLogOut callback when logging out", async () => {
       const account = await createJazzTestAccount({
