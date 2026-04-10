@@ -468,6 +468,7 @@ describe("sync-transport", () => {
 
     const controller = new SyncStreamController({
       getAuth: () => ({ backendSecret: "backend-secret" }),
+      getSchemaHash: () => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       getClientId: () => "initial-client-id",
       setClientId: vi.fn(),
       onConnected: vi.fn(),
@@ -481,6 +482,8 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Accept: "application/octet-stream",
       "X-Jazz-Backend-Secret": "backend-secret",
+      "X-Jazz-Client-Schema-Hash":
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
 
@@ -561,50 +564,6 @@ describe("sync-transport", () => {
 
     expect(errorSpy).toHaveBeenCalledWith("[client] Stream callback error:", expect.any(Error));
     expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
-  });
-
-  it("logs schema warnings that arrive over the stream", async () => {
-    const response = streamResponse([
-      {
-        type: "SyncUpdate",
-        payload: {
-          SchemaWarning: {
-            queryId: 7,
-            tableName: "todos",
-            rowCount: 3,
-            fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          },
-        },
-      },
-    ]);
-    const reader = response.body!.getReader();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const onSyncMessage = vi.fn();
-
-    await readBinaryFrames(
-      reader,
-      {
-        onSyncMessage,
-      },
-      "[client] ",
-    );
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      "[client] Detected 3 rows of todos with differing schema versions. To ensure data visibility and forward/backward compatibility, run `npx jazz-tools@alpha schema export --schema-hash aaaaaaaaaaaa`. Then generate a migration with `npx jazz-tools@alpha migrations create --fromHash aaaaaaaaaaaa --toHash <targetHash>`",
-    );
-    expect(onSyncMessage).toHaveBeenCalledWith(
-      JSON.stringify({
-        SchemaWarning: {
-          queryId: 7,
-          tableName: "todos",
-          rowCount: 3,
-          fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        },
-      }),
-      null,
-    );
   });
 
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
