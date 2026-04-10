@@ -16,12 +16,10 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   isExpectedFetchAbortError,
-  linkExternalIdentity as sendLinkExternalIdentityRequest,
   SyncAuthError,
   type SyncStreamController,
   type SyncAuth,
   type AuthFailureReason,
-  type LinkExternalResponse,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
@@ -156,14 +154,6 @@ interface WriteContextPayload {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
-
-export interface LinkExternalIdentityOptions {
-  jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
-}
-
-export type LinkExternalIdentityResult = LinkExternalResponse;
 
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
@@ -1471,49 +1461,6 @@ export class JazzClient {
       headers,
       body: JSON.stringify(body),
     });
-  }
-
-  /**
-   * Link an anonymous/demo local principal to an external JWT identity.
-   *
-   * Requires all three auth fields:
-   * - `jwtToken`
-   * - `localAuthMode`
-   * - `localAuthToken`
-   *
-   * Values default to the current AppContext auth fields unless overridden.
-   */
-  async linkExternalIdentity(
-    options: LinkExternalIdentityOptions = {},
-  ): Promise<LinkExternalIdentityResult> {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-
-    const jwtToken = options.jwtToken ?? this.context.jwtToken;
-    const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
-    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
-
-    if (!jwtToken) {
-      throw new Error("linkExternalIdentity requires jwtToken");
-    }
-    if (!localAuthMode) {
-      throw new Error("linkExternalIdentity requires localAuthMode");
-    }
-    if (!localAuthToken) {
-      throw new Error("linkExternalIdentity requires localAuthToken");
-    }
-
-    return sendLinkExternalIdentityRequest(
-      this.context.serverUrl,
-      {
-        jwtToken,
-        localAuthMode,
-        localAuthToken,
-        pathPrefix: this.context.serverPathPrefix,
-      },
-      "[client] ",
-    );
   }
 
   /**
