@@ -33,6 +33,43 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
     ])
 }
 
+async fn publish_test_schema(server: &TestingServer, schema: &jazz_tools::Schema) {
+    support::publish_schema_and_permissions(&server.base_url(), server.admin_secret(), schema)
+        .await
+        .expect("publish history_conflict schema and permissions");
+}
+
+async fn connect_ready_history_user(
+    server: &TestingServer,
+    schema: &jazz_tools::Schema,
+    user_id: &str,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await
+}
+
+async fn connect_ready_persistent_history_user(
+    server: &TestingServer,
+    schema: &jazz_tools::Schema,
+    user_id: &str,
+) -> (jazz_tools::AppContext, JazzClient) {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .with_persistent_storage()
+        .ready_on("todos", READY_TIMEOUT)
+        .connect_with_context()
+        .await
+}
+
 /// Two clients update the same todo concurrently (no sync wait between writes).
 /// Both must eventually converge to the same final title.
 ///
@@ -46,22 +83,10 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 async fn concurrent_updates_resolve_to_lww_winner() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-conflict")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-conflict")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-conflict").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-conflict").await;
 
     // Alice creates a todo
     let (todo_id, _) = alice
@@ -168,22 +193,10 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 async fn concurrent_creates_both_survive() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-creates")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-creates")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-creates").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-creates").await;
 
     // Both create concurrently
     let alice = Arc::new(alice);
@@ -254,22 +267,10 @@ async fn concurrent_creates_both_survive() {
 async fn rapid_concurrent_updates_converge() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-rapid")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-rapid")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-rapid").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-rapid").await;
 
     // Alice creates, wait for Bob to see it
     let (todo_id, _) = alice
@@ -378,22 +379,10 @@ async fn rapid_concurrent_updates_converge() {
 async fn fresh_client_sees_lww_winner_after_conflict() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-fresh")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob-fresh")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-fresh").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-fresh").await;
 
     // Alice creates, Bob sees it
     let (todo_id, _) = alice
@@ -475,13 +464,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
     .await;
 
     // Charlie connects fresh
-    let charlie = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("charlie-fresh")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let charlie = connect_ready_history_user(&server, &schema, "charlie-fresh").await;
 
     // Charlie must see the same winner
     let charlie_title = wait_for_query(
@@ -533,22 +516,10 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 async fn subscription_reflects_concurrent_update() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-sub")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-sub")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-sub").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-sub").await;
 
     // Alice creates a todo
     let (todo_id, _) = alice
@@ -605,14 +576,9 @@ async fn subscription_reflects_concurrent_update() {
 async fn sequential_updates_preserve_latest() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-seq")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-seq").await;
 
     // Alice creates and updates 3 times
     let (todo_id, _) = alice
@@ -643,13 +609,7 @@ async fn sequential_updates_preserve_latest() {
     .await;
 
     // Bob connects fresh, must see v3
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-seq")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-seq").await;
 
     let bob_rows = wait_for_query(
         &bob,
@@ -686,22 +646,10 @@ async fn sequential_updates_preserve_latest() {
 async fn concurrent_edits_on_different_fields() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-fields")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-fields")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-fields").await;
+    let bob = connect_ready_history_user(&server, &schema, "bob-fields").await;
 
     // Alice creates a todo: title="task", completed=false
     let (todo_id, _) = alice
@@ -844,25 +792,14 @@ async fn concurrent_edits_on_different_fields() {
 async fn offline_user_wins_on_reconnect() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
     // --- Phase 1: Both online. Alice creates + updates to v1. Bob sees v1. ---
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-offline-test")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-offline-test").await;
 
-    let (mut bob_ctx, bob) = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-offline-test")
-        .with_persistent_storage()
-        .ready_on("todos", READY_TIMEOUT)
-        .connect_with_context()
-        .await;
+    let (mut bob_ctx, bob) =
+        connect_ready_persistent_history_user(&server, &schema, "bob-offline-test").await;
 
     let (todo_id, _) = alice
         .create("todos", todo_values("create"))
@@ -1050,25 +987,14 @@ async fn offline_user_wins_on_reconnect() {
 async fn online_user_wins_on_reconnect() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+    publish_test_schema(&server, &schema).await;
 
     // --- Phase 1: Both online. Alice creates + updates to v1. Bob sees v1. ---
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-alice-wins")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_history_user(&server, &schema, "alice-alice-wins").await;
 
-    let (mut bob_ctx, bob) = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-alice-wins")
-        .with_persistent_storage()
-        .ready_on("todos", READY_TIMEOUT)
-        .connect_with_context()
-        .await;
+    let (mut bob_ctx, bob) =
+        connect_ready_persistent_history_user(&server, &schema, "bob-alice-wins").await;
 
     let (todo_id, _) = alice
         .create("todos", todo_values("create"))
