@@ -610,6 +610,98 @@ describe("Better-Auth client plugin", () => {
       expect(customFetchImpl).toHaveBeenCalledTimes(3);
     });
 
+    it("should NOT logout from Jazz if a stale null get-session arrives after authentication", async () => {
+      const credentials = await authSecretStorage.get();
+      assert(credentials, "Jazz credentials are not available");
+
+      // This test validates race condition handling where a stale null response
+      // arrives after authentication. The authGeneration is tracked via the
+      // x-jazz-auth-generation header set in onRequest and read in onSuccess.
+      // Since authGeneration increments after sign-in, the stale response's
+      // generation number will be older, preventing an unintended logout.
+
+      const capturedHeaders: any[] = [];
+      let resolveStaleSession: (value: Response) => void;
+      const staleSessionPromise = new Promise<Response>((resolve) => {
+        resolveStaleSession = resolve;
+      });
+
+      customFetchImpl.mockImplementation(
+        (urlOrRequest: string | Request, init?: RequestInit) => {
+          const headers =
+            urlOrRequest instanceof Request
+              ? urlOrRequest.headers
+              : init?.headers || {};
+          capturedHeaders.push(headers);
+
+          const url =
+            urlOrRequest instanceof Request ? urlOrRequest.url : urlOrRequest;
+
+          if (url.toString().includes("/get-session")) {
+            return staleSessionPromise;
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                user: {
+                  id: "user-1",
+                  email: "test@jazz.dev",
+                  name: "Matteo",
+                },
+                jazzAuth: {
+                  accountID: credentials.accountID,
+                  secretSeed: credentials.secretSeed,
+                  accountSecret: credentials.accountSecret,
+                  provider: "better-auth",
+                },
+              }),
+            ),
+          );
+        },
+      );
+
+      const staleSessionFetch = authClient.getSession();
+
+      // We need to wait a tick for onRequest to be called and customFetchImpl to be triggered
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const getHeader = (headers: any, name: string) => {
+        if (!headers) return null;
+        if (typeof headers.get === "function") return headers.get(name);
+        if (Array.isArray(headers)) {
+          const pair = (headers as string[][]).find(
+            (h) => h[0]?.toLowerCase() === name.toLowerCase(),
+          );
+          return pair ? pair[1] : null;
+        }
+        return headers[name] || headers[name.toLowerCase()] || null;
+      };
+
+      // Verify the stale request had authGeneration=0 in the header
+      expect(getHeader(capturedHeaders[0], "x-jazz-auth-generation")).toBe("0");
+
+      // Now sign in, which increments authGeneration to 1
+      await authClient.signIn.email({
+        email: "test@jazz.dev",
+        password: "password",
+      });
+
+      expect(authSecretStorage.isAuthenticated).toBe(true);
+
+      // Verify the sign-in request had no x-jazz-auth-generation header (it is gated to get-session)
+      expect(
+        getHeader(capturedHeaders[1], "x-jazz-auth-generation"),
+      ).toBeNull();
+
+      // Resolve the stale get-session response with null
+      resolveStaleSession!(new Response(JSON.stringify(null)));
+      await staleSessionFetch;
+
+      // The stale null response should not trigger a logout because its
+      // authGeneration (0) < current authGeneration (1), so >= comparison fails
+      expect(authSecretStorage.isAuthenticated).toBe(true);
+    });
+
     it("should deduplicate auth requests for the same account", async () => {
       const credentials = await authSecretStorage.get();
       assert(credentials, "Jazz credentials are not available");
