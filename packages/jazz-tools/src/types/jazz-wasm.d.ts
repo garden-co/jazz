@@ -95,5 +95,12 @@ declare module "jazz-wasm" {
     close?(): void;
     setClientRole?(clientId: string, role: string): void;
     onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;
+
+    /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
+    static deriveUserId(seedB64: string): string;
+    /** Mint a self-signed JWT from a base64url-encoded seed. */
+    static mintSelfSignedToken(seedB64: string, audience: string, ttlSeconds: number): string;
+    /** Get the Ed25519 public key as base64url from a base64url-encoded seed. */
+    static getPublicKeyBase64url(seedB64: string): string;
   }
 }
