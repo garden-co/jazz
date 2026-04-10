@@ -1383,18 +1383,11 @@ struct MetaAppRow {
     admin_secret: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct MetaExternalIdentityRow {
-    principal_id: String,
-}
-
 struct MetaStore {
     runtime: TokioRuntime<RocksDBStorage>,
     secret_hash_key: String,
     apps_insert_descriptor: RowDescriptor,
     apps_descriptor: RowDescriptor,
-    external_identities_insert_descriptor: RowDescriptor,
-    external_identities_descriptor: RowDescriptor,
 }
 
 fn normalize_row_descriptor(descriptor: &mut RowDescriptor) {
@@ -1460,15 +1453,6 @@ impl MetaStore {
                     .column("updated_at", ColumnType::Timestamp)
                     .column("admin_secret", ColumnType::Text),
             )
-            .table(
-                TableSchema::builder("external_identities")
-                    .column("app_id", ColumnType::Uuid)
-                    .column("issuer", ColumnType::Text)
-                    .column("subject", ColumnType::Text)
-                    .column("principal_id", ColumnType::Text)
-                    .column("created_at", ColumnType::Timestamp)
-                    .column("updated_at", ColumnType::Timestamp),
-            )
             .build();
 
         let apps_insert_descriptor = meta_schema
@@ -1478,14 +1462,6 @@ impl MetaStore {
             .clone();
         let mut apps_descriptor = apps_insert_descriptor.clone();
         normalize_row_descriptor(&mut apps_descriptor);
-
-        let external_identities_insert_descriptor = meta_schema
-            .get(&TableName::new("external_identities"))
-            .ok_or_else(|| "meta schema missing external_identities table".to_string())?
-            .columns
-            .clone();
-        let mut external_identities_descriptor = external_identities_insert_descriptor.clone();
-        normalize_row_descriptor(&mut external_identities_descriptor);
 
         let sync_manager = SyncManager::new().with_durability_tiers(vec![
             DurabilityTier::EdgeServer,
@@ -1512,8 +1488,6 @@ impl MetaStore {
             secret_hash_key,
             apps_insert_descriptor,
             apps_descriptor,
-            external_identities_insert_descriptor,
-            external_identities_descriptor,
         })
     }
 
@@ -1699,74 +1673,6 @@ impl MetaStore {
         Ok(())
     }
 
-    async fn get_external_identity(
-        &self,
-        app_id: AppId,
-        issuer: &str,
-        subject: &str,
-    ) -> Result<Option<MetaExternalIdentityRow>, String> {
-        let query = QueryBuilder::new("external_identities")
-            .filter_eq("app_id", Value::Uuid(app_id.as_object_id()))
-            .filter_eq("issuer", Value::Text(issuer.to_string()))
-            .filter_eq("subject", Value::Text(subject.to_string()))
-            .build();
-
-        let future = self
-            .runtime
-            .query(query, None, ReadDurabilityOptions::default())
-            .map_err(|e| format!("external identity query error: {e}"))?;
-        let mut rows = future
-            .await
-            .map_err(|e| format!("external identity query await error: {e}"))?;
-
-        if let Some((object_id, values)) = rows.pop() {
-            Ok(Some(self.decode_external_identity_row(object_id, &values)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn create_external_identity(
-        &self,
-        app_id: AppId,
-        issuer: &str,
-        subject: &str,
-        principal_id: &str,
-    ) -> Result<MetaExternalIdentityRow, String> {
-        let now = now_timestamp_us();
-        let values: HashMap<String, Value> = self
-            .external_identities_insert_descriptor
-            .columns
-            .iter()
-            .map(|column| {
-                let value = match column.name.as_str() {
-                    "app_id" => Value::Uuid(app_id.as_object_id()),
-                    "created_at" => Value::Timestamp(now),
-                    "issuer" => Value::Text(issuer.to_string()),
-                    "principal_id" => Value::Text(principal_id.to_string()),
-                    "subject" => Value::Text(subject.to_string()),
-                    "updated_at" => Value::Timestamp(now),
-                    other => panic!("unexpected external identity column {other}"),
-                };
-                (column.name.to_string(), value)
-            })
-            .collect();
-
-        let object_id = self
-            .runtime
-            .insert("external_identities", values, None)
-            .map_err(|e| format!("failed to insert external identity: {e}"))?;
-        self.runtime
-            .flush()
-            .await
-            .map_err(|e| format!("failed to flush external identity: {e}"))?;
-
-        let _ = object_id;
-        Ok(MetaExternalIdentityRow {
-            principal_id: principal_id.to_string(),
-        })
-    }
-
     fn decode_row(&self, object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
         let app_obj_id = match descriptor_value(&self.apps_descriptor, values, "app_id") {
             Some(Value::Uuid(id)) => *id,
@@ -1910,25 +1816,6 @@ impl MetaStore {
             updated_at,
             admin_secret,
         })
-    }
-
-    fn decode_external_identity_row(
-        &self,
-        _object_id: ObjectId,
-        values: &[Value],
-    ) -> Result<MetaExternalIdentityRow, String> {
-        let principal_id =
-            match descriptor_value(&self.external_identities_descriptor, values, "principal_id") {
-                Some(Value::Text(s)) => s.clone(),
-                Some(other) => {
-                    return Err(format!(
-                        "external identity field principal_id expected text, got {other:?}"
-                    ));
-                }
-                None => return Err("external identity row missing principal_id".to_string()),
-            };
-
-        Ok(MetaExternalIdentityRow { principal_id })
     }
 }
 
@@ -2461,15 +2348,6 @@ struct UpdateAppResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct LinkExternalResponse {
-    app_id: String,
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
-}
-
-#[derive(Debug, Serialize)]
 struct ManageAdminSecretResponse {
     app_id: String,
     admin_secret: Option<String>,
@@ -2647,10 +2525,6 @@ fn create_router(state: Arc<ServerState>) -> Router {
             post(publish_permissions_handler),
         )
         .route(
-            "/apps/:app_id/auth/link-external",
-            post(link_external_handler),
-        )
-        .route(
             "/internal/apps",
             post(create_app_handler).get(list_apps_handler),
         )
@@ -2771,8 +2645,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-async fn resolve_external_session(
-    state: &ServerState,
+fn resolve_external_session(
     app_id: AppId,
     verified: VerifiedJwt,
 ) -> Result<Session, (StatusCode, &'static str)> {
@@ -2792,54 +2665,8 @@ async fn resolve_external_session(
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
-    let mapped_principal = if let Some(iss) = issuer {
-        match state
-            .meta_store
-            .get_external_identity(app_id, iss, subject)
-            .await
-        {
-            Ok(Some(row)) => Some(row.principal_id),
-            Ok(None) => None,
-            Err(err) => {
-                warn!(
-                    app_id = %app_id,
-                    issuer = %iss,
-                    subject = %subject,
-                    error = %err,
-                    "failed to resolve external identity mapping"
-                );
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to resolve external identity",
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    match (principal_claim, mapped_principal.as_deref()) {
-        (Some(claim), Some(mapped)) if claim != mapped => {
-            warn!(
-                app_id = %app_id,
-                claim_principal = %claim,
-                mapped_principal = %mapped,
-                issuer = issuer.unwrap_or("<missing>"),
-                subject = %subject,
-                "external principal claim mismatches persisted identity mapping"
-            );
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "External identity mapping conflict",
-            ));
-        }
-        _ => {}
-    }
-
     let principal_id = if let Some(claim) = principal_claim {
         claim.to_string()
-    } else if let Some(mapped) = mapped_principal {
-        mapped
     } else if let Some(iss) = issuer {
         derive_external_principal_id(app_id, iss, subject)
     } else {
@@ -3230,7 +3057,7 @@ async fn extract_session(
         }
 
         let verified = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
-        let session = resolve_external_session(state, app_id, verified).await?;
+        let session = resolve_external_session(app_id, verified)?;
         return Ok(Some(session));
     }
 
@@ -4563,221 +4390,6 @@ async fn update_app_handler(
     .into_response()
 }
 
-async fn link_external_handler(
-    State(state): State<Arc<ServerState>>,
-    AxumPath(path): AxumPath<AppPath>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let app_id = match parse_app_id(&path.app_id) {
-        Ok(id) => id,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
-        }
-    };
-
-    let app = match state.get_app(app_id).await {
-        Some(app) => app,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "unknown app_id: {}",
-                    path.app_id
-                ))),
-            )
-                .into_response();
-        }
-    };
-
-    let cfg = app.config.read().await.clone();
-
-    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers
-        .get(LOCAL_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok());
-    let (mode, token) = match (local_mode, local_token) {
-        (Some(mode), Some(token)) => (mode, token.trim()),
-        (Some(_), None) | (None, Some(_)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
-                )),
-            )
-                .into_response();
-        }
-        (None, None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Local auth headers are required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let mode = match LocalAuthMode::from_header(mode) {
-        Some(mode) => mode,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request("Invalid local auth mode")),
-            )
-                .into_response();
-        }
-    };
-
-    if token.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("Empty local auth token")),
-        )
-            .into_response();
-    }
-
-    if mode == LocalAuthMode::Anonymous && !cfg.allow_anonymous {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized(
-                "Anonymous auth disabled for app",
-            )),
-        )
-            .into_response();
-    }
-    if mode == LocalAuthMode::Demo && !cfg.allow_demo {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized("Demo auth disabled for app")),
-        )
-            .into_response();
-    }
-
-    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Authorization bearer token is required",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let token_bearer = match auth_value.strip_prefix("Bearer ") {
-        Some(token) if !token.trim().is_empty() => token.trim(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Invalid Authorization header format",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let verified = match validate_jwt_with_jwks(&state, app_id, &cfg, token_bearer).await {
-        Ok(verified) => verified,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    let issuer = match verified.issuer.as_deref().map(str::trim) {
-        Some(iss) if !iss.is_empty() => iss.to_string(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "JWT issuer (iss) is required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let subject = verified.subject.trim().to_string();
-    if subject.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
-        )
-            .into_response();
-    }
-
-    let local_principal_id = derive_local_principal_id(app_id, mode, token);
-
-    match verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        Some(claim_principal) if claim_principal != local_principal_id => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(
-                    "JWT jazz_principal_id claim does not match local principal",
-                )),
-            )
-                .into_response();
-        }
-        _ => {}
-    }
-
-    let mut created = false;
-
-    match state
-        .meta_store
-        .get_external_identity(app_id, &issuer, &subject)
-        .await
-    {
-        Ok(Some(row)) => {
-            if row.principal_id != local_principal_id {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::bad_request(
-                        "external identity is already linked to a different principal",
-                    )),
-                )
-                    .into_response();
-            }
-        }
-        Ok(None) => {
-            if let Err(err) = state
-                .meta_store
-                .create_external_identity(app_id, &issuer, &subject, &local_principal_id)
-                .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::internal(err)),
-                )
-                    .into_response();
-            }
-            created = true;
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    }
-
-    Json(LinkExternalResponse {
-        app_id: app_id.to_string(),
-        principal_id: local_principal_id,
-        issuer,
-        subject,
-        created,
-    })
-    .into_response()
-}
-
 async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy",
@@ -4866,29 +4478,5 @@ mod tests {
         assert_eq!(loaded.admin_secret_hash, "admin-secret-hash");
         assert_eq!(loaded.status, AppStatus::Active);
         assert_eq!(loaded.admin_secret.as_deref(), Some("admin-secret"));
-    }
-
-    #[tokio::test]
-    async fn meta_store_create_external_identity_uses_declared_schema_order() {
-        let data_root = tempdir().unwrap();
-        let store = MetaStore::new(data_root.path(), "meta-store-test-key".to_string()).unwrap();
-        let app_id = AppId::from_name("meta-store-app");
-
-        store
-            .create_external_identity(
-                app_id,
-                "https://issuer.example",
-                "subject-123",
-                "principal-456",
-            )
-            .await
-            .unwrap();
-
-        let loaded = store
-            .get_external_identity(app_id, "https://issuer.example", "subject-123")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.principal_id, "principal-456");
     }
 }

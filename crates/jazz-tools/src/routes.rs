@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -21,10 +21,7 @@ use crate::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
     SyncPayloadResult, UnauthenticatedResponse,
 };
-use crate::middleware::auth::{
-    derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_backend_secret,
-};
+use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
 use crate::object::ObjectId;
 use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
@@ -67,8 +64,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
-        // Link a local anonymous/demo principal to an external identity.
-        .route("/auth/link-external", post(link_external_handler))
         // Health check
         .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http());
@@ -194,14 +189,6 @@ struct PublishMigrationResponse {
     object_id: String,
     from_hash: String,
     to_hash: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LinkExternalResponse {
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
 }
 
 async fn forward_catalogue_request(
@@ -360,21 +347,17 @@ async fn events_handler(
         ClientSetup::Backend
     } else {
         // Extract session from headers (JWT, local auth, or backend impersonation)
-        let session = {
-            let external_identities = state.external_identities.read().await;
-            match extract_session(
-                &headers,
-                state.app_id,
-                &state.auth_config,
-                Some(&external_identities),
-                state.jwks_cache.as_deref(),
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(error) => {
-                    return Err((StatusCode::UNAUTHORIZED, Json(error)).into_response());
-                }
+        let session = match extract_session(
+            &headers,
+            state.app_id,
+            &state.auth_config,
+            state.jwks_cache.as_deref(),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(error) => {
+                return Err((StatusCode::UNAUTHORIZED, Json(error)).into_response());
             }
         };
 
@@ -565,33 +548,29 @@ async fn sync_handler(
         }
     } else {
         // Extract session from headers (JWT or backend impersonation)
-        let session = {
-            let external_identities = state.external_identities.read().await;
-            match extract_session(
-                &headers,
-                state.app_id,
-                &state.auth_config,
-                Some(&external_identities),
-                state.jwks_cache.as_deref(),
-            )
-            .await
-            {
-                Ok(Some(s)) => s,
-                Ok(None) => {
-                    tracing::error!(
-                        "Sync request rejected: no session (client_id={}). Client must send auth headers.",
-                        request.client_id
-                    );
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(UnauthenticatedResponse::missing(
-                            "Session required for sync. Provide JWT, local auth headers, or backend secret.",
-                        )),
-                    )
-                        .into_response();
-                }
-                Err(error) => return (StatusCode::UNAUTHORIZED, Json(error)).into_response(),
+        let session = match extract_session(
+            &headers,
+            state.app_id,
+            &state.auth_config,
+            state.jwks_cache.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::error!(
+                    "Sync request rejected: no session (client_id={}). Client must send auth headers.",
+                    request.client_id
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(UnauthenticatedResponse::missing(
+                        "Session required for sync. Provide JWT, local auth headers, or backend secret.",
+                    )),
+                )
+                    .into_response();
             }
+            Err(error) => return (StatusCode::UNAUTHORIZED, Json(error)).into_response(),
         };
 
         // Ensure client is registered with session bound
@@ -1431,206 +1410,6 @@ fn unix_timestamp_millis() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
-}
-
-async fn link_external_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let (local_mode, local_token) = match parse_local_auth_headers(&headers) {
-        Ok(Some(local)) => local,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Local auth headers are required for link-external",
-                )),
-            )
-                .into_response();
-        }
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
-        }
-    };
-
-    if !state.auth_config.is_local_mode_enabled(local_mode) {
-        let message = match local_mode {
-            crate::middleware::auth::LocalAuthMode::Anonymous => "Anonymous auth disabled",
-            crate::middleware::auth::LocalAuthMode::Demo => "Demo auth disabled",
-        };
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized(message)),
-        )
-            .into_response();
-    }
-
-    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Authorization bearer token is required",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let token = match auth_value.strip_prefix("Bearer ") {
-        Some(token) if !token.trim().is_empty() => token.trim(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Invalid Authorization header format",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let jwt_result = if let Some(ref cache) = state.jwks_cache {
-        crate::middleware::auth::validate_jwt_with_cache(token, cache).await
-    } else {
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured)
-    };
-
-    let verified = match jwt_result {
-        Ok(verified) => verified,
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::disabled(
-                    "JWT auth is not enabled for this app",
-                )),
-            )
-                .into_response();
-        }
-        Err(crate::middleware::auth::JwtError::Expired) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::expired("JWT has expired")),
-            )
-                .into_response();
-        }
-        Err(crate::middleware::auth::JwtError::Invalid(_)) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::invalid("Invalid JWT")),
-            )
-                .into_response();
-        }
-    };
-
-    let issuer = match verified.issuer.as_deref().map(str::trim) {
-        Some(iss) if !iss.is_empty() => iss.to_string(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "JWT issuer (iss) is required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let subject = verified.subject.trim().to_string();
-    if subject.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
-        )
-            .into_response();
-    }
-
-    let local_principal_id = derive_local_principal_id(state.app_id, local_mode, &local_token);
-    if let Some(claim_principal) = verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        && claim_principal != local_principal_id
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::bad_request(
-                "JWT jazz_principal_id claim does not match local principal",
-            )),
-        )
-            .into_response();
-    }
-
-    let existing = match state
-        .external_identity_store
-        .get_external_identity(state.app_id, &issuer, &subject)
-        .await
-    {
-        Ok(row) => row,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    };
-
-    let mut created = false;
-
-    if let Some(row) = existing {
-        if row.principal_id != local_principal_id {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(
-                    "external identity is already linked to a different principal",
-                )),
-            )
-                .into_response();
-        }
-    } else {
-        if let Err(err) = state
-            .external_identity_store
-            .create_external_identity(state.app_id, &issuer, &subject, &local_principal_id)
-            .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-        created = true;
-    }
-
-    {
-        let mut mappings = state.external_identities.write().await;
-        match mappings.get(&(issuer.clone(), subject.clone())) {
-            Some(existing_principal) if existing_principal != &local_principal_id => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::bad_request(
-                        "external identity is already linked to a different principal",
-                    )),
-                )
-                    .into_response();
-            }
-            _ => {
-                mappings.insert(
-                    (issuer.clone(), subject.clone()),
-                    local_principal_id.clone(),
-                );
-            }
-        }
-    }
-
-    Json(LinkExternalResponse {
-        principal_id: local_principal_id,
-        issuer,
-        subject,
-        created,
-    })
-    .into_response()
 }
 
 /// Health check endpoint.

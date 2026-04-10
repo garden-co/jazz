@@ -12,11 +12,6 @@ export {
   useSession,
 } from "./provider.js";
 export {
-  useLinkExternalIdentity,
-  type LinkExternalIdentityInput,
-  type UseLinkExternalIdentityOptions,
-} from "../react/use-link-external-identity.js";
-export {
   createSyntheticUserProfile,
   getActiveSyntheticAuth,
   loadSyntheticUserStore,
