@@ -16,6 +16,7 @@ import {
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
   MockSessionProvider,
+  z,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
 import {
@@ -143,6 +144,69 @@ describe("createContext methods", () => {
         coValueClassFromCoValueClassOrSchema(CustomAccount),
       );
     });
+
+    test("rejects when the migration throws synchronously", async () => {
+      const CustomAccount = co.account().withMigration(() => {
+        throw new Error("migration failed");
+      });
+
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const credentials: Credentials = {
+        accountID: account.$jazz.id,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      };
+
+      await expect(
+        createJazzContextFromExistingCredentials({
+          credentials,
+          peers: [getPeerConnectedToTestSyncServer()],
+          crypto: Crypto,
+          AccountSchema: CustomAccount,
+          sessionProvider: randomSessionProvider,
+          asActiveAccount: true,
+        }),
+      ).rejects.toThrow("migration failed");
+    }, 2000);
+
+    test("does not hang when a CoValue loaded during migration fails fromRaw due to a schema mismatch", async () => {
+      const TypeA = co.map({ type: z.literal("a"), data: z.string() });
+      const TypeB = co.map({ type: z.literal("b"), data: z.string() });
+
+      // Create an account and a TypeA co-value (synced to the test server)
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+      const typeAValue = TypeA.create({ type: "a", data: "hello" }, account);
+
+      const credentials: Credentials = {
+        accountID: account.$jazz.id,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      };
+
+      // Schema that only knows TypeB — fromRaw will throw "no matching discriminator value found"
+      // when it encounters the stored TypeA data
+      const UnionBOnly = co.discriminatedUnion("type", [TypeB]);
+
+      const NewAccount = co.account().withMigration(async (loadedAccount) => {
+        await UnionBOnly.load(typeAValue.$jazz.id, {
+          loadAs: loadedAccount,
+        });
+      });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials,
+        peers: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        AccountSchema: NewAccount,
+        sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
+      });
+      expect(context.account).toBeDefined();
+      context.done();
+    }, 2000);
 
     test("calls onLogOut callback when logging out", async () => {
       const account = await createJazzTestAccount({
