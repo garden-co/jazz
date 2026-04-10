@@ -6,6 +6,7 @@ import type {
   Value as WasmValue,
   WasmSchema,
 } from "./drivers/types.js";
+import type { RelExpr, RelPredicateExpr, RelValueRef } from "./ir.js";
 import type {
   OperationPolicy,
   PolicyExpr,
@@ -151,6 +152,146 @@ function normalizePolicyLiteralValueForWasm(value: PolicyLiteralValue): WasmValu
   return normalizeWasmLiteral(value.value);
 }
 
+function normalizeRelationValueRefForWasm(value: RelValueRef): RelValueRef {
+  if ("Literal" in value) {
+    return {
+      Literal: normalizeWasmLiteral(value.Literal),
+    };
+  }
+  return value;
+}
+
+function normalizeRelationPredicateForWasm(predicate: RelPredicateExpr): RelPredicateExpr {
+  if (predicate === "True" || predicate === "False") {
+    return predicate;
+  }
+
+  if ("Cmp" in predicate) {
+    return {
+      Cmp: {
+        ...predicate.Cmp,
+        right: normalizeRelationValueRefForWasm(predicate.Cmp.right),
+      },
+    };
+  }
+
+  if ("Contains" in predicate) {
+    return {
+      Contains: {
+        ...predicate.Contains,
+        right: normalizeRelationValueRefForWasm(predicate.Contains.right),
+      },
+    };
+  }
+
+  if ("In" in predicate) {
+    return {
+      In: {
+        ...predicate.In,
+        values: predicate.In.values.map((value) => normalizeRelationValueRefForWasm(value)),
+      },
+    };
+  }
+
+  if ("And" in predicate) {
+    return {
+      And: predicate.And.map((child) => normalizeRelationPredicateForWasm(child)),
+    };
+  }
+
+  if ("Or" in predicate) {
+    return {
+      Or: predicate.Or.map((child) => normalizeRelationPredicateForWasm(child)),
+    };
+  }
+
+  if ("Not" in predicate) {
+    return {
+      Not: normalizeRelationPredicateForWasm(predicate.Not),
+    };
+  }
+
+  return predicate;
+}
+
+function normalizeRelationExprForWasm(expr: RelExpr): RelExpr {
+  if ("TableScan" in expr) {
+    return expr;
+  }
+
+  if ("Filter" in expr) {
+    return {
+      Filter: {
+        input: normalizeRelationExprForWasm(expr.Filter.input),
+        predicate: normalizeRelationPredicateForWasm(expr.Filter.predicate),
+      },
+    };
+  }
+
+  if ("Join" in expr) {
+    return {
+      Join: {
+        ...expr.Join,
+        left: normalizeRelationExprForWasm(expr.Join.left),
+        right: normalizeRelationExprForWasm(expr.Join.right),
+      },
+    };
+  }
+
+  if ("Project" in expr) {
+    return {
+      Project: {
+        ...expr.Project,
+        input: normalizeRelationExprForWasm(expr.Project.input),
+      },
+    };
+  }
+
+  if ("Gather" in expr) {
+    return {
+      Gather: {
+        ...expr.Gather,
+        seed: normalizeRelationExprForWasm(expr.Gather.seed),
+        step: normalizeRelationExprForWasm(expr.Gather.step),
+      },
+    };
+  }
+
+  if ("Distinct" in expr) {
+    return {
+      Distinct: {
+        ...expr.Distinct,
+        input: normalizeRelationExprForWasm(expr.Distinct.input),
+      },
+    };
+  }
+
+  if ("OrderBy" in expr) {
+    return {
+      OrderBy: {
+        ...expr.OrderBy,
+        input: normalizeRelationExprForWasm(expr.OrderBy.input),
+      },
+    };
+  }
+
+  if ("Offset" in expr) {
+    return {
+      Offset: {
+        ...expr.Offset,
+        input: normalizeRelationExprForWasm(expr.Offset.input),
+      },
+    };
+  }
+
+  return {
+    Limit: {
+      ...expr.Limit,
+      input: normalizeRelationExprForWasm(expr.Limit.input),
+    },
+  };
+}
+
 function normalizePolicyExprForWasm(expr: PolicyExpr): WasmPolicyExpr {
   switch (expr.type) {
     case "Cmp":
@@ -206,6 +347,10 @@ function normalizePolicyExprForWasm(expr: PolicyExpr): WasmPolicyExpr {
         condition: normalizePolicyExprForWasm(expr.condition),
       };
     case "ExistsRel":
+      return {
+        type: "ExistsRel",
+        rel: normalizeRelationExprForWasm(expr.rel),
+      };
     case "Inherits":
     case "InheritsReferencing":
     case "True":
