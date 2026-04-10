@@ -1571,14 +1571,27 @@ pub fn mint_self_signed_token(
         .map_err(napi::Error::from_reason)
 }
 
+#[napi(object)]
+pub struct VerifyTokenResult {
+    pub ok: bool,
+    pub id: String,
+}
+
 #[napi(js_name = "verifySelfSignedToken")]
 pub fn verify_self_signed_token_napi(
     token: String,
     expected_audience: String,
-) -> napi::Result<String> {
-    let verified = identity::verify_self_signed_token(&token, &expected_audience)
-        .map_err(napi::Error::from_reason)?;
-    Ok(verified.user_id)
+) -> VerifyTokenResult {
+    match identity::verify_self_signed_token(&token, &expected_audience) {
+        Ok(verified) => VerifyTokenResult {
+            ok: true,
+            id: verified.user_id,
+        },
+        Err(_) => VerifyTokenResult {
+            ok: false,
+            id: String::new(),
+        },
+    }
 }
 
 #[napi(js_name = "getPublicKeyBase64url")]

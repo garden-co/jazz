@@ -32,18 +32,14 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
           });
         }
 
-        let provedUserId: string;
-        try {
-          const { verifySelfSignedToken } = await import(
-            /* turbopackIgnore: true */
-            /* webpackIgnore: true */
-            "jazz-napi"
-          );
-          provedUserId = verifySelfSignedToken(proofToken, "betterauth-signup");
-        } catch {
-          throw new APIError("UNAUTHORIZED", {
-            message: "Invalid proof token",
-          });
+        const { verifySelfSignedToken } = await import(
+          /* turbopackIgnore: true */
+          /* webpackIgnore: true */
+          "jazz-napi"
+        );
+        const { ok, id: provedUserId } = verifySelfSignedToken(proofToken, "betterauth-signup");
+        if (!ok) {
+          throw new APIError("UNAUTHORIZED", { message: "Invalid proof token" });
         }
 
         return {

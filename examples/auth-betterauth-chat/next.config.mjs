@@ -1,9 +1,5 @@
 import { withJazz } from "jazz-tools/dev/next";
-import {
-  APP_ORIGIN,
-  DEFAULT_ADMIN_SECRET,
-  DEFAULT_APP_ID,
-} from "./constants.ts";
+import { APP_ORIGIN, DEFAULT_ADMIN_SECRET, DEFAULT_APP_ID } from "./constants.ts";
 
 export default withJazz(
   {
