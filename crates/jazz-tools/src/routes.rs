@@ -367,7 +367,7 @@ async fn events_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {
@@ -572,7 +572,7 @@ async fn sync_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {

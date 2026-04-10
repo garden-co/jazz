@@ -177,7 +177,7 @@ pub struct ServerState {
     /// Shared HTTP client for forwarding admin requests to a remote authority.
     pub http_client: reqwest::Client,
     /// JWKS cache with TTL and on-demand refresh for key rotation.
-    pub jwks_cache: Option<JwksCache>,
+    pub jwks_cache: Option<Arc<JwksCache>>,
     /// Persistent external identity mapping store.
     pub external_identity_store: Arc<ExternalIdentityStore>,
     /// In-memory cache: (issuer, subject) -> principal_id.

@@ -47,6 +47,10 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
+    "./dev/next": {
+      "types": "./dist/dev/next.d.ts",
+      "default": "./dist/dev/next.js"
+    },
     "./dev/vite": {
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
