@@ -18,8 +18,8 @@ use super::lens::Direction;
 pub struct TransformResult {
     /// Transformed row data.
     pub data: Vec<u8>,
-    /// Original commit ID (preserved).
-    pub commit_id: CommitId,
+    /// Original row version ID (preserved).
+    pub version_id: CommitId,
     /// Whether the row was transformed (false if already in current schema).
     pub was_transformed: bool,
 }
@@ -82,7 +82,7 @@ impl<'a> LensTransformer<'a> {
     ///
     /// # Arguments
     /// * `data` - Raw row data encoded with source schema
-    /// * `commit_id` - Commit ID of the row
+    /// * `version_id` - Version ID of the row
     /// * `source_hash` - Schema hash of the source (where row was stored)
     ///
     /// # Returns
@@ -90,14 +90,14 @@ impl<'a> LensTransformer<'a> {
     pub fn transform(
         &self,
         data: &[u8],
-        commit_id: CommitId,
+        version_id: CommitId,
         source_hash: SchemaHash,
     ) -> Result<TransformResult, TransformError> {
         // If already in current schema, no transform needed
         if source_hash == self.context.current_hash {
             return Ok(TransformResult {
                 data: data.to_vec(),
-                commit_id,
+                version_id,
                 was_transformed: false,
             });
         }
@@ -182,7 +182,7 @@ impl<'a> LensTransformer<'a> {
 
         Ok(TransformResult {
             data: transformed_data,
-            commit_id,
+            version_id,
             was_transformed: true,
         })
     }

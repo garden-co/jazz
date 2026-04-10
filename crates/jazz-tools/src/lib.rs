@@ -1,13 +1,16 @@
 pub mod binding_support;
+pub mod catalogue;
 pub mod commit;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
+mod monotonic_clock;
 pub mod object;
-pub mod object_manager;
 pub mod query_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod routes;
+pub mod row_format;
+pub mod row_histories;
 pub mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -15,6 +18,8 @@ pub mod server;
 pub mod storage;
 pub mod sync_manager;
 pub mod sync_tracer;
+#[cfg(test)]
+mod test_row_history;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]

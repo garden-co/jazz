@@ -6,26 +6,29 @@
 //! Per-operation SAVEPOINTs nested inside that transaction provide rollback
 //! semantics for individual operations. Targets React Native / mobile.
 
-use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
-use crate::sync_manager::DurabilityTier;
-
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    Storage, StorageError,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        append_history_region_rows_core, load_history_query_row_version_core,
+        load_history_row_version_core, load_visible_query_row_core,
+        load_visible_query_row_for_tier_core, load_visible_region_entry_core,
+        load_visible_region_frontier_core, load_visible_region_row_core,
+        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_core,
+        scan_history_row_versions_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
+use crate::commit::CommitId;
+use crate::object::ObjectId;
+use crate::row_histories::{
+    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+};
+use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
     conn: rusqlite::Connection,
@@ -221,23 +224,47 @@ impl SqliteStorage {
         Ok(out)
     }
 
-    fn scan_key_range(
+    fn scan_range(
+        conn: &rusqlite::Connection,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let mut stmt = conn
+            .prepare_cached("SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_range: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![start.as_bytes(), end.as_bytes()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| StorageError::IoError(format!("sqlite scan_range: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key_bytes, value) =
+                row.map_err(|e| StorageError::IoError(format!("sqlite scan_range row: {e}")))?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|e| StorageError::IoError(format!("sqlite key utf8: {e}")))?;
+            out.push((key, value));
+        }
+        Ok(out)
+    }
+
+    fn scan_range_keys(
         conn: &rusqlite::Connection,
         start: &str,
         end: &str,
     ) -> Result<Vec<String>, StorageError> {
         let mut stmt = conn
             .prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
-            .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_key_range: {e}")))?;
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_range_keys: {e}")))?;
         let rows = stmt
             .query_map(rusqlite::params![start.as_bytes(), end.as_bytes()], |row| {
                 row.get::<_, Vec<u8>>(0)
             })
-            .map_err(|e| StorageError::IoError(format!("sqlite scan_key_range: {e}")))?;
+            .map_err(|e| StorageError::IoError(format!("sqlite scan_range_keys: {e}")))?;
         let mut out = Vec::new();
         for row in rows {
             let key_bytes =
-                row.map_err(|e| StorageError::IoError(format!("sqlite scan_key_range row: {e}")))?;
+                row.map_err(|e| StorageError::IoError(format!("sqlite scan_range_keys row: {e}")))?;
             let key = String::from_utf8(key_bytes)
                 .map_err(|e| StorageError::IoError(format!("sqlite key utf8: {e}")))?;
             out.push(key);
@@ -263,224 +290,274 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
-            create_object_core(id, metadata, |key, value| {
-                Self::set(&inner.conn, key, value)
+            Self::with_savepoint(&inner.conn, || {
+                raw_table_put_core(table, key, value, |storage_key, bytes| {
+                    Self::set(&inner.conn, storage_key, bytes)
+                })
             })
         })
     }
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.with_inner(|inner| load_object_metadata_core(id, |key| Self::get(&inner.conn, key)))
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                raw_table_delete_core(table, key, |storage_key| {
+                    Self::delete(&inner.conn, storage_key)
+                })
+            })
+        })
     }
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::get(&inner.conn, key),
-                |prefix| Self::scan_prefix(&inner.conn, prefix),
-            )
-        })
-    }
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                append_commit_core(
-                    object_id,
-                    branch,
-                    commit,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
+            raw_table_get_core(table, key, |storage_key| {
+                Self::get(&inner.conn, storage_key)
             })
         })
     }
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                delete_commit_core(
-                    object_id,
-                    branch,
-                    commit_id,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                    |key| Self::delete(&inner.conn, key),
-                )
-            })
-        })
-    }
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            set_branch_tails_core(
-                object_id,
-                branch,
-                tails,
-                |key, value| Self::set(&inner.conn, key, value),
-                |key| Self::delete(&inner.conn, key),
-            )
-        })
-    }
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                store_ack_tier_core(
-                    commit_id,
-                    tier,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
-            })
-        })
-    }
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                append_catalogue_manifest_op_core(
-                    app_id,
-                    op,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
-            })
-        })
-    }
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                append_catalogue_manifest_ops_core(
-                    app_id,
-                    ops,
-                    |key| Self::get(&inner.conn, key),
-                    |key, value| Self::set(&inner.conn, key, value),
-                )
-            })
-        })
-    }
-    fn load_catalogue_manifest(
+
+    fn raw_table_scan_prefix(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
         self.with_inner(|inner| {
-            load_catalogue_manifest_core(app_id, |prefix| Self::scan_prefix(&inner.conn, prefix))
+            raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix(&inner.conn, storage_prefix)
+            })
         })
     }
-    fn index_insert(
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_keys(&inner.conn, storage_prefix)
+            })
+        })
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+                Self::scan_range(&inner.conn, start_key, end_key)
+            })
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_keys(&inner.conn, start_key, end_key)
+            })
+        })
+    }
+
+    fn append_history_region_rows(
         &mut self,
         table: &str,
-        column: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                append_history_region_rows_core(table, rows, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
+            })
+        })
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                upsert_visible_region_rows_core(table, entries, |key, bytes| {
+                    Self::set(&inner.conn, key, bytes)
+                })
+            })
+        })
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                patch_row_region_rows_by_batch_core(
+                    table,
+                    batch_id,
+                    state,
+                    confirmed_tier,
+                    |prefix| Self::scan_prefix(&inner.conn, prefix),
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )
+            })
+        })
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
         branch: &str,
-        value: &Value,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_core(table, branch, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
+        })
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
         row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                Self::set(&inner.conn, key, bytes)
-            })
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_region_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
         })
     }
-    fn index_remove(
-        &mut self,
+
+    fn load_visible_query_row(
+        &self,
         table: &str,
-        column: &str,
         branch: &str,
-        value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            index_remove_core(table, column, branch, value, row_id, |key| {
-                Self::delete(&inner.conn, key)
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_query_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn load_visible_region_entry(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<VisibleRowEntry>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_region_entry_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_query_row_for_tier_core(table, branch, row_id, required_tier, |key| {
+                Self::get(&inner.conn, key)
             })
         })
     }
-    fn index_lookup(
+
+    fn load_visible_region_frontier(
         &self,
         table: &str,
-        column: &str,
         branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<CommitId>>, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_lookup_core(table, column, branch, value, |prefix| {
-                Self::scan_prefix_keys(&inner.conn, prefix)
-            }))
+            load_visible_region_frontier_core(table, branch, row_id, |key| {
+                Self::get(&inner.conn, key)
+            })
         })
-        .unwrap_or_default()
     }
-    fn index_range(
+
+    fn scan_visible_region_row_versions(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_range_core(
+            scan_visible_region_row_versions_core(
                 table,
-                column,
-                branch,
-                start,
-                end,
-                |start_key, end_key| Self::scan_key_range(&inner.conn, start_key, end_key),
-            ))
+                row_id,
+                |prefix| Self::scan_prefix(&inner.conn, prefix),
+                |key| Self::get(&inner.conn, key),
+            )
         })
-        .unwrap_or_default()
     }
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_scan_all_core(table, column, branch, |prefix| {
-                Self::scan_prefix_keys(&inner.conn, prefix)
-            }))
+            scan_history_row_versions_core(table, row_id, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
         })
-        .unwrap_or_default()
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_history_row_version_core(table, row_id, version_id, |key| {
+                Self::get(&inner.conn, key)
+            })
+        })
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            load_history_query_row_version_core(table, row_id, version_id, |key| {
+                Self::get(&inner.conn, key)
+            })
+        })
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            scan_history_region_core(table, branch, scan, |prefix| {
+                Self::scan_prefix(&inner.conn, prefix)
+            })
+        })
     }
 
     fn flush_wal(&self) {
@@ -541,7 +618,7 @@ mod tests {
             let id = ObjectId::new();
             let mut meta = HashMap::new();
             meta.insert("k".to_string(), "v".to_string());
-            storage.create_object(id, meta).unwrap();
+            storage.put_metadata(id, meta).unwrap();
         }
 
         // flush() should not panic or return an error (it returns ())
@@ -559,10 +636,10 @@ mod tests {
 
         // Storage is closed but NOT yet dropped.
         // A real close() takes the inner; the next call must return Err, not succeed or panic.
-        let result = storage.load_object_metadata(ObjectId::new());
+        let result = storage.load_metadata(ObjectId::new());
         assert!(
             result.is_err(),
-            "load_object_metadata should return Err after close, got Ok"
+            "load_metadata should return Err after close, got Ok"
         );
     }
 

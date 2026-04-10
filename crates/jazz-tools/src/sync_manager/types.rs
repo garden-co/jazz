@@ -4,12 +4,14 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::commit::{Commit, CommitId};
+use crate::catalogue::CatalogueEntry;
+use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
+use crate::row_histories::StoredRowVersion;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -95,6 +97,28 @@ pub enum QueryPropagation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
 
+/// Stable identity for one concrete row version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RowVersionKey {
+    pub row_id: ObjectId,
+    pub branch_name: BranchName,
+    pub version_id: CommitId,
+}
+
+impl RowVersionKey {
+    pub fn new(row_id: ObjectId, branch_name: BranchName, version_id: CommitId) -> Self {
+        Self {
+            row_id,
+            branch_name,
+            version_id,
+        }
+    }
+
+    pub fn from_row(row: &StoredRowVersion) -> Self {
+        Self::new(row.row_id, BranchName::new(&row.branch), row.version_id())
+    }
+}
+
 /// Deferred query settlement waiting for stream sequencing prerequisites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingQuerySettled {
@@ -103,14 +127,6 @@ pub struct PendingQuerySettled {
     pub tier: DurabilityTier,
     pub through_seq: u64,
 }
-
-/// Data needed to sync a branch: (object_id, metadata, branch_name, tips).
-pub(super) type BranchSyncData = (
-    ObjectId,
-    HashMap<String, String>,
-    BranchName,
-    HashSet<CommitId>,
-);
 
 // ============================================================================
 // Client Roles
@@ -140,9 +156,10 @@ pub enum ClientRole {
 /// Tracking state for a connected server.
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
-    /// What we've pushed to this server: (object, branch) → set of commit tips.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
-    /// Object IDs for which we've sent metadata.
+    /// What we've pushed to this server for row-history sync:
+    /// (row object, branch) -> set of known row-version ids.
+    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
 
@@ -164,9 +181,10 @@ pub struct ClientState {
     pub session: Option<Session>,
     /// Active queries from this client.
     pub queries: HashMap<QueryId, QueryScope>,
-    /// What we've sent to this client.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
-    /// Object IDs for which we've sent metadata.
+    /// What we've sent to this client for row-history sync:
+    /// (row object, branch) -> set of known row-version ids.
+    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
 
@@ -218,9 +236,9 @@ pub enum SyncError {
 // Message Protocol
 // ============================================================================
 
-/// Object metadata sent once per destination.
+/// Row metadata sent once per destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectMetadata {
+pub struct RowMetadata {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
 }
@@ -228,19 +246,28 @@ pub struct ObjectMetadata {
 /// Payload for sync messages between peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPayload {
-    /// Object or branch update with commits.
-    ObjectUpdated {
-        object_id: ObjectId,
-        metadata: Option<ObjectMetadata>,
-        branch_name: BranchName,
-        commits: Vec<Commit>,
+    /// Semantic update for one catalogue/system entry.
+    CatalogueEntryUpdated { entry: CatalogueEntry },
+
+    /// Upstream replication of a newly created or newly learned row version.
+    RowVersionCreated {
+        metadata: Option<RowMetadata>,
+        row: StoredRowVersion,
     },
 
-    /// Branch truncated - new tail boundary.
-    ObjectTruncated {
-        object_id: ObjectId,
+    /// Downstream delivery of a row version that is needed for a subscriber's scope.
+    RowVersionNeeded {
+        metadata: Option<RowMetadata>,
+        row: StoredRowVersion,
+    },
+
+    /// System-column update for a previously sent row version.
+    RowVersionStateChanged {
+        row_id: ObjectId,
         branch_name: BranchName,
-        tails: HashSet<CommitId>,
+        version_id: CommitId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
     },
 
     /// Subscribe to a query (client to server).
@@ -257,15 +284,11 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
-    /// Persistence acknowledgment — confirms a set of commits were persisted at a tier.
-    PersistenceAck {
-        object_id: ObjectId,
-        branch_name: BranchName,
-        confirmed_commits: HashSet<CommitId>,
-        tier: DurabilityTier,
-    },
-
-    /// Query settlement notification — a query has settled at a given persistence tier.
+    /// Query frontier settlement notification.
+    ///
+    /// This means the upstream server has reached a complete first frontier for the
+    /// subscription. Per-row durability remains encoded and replayed on the rows
+    /// themselves via `RowVersionStateChanged`.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -350,18 +373,35 @@ mod query_subscription_session_serde {
 }
 
 impl SyncPayload {
-    fn catalogue_object_type(&self) -> Option<&str> {
-        let metadata = match self {
-            SyncPayload::ObjectUpdated {
-                metadata: Some(m), ..
-            } => &m.metadata,
-            SyncPayload::ObjectTruncated { .. } => return None,
-            _ => return None,
-        };
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            _ => None,
+        }
+    }
 
-        metadata
-            .get(crate::metadata::MetadataKey::Type.as_str())
-            .map(String::as_str)
+    pub fn branch_name(&self) -> Option<BranchName> {
+        match self {
+            SyncPayload::CatalogueEntryUpdated { .. } => None,
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(BranchName::new(&row.branch)),
+            SyncPayload::RowVersionStateChanged { branch_name, .. } => Some(*branch_name),
+            _ => None,
+        }
+    }
+
+    /// True when handling this payload may mutate local storage.
+    pub fn writes_storage(&self) -> bool {
+        matches!(
+            self,
+            SyncPayload::CatalogueEntryUpdated { .. }
+                | SyncPayload::RowVersionCreated { .. }
+                | SyncPayload::RowVersionNeeded { .. }
+                | SyncPayload::RowVersionStateChanged { .. }
+        )
     }
 
     /// Encode this payload using postcard.
@@ -384,28 +424,23 @@ impl SyncPayload {
 
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
-        matches!(
-            self.catalogue_object_type(),
-            Some(t) if crate::metadata::ObjectType::is_catalogue_type_str(t)
-        )
+        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
     }
 
     /// Check if this payload carries a structural schema catalogue object.
     pub fn is_structural_schema_catalogue(&self) -> bool {
-        matches!(
-            self.catalogue_object_type(),
-            Some(t) if t == crate::metadata::ObjectType::CatalogueSchema.as_str()
-        )
+        matches!(self, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_structural_schema_catalogue())
     }
 
     /// Get the variant name for debugging.
     pub fn variant_name(&self) -> &'static str {
         match self {
-            SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
-            SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
+            SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
+            SyncPayload::RowVersionCreated { .. } => "RowVersionCreated",
+            SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
+            SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
-            SyncPayload::PersistenceAck { .. } => "PersistenceAck",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::SchemaWarning(_) => "SchemaWarning",
             SyncPayload::Error(_) => "Error",

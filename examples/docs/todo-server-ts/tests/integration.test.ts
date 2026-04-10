@@ -18,20 +18,6 @@ import {
   type Todo,
 } from "../src/main.ts";
 
-const originalEnv = {
-  appId: process.env.JAZZ_APP_ID,
-  serverUrl: process.env.JAZZ_SERVER_URL,
-  backendSecret: process.env.JAZZ_BACKEND_SECRET,
-  adminSecret: process.env.JAZZ_ADMIN_SECRET,
-};
-
-function restoreEnv(): void {
-  process.env.JAZZ_APP_ID = originalEnv.appId;
-  process.env.JAZZ_SERVER_URL = originalEnv.serverUrl;
-  process.env.JAZZ_BACKEND_SECRET = originalEnv.backendSecret;
-  process.env.JAZZ_ADMIN_SECRET = originalEnv.adminSecret;
-}
-
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
@@ -39,13 +25,14 @@ describe("Todo Server Integration", () => {
 
   beforeAll(async () => {
     upstream = await TestingServer.start();
-    process.env.JAZZ_APP_ID = upstream.appId;
-    process.env.JAZZ_SERVER_URL = upstream.url;
-    process.env.JAZZ_BACKEND_SECRET = upstream.backendSecret;
-    process.env.JAZZ_ADMIN_SECRET = upstream.adminSecret;
 
     // Create server with temp persistent storage plus an ephemeral upstream server.
-    const todoServer = await createServer();
+    const todoServer = await createServer({
+      appId: upstream.appId,
+      serverUrl: upstream.url,
+      backendSecret: upstream.backendSecret,
+      adminSecret: upstream.adminSecret,
+    });
 
     // Start on random available port
     server = await startServer(todoServer, 0);
@@ -60,8 +47,6 @@ describe("Todo Server Integration", () => {
     if (upstream) {
       await upstream.stop();
     }
-
-    restoreEnv();
   });
 
   describe("Health Check", () => {
@@ -207,7 +192,16 @@ describe("Todo Server Integration", () => {
       const dbPath = join(dataDir, "jazz.db");
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(await createServer(dbPath), 0);
+      const server1 = await startServer(
+        await createServer({
+          dataPath: dbPath,
+          appId: upstream!.appId,
+          serverUrl: upstream!.url,
+          backendSecret: upstream!.backendSecret,
+          adminSecret: upstream!.adminSecret,
+        }),
+        0,
+      );
 
       const createRes1 = await fetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -230,7 +224,16 @@ describe("Todo Server Integration", () => {
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(await createServer(dbPath), 0);
+      const server2 = await startServer(
+        await createServer({
+          dataPath: dbPath,
+          appId: upstream!.appId,
+          serverUrl: upstream!.url,
+          backendSecret: upstream!.backendSecret,
+          adminSecret: upstream!.adminSecret,
+        }),
+        0,
+      );
 
       const listRes = await fetch(`${server2.baseUrl}/todos`);
       expect(listRes.status).toBe(200);
@@ -254,8 +257,17 @@ describe("Todo Server Integration", () => {
 
   describe("SSE Live Endpoint", () => {
     it("streams all todos and updates on changes", async () => {
-      // Use an isolated server instance so this test has an independent persistence context.
-      const sseServer = await startServer(await createServer(), 0);
+      // Use an isolated upstream and local server so this test starts from a clean global state.
+      const sseUpstream = await TestingServer.start();
+      const sseServer = await startServer(
+        await createServer({
+          appId: sseUpstream.appId,
+          serverUrl: sseUpstream.url,
+          backendSecret: sseUpstream.backendSecret,
+          adminSecret: sseUpstream.adminSecret,
+        }),
+        0,
+      );
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
@@ -330,6 +342,7 @@ describe("Todo Server Integration", () => {
           await reader.cancel().catch(() => undefined);
         }
         await stopServer(sseServer);
+        await sseUpstream.stop();
       }
     });
   });

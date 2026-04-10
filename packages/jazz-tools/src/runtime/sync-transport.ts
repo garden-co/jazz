@@ -72,6 +72,8 @@ export interface RuntimeSyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
+  onConnected?(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
+  onDisconnected?(): void;
   onAuthFailure?(reason: AuthFailureReason): void;
 }
 
@@ -381,9 +383,14 @@ export function createRuntimeSyncStreamController(
     getAuth: options.getAuth,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
-    onConnected: (catalogueStateHash, nextSyncSeq) =>
-      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq),
-    onDisconnected: () => options.getRuntime()?.removeServer(),
+    onConnected: (catalogueStateHash, nextSyncSeq) => {
+      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq);
+      options.onConnected?.(catalogueStateHash, nextSyncSeq);
+    },
+    onDisconnected: () => {
+      options.getRuntime()?.removeServer();
+      options.onDisconnected?.();
+    },
     onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
     onAuthFailure: options.onAuthFailure,
   });
@@ -636,6 +643,13 @@ async function postSyncBatch(
 function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
   try {
     const parsed = JSON.parse(payloadJson) as {
+      CatalogueEntryUpdated?: {
+        entry?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
       ObjectUpdated?: {
         metadata?: {
           metadata?: {
@@ -644,7 +658,9 @@ function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null 
         };
       };
     };
-    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    const kind =
+      parsed.CatalogueEntryUpdated?.entry?.metadata?.type ??
+      parsed.ObjectUpdated?.metadata?.metadata?.type;
     return typeof kind === "string" ? kind : null;
   } catch {
     return null;
@@ -670,14 +686,18 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const isSchemaCatalogue = isCatalogue && isStructuralSchemaCataloguePayload(payloadJson);
+  const catalogueType = catalogueObjectTypeFromPayloadJson(payloadJson);
+  const effectiveIsCatalogue = isCatalogue || catalogueType !== null;
+  const isSchemaCatalogue =
+    effectiveIsCatalogue &&
+    (catalogueType === "catalogue_schema" || isStructuralSchemaCataloguePayload(payloadJson));
 
-  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
+  if (effectiveIsCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (isCatalogue && auth.adminSecret) {
+  if (effectiveIsCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);

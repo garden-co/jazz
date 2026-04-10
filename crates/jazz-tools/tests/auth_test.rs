@@ -12,7 +12,13 @@ mod test_server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use jazz_tools::commit::CommitId;
+use jazz_tools::jazz_transport::SyncBatchRequest;
+use jazz_tools::metadata::RowProvenance;
+use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -93,18 +99,26 @@ fn encode_session(session: &Session) -> String {
 
 /// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }]
-    })
-    .to_string()
+    let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
+    let row = StoredRowVersion::new(
+        ObjectId::from_uuid(uuid::Uuid::parse_str(object_id_text).expect("parse test object id")),
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        RowProvenance::for_insert(object_id_text.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let request = SyncBatchRequest {
+        client_id: ClientId::new(),
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+    };
+
+    serde_json::to_string(&request).expect("serialize typed sync batch request")
 }
 
 // ============================================================================
@@ -506,14 +520,12 @@ mod integration_tests {
         json!({
             "client_id": "01234567-89ab-cdef-0123-456789abcdef",
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "metadata": {
-                        "id": "01234567-89ab-cdef-0123-456789abcdef",
-                        "metadata": {"type": "catalogue_schema"}
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "metadata": {"type": "catalogue_schema"},
+                        "content": []
                     },
-                    "branch_name": "main",
-                    "commits": []
                 }
             }]
         })
@@ -934,22 +946,12 @@ mod integration_tests {
         let sync_payload = json!({
             "client_id": Uuid::new_v4().to_string(),
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": object_id,
-                    "metadata": {
-                        "id": object_id,
-                        "metadata": metadata
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": object_id,
+                        "metadata": metadata,
+                        "content": encoded_schema
                     },
-                    "branch_name": "main",
-                    "commits": [
-                        {
-                            "parents": [],
-                            "content": encoded_schema,
-                            "timestamp": 1,
-                            "author": Uuid::new_v4().to_string(),
-                            "metadata": null
-                        }
-                    ]
                 }
             }]
         });

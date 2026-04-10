@@ -122,7 +122,7 @@ async fn rocksdb_server_storage() {
 
     // --- restart subtests (need their own server lifecycle) ---
     restart_preserves_data().await;
-    catalogue_manifest_survives_restart().await;
+    catalogue_entries_survive_restart().await;
 }
 
 /// Alice creates 200 todos. Bob connects fresh and must see all 200 with
@@ -781,7 +781,7 @@ async fn restart_preserves_data() {
     server2.shutdown().await;
 }
 
-/// Verifies that schema metadata (catalogue manifest) persists across a
+/// Verifies that schema metadata (catalogue entries) persists across a
 /// server restart. After restart, a fresh client can query without the
 /// server needing to re-discover the schema.
 ///
@@ -796,7 +796,7 @@ async fn restart_preserves_data() {
 ///                               │
 ///                               └──► rows available (schema was persisted)
 /// ```
-async fn catalogue_manifest_survives_restart() {
+async fn catalogue_entries_survive_restart() {
     let data_dir = TempDir::new().expect("temp data dir");
     let jwks = TestingJwksServer::start().await;
     let schema = todos_schema();
@@ -838,7 +838,7 @@ async fn catalogue_manifest_survives_restart() {
     alice.shutdown().await.expect("shutdown alice");
     server1.shutdown().await;
 
-    // Restart with same data_dir — catalogue manifest should be rehydrated.
+    // Restart with same data_dir — catalogue entries should be rehydrated.
     let server2 = TestingServer::builder()
         .with_rocksdb_storage()
         .with_data_dir(data_dir.path())

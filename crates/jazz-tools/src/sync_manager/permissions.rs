@@ -34,19 +34,11 @@ impl SyncManager {
     /// This takes the full PendingPermissionCheck since it was already taken
     /// from the queue by take_pending_permission_checks().
     pub fn reject_permission_check(&mut self, check: PendingPermissionCheck, reason: String) {
-        // Extract object_id and branch_name from payload
-        let (object_id, branch_name) = match &check.payload {
-            SyncPayload::ObjectUpdated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            SyncPayload::ObjectTruncated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            _ => return,
+        let Some(object_id) = check.payload.object_id() else {
+            return;
+        };
+        let Some(branch_name) = check.payload.branch_name() else {
+            return;
         };
 
         self.outbox.push(OutboxEntry {

@@ -342,15 +342,24 @@ mod tests {
 
     #[test]
     fn test_sync_batch_request_serialization() {
-        use crate::object::BranchName;
+        use crate::metadata::RowProvenance;
         use crate::object::ObjectId;
+        use crate::row_histories::{RowState, StoredRowVersion};
         use crate::sync_manager::ClientId;
 
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        let row_id = ObjectId::new();
+        let payload = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: StoredRowVersion::new(
+                row_id,
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(row_id.to_string(), 1_000),
+                Default::default(),
+                RowState::VisibleDirect,
+                None,
+            ),
         };
         let request = SyncBatchRequest {
             payloads: vec![payload],
@@ -359,14 +368,14 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("payloads"));
-        assert!(json.contains("ObjectUpdated"));
+        assert!(json.contains("RowVersionCreated"));
         assert!(json.contains("main"));
 
         let parsed: SyncBatchRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         assert!(matches!(
             parsed.payloads[0],
-            SyncPayload::ObjectUpdated { .. }
+            SyncPayload::RowVersionCreated { .. }
         ));
     }
 

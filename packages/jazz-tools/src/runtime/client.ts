@@ -611,6 +611,12 @@ export class JazzClient {
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
   private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
+  private syncStarted = false;
+  private remoteSyncConnected: boolean;
+  private pendingRemoteSyncWaiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
   private readonly inFlightServerSyncs = new Set<Promise<void>>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -626,6 +632,7 @@ export class JazzClient {
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.onAuthFailure = runtimeOptions?.onAuthFailure;
+    this.remoteSyncConnected = !context.serverUrl;
     this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
@@ -639,7 +646,16 @@ export class JazzClient {
       setClientId: (clientId) => {
         this.serverClientId = clientId;
       },
+      onConnected: () => {
+        this.remoteSyncConnected = true;
+        this.resolvePendingRemoteSyncWaiters();
+      },
+      onDisconnected: () => {
+        this.remoteSyncConnected = false;
+      },
       onAuthFailure: (reason) => {
+        this.remoteSyncConnected = false;
+        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
         this.onAuthFailure?.(reason);
       },
     });
@@ -835,6 +851,7 @@ export class JazzClient {
     if (this.useBackendSyncAuth) {
       return {
         backendSecret: this.context.backendSecret,
+        adminSecret: this.context.adminSecret,
       };
     }
 
@@ -846,7 +863,9 @@ export class JazzClient {
     };
   }
 
-  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+  private normalizeQueryExecutionOptions(
+    options?: QueryExecutionOptions,
+  ): ResolvedQueryExecutionOptions {
     return resolveEffectiveQueryExecutionOptions(
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
@@ -1166,6 +1185,7 @@ export class JazzClient {
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
+    await this.waitForRemoteReadAvailability(normalizedOptions.tier);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -1499,6 +1519,7 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
+    this.resolvePendingRemoteSyncWaiters();
     if (this.shutdownPromise) {
       return await this.shutdownPromise;
     }
@@ -1521,6 +1542,7 @@ export class JazzClient {
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
+    this.syncStarted = true;
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
@@ -1544,6 +1566,43 @@ export class JazzClient {
 
     // Connect to binary stream for incoming messages
     this.streamController.start(serverUrl, serverPathPrefix);
+  }
+
+  private resolvePendingRemoteSyncWaiters(): void {
+    if (this.pendingRemoteSyncWaiters.length === 0) {
+      return;
+    }
+
+    const waiters = this.pendingRemoteSyncWaiters.splice(0);
+    for (const waiter of waiters) {
+      waiter.resolve();
+    }
+  }
+
+  private rejectPendingRemoteSyncWaiters(error: Error): void {
+    if (this.pendingRemoteSyncWaiters.length === 0) {
+      return;
+    }
+
+    const waiters = this.pendingRemoteSyncWaiters.splice(0);
+    for (const waiter of waiters) {
+      waiter.reject(error);
+    }
+  }
+
+  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
+    if (
+      !this.syncStarted ||
+      !this.context.serverUrl ||
+      tier === "worker" ||
+      this.remoteSyncConnected
+    ) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      this.pendingRemoteSyncWaiters.push({ resolve, reject });
+    });
   }
 
   private async waitForInFlightServerSyncs(): Promise<void> {

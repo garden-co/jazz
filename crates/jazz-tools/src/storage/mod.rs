@@ -28,10 +28,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
+use smolset::SmolSet;
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{SchemaHash, Value};
+use crate::catalogue::CatalogueEntry;
+use crate::commit::CommitId;
+use crate::metadata::MetadataKey;
+use crate::object::ObjectId;
+use crate::query_manager::types::{SchemaHash, SharedString, Value};
+use crate::row_histories::{
+    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -82,98 +88,95 @@ pub(crate) fn validate_index_value_size(
     key_codec::validate_index_entry_size(table, column, branch, value)
 }
 
-// ============================================================================
-// LoadedBranch - Branch data returned from storage
-// ============================================================================
+pub type MetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
+pub type RowLocatorRows = Vec<(ObjectId, RowLocator)>;
+pub type RawTableRows = Vec<(String, Vec<u8>)>;
+pub type RawTableKeys = Vec<String>;
 
-/// Branch data loaded from storage.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LoadedBranch {
-    pub commits: Vec<Commit>,
-    pub tails: HashSet<CommitId>,
-}
+const METADATA_TABLE: &str = "__metadata";
+const ROW_LOCATOR_TABLE: &str = "__row_locator";
 
-/// Lens edge stored in the catalogue manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogueLensSeen {
-    pub source_hash: SchemaHash,
-    pub target_hash: SchemaHash,
-}
-
-/// Append-only catalogue manifest operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CatalogueManifestOp {
-    SchemaSeen {
-        object_id: ObjectId,
-        schema_hash: SchemaHash,
+pub struct RowLocator {
+    pub table: SharedString,
+    pub origin_schema_hash: Option<SchemaHash>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexMutation<'a> {
+    Insert {
+        table: &'a str,
+        column: &'a str,
+        branch: &'a str,
+        value: Value,
+        row_id: ObjectId,
     },
-    PermissionsSeen {
-        object_id: ObjectId,
-        schema_hash: SchemaHash,
-    },
-    LensSeen {
-        object_id: ObjectId,
-        source_hash: SchemaHash,
-        target_hash: SchemaHash,
+    Remove {
+        table: &'a str,
+        column: &'a str,
+        branch: &'a str,
+        value: Value,
+        row_id: ObjectId,
     },
 }
 
-impl CatalogueManifestOp {
-    pub fn object_id(&self) -> ObjectId {
-        match self {
-            Self::SchemaSeen { object_id, .. }
-            | Self::PermissionsSeen { object_id, .. }
-            | Self::LensSeen { object_id, .. } => *object_id,
-        }
+fn metadata_raw_key(id: ObjectId) -> String {
+    hex::encode(id.uuid().as_bytes())
+}
+
+fn decode_metadata_raw_key(key: &str) -> Result<ObjectId, StorageError> {
+    let bytes = hex::decode(key)
+        .map_err(|err| StorageError::IoError(format!("invalid metadata key '{key}': {err}")))?;
+    let uuid = uuid::Uuid::from_slice(&bytes)
+        .map_err(|err| StorageError::IoError(format!("invalid metadata uuid '{key}': {err}")))?;
+    Ok(ObjectId::from_uuid(uuid))
+}
+
+fn encode_metadata(metadata: &HashMap<String, String>) -> Result<Vec<u8>, StorageError> {
+    serde_json::to_vec(metadata)
+        .map_err(|err| StorageError::IoError(format!("serialize metadata: {err}")))
+}
+
+fn decode_metadata(bytes: &[u8]) -> Result<HashMap<String, String>, StorageError> {
+    serde_json::from_slice(bytes)
+        .map_err(|err| StorageError::IoError(format!("deserialize metadata: {err}")))
+}
+
+pub(crate) fn row_locator_from_metadata(metadata: &HashMap<String, String>) -> Option<RowLocator> {
+    Some(RowLocator {
+        table: metadata.get(MetadataKey::Table.as_str())?.clone().into(),
+        origin_schema_hash: metadata
+            .get(MetadataKey::OriginSchemaHash.as_str())
+            .and_then(|raw_hash| SchemaHash::from_hex(raw_hash)),
+    })
+}
+
+pub(crate) fn metadata_from_row_locator(locator: &RowLocator) -> HashMap<String, String> {
+    let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), locator.table.to_string())]);
+    if let Some(origin_schema_hash) = locator.origin_schema_hash {
+        metadata.insert(
+            MetadataKey::OriginSchemaHash.to_string(),
+            origin_schema_hash.to_string(),
+        );
     }
+    metadata
 }
 
-/// Materialized view of catalogue objects known for an app.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CatalogueManifest {
-    pub schema_seen: HashMap<ObjectId, SchemaHash>,
-    pub permissions_seen: HashMap<ObjectId, SchemaHash>,
-    pub lens_seen: HashMap<ObjectId, CatalogueLensSeen>,
+fn encode_row_locator(locator: &RowLocator) -> Result<Vec<u8>, StorageError> {
+    postcard::to_allocvec(locator)
+        .map_err(|err| StorageError::IoError(format!("serialize row locator: {err}")))
 }
 
-impl CatalogueManifest {
-    pub fn apply(&mut self, op: &CatalogueManifestOp) {
-        match op {
-            CatalogueManifestOp::SchemaSeen {
-                object_id,
-                schema_hash,
-            } => {
-                self.schema_seen.insert(*object_id, *schema_hash);
-            }
-            CatalogueManifestOp::PermissionsSeen {
-                object_id,
-                schema_hash,
-            } => {
-                self.permissions_seen.insert(*object_id, *schema_hash);
-            }
-            CatalogueManifestOp::LensSeen {
-                object_id,
-                source_hash,
-                target_hash,
-            } => {
-                self.lens_seen.insert(
-                    *object_id,
-                    CatalogueLensSeen {
-                        source_hash: *source_hash,
-                        target_hash: *target_hash,
-                    },
-                );
-            }
-        }
-    }
+fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
+    postcard::from_bytes(bytes)
+        .map_err(|err| StorageError::IoError(format!("deserialize row locator: {err}")))
 }
 
 // ============================================================================
 // Storage Trait
 // ============================================================================
 
-/// Synchronous storage for objects and indices.
+/// Synchronous storage for metadata, row histories, raw tables, and indices.
 ///
 /// All operations are **synchronous** - they return immediately with results.
 /// This eliminates the async response/callback pattern that permeated the
@@ -185,104 +188,438 @@ impl CatalogueManifest {
 /// Cross-thread communication uses the sync protocol, not shared state.
 pub trait Storage {
     // ================================================================
-    // Object storage (sync - returns immediately with result)
+    // Metadata storage (sync - returns immediately with result)
     // ================================================================
 
-    /// Create a new object with the given ID and metadata.
-    fn create_object(
+    /// Upsert metadata for a logical id.
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let bytes = encode_metadata(&metadata)?;
+        self.raw_table_put(METADATA_TABLE, &metadata_raw_key(id), &bytes)?;
 
-    /// Load object metadata. Returns None if object doesn't exist.
-    fn load_object_metadata(
-        &self,
+        self.put_row_locator(id, row_locator_from_metadata(&metadata).as_ref())?;
+
+        Ok(())
+    }
+
+    /// Load metadata for a logical id. Returns None if it doesn't exist.
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.raw_table_get(METADATA_TABLE, &metadata_raw_key(id))?
+            .map(|bytes| decode_metadata(&bytes))
+            .transpose()
+    }
+
+    /// Enumerate all persisted metadata rows.
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        let mut rows = Vec::new();
+        for (key, bytes) in self.raw_table_scan_prefix(METADATA_TABLE, "")? {
+            rows.push((decode_metadata_raw_key(&key)?, decode_metadata(&bytes)?));
+        }
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
+    }
+
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        let mut rows = Vec::new();
+        for (key, bytes) in self.raw_table_scan_prefix(ROW_LOCATOR_TABLE, "")? {
+            rows.push((decode_metadata_raw_key(&key)?, decode_row_locator(&bytes)?));
+        }
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
+    }
+
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        self.raw_table_get(ROW_LOCATOR_TABLE, &metadata_raw_key(id))?
+            .map(|bytes| decode_row_locator(&bytes))
+            .transpose()
+    }
+
+    fn put_row_locator(
+        &mut self,
         id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError>;
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        if let Some(locator) = locator {
+            let locator_bytes = encode_row_locator(locator)?;
+            self.raw_table_put(ROW_LOCATOR_TABLE, &metadata_raw_key(id), &locator_bytes)
+        } else {
+            self.raw_table_delete(ROW_LOCATOR_TABLE, &metadata_raw_key(id))
+        }
+    }
 
-    /// Load a branch's commits and tails. Returns None if branch doesn't exist.
-    fn load_branch(
+    // ================================================================
+    // Ordered raw-table storage
+    // ================================================================
+
+    fn raw_table_put(
+        &mut self,
+        _table: &str,
+        _key: &str,
+        _value: &[u8],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "raw table puts are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_delete(&mut self, _table: &str, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "raw table deletes are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_get(&self, _table: &str, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw table lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        _table: &str,
+        _prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        Err(StorageError::IoError(
+            "raw table prefix scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        _table: &str,
+        _start: Option<&str>,
+        _end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        Err(StorageError::IoError(
+            "raw table range scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.raw_table_scan_prefix(table, prefix)
+            .map(|rows| rows.into_iter().map(|(key, _)| key).collect())
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.raw_table_scan_range(table, start, end)
+            .map(|rows| rows.into_iter().map(|(key, _)| key).collect())
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        let bytes = entry
+            .encode_storage_row()
+            .map_err(|err| StorageError::IoError(format!("encode catalogue entry: {err}")))?;
+        self.raw_table_put(
+            "catalogue",
+            &key_codec::catalogue_entry_key(entry.object_id),
+            &bytes,
+        )
+    }
+
+    fn load_catalogue_entry(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError>;
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        match self.raw_table_get("catalogue", &key_codec::catalogue_entry_key(object_id))? {
+            Some(bytes) => CatalogueEntry::decode_storage_row(object_id, &bytes)
+                .map(Some)
+                .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}"))),
+            None => Ok(None),
+        }
+    }
 
-    /// Append a commit to a branch.
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError>;
-
-    /// Delete a commit from a branch.
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError>;
-
-    /// Set or clear the branch truncation tails.
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError>;
-
-    // ================================================================
-    // Persistence ack storage
-    // ================================================================
-
-    /// Record that a commit was persisted at the given tier.
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError>;
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        let mut entries = Vec::new();
+        for (key, bytes) in
+            self.raw_table_scan_prefix("catalogue", key_codec::catalogue_entry_prefix())?
+        {
+            let Some(hex_id) = key.strip_prefix(key_codec::catalogue_entry_prefix()) else {
+                continue;
+            };
+            let bytes_id = hex::decode(hex_id).map_err(|err| {
+                StorageError::IoError(format!("invalid catalogue entry key '{key}': {err}"))
+            })?;
+            let uuid = uuid::Uuid::from_slice(&bytes_id).map_err(|err| {
+                StorageError::IoError(format!("invalid catalogue entry uuid '{key}': {err}"))
+            })?;
+            let object_id = ObjectId::from_uuid(uuid);
+            let entry = CatalogueEntry::decode_storage_row(object_id, &bytes)
+                .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}")))?;
+            entries.push(entry);
+        }
+        entries.sort_by_key(|entry| entry.object_id);
+        Ok(entries)
+    }
 
     // ================================================================
-    // Catalogue manifest storage
+    // Row-history storage
     // ================================================================
 
-    /// Append one catalogue manifest operation for an app.
-    ///
-    /// Implementations must be idempotent by operation `object_id`.
-    fn append_catalogue_manifest_op(
+    fn append_history_region_rows(
         &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError>;
+        _table: &str,
+        _rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "row-history appends are not implemented for this backend yet".to_string(),
+        ))
+    }
 
-    /// Append multiple catalogue manifest operations for an app.
-    fn append_catalogue_manifest_ops(
+    fn upsert_visible_region_rows(
         &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError>;
+        _table: &str,
+        _entries: &[VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "visible-entry upserts are not implemented for this backend yet".to_string(),
+        ))
+    }
 
-    /// Load the materialized catalogue manifest for an app.
-    fn load_catalogue_manifest(
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        _table: &str,
+        _batch_id: crate::row_histories::BatchId,
+        _state: Option<RowState>,
+        _confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "row-history patching is not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if !history_rows.is_empty() {
+            self.append_history_region_rows(table, history_rows)?;
+        }
+        if !visible_entries.is_empty() {
+            self.upsert_visible_region_rows(table, visible_entries)?;
+        }
+        if !index_mutations.is_empty() {
+            self.apply_index_mutations(index_mutations)?;
+        }
+        Ok(())
+    }
+
+    fn scan_visible_region(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError>;
+        _table: &str,
+        _branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "visible-row scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn load_visible_region_row(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "visible-row lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_visible_region_row(table, branch, row_id)?
+            .as_ref()
+            .map(QueryRowVersion::from))
+    }
+
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        let Some(entry) = self.load_visible_region_entry(table, branch, row_id)? else {
+            return Ok(None);
+        };
+
+        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+            return Ok(None);
+        };
+        if version_id == entry.current_version_id() {
+            return Ok(Some(entry.current_row));
+        }
+
+        self.load_history_row_version(table, row_id, version_id)
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_visible_region_row_for_tier(table, branch, row_id, required_tier)?
+            .as_ref()
+            .map(QueryRowVersion::from))
+    }
+
+    fn load_visible_region_entry(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<VisibleRowEntry>, StorageError> {
+        let Some(current_row) = self.load_visible_region_row(table, branch, row_id)? else {
+            return Ok(None);
+        };
+
+        let history_rows = self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .filter(|row| row.branch == branch)
+            .collect::<Vec<_>>();
+
+        Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
+    }
+
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+        Ok(self
+            .load_visible_region_entry(table, branch, row_id)?
+            .map(|entry| entry.branch_frontier))
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .find(|row| row.version_id() == version_id))
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .load_history_row_version(table, row_id, version_id)?
+            .as_ref()
+            .map(QueryRowVersion::from))
+    }
+
+    fn row_version_exists(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .any(|row| row.branch == branch && row.version_id() == version_id))
+    }
+
+    fn scan_row_branch_tip_ids(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<CommitId>, StorageError> {
+        if let Some(frontier) = self.load_visible_region_frontier(table, branch, row_id)? {
+            return Ok(frontier);
+        }
+
+        let branch_rows = self
+            .scan_history_row_versions(table, row_id)?
+            .into_iter()
+            .filter(|row| row.branch == branch)
+            .collect::<Vec<_>>();
+
+        let mut non_tips = SmolSet::<[CommitId; 2]>::new();
+        for row in &branch_rows {
+            for parent in &row.parents {
+                non_tips.insert(*parent);
+            }
+        }
+
+        let mut tips: Vec<_> = branch_rows
+            .into_iter()
+            .map(|row| row.version_id())
+            .filter(|version_id| !non_tips.contains(version_id))
+            .collect();
+        tips.sort();
+        tips.dedup();
+        Ok(tips)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        _table: &str,
+        _row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "visible-row history scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        _table: &str,
+        _row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-history row scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_history_region(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-history scans are not implemented for this backend yet".to_string(),
+        ))
+    }
 
     // ================================================================
-    // Index operations (sync)
+    // Index operations (built on ordered raw tables)
     // ================================================================
-    //
-    // These replace our entire BTreeIndex implementation.
-    // MemoryStorage uses BTreeMaps. OpfsBTreeStorage uses opfs-btree.
-    //
-    // NOTE: Branch is included in all index methods to support multi-branch
-    // scenarios (e.g., user branch vs main branch).
-    //
-    // NOTE: Methods take `Value` not raw bytes - each implementation handles
-    // encoding internally. This keeps encoding concerns inside Storage.
 
-    /// Insert an index entry.
     fn index_insert(
         &mut self,
         table: &str,
@@ -290,9 +627,12 @@ pub trait Storage {
         branch: &str,
         value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let key = key_codec::index_entry_key(table, column, branch, value, row_id)?;
+        self.raw_table_put(&raw_table, &key, &[0x01])
+    }
 
-    /// Remove an index entry.
     fn index_remove(
         &mut self,
         table: &str,
@@ -300,13 +640,78 @@ pub trait Storage {
         branch: &str,
         value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let key = match key_codec::index_entry_key(table, column, branch, value, row_id) {
+            Ok(key) => key,
+            Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        self.raw_table_delete(&raw_table, &key)
+    }
 
-    /// Lookup exact value - returns all row IDs with this value.
-    fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value)
-    -> Vec<ObjectId>;
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::Insert {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => self.index_insert(table, column, branch, value, *row_id)?,
+                IndexMutation::Remove {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => self.index_remove(table, column, branch, value, *row_id)?,
+            }
+        }
+        Ok(())
+    }
 
-    /// Range scan - returns row IDs matching the range bounds.
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        if is_double_zero(value) {
+            let mut result = HashSet::new();
+            for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
+                let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, zero) else {
+                    continue;
+                };
+                if let Ok(keys) = self.raw_table_scan_prefix_keys(&raw_table, &prefix) {
+                    for key in keys {
+                        if let Some(id) = key_codec::parse_uuid_from_index_key(&key) {
+                            result.insert(id);
+                        }
+                    }
+                }
+            }
+            return result.into_iter().collect();
+        }
+
+        let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, value) else {
+            return Vec::new();
+        };
+        self.raw_table_scan_prefix_keys(&raw_table, &prefix)
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn index_range(
         &self,
         table: &str,
@@ -314,10 +719,33 @@ pub trait Storage {
         branch: &str,
         start: Bound<&Value>,
         end: Bound<&Value>,
-    ) -> Vec<ObjectId>;
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let Some((start_key, end_key)) =
+            key_codec::index_range_scan_bounds(table, column, branch, start, end)
+        else {
+            return Vec::new();
+        };
 
-    /// Full scan - returns all row IDs in this index.
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
+        self.raw_table_scan_range_keys(&raw_table, start_key.as_deref(), end_key.as_deref())
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        self.raw_table_scan_prefix_keys(&raw_table, "")
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|key| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
@@ -333,85 +761,213 @@ pub trait Storage {
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
 impl<T: Storage + ?Sized> Storage for Box<T> {
-    fn create_object(
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        (**self).create_object(id, metadata)
+        (**self).put_metadata(id, metadata)
     }
 
-    fn load_object_metadata(
-        &self,
+    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
+        (**self).load_metadata(id)
+    }
+
+    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
+        (**self).scan_metadata()
+    }
+
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        (**self).scan_row_locators()
+    }
+
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        (**self).load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
         id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        (**self).load_object_metadata(id)
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        (**self).put_row_locator(id, locator)
     }
 
-    fn load_branch(
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        (**self).raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        (**self).raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        (**self).raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        (**self).raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        (**self).raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        (**self).raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        (**self).upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        (**self).load_branch(object_id, branch)
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        (**self).load_catalogue_entry(object_id)
     }
 
-    fn append_commit(
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        (**self).scan_catalogue_entries()
+    }
+
+    fn append_history_region_rows(
         &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
+        table: &str,
+        rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
-        (**self).append_commit(object_id, branch, commit)
+        (**self).append_history_region_rows(table, rows)
     }
 
-    fn delete_commit(
+    fn upsert_visible_region_rows(
         &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
+        table: &str,
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        (**self).delete_commit(object_id, branch, commit_id)
+        (**self).upsert_visible_region_rows(table, entries)
     }
 
-    fn set_branch_tails(
+    fn patch_row_region_rows_by_batch(
         &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        (**self).set_branch_tails(object_id, branch, tails)
+        (**self).patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
-    fn store_ack_tier(
+    fn apply_row_mutation(
         &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
-        (**self).store_ack_tier(commit_id, tier)
+        (**self).apply_row_mutation(table, history_rows, visible_entries, index_mutations)
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        (**self).append_catalogue_manifest_op(app_id, op)
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        (**self).append_catalogue_manifest_ops(app_id, ops)
-    }
-
-    fn load_catalogue_manifest(
+    fn scan_visible_region(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        (**self).load_catalogue_manifest(app_id)
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        (**self).load_visible_region_row(table, branch, row_id)
+    }
+
+    fn load_visible_query_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_visible_query_row(table, branch, row_id)
+    }
+
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        (**self).load_visible_region_row_for_tier(table, branch, row_id, required_tier)
+    }
+
+    fn load_visible_query_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_visible_query_row_for_tier(table, branch, row_id, required_tier)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        (**self).load_history_query_row_version(table, row_id, version_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_history_region(table, branch, scan)
     }
 
     fn index_insert(
@@ -434,6 +990,13 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         (**self).index_remove(table, column, branch, value, row_id)
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).apply_index_mutations(mutations)
     }
 
     fn index_lookup(
@@ -478,45 +1041,68 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
-/// Index key: (table, column, branch).
-type IndexKey = (String, String, String);
+/// Ordered raw-table rows keyed by their local storage key.
+type RawTableEntries = BTreeMap<String, Vec<u8>>;
 
-/// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
-type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
+#[derive(Debug, Clone, Default)]
+struct TableRowHistories {
+    visible: BTreeMap<SharedString, BTreeMap<ObjectId, VisibleRowEntry>>,
+    history: BTreeMap<(ObjectId, CommitId), StoredRowVersion>,
+}
+
+impl TableRowHistories {
+    fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowVersion> {
+        let mut rows: Vec<_> = self
+            .history
+            .iter()
+            .filter(|((history_row_id, _), row)| *history_row_id == row_id && row.branch == branch)
+            .map(|(_, row)| row.clone())
+            .collect();
+        rows.sort_by_key(|row| (row.updated_at, row.version_id()));
+        rows
+    }
+
+    fn rebuild_visible_entry(&mut self, branch: &str, row_id: ObjectId) {
+        let Some(current_row) = self
+            .visible
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
+            .map(|entry| entry.current_row.clone())
+        else {
+            return;
+        };
+        let branch_key = current_row.branch.clone();
+
+        let mut history_rows = self.history_rows_for(branch, row_id);
+        if !history_rows
+            .iter()
+            .any(|row| row.version_id() == current_row.version_id())
+        {
+            history_rows.push(current_row.clone());
+        }
+
+        self.visible
+            .entry(branch_key)
+            .or_default()
+            .insert(row_id, VisibleRowEntry::rebuild(current_row, &history_rows));
+    }
+}
 
 /// In-memory Storage for testing and main-thread use.
 ///
-/// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
+/// Stores objects and raw tables in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
 /// - All jazz unit tests
 /// - All jazz integration tests
 /// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
 pub struct MemoryStorage {
-    /// Object storage: object_id -> ObjectData
-    objects: HashMap<ObjectId, ObjectData>,
-
-    /// Index storage: key -> (encoded_value -> row_ids)
-    indices: HashMap<IndexKey, IndexEntries>,
-
-    /// Persistence ack tiers per commit.
-    ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
-    /// Append-only manifest ops keyed by app_id then op object_id.
-    catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
-}
-
-/// Internal object storage structure.
-#[derive(Debug, Clone, Default)]
-struct ObjectData {
-    metadata: HashMap<String, String>,
-    branches: HashMap<BranchName, BranchData>,
-}
-
-/// Internal branch storage structure.
-#[derive(Debug, Clone, Default)]
-struct BranchData {
-    commits: Vec<Commit>,
-    tails: HashSet<CommitId>,
+    /// Ordered raw-table storage.
+    raw_tables: HashMap<String, RawTableEntries>,
+    /// Decoded row locators keyed by logical row id.
+    row_locators: HashMap<ObjectId, RowLocator>,
+    /// Row-history storage keyed by table.
+    row_histories: HashMap<String, TableRowHistories>,
 }
 
 impl MemoryStorage {
@@ -628,306 +1214,501 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
-    // ================================================================
-    // Object storage
-    // ================================================================
-
-    fn create_object(
+    fn put_metadata(
         &mut self,
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.objects.insert(
-            id,
-            ObjectData {
-                metadata,
-                branches: HashMap::new(),
-            },
-        );
+        let bytes = encode_metadata(&metadata)?;
+        self.raw_tables
+            .entry(METADATA_TABLE.to_string())
+            .or_default()
+            .insert(metadata_raw_key(id), bytes);
+
+        self.put_row_locator(id, row_locator_from_metadata(&metadata).as_ref())?;
+
         Ok(())
     }
 
-    fn load_object_metadata(
-        &self,
+    fn put_row_locator(
+        &mut self,
         id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        Ok(self.objects.get(&id).map(|obj| obj.metadata.clone()))
+        locator: Option<&RowLocator>,
+    ) -> Result<(), StorageError> {
+        if let Some(locator) = locator {
+            let locator_bytes = encode_row_locator(locator)?;
+            self.raw_tables
+                .entry(ROW_LOCATOR_TABLE.to_string())
+                .or_default()
+                .insert(metadata_raw_key(id), locator_bytes);
+            self.row_locators.insert(id, locator.clone());
+        } else {
+            if let Some(rows) = self.raw_tables.get_mut(ROW_LOCATOR_TABLE) {
+                rows.remove(&metadata_raw_key(id));
+            }
+            self.row_locators.remove(&id);
+        }
+
+        Ok(())
     }
 
-    fn load_branch(
+    fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
+        Ok(self.row_locators.get(&id).cloned())
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.raw_tables
+            .entry(table.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_vec());
+        Ok(())
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        if let Some(rows) = self.raw_tables.get_mut(table) {
+            rows.remove(key);
+        }
+        Ok(())
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .raw_tables
+            .get(table)
+            .and_then(|rows| rows.get(key))
+            .cloned())
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        let Some(obj) = self.objects.get(&object_id) else {
-            return Ok(None);
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
         };
-        let Some(branch_data) = obj.branches.get(branch) else {
-            return Ok(None);
+        Ok(rows
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
         };
-        let mut commits = branch_data.commits.clone();
-        for commit in &mut commits {
-            if let Some(tiers) = self.ack_tiers.get(&commit.id()) {
-                commit.ack_state.confirmed_tiers = tiers.clone();
+        Ok(rows
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, _)| key.clone())
+            .collect())
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let start = start.map(str::to_string);
+        let end = end.map(str::to_string);
+
+        Ok(match (start.as_ref(), end.as_ref()) {
+            (Some(start), Some(end)) => rows
+                .range(start.clone()..end.clone())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (Some(start), None) => rows
+                .range(start.clone()..)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (None, Some(end)) => rows
+                .range(..end.clone())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (None, None) => rows
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let start = start.map(str::to_string);
+        let end = end.map(str::to_string);
+
+        Ok(match (start.as_ref(), end.as_ref()) {
+            (Some(start), Some(end)) => rows
+                .range(start.clone()..end.clone())
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (Some(start), None) => rows
+                .range(start.clone()..)
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (None, Some(end)) => rows
+                .range(..end.clone())
+                .map(|(key, _)| key.clone())
+                .collect(),
+            (None, None) => rows.keys().cloned().collect(),
+        })
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        let regions = self.row_histories.entry(table.to_string()).or_default();
+        for row in rows {
+            regions
+                .history
+                .insert((row.row_id, row.version_id()), row.clone());
+        }
+        Ok(())
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        entries: &[VisibleRowEntry],
+    ) -> Result<(), StorageError> {
+        let regions = self.row_histories.entry(table.to_string()).or_default();
+        for entry in entries {
+            regions
+                .visible
+                .entry(entry.current_row.branch.clone())
+                .or_default()
+                .insert(entry.current_row.row_id, entry.clone());
+        }
+        Ok(())
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        let Some(regions) = self.row_histories.get_mut(table) else {
+            return Ok(());
+        };
+
+        let mut affected_visible_rows = HashSet::new();
+        for row in regions.history.values_mut() {
+            if row.batch_id == batch_id {
+                if let Some(state) = state {
+                    row.state = state;
+                }
+                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                    (Some(existing), None) => Some(existing),
+                    (None, incoming) => incoming,
+                };
+                affected_visible_rows.insert((row.branch.clone(), row.row_id));
             }
         }
-        Ok(Some(LoadedBranch {
-            commits,
-            tails: branch_data.tails.clone(),
+
+        for branch_rows in regions.visible.values_mut() {
+            for entry in branch_rows.values_mut() {
+                let row = &mut entry.current_row;
+                if row.batch_id == batch_id {
+                    if let Some(state) = state {
+                        row.state = state;
+                    }
+                    row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                        (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                        (Some(existing), None) => Some(existing),
+                        (None, incoming) => incoming,
+                    };
+                    affected_visible_rows.insert((row.branch.clone(), row.row_id));
+                }
+            }
+        }
+
+        for (branch, row_id) in affected_visible_rows {
+            regions.rebuild_visible_entry(&branch, row_id);
+        }
+
+        Ok(())
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(regions
+            .visible
+            .get(branch)
+            .map(|rows| {
+                rows.values()
+                    .map(|entry| entry.current_row.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self.row_histories.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
+                .map(|entry| entry.current_row.clone())
         }))
     }
 
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        let obj = self.objects.entry(object_id).or_default();
-        let branch_data = obj.branches.entry(*branch).or_default();
-
-        let commit_id = commit.id();
-
-        // Remove parents from tips
-        for parent in &commit.parents {
-            branch_data.tails.remove(parent);
-        }
-
-        // Add this commit as a tip
-        branch_data.tails.insert(commit_id);
-        branch_data.commits.push(commit);
-
-        Ok(())
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.commits.retain(|c| c.id() != commit_id);
-            branch_data.tails.remove(&commit_id);
-        }
-        Ok(())
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.tails = tails.unwrap_or_default();
-        }
-        Ok(())
-    }
-
-    // ================================================================
-    // Persistence ack storage
-    // ================================================================
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.ack_tiers.entry(commit_id).or_default().insert(tier);
-        Ok(())
-    }
-
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        let object_id = op.object_id();
-        let app_ops = self.catalogue_manifest_ops.entry(app_id).or_default();
-
-        match app_ops.get(&object_id) {
-            Some(existing) if existing == &op => Ok(()),
-            Some(existing) => Err(StorageError::IoError(format!(
-                "conflicting catalogue manifest op for object {object_id}: existing={existing:?} new={op:?}"
-            ))),
-            None => {
-                app_ops.insert(object_id, op);
-                Ok(())
-            }
-        }
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        for op in ops {
-            self.append_catalogue_manifest_op(app_id, op.clone())?;
-        }
-        Ok(())
-    }
-
-    fn load_catalogue_manifest(
+    fn load_visible_query_row(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        let Some(ops) = self.catalogue_manifest_ops.get(&app_id) else {
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self.row_histories.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
+                .map(|entry| QueryRowVersion::from(&entry.current_row))
+        }))
+    }
+
+    fn load_visible_region_entry(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<VisibleRowEntry>, StorageError> {
+        Ok(self
+            .row_histories
+            .get(table)
+            .and_then(|regions| regions.visible.get(branch))
+            .and_then(|rows| rows.get(&row_id).cloned()))
+    }
+
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+        Ok(self.row_histories.get(table).and_then(|regions| {
+            regions
+                .visible
+                .get(branch)
+                .and_then(|rows| rows.get(&row_id))
+                .map(|entry| entry.branch_frontier.clone())
+        }))
+    }
+
+    fn load_visible_region_row_for_tier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(None);
+        };
+        let Some(entry) = regions
+            .visible
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
+        else {
             return Ok(None);
         };
 
-        if ops.is_empty() {
+        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
             return Ok(None);
+        };
+        if version_id == entry.current_version_id() {
+            return Ok(Some(entry.current_row.clone()));
         }
 
-        let mut manifest = CatalogueManifest::default();
-        for op in ops.values() {
-            manifest.apply(op);
-        }
-        Ok(Some(manifest))
+        Ok(regions
+            .history_rows_for(branch, row_id)
+            .into_iter()
+            .find(|row| row.version_id() == version_id))
     }
 
-    // ================================================================
-    // Index operations
-    // ================================================================
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        validate_index_value_size(table, column, branch, value)?;
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let index = self.indices.entry(key).or_default();
-        let encoded = encode_value(value);
-        index.entry(encoded).or_default().insert(row_id);
-        Ok(())
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        if matches!(
-            validate_index_value_size(table, column, branch, value),
-            Err(StorageError::IndexKeyTooLarge { .. })
-        ) {
-            return Ok(());
-        }
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        if let Some(index) = self.indices.get_mut(&key) {
-            let encoded = encode_value(value);
-            if let Some(row_ids) = index.get_mut(&encoded) {
-                row_ids.remove(&row_id);
-                if row_ids.is_empty() {
-                    index.remove(&encoded);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn index_lookup(
+    fn load_visible_query_row_for_tier(
         &self,
         table: &str,
-        column: &str,
         branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
+        row_id: ObjectId,
+        required_tier: DurabilityTier,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(None);
+        };
+        let Some(entry) = regions
+            .visible
+            .get(branch)
+            .and_then(|rows| rows.get(&row_id))
+        else {
+            return Ok(None);
         };
 
-        // IEEE 754: -0.0 == 0.0, so look up both encodings and merge.
-        if is_double_zero(value) {
-            let mut result = HashSet::new();
-            for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
-                if let Some(ids) = index.get(&encode_value(zero)) {
-                    result.extend(ids.iter().copied());
-                }
-            }
-            return result.into_iter().collect();
+        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+            return Ok(None);
+        };
+        if version_id == entry.current_version_id() {
+            return Ok(Some(QueryRowVersion::from(&entry.current_row)));
         }
 
-        let encoded = encode_value(value);
-        index
-            .get(&encoded)
-            .map(|ids| ids.iter().copied().collect())
-            .unwrap_or_default()
+        Ok(regions
+            .history_rows_for(branch, row_id)
+            .into_iter()
+            .find(|row| row.version_id() == version_id)
+            .map(|row| QueryRowVersion::from(&row)))
     }
 
-    fn index_range(
+    fn scan_visible_region_row_versions(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(Vec::new());
         };
 
-        // IEEE 754: -0.0 == 0.0 but they have distinct encodings where
-        // encoded(-0.0) < encoded(+0.0). Adjust bounds so that both zeros
-        // are treated as the same point:
-        //   Start Included(zero) → use -0.0 (widen to include the lesser encoding)
-        //   Start Excluded(zero) → use +0.0 (skip past both encodings)
-        //   End Included(zero)   → use +0.0 (widen to include the greater encoding)
-        //   End Excluded(zero)   → use -0.0 (stop before both encodings)
-        let start_bound = match start {
-            Bound::Included(v) if is_double_zero(v) => {
-                Bound::Included(encode_value(&Value::Double(-0.0)))
-            }
-            Bound::Excluded(v) if is_double_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Double(0.0)))
-            }
-            Bound::Included(v) => Bound::Included(encode_value(v)),
-            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let end_bound = match end {
-            Bound::Included(v) if is_double_zero(v) => {
-                Bound::Included(encode_value(&Value::Double(0.0)))
-            }
-            Bound::Excluded(v) if is_double_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Double(-0.0)))
-            }
-            Bound::Included(v) => Bound::Included(encode_value(v)),
-            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-
-        index
-            .range((start_bound, end_bound))
-            .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+        let mut rows: Vec<_> = regions
+            .visible
+            .values()
+            .filter_map(|branch_rows| branch_rows.get(&row_id))
+            .map(|entry| entry.current_row.clone())
+            .collect();
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(Vec::new());
         };
-        index.values().flat_map(|ids| ids.iter().copied()).collect()
+
+        let mut rows: Vec<_> = regions
+            .history
+            .iter()
+            .filter(|((history_row_id, _), _)| *history_row_id == row_id)
+            .map(|(_, row)| row.clone())
+            .collect();
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        Ok(rows)
+    }
+
+    fn load_history_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self
+            .row_histories
+            .get(table)
+            .and_then(|regions| regions.history.get(&(row_id, version_id)).cloned()))
+    }
+
+    fn load_history_query_row_version(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        Ok(self
+            .row_histories
+            .get(table)
+            .and_then(|regions| regions.history.get(&(row_id, version_id)))
+            .map(QueryRowVersion::from))
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_histories.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows: Vec<StoredRowVersion> = match scan {
+            HistoryScan::Branch => regions
+                .history
+                .iter()
+                .filter(|(_, row)| row.branch == branch)
+                .map(|(_, row)| row.clone())
+                .collect(),
+            HistoryScan::Row { row_id } => regions
+                .history
+                .iter()
+                .filter(|((history_row_id, _), row)| {
+                    row.branch == branch && *history_row_id == row_id
+                })
+                .map(|(_, row)| row.clone())
+                .collect(),
+            HistoryScan::AsOf { ts } => {
+                let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
+                for ((row_id, _), row) in &regions.history {
+                    if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
+                        continue;
+                    }
+                    match latest_per_row.get(row_id) {
+                        Some(existing)
+                            if (existing.updated_at, existing.version_id())
+                                >= (row.updated_at, row.version_id()) => {}
+                        _ => {
+                            latest_per_row.insert(*row_id, row.clone());
+                        }
+                    }
+                }
+                latest_per_row.into_values().collect()
+            }
+        };
+
+        rows.sort_by_key(|row| {
+            (
+                row.branch.clone(),
+                row.row_id,
+                row.updated_at,
+                row.version_id(),
+            )
+        });
+        Ok(rows)
     }
 }
 
@@ -1122,29 +1903,143 @@ mod tests {
     }
 
     #[test]
-    fn memory_storage_catalogue_manifest_conflict_is_rejected() {
+    fn memory_storage_catalogue_entry_upsert_overwrites_existing() {
         let mut storage = MemoryStorage::new();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
+        let object_id = ObjectId::new();
+        let initial = CatalogueEntry {
+            object_id,
+            metadata: HashMap::from([(
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"v1".to_vec(),
+        };
+        let updated = CatalogueEntry {
+            object_id,
+            metadata: HashMap::from([(
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"v2".to_vec(),
+        };
+
+        storage.upsert_catalogue_entry(&initial).unwrap();
+        storage.upsert_catalogue_entry(&updated).unwrap();
+
+        let loaded = storage.load_catalogue_entry(object_id).unwrap();
+        assert_eq!(loaded, Some(updated.clone()));
+        assert_eq!(storage.scan_catalogue_entries().unwrap(), vec![updated]);
+    }
+
+    #[test]
+    fn memory_storage_row_histories_visible_and_history_round_trip() {
+        use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+        let version = StoredRowVersion::new(
+            row_id,
+            "dev/main",
+            Vec::new(),
+            b"alice".to_vec(),
+            crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
 
         storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash: SchemaHash::from_bytes([0x44; 32]),
-                },
+            .append_history_region_rows("users", &[version.clone()])
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                &[VisibleRowEntry::rebuild(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )],
             )
             .unwrap();
 
-        let conflict = storage.append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::SchemaSeen {
-                object_id: schema_object_id,
-                schema_hash: SchemaHash::from_bytes([0x55; 32]),
-            },
+        let visible = storage.scan_visible_region("users", "dev/main").unwrap();
+        let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
+        let history = storage
+            .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
+            .unwrap();
+
+        assert_eq!(visible, vec![version.clone()]);
+        assert_eq!(history_by_row, vec![version.clone()]);
+        assert_eq!(history, vec![version]);
+    }
+
+    #[test]
+    fn memory_storage_visible_entries_track_older_tier_winners() {
+        use crate::row_histories::{RowState, StoredRowVersion, VisibleRowEntry};
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+
+        let globally_confirmed = StoredRowVersion::new(
+            row_id,
+            "dev/main",
+            Vec::new(),
+            b"v1".to_vec(),
+            crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
         );
-        assert!(matches!(conflict, Err(StorageError::IoError(_))));
+        let current_worker = StoredRowVersion::new(
+            row_id,
+            "dev/main",
+            vec![globally_confirmed.version_id()],
+            b"v2".to_vec(),
+            crate::metadata::RowProvenance {
+                created_by: "alice".to_string(),
+                created_at: 10,
+                updated_by: "alice".to_string(),
+                updated_at: 20,
+            },
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+
+        storage
+            .append_history_region_rows(
+                "users",
+                &[globally_confirmed.clone(), current_worker.clone()],
+            )
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    current_worker.clone(),
+                    &[globally_confirmed.clone(), current_worker.clone()],
+                )),
+            )
+            .unwrap();
+
+        let visible = storage
+            .load_visible_region_row("users", "dev/main", row_id)
+            .unwrap();
+        let entry = storage
+            .row_histories
+            .get("users")
+            .and_then(|regions| regions.visible.get("dev/main"))
+            .and_then(|rows| rows.get(&row_id))
+            .cloned()
+            .expect("visible entry");
+
+        assert_eq!(visible, Some(current_worker.clone()));
+        assert_eq!(entry.current_row, current_worker);
+        assert_eq!(entry.worker_version_id, None);
+        assert_eq!(entry.edge_version_id, Some(globally_confirmed.version_id()));
+        assert_eq!(
+            entry.global_version_id,
+            Some(globally_confirmed.version_id())
+        );
     }
 
     mod memory_conformance {

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::object_manager::AllObjectUpdate;
+use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
@@ -118,7 +118,9 @@ impl QueryManager {
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
-        let achieved_tiers = self.sync_manager.local_durability_tiers();
+        let query_frontier_complete = durability_tier.is_none()
+            || !self.should_send_local_subscription_upstream(propagation)
+            || !self.sync_manager.has_servers();
 
         tracing::debug!(
             sub_id = id.0,
@@ -138,7 +140,8 @@ impl QueryManager {
                 durability_tier,
                 local_updates,
                 has_pending_local_updates: false,
-                achieved_tiers,
+                pending_local_row_ids: HashSet::new(),
+                query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering,
@@ -208,7 +211,8 @@ impl QueryManager {
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
                 has_pending_local_updates: false,
-                achieved_tiers: HashSet::new(),
+                pending_local_row_ids: HashSet::new(),
+                query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering: false,
@@ -226,9 +230,10 @@ impl QueryManager {
     /// 1. Creates a local subscription (like `subscribe_with_session`)
     /// 2. Sends a QuerySubscription to all connected servers
     ///
-    /// Servers will evaluate the query against their data and send ObjectUpdated
-    /// messages for all matching objects. As new objects match the query on
-    /// the server, they are automatically synced.
+    /// Servers will evaluate the query against their data and send row-version
+    /// messages for matching rows plus legacy object updates for non-row
+    /// objects. As new objects match the query on the server, they are
+    /// automatically synced.
     ///
     /// The returned QuerySubscriptionId is used both locally and in the sync protocol.
     pub fn subscribe_with_sync(
@@ -313,23 +318,14 @@ impl QueryManager {
         Ok(sub_id)
     }
 
-    /// Add an upstream server and replay all active query subscriptions.
-    ///
-    /// This ensures subscriptions that became active before the server connection
-    /// are forwarded once the server is available.
-    pub fn add_server(&mut self, server_id: ServerId) {
-        self.add_server_with_catalogue_match(server_id, false);
-    }
-
-    /// Add an upstream server and optionally skip replaying catalogue objects
-    /// when the remote side already has the same catalogue state.
-    pub fn add_server_with_catalogue_match(
+    pub fn add_server_with_storage<H: Storage>(
         &mut self,
+        storage: &H,
         server_id: ServerId,
         skip_catalogue_sync: bool,
     ) {
         self.sync_manager
-            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
+            .add_server_with_storage(server_id, skip_catalogue_sync, storage);
         self.replay_active_query_subscriptions_to_server(server_id);
     }
 
@@ -436,26 +432,26 @@ impl QueryManager {
         std::mem::take(&mut self.pending_catalogue_updates)
     }
 
-    /// Retry processing buffered row updates.
+    /// Retry processing buffered row visibility changes.
     ///
     /// Call this after activating new schemas (via try_activate_pending_schemas)
     /// and updating the schema context (via sync_context). Rows that arrived
     /// before their schema was known will be reprocessed.
-    pub fn retry_pending_row_updates(&mut self, storage: &mut dyn Storage) {
-        let pending = std::mem::take(&mut self.pending_row_updates);
+    pub fn retry_pending_row_visibility_changes(&mut self, storage: &mut dyn Storage) {
+        let pending = std::mem::take(&mut self.pending_row_visibility_changes);
         for update in pending {
-            self.handle_object_update(storage, update);
+            self.handle_row_update(storage, update);
         }
     }
 
-    /// Take all pending row updates (used by sync_context to preserve across rebuild).
-    pub fn take_pending_row_updates(&mut self) -> Vec<AllObjectUpdate> {
-        std::mem::take(&mut self.pending_row_updates)
+    /// Take all pending row visibility changes (used by sync_context to preserve across rebuild).
+    pub fn take_pending_row_visibility_changes(&mut self) -> Vec<RowVisibilityChange> {
+        std::mem::take(&mut self.pending_row_visibility_changes)
     }
 
-    /// Restore pending row updates (used by sync_context after rebuild).
-    pub fn restore_pending_row_updates(&mut self, updates: Vec<AllObjectUpdate>) {
-        self.pending_row_updates = updates;
+    /// Restore pending row visibility changes (used by sync_context after rebuild).
+    pub fn restore_pending_row_visibility_changes(&mut self, updates: Vec<RowVisibilityChange>) {
+        self.pending_row_visibility_changes = updates;
     }
 
     /// Set known schemas for server-mode operation.
@@ -476,14 +472,24 @@ impl QueryManager {
 
     /// Find a schema in known_schemas by its short hash prefix.
     ///
-    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
+    /// Returns the full SchemaHash if found. The partial hash has the first 6 bytes
     /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
     pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
-        let target_short = &partial.0[..4];
+        let target_short = &partial.0[..6];
+
+        if &self.schema_context.current_hash.0[..6] == target_short {
+            return Some(self.schema_context.current_hash);
+        }
+
+        for &full_hash in self.schema_context.live_schemas.keys() {
+            if &full_hash.0[..6] == target_short {
+                return Some(full_hash);
+            }
+        }
 
         // Search known_schemas for matching short hash
         for full_hash in self.known_schemas.keys() {
-            if &full_hash.0[..4] == target_short {
+            if &full_hash.0[..6] == target_short {
                 return Some(*full_hash);
             }
         }
