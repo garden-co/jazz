@@ -1418,6 +1418,7 @@ impl DevServer {
             jwks_url: opts.jwks_url,
             allow_anonymous: opts.allow_anonymous.unwrap_or(false),
             allow_demo: opts.allow_demo.unwrap_or(false),
+            allow_self_signed: false,
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
         };

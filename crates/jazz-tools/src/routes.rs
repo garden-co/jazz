@@ -1665,6 +1665,7 @@ mod tests {
             admin_secret: Some("admin-secret".to_string()),
             allow_anonymous: true,
             allow_demo: true,
+            allow_self_signed: false,
             jwks_url: None,
         }
     }
@@ -1678,6 +1679,7 @@ mod tests {
             admin_secret: None,
             allow_anonymous: true,
             allow_demo: true,
+            allow_self_signed: false,
             jwks_url: None,
         };
 
@@ -1897,6 +1899,7 @@ mod tests {
                 admin_secret: Some("admin-secret".to_string()),
                 allow_anonymous: true,
                 allow_demo: true,
+                allow_self_signed: false,
                 jwks_url: None,
             })
             .with_in_memory_storage()
