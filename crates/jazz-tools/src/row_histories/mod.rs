@@ -226,6 +226,152 @@ fn visible_row_entry_descriptor() -> &'static RowDescriptor {
     })
 }
 
+fn history_row_system_columns() -> Vec<ColumnDescriptor> {
+    vec![
+        ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
+        ColumnDescriptor::new("_jazz_version_id", ColumnType::Bytea),
+        ColumnDescriptor::new("_jazz_branch", ColumnType::Text),
+        ColumnDescriptor::new(
+            "_jazz_parents",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
+        ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_updated_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
+        ColumnDescriptor::new("_jazz_state", row_state_column_type()),
+        ColumnDescriptor::new("_jazz_confirmed_tier", confirmed_tier_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_delete_kind", delete_kind_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_is_deleted", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "_jazz_metadata",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(metadata_entry_descriptor().clone()),
+                }),
+            },
+        ),
+    ]
+}
+
+fn history_row_system_values(row: &StoredRowVersion) -> Vec<Value> {
+    vec![
+        Value::Uuid(row.row_id),
+        commit_id_to_value(row.version_id),
+        Value::Text(row.branch.to_string()),
+        Value::Array(
+            row.parents
+                .iter()
+                .copied()
+                .map(commit_id_to_value)
+                .collect(),
+        ),
+        Value::Timestamp(row.updated_at),
+        Value::Text(row.created_by.to_string()),
+        Value::Timestamp(row.created_at),
+        Value::Text(row.updated_by.to_string()),
+        batch_id_to_value(row.batch_id),
+        row_state_to_value(row.state),
+        row.confirmed_tier
+            .map(durability_tier_to_value)
+            .unwrap_or(Value::Null),
+        row.delete_kind
+            .map(delete_kind_to_value)
+            .unwrap_or(Value::Null),
+        Value::Boolean(row.is_deleted),
+        metadata_to_value(&row.metadata),
+    ]
+}
+
+fn history_row_system_column_count() -> usize {
+    history_row_system_columns().len()
+}
+
+/// Build the physical row descriptor used when row-history state is stored as a
+/// single flat row: reserved Jazz columns first, followed by the table's user
+/// columns as nullable storage columns.
+pub fn history_row_physical_descriptor(user_descriptor: &RowDescriptor) -> RowDescriptor {
+    let mut columns = history_row_system_columns();
+    columns.extend(user_descriptor.columns.iter().cloned().map(|mut column| {
+        column.nullable = true;
+        column
+    }));
+    RowDescriptor::new(columns)
+}
+
+/// Encode a row-history version into a single flat physical row.
+pub fn encode_flat_history_row(
+    user_descriptor: &RowDescriptor,
+    row: &StoredRowVersion,
+) -> Result<Vec<u8>, EncodingError> {
+    let mut values = history_row_system_values(row);
+    if row.data.is_empty() {
+        values.extend(
+            user_descriptor
+                .columns
+                .iter()
+                .map(|_| Value::Null)
+                .collect::<Vec<_>>(),
+        );
+    } else {
+        values.extend(decode_row(user_descriptor, &row.data)?);
+    }
+
+    encode_row(&history_row_physical_descriptor(user_descriptor), &values)
+}
+
+/// Decode a flat physical row back into the current `StoredRowVersion` shape.
+pub fn decode_flat_history_row(
+    user_descriptor: &RowDescriptor,
+    data: &[u8],
+) -> Result<StoredRowVersion, EncodingError> {
+    let descriptor = history_row_physical_descriptor(user_descriptor);
+    let values = decode_row(&descriptor, data)?;
+    let system_count = history_row_system_column_count();
+
+    let user_values = &values[system_count..];
+    let delete_kind = delete_kind_from_value(&values[11])?;
+    let is_deleted = expect_bool(&values[12], "is_deleted")?;
+    let user_data = if delete_kind == Some(DeleteKind::Hard)
+        || (is_deleted && user_values.iter().all(Value::is_null))
+    {
+        Vec::new()
+    } else {
+        encode_row(user_descriptor, user_values)?
+    };
+
+    let parents = match &values[3] {
+        Value::Array(values) => values
+            .iter()
+            .map(commit_id_from_value)
+            .collect::<Result<SmallVec<[CommitId; 2]>, _>>()?,
+        other => {
+            return Err(malformed(format!("expected parents array, got {other:?}")));
+        }
+    };
+
+    Ok(StoredRowVersion {
+        row_id: expect_uuid(&values[0], "row_id")?,
+        version_id: commit_id_from_value(&values[1])?,
+        branch: expect_text(&values[2], "branch")?.into(),
+        parents,
+        updated_at: expect_timestamp(&values[4], "updated_at")?,
+        created_by: expect_text(&values[5], "created_by")?.into(),
+        created_at: expect_timestamp(&values[6], "created_at")?,
+        updated_by: expect_text(&values[7], "updated_by")?.into(),
+        batch_id: batch_id_from_value(&values[8])?,
+        state: row_state_from_value(&values[9])?,
+        confirmed_tier: durability_tier_from_value(&values[10])?,
+        delete_kind,
+        is_deleted,
+        data: user_data.into(),
+        metadata: metadata_from_value(&values[13])?,
+    })
+}
+
 fn row_state_to_value(state: RowState) -> Value {
     Value::Text(
         match state {
@@ -1438,6 +1584,7 @@ fn branch_frontier(history_rows: &[StoredRowVersion]) -> Vec<CommitId> {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
+    use crate::row_format::decode_row;
 
     fn visible_row(updated_at: u64, confirmed_tier: Option<DurabilityTier>) -> StoredRowVersion {
         StoredRowVersion::new(
@@ -1596,5 +1743,104 @@ mod tests {
             entry.branch_frontier,
             vec![left.version_id(), right.version_id()]
         );
+    }
+
+    fn user_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+        ])
+    }
+
+    #[test]
+    fn history_row_physical_descriptor_appends_nullable_user_columns() {
+        let descriptor = history_row_physical_descriptor(&user_descriptor());
+
+        let title = descriptor
+            .column("title")
+            .expect("physical descriptor should contain title");
+        assert!(title.nullable, "physical user columns should be nullable");
+
+        let done = descriptor
+            .column("done")
+            .expect("physical descriptor should contain done");
+        assert!(done.nullable, "physical user columns should be nullable");
+    }
+
+    #[test]
+    fn flat_history_row_binary_roundtrips_user_and_system_columns() {
+        let user_descriptor = user_descriptor();
+        let user_values = vec![Value::Text("Write docs".into()), Value::Boolean(false)];
+        let user_data = crate::row_format::encode_row(&user_descriptor, &user_values).unwrap();
+        let row = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(42)),
+            "main",
+            vec![CommitId([9; 32])],
+            user_data.clone(),
+            RowProvenance {
+                created_by: "alice".to_string(),
+                created_at: 100,
+                updated_by: "bob".to_string(),
+                updated_at: 123,
+            },
+            HashMap::from([("source".to_string(), "test".to_string())]),
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::EdgeServer),
+        );
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
+        let decoded =
+            decode_flat_history_row(&user_descriptor, &encoded).expect("decode flat history row");
+
+        assert_eq!(decoded, row);
+
+        let physical_descriptor = history_row_physical_descriptor(&user_descriptor);
+        let physical_values = decode_row(&physical_descriptor, &encoded).expect("decode values");
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("title").unwrap()],
+            Value::Text("Write docs".into())
+        );
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("done").unwrap()],
+            Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn flat_history_row_hard_delete_uses_null_user_columns() {
+        let user_descriptor = user_descriptor();
+        let deleted = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(43)),
+            "main",
+            vec![CommitId([7; 32])],
+            vec![],
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::from([(
+                crate::metadata::MetadataKey::Delete.to_string(),
+                "hard".to_string(),
+            )]),
+            RowState::VisibleDirect,
+            None,
+        );
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &deleted).expect("encode hard delete");
+        let physical_descriptor = history_row_physical_descriptor(&user_descriptor);
+        let physical_values = decode_row(&physical_descriptor, &encoded).expect("decode values");
+
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("title").unwrap()],
+            Value::Null
+        );
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("done").unwrap()],
+            Value::Null
+        );
+
+        let decoded =
+            decode_flat_history_row(&user_descriptor, &encoded).expect("decode hard delete");
+        assert_eq!(decoded.data.as_ref(), &[] as &[u8]);
+        assert!(decoded.is_hard_deleted());
     }
 }
