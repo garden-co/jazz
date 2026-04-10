@@ -38,6 +38,7 @@ import {
   type FileWriteOptions,
 } from "./file-storage.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+import type { SeedStore } from "./seed-store.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
@@ -98,6 +99,8 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** Self-signed auth via a local seed. Mutually exclusive with jwtToken. */
+  auth?: { seed: string } | { seedStore: SeedStore };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -366,6 +369,7 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private _selfSignedSeed: string | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -400,6 +404,11 @@ export class Db {
     this.config = config;
     this.wasmModule = wasmModule;
     this.authStateStore = createAuthStateStore(config);
+  }
+
+  /** @internal Store the seed used for self-signed auth (for token refresh). */
+  setSelfSignedSeed(seed: string): void {
+    this._selfSignedSeed = seed;
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -1685,17 +1694,43 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
+  if (config.auth && config.jwtToken) {
+    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  }
+
+  let resolvedConfig = { ...config };
+
+  // Self-signed auth: resolve seed and mint a JWT
+  let selfSignedSeed: string | null = null;
+  if (config.auth) {
+    const seed =
+      "seed" in config.auth ? config.auth.seed : await config.auth.seedStore.getOrCreateSeed();
+    selfSignedSeed = seed;
+
+    const wasmModule = await loadWasmModule(config.runtimeSources);
+    const jwtToken = wasmModule.WasmRuntime.mintSelfSignedToken(seed, config.appId, 3600);
+    resolvedConfig = { ...resolvedConfig, jwtToken };
+  }
+
+  resolvedConfig = resolveLocalAuthDefaults(resolvedConfig);
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
   if (driver.type === "memory" && !resolvedConfig.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
+  let db: Db;
   if (isBrowser() && driver.type === "persistent") {
-    return Db.createWithWorker(resolvedConfig);
+    db = await Db.createWithWorker(resolvedConfig);
+  } else {
+    db = await Db.create(resolvedConfig);
   }
-  return Db.create(resolvedConfig);
+
+  if (selfSignedSeed) {
+    db.setSelfSignedSeed(selfSignedSeed);
+  }
+
+  return db;
 }
 
 export function createDbFromClient(
