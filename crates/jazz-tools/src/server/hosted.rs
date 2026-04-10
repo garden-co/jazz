@@ -96,6 +96,12 @@ impl HostedServer {
                 let _ = storage.close();
             })
             .expect("flush and close server storage");
+
+        self.state
+            .external_identity_store
+            .close()
+            .await
+            .expect("close external identity store");
     }
 
     async fn wait_ready(&self) {

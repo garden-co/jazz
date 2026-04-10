@@ -17,6 +17,7 @@
 //! 2. JWT auth (if `Authorization: Bearer` present)
 //! 3. No session (anonymous)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,6 +58,8 @@ const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 /// entry is older than TTL + max_stale, the stale-if-error fallback is
 /// refused and the fetch error propagates.
 pub const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
+
+pub type ExternalIdentityMap = HashMap<(String, String), String>;
 
 // ============================================================================
 // Auth Configuration
@@ -402,8 +405,13 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
 
         match jwt_result {
             Ok(verified) => {
-                let session = resolve_verified_jwt_session(state.app_id, verified)
-                    .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
+                let external_identities = state.external_identities.read().await;
+                let session = resolve_verified_jwt_session(
+                    state.app_id,
+                    verified,
+                    Some(&external_identities),
+                )
+                .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
                 Ok(JwtAuth(Some(session)))
             }
             Err(JwtError::NoKeyConfigured) => Err((
@@ -477,10 +485,12 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
         parts: &mut Parts,
         state: &Arc<ServerState>,
     ) -> Result<Self, Self::Rejection> {
+        let external_identities = state.external_identities.read().await;
         let session = extract_session(
             &parts.headers,
             state.app_id,
             &state.auth_config,
+            Some(&external_identities),
             state.jwks_cache.as_deref(),
         )
         .await
@@ -659,10 +669,11 @@ pub async fn validate_jwt_with_cache(
     }
 }
 
-/// Resolve a session from validated JWT identity.
+/// Resolve a session from validated JWT identity + optional external mappings.
 pub fn resolve_verified_jwt_session(
     app_id: AppId,
     verified: VerifiedJwt,
+    external_identities: Option<&ExternalIdentityMap>,
 ) -> Result<Session, UnauthenticatedResponse> {
     let subject = verified.subject.trim();
     if subject.is_empty() {
@@ -680,8 +691,25 @@ pub fn resolve_verified_jwt_session(
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
+    let mapped_principal = match (issuer, external_identities) {
+        (Some(iss), Some(mappings)) => mappings
+            .get(&(iss.to_string(), subject.to_string()))
+            .cloned(),
+        _ => None,
+    };
+
+    if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
+        && claim != mapped
+    {
+        return Err(UnauthenticatedResponse::invalid(
+            "External identity mapping conflict",
+        ));
+    }
+
     let principal_id = if let Some(claim) = principal_claim {
         claim.to_string()
+    } else if let Some(mapped) = mapped_principal {
+        mapped
     } else if let Some(iss) = issuer {
         derive_external_principal_id(app_id, iss, subject)
     } else {
@@ -770,6 +798,7 @@ pub async fn extract_session(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
+    external_identities: Option<&ExternalIdentityMap>,
     jwks_cache: Option<&JwksCache>,
 ) -> Result<Option<Session>, UnauthenticatedResponse> {
     // Priority 1: Backend impersonation
@@ -842,7 +871,7 @@ pub async fn extract_session(
 
         match jwt_result {
             Ok(verified) => {
-                let session = resolve_verified_jwt_session(app_id, verified)?;
+                let session = resolve_verified_jwt_session(app_id, verified, external_identities)?;
                 return Ok(Some(session));
             }
             Err(JwtError::NoKeyConfigured) => {
@@ -1078,7 +1107,7 @@ mod tests {
         );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -1097,7 +1126,7 @@ mod tests {
         headers.insert("X-Jazz-Backend-Secret", "wrong-secret".parse().unwrap());
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
@@ -1120,11 +1149,81 @@ mod tests {
 
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, Some(&cache))
+        let result = extract_session(&headers, test_app_id(), &config, None, Some(&cache))
             .await
             .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().user_id, "jwt-user");
+    }
+
+    #[tokio::test]
+    async fn test_extract_session_jwt_uses_external_mapping_fallback() {
+        let config = make_test_config();
+        let cache = test_jwks_cache();
+        let mut headers = HeaderMap::new();
+        let mut mappings = ExternalIdentityMap::new();
+        mappings.insert(
+            ("https://issuer.example".to_string(), "jwt-user".to_string()),
+            "local:mapped-principal".to_string(),
+        );
+
+        let claims = JwtClaims {
+            sub: "jwt-user".to_string(),
+            iss: Some("https://issuer.example".to_string()),
+            jazz_principal_id: None,
+            claims: serde_json::json!({}),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
+
+        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+
+        let result = extract_session(
+            &headers,
+            test_app_id(),
+            &config,
+            Some(&mappings),
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().user_id, "local:mapped-principal");
+    }
+
+    #[tokio::test]
+    async fn test_extract_session_jwt_claim_conflict_with_mapping_is_rejected() {
+        let config = make_test_config();
+        let cache = test_jwks_cache();
+        let mut headers = HeaderMap::new();
+        let mut mappings = ExternalIdentityMap::new();
+        mappings.insert(
+            ("https://issuer.example".to_string(), "jwt-user".to_string()),
+            "local:mapped-principal".to_string(),
+        );
+
+        let claims = JwtClaims {
+            sub: "jwt-user".to_string(),
+            iss: Some("https://issuer.example".to_string()),
+            jazz_principal_id: Some("different-principal".to_string()),
+            claims: serde_json::json!({}),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
+        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+
+        let result = extract_session(
+            &headers,
+            test_app_id(),
+            &config,
+            Some(&mappings),
+            Some(&cache),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
 
     #[tokio::test]
@@ -1154,7 +1253,7 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -1166,7 +1265,7 @@ mod tests {
         let config = make_test_config();
         let headers = HeaderMap::new();
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1209,7 +1308,7 @@ mod tests {
         headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None)
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
             .await
             .unwrap();
         let session = result.unwrap();
@@ -1224,7 +1323,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
@@ -1238,7 +1337,7 @@ mod tests {
         headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, UnauthenticatedCode::Disabled);
@@ -1254,7 +1353,7 @@ mod tests {
         headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-2".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, UnauthenticatedCode::Disabled);
@@ -1289,7 +1388,7 @@ mod tests {
         let config = make_self_signed_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let session = extract_session(&headers, app_id, &config, None)
+        let session = extract_session(&headers, app_id, &config, None, None)
             .await
             .unwrap()
             .unwrap();
@@ -1302,7 +1401,7 @@ mod tests {
         let config = make_self_signed_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
     }
 
@@ -1315,7 +1414,7 @@ mod tests {
         config.allow_self_signed = false;
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let result = extract_session(&headers, app_id, &config, None).await;
+        let result = extract_session(&headers, app_id, &config, None, None).await;
         assert!(result.is_err());
     }
 
@@ -1334,7 +1433,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         // Should fail because no JWKS configured in self_signed_config
-        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
     }
 }

@@ -14,6 +14,11 @@ export {
 } from "./provider.js";
 export { useAll } from "./use-all.js";
 export {
+  useLinkExternalIdentity,
+  type LinkExternalIdentityInput,
+  type UseLinkExternalIdentityOptions,
+} from "./use-link-external-identity.js";
+export {
   SyntheticUserSwitcher,
   type SyntheticUserSwitcherProps,
 } from "./synthetic-user-switcher.js";

@@ -37,6 +37,14 @@ struct CreateAppResponse {
     app_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct LinkExternalResponse {
+    principal_id: String,
+    issuer: String,
+    subject: String,
+    created: bool,
+}
+
 #[derive(Clone)]
 struct JwksState {
     hits: Arc<AtomicUsize>,
@@ -255,6 +263,26 @@ impl TestServer {
             .send()
             .await
             .expect("sync request")
+    }
+
+    async fn link_external(
+        &self,
+        app_id: &str,
+        bearer_token: &str,
+        local_mode: &str,
+        local_token: &str,
+    ) -> reqwest::Response {
+        self.client
+            .post(format!(
+                "{}/apps/{app_id}/auth/link-external",
+                self.base_url()
+            ))
+            .header("Authorization", format!("Bearer {bearer_token}"))
+            .header("X-Jazz-Local-Mode", local_mode)
+            .header("X-Jazz-Local-Token", local_token)
+            .send()
+            .await
+            .expect("link external request")
     }
 
     async fn sync_with_backend_session(
@@ -646,4 +674,46 @@ async fn local_mode_flags_are_enforced_per_app() {
         .await;
     assert_ne!(demo.status(), StatusCode::FORBIDDEN);
     assert_ne!(demo.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn link_external_is_idempotent_and_conflicts_on_relink_to_other_principal() {
+    let _guard = auth_jwks_test_guard();
+    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-link", "secret-link")]).await;
+    let server = TestServer::start().await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+
+    let bearer = make_jwt_with_options(
+        "external-user-1",
+        "kid-link",
+        "secret-link",
+        Some("https://issuer.link.test"),
+        None,
+    );
+
+    let first = server
+        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = first.text().await.expect("first link body");
+    let first_link: LinkExternalResponse =
+        serde_json::from_str(&first_body).expect("first link response");
+    assert!(first_link.created);
+    assert_eq!(first_link.issuer, "https://issuer.link.test");
+    assert_eq!(first_link.subject, "external-user-1");
+
+    let second = server
+        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
+        .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = second.text().await.expect("second link body");
+    let second_link: LinkExternalResponse =
+        serde_json::from_str(&second_body).expect("second link response");
+    assert!(!second_link.created);
+    assert_eq!(first_link.principal_id, second_link.principal_id);
+
+    let conflict = server
+        .link_external(&app.app_id, &bearer, "anonymous", "device-token-b")
+        .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 }

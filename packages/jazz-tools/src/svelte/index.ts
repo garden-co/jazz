@@ -8,6 +8,11 @@ export { getDb, getSession, getJazzContext, type JazzContext } from "./context.s
 export { QuerySubscription } from "./use-all.svelte.js";
 export { default as SyntheticUserSwitcher } from "./SyntheticUserSwitcher.svelte";
 export {
+  useLinkExternalIdentity,
+  type LinkExternalIdentityInput,
+  type UseLinkExternalIdentityOptions,
+} from "./use-link-external-identity.js";
+export {
   createSyntheticUserProfile,
   getActiveSyntheticAuth,
   loadSyntheticUserStore,

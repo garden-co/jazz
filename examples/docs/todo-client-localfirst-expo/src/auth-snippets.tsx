@@ -1,4 +1,10 @@
-import { getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react-native";
+import { useState } from "react";
+import { Pressable, Text, View } from "react-native";
+import {
+  getActiveSyntheticAuth,
+  JazzProvider,
+  useLinkExternalIdentity,
+} from "jazz-tools/react-native";
 
 function TodoApp() {
   return null;
@@ -54,6 +60,51 @@ export function DemoAuthExpoApp() {
   );
 }
 // #endregion auth-demo-expo
+
+// #region auth-external-expo
+const appId = "my-app";
+const jazzServerUrl = "http://127.0.0.1:4200";
+const providerJwt = "<provider-jwt>";
+
+export function ExternalAuthExpoApp() {
+  const [hasJwt, setHasJwt] = useState(false);
+  const linkExternalIdentity = useLinkExternalIdentity({
+    appId,
+    serverUrl: jazzServerUrl,
+    defaultMode: "anonymous",
+  });
+
+  async function onSignedIn() {
+    await linkExternalIdentity({ jwtToken: providerJwt });
+    setHasJwt(true);
+  }
+
+  return (
+    <JazzProvider
+      key={hasJwt ? "jwt" : "local"}
+      config={
+        hasJwt
+          ? {
+              appId,
+              serverUrl: jazzServerUrl,
+              jwtToken: providerJwt,
+            }
+          : {
+              appId,
+              serverUrl: jazzServerUrl,
+            }
+      }
+    >
+      <View>
+        <Pressable onPress={() => void onSignedIn()}>
+          <Text>Sign in</Text>
+        </Pressable>
+        <TodoApp />
+      </View>
+    </JazzProvider>
+  );
+}
+// #endregion auth-external-expo
 
 // #region auth-offline-expo
 export function OfflineOnlyAuthExpoApp() {

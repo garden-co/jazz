@@ -1,5 +1,7 @@
 export {
   JazzClient,
+  type LinkExternalIdentityOptions,
+  type LinkExternalIdentityResult,
   type LocalUpdatesMode,
   SessionClient,
   loadWasmModule,
@@ -16,6 +18,7 @@ export {
   type WasmModule,
 } from "./client.js";
 export type { AppContext, LocalAuthMode, RuntimeSourcesConfig, Session } from "./context.js";
+export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
 export {
   createDb,
   Db,
