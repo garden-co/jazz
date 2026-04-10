@@ -3,7 +3,6 @@ import {
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
-  publishStoredMigration,
 } from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
 
