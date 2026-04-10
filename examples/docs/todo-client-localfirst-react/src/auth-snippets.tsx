@@ -1,10 +1,4 @@
-import { useState } from "react";
-import {
-  getActiveSyntheticAuth,
-  JazzProvider,
-  SyntheticUserSwitcher,
-  useLinkExternalIdentity,
-} from "jazz-tools/react";
+import { getActiveSyntheticAuth, JazzProvider, SyntheticUserSwitcher } from "jazz-tools/react";
 
 function TodoApp() {
   return null;
@@ -64,47 +58,6 @@ export function DemoAuthApp() {
   );
 }
 // #endregion auth-demo-react
-
-// #region auth-external-react
-const appId = "my-app";
-const jazzServerUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-
-export function ExternalAuthApp() {
-  const [hasJwt, setHasJwt] = useState(false);
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
-  async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    setHasJwt(true);
-  }
-
-  return (
-    <JazzProvider
-      key={hasJwt ? "jwt" : "local"}
-      config={
-        hasJwt
-          ? {
-              appId,
-              serverUrl: jazzServerUrl,
-              jwtToken: providerJwt,
-            }
-          : {
-              appId,
-              serverUrl: jazzServerUrl,
-            }
-      }
-    >
-      <button onClick={() => onSignedIn()}>Sign in</button>
-      <TodoApp />
-    </JazzProvider>
-  );
-}
-// #endregion auth-external-react
 
 // #region auth-jwt-react
 export function JwtAuthApp() {
