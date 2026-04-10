@@ -1,18 +1,17 @@
 # App Surface — Status Quo
 
-Today, the important idea is simpler:
+Most Jazz users meet the system through two files:
 
-- developers write `schema.ts`
-- `schema.ts` exports a typed `app`
-- that `app` object is both the typed query surface for application code and the source of runtime schema metadata
+- `schema.ts`
+- application code that calls `createDb(...)`
 
-See also [Schema Files](schema_files.md) for the current validation and migration workflow.
+That is intentional. The runtime is doing a lot underneath, but the app-facing surface is meant to feel like ordinary table-first application code.
 
-## Current Mental Model
+## The Basic Shape
 
-Typical shape:
+You define tables:
 
-```typescript
+```ts
 import { schema as s } from "jazz-tools";
 
 const schema = {
@@ -30,89 +29,107 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-`defineApp(...)` builds an object with:
+From that one definition you get:
 
-- one typed table handle per table, like `app.todos`
-- a `wasmSchema` payload used by the runtime
+- typed table handles such as `app.todos`
+- typed row/input helpers such as `RowOf`, `InsertOf`, and `WhereOf`
+- runtime schema metadata used by the engine
 
-> [schema.ts](/Users/nicolasr/Desktop/Jazz/jazz2/examples/docs/todo-client-localfirst-react/schema.ts#L2)
-> [typed-app.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/typed-app.ts#L1116)
+## What `app.todos` Really Is
 
-## What Developers Use
+Each table handle is a typed query builder plus a table identity.
 
-Application code usually works with the exported `app` directly.
+That is why application code can write:
 
-- `app.todos` is a typed table/query handle
-- `s.RowOf<typeof app.todos>` gives the row type
-- `s.InsertOf<typeof app.todos>` gives the insert shape
-- `s.WhereOf<typeof app.todos>` gives the `where(...)` input shape
-
-Example:
-
-```typescript
-import { app, type Todo } from "../schema.js";
-
-const query = app.todos.where({ done: false }).orderBy("title");
+```ts
+app.todos.where({ done: false }).orderBy("title").limit(10)
 ```
 
-> [typed-app.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/typed-app.ts#L1043)
-> [typed-app.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/typed-app.ts#L1053)
+and also:
 
-## Query Surface
+```ts
+db.insert(app.todos, { title: "Ship docs", done: false });
+```
 
-The typed table handles are query builders. The core methods are:
+The table handle is the shared entry point for reads, writes, and subscriptions.
+
+## The Normal App Workflow
+
+```ts
+const db = await createDb(config);
+
+const todos = await db.all(app.todos.where({ done: false }));
+
+const unsubscribe = db.subscribeAll(app.todos, ({ all }) => {
+  console.log(all);
+});
+
+await db.insert(app.todos, { title: "Ship docs", done: false });
+```
+
+That is the friendly promise of the stack:
+
+- you think in tables and rows
+- the runtime handles row histories, visibility, sync, and persistence underneath
+
+## Query Builder Surface
+
+The typed query builders expose the table-first operations most application code cares about:
 
 - `where(...)`
 - `select(...)`
 - `include(...)`
-- `requireIncludes()`
 - `orderBy(...)`
 - `limit(...)`
 - `offset(...)`
-- `hopTo(...)`
-- `gather(...)`
+- relation traversal helpers such as `hopTo(...)` and `gather(...)`
 
-These builders are immutable and serialize into the runtime query format through `._build()`.
+These builders are immutable. Each call returns a new query shape that `Db` can translate into the runtime query representation.
 
-> [typed-app.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/typed-app.ts#L731)
+## Runtime Surface
 
-## Runtime Integration
+The current `Db` API centers around a small set of predictable operations:
 
-The runtime revolves around `createDb(...)` and `Db`.
+- `all(...)`
+- `one(...)`
+- `insert(...)`
+- `update(...)`
+- `delete(...)`
+- `subscribeAll(...)`
 
-The key integration point is that `Db` methods accept the typed table/query handles exported from `schema.ts`:
+There are also durable variants for callers that want to wait for a specific durability tier instead of stopping at local application.
 
-- `db.all(app.todos.where(...))`
-- `db.one(app.todos.where(...))`
-- `db.insert(app.todos, data)`
-- `db.update(app.todos, id, data)`
-- `db.delete(app.todos, id)`
-- `db.subscribeAll(app.todos, callback)`
+## What App Code Does *Not* Need to Care About
 
-> [main.ts](/Users/nicolasr/Desktop/Jazz/jazz2/examples/docs/todo-client-localfirst-ts/src/main.ts#L1)
-> [db.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/runtime/db.ts#L1141)
-> [db.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/runtime/db.ts#L1244)
+The runtime still tracks engine-owned row information such as:
+
+- row ids
+- version ids
+- branches
+- visibility state
+- durability tiers
+
+But those fields are not the normal surface application authors work with. The app-facing API stays table-first, while the runtime uses those engine fields to make local-first behavior reliable.
 
 ## Framework Bindings
 
-There are first-party framework wrappers on top of the same runtime surface:
+React, Vue, and Svelte adapters sit on top of the same `Db` and `app` surface.
 
-- React: `JazzProvider`, `useDb`, `useAll`, `useAllSuspense`
-- Vue: `JazzProvider`, `useDb`, `useAll`
-- Svelte: `useAll` helpers over the same query API
+They mainly add:
 
-These do not change the core model. They consume the same `app` query handles and `Db` behavior.
+- context/provider setup
+- hook/store integration
+- lifecycle-aware subscription management
 
-> [react/index.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/react/index.ts)
-> [vue/index.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/vue/index.ts)
-> [svelte/use-all.svelte.ts](/Users/nicolasr/Desktop/Jazz/jazz2/packages/jazz-tools/src/svelte/use-all.svelte.ts)
+The data model does not change between frameworks.
 
 ## Key Files
 
-| File                                                   | Purpose                                   |
-| ------------------------------------------------------ | ----------------------------------------- |
-| `packages/jazz-tools/src/typed-app.ts`                 | Typed schema and `app` definitions        |
-| `packages/jazz-tools/src/runtime/db.ts`                | Query, mutation, and subscription runtime |
-| `packages/jazz-tools/src/index.ts`                     | Public `schema` namespace and exports     |
-| `examples/docs/todo-client-localfirst-react/schema.ts` | Current `defineApp(...)` example          |
-| `examples/docs/todo-client-localfirst-ts/src/main.ts`  | Current `createDb(...)` + `app` usage     |
+| File | Purpose |
+| --- | --- |
+| `packages/jazz-tools/src/typed-app.ts` | Typed app/table/query builder surface |
+| `packages/jazz-tools/src/runtime/db.ts` | App-facing runtime API |
+| `packages/jazz-tools/src/index.ts` | Main TypeScript export surface |
+| `packages/jazz-tools/src/react/` | React bindings |
+| `packages/jazz-tools/src/vue/` | Vue bindings |
+| `packages/jazz-tools/src/svelte/` | Svelte bindings |
