@@ -25,7 +25,7 @@ await pushSchemaCatalogue({
   serverUrl: server.url,
   appId: APP_ID,
   adminSecret: server.adminSecret,
-  schemaDir: join(import.meta.dirname ?? __dirname, "../schema"),
+  schemaDir: join(import.meta.dirname ?? __dirname, "../"),
 });
 
 console.log(`Schema catalogue pushed to ${server.url} for app ${server.appId}`);

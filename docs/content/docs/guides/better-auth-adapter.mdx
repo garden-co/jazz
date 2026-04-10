@@ -61,13 +61,48 @@ npx @better-auth/cli@latest generate \
 
 # Validate the generated schema source
 npx jazz-tools@alpha validate --schema-dir ./schema-better-auth
+```
 
-# In development, connecting the app to a local Jazz server auto-publishes
-# the structural schema hash. For an existing deployed schema, create and
-# publish the migration edge instead:
+The generated `schema.ts` includes a `permissions` export that denies all operations on the better-auth tables by default. This prevents any regular Jazz client session from reading or writing better-auth data. The adapter uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely, so better-auth itself is unaffected.
+
+### Publishing to a sync server
+
+If you connect your auth context to a sync server (`serverUrl`), you must publish the schema and permissions to that server before the app can start.
+
+```bash
+# Publish the structural schema
+npx jazz-tools@alpha schema push \
+  --schema-dir ./schema-better-auth \
+  --server-url $JAZZ_SERVER_URL \
+  --admin-secret $JAZZ_ADMIN_SECRET
+
+# Publish the deny-all permissions
+npx jazz-tools@alpha permissions push \
+  --schema-dir ./schema-better-auth \
+  --server-url $JAZZ_SERVER_URL \
+  --admin-secret $JAZZ_ADMIN_SECRET
+```
+
+You can check the currently deployed permissions head at any time:
+
+```bash
+npx jazz-tools@alpha permissions status \
+  --schema-dir ./schema-better-auth \
+  --server-url $JAZZ_SERVER_URL \
+  --admin-secret $JAZZ_ADMIN_SECRET
+```
+
+After the initial push, schema changes require a migration edge:
+
+```bash
 npx jazz-tools@alpha migrations create <fromHash> <toHash>
 npx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```
+
+<Callout title="No push needed for local-only setups">
+  If your auth context uses a local persistence driver with no `serverUrl`, the schema and
+  permissions are applied in-process at startup — no CLI push commands are required.
+</Callout>
 
 ## Compatibility
 
