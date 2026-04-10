@@ -5,6 +5,7 @@ import {
   Account,
   AnonymousJazzAgent,
   AuthSecretStorage,
+  CoValueLoadingState,
   Credentials,
   ID,
   InMemoryKVStore,
@@ -16,6 +17,7 @@ import {
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
   MockSessionProvider,
+  z,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
 import {
@@ -143,6 +145,47 @@ describe("createContext methods", () => {
         coValueClassFromCoValueClassOrSchema(CustomAccount),
       );
     });
+
+    test("rejects when the migration throws synchronously", async () => {
+      const CustomAccount = co.account().withMigration(() => {
+        throw new Error("migration failed");
+      });
+
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const credentials: Credentials = {
+        accountID: account.$jazz.id,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      };
+
+      await expect(
+        createJazzContextFromExistingCredentials({
+          credentials,
+          peers: [getPeerConnectedToTestSyncServer()],
+          crypto: Crypto,
+          AccountSchema: CustomAccount,
+          sessionProvider: randomSessionProvider,
+          asActiveAccount: true,
+        }),
+      ).rejects.toThrow("migration failed");
+    }, 2000);
+
+    test("load() settles as unavailable when a discriminated union has no matching variant", async () => {
+      const TypeA = co.map({ type: z.literal("a"), data: z.string() });
+      const TypeB = co.map({ type: z.literal("b"), data: z.string() });
+
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+      const typeAValue = TypeA.create({ type: "a", data: "hello" }, account);
+
+      const UnionBOnly = co.discriminatedUnion("type", [TypeB]);
+      const loaded = await UnionBOnly.load(typeAValue.$jazz.id);
+
+      expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+    }, 2000);
 
     test("calls onLogOut callback when logging out", async () => {
       const account = await createJazzTestAccount({
