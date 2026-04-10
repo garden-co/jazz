@@ -178,12 +178,29 @@ export class CoValueCoreSubscription {
   private subscribe(value: CoValueCore): void {
     if (this.unsubscribed) return;
 
-    // Subscribe to the value and store the unsubscribe function
+    // Track whether we're still in the synchronous call to value.subscribe().
+    // Callbacks fired synchronously (value already in cache) should let errors
+    // propagate naturally so callers like load() and subscribe() can surface them.
+    // Callbacks fired asynchronously (value arriving from peers) run inside
+    // cojson's internal update loop, which swallows thrown errors — so we must
+    // catch them ourselves and emit UNAVAILABLE instead, or the promise hangs.
+    let syncCallback = true;
+
     this._unsubscribe = value.subscribe((value) => {
       if (value.isAvailable()) {
-        this.emit(value);
+        if (syncCallback) {
+          this.emit(value);
+        } else {
+          try {
+            this.emit(value);
+          } catch {
+            this.emit(CoValueLoadingState.UNAVAILABLE);
+          }
+        }
       }
     });
+
+    syncCallback = false;
 
     if (!value.isAvailable()) {
       this.load(value);
