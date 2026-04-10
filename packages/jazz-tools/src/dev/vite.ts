@@ -14,6 +14,7 @@ export interface JazzServerOptions {
   appId?: string;
   allowAnonymous?: boolean;
   allowDemo?: boolean;
+  allowSelfSigned?: boolean;
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
@@ -116,6 +117,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
           adminSecret,
           allowAnonymous: serverConfig.allowAnonymous,
           allowDemo: serverConfig.allowDemo,
+          allowSelfSigned: serverConfig.allowSelfSigned,
           dataDir: serverConfig.dataDir,
           inMemory: serverConfig.inMemory,
           jwksUrl: serverConfig.jwksUrl,

@@ -156,7 +156,7 @@ async fn main() {
                 jwks_url,
                 allow_anonymous,
                 allow_demo,
-                allow_self_signed: false,
+                allow_self_signed: true,
                 backend_secret,
                 admin_secret,
             };

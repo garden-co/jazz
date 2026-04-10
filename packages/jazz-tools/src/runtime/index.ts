@@ -65,5 +65,5 @@ export {
   type SubscriptionDelta,
 } from "./subscription-manager.js";
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
-export { generateSeed, LocalStorageSeedStore } from "./seed-store.js";
-export type { SeedStore } from "./seed-store.js";
+export { generateAuthSecret, LocalStorageAuthSecretStore } from "./auth-secret-store.js";
+export type { AuthSecretStore } from "./auth-secret-store.js";

@@ -3,7 +3,6 @@ import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
-import { verifySelfSignedToken } from "jazz-napi";
 import { APP_ORIGIN } from "../../constants";
 
 const authMemoryDb: MemoryDB = {
@@ -35,6 +34,11 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
 
         let provedUserId: string;
         try {
+          const { verifySelfSignedToken } = await import(
+            /* turbopackIgnore: true */
+            /* webpackIgnore: true */
+            "jazz-napi"
+          );
           provedUserId = verifySelfSignedToken(proofToken, "betterauth-signup");
         } catch {
           throw new APIError("UNAUTHORIZED", {
@@ -54,7 +58,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
       user: {
         create: {
           before: async (user: any, ctx: any) => {
-            const provedUserId = ctx?.context?.body?.provedUserId;
+            const provedUserId = ctx?.body?.provedUserId;
             if (provedUserId) {
               return { data: { ...user, id: provedUserId } };
             }

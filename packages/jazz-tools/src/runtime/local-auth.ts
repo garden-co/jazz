@@ -1,5 +1,4 @@
 import type { LocalAuthMode } from "./context.js";
-import type { SeedStore } from "./seed-store.js";
 
 const LOCAL_AUTH_TOKEN_STORAGE_PREFIX = "jazz-tools:local-auth-token:";
 
@@ -10,7 +9,7 @@ export interface LocalAuthStorageLike {
 
 type LocalAuthDefaultsInput = {
   appId: string;
-  auth?: { seed: string } | { seedStore: SeedStore };
+  auth?: { seed: string };
   jwtToken?: string;
   backendSecret?: string;
   localAuthMode?: LocalAuthMode;
