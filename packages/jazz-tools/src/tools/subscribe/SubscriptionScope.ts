@@ -174,36 +174,33 @@ export class SubscriptionScope<D extends CoValue> {
           }
 
           this.migrating = true;
-          let instance: CoValue;
+          let instantiating = true;
           try {
-            instance = instantiateRefEncodedFromRaw(this.schema, value);
-          } catch (error) {
-            // A discriminated union whose stored value doesn't match any
-            // declared variant would otherwise hang load() — the throw
-            // escapes into cojson's async update loop and nothing settles.
-            // Treat it as unavailable so load() resolves. Other
-            // instantiation errors (e.g. CoVector dimension mismatch) keep
-            // throwing loudly, as they indicate schema drift that callers
-            // should surface.
-            if (!(error instanceof SchemaUnionNoMatchingVariantError)) {
-              throw error;
-            }
-            this.migrationFailed = true;
-            this.migrated = true;
-            console.error(
-              `Schema instantiation failed for ${this.id}: ${error.message}`,
-            );
-            this.handleUpdate(CoValueLoadingState.UNAVAILABLE);
-            return;
-          }
-          try {
+            const instance = instantiateRefEncodedFromRaw(this.schema, value);
+            instantiating = false;
             applyCoValueMigrations(instance);
           } catch (error) {
+            // Instantiation errors other than a discriminated-union
+            // mismatch keep throwing — they indicate schema drift that
+            // callers should surface (e.g. CoVector dimension mismatch).
+            // Migration errors and discriminated-union mismatches are
+            // treated as unavailable so load() resolves instead of
+            // hanging.
+            if (
+              instantiating &&
+              !(error instanceof SchemaUnionNoMatchingVariantError)
+            ) {
+              throw error;
+            }
             const reason =
               error instanceof Error ? error.message : String(error);
             this.migrationFailed = true;
             this.migrated = true;
-            console.error(`Migration failed for ${this.id}: ${reason}`);
+            console.error(
+              instantiating
+                ? `Schema instantiation failed for ${this.id}: ${reason}`
+                : `Migration failed for ${this.id}: ${reason}`,
+            );
             this.handleUpdate(CoValueLoadingState.UNAVAILABLE);
             return;
           }

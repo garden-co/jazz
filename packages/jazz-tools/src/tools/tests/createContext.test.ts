@@ -5,7 +5,6 @@ import {
   Account,
   AnonymousJazzAgent,
   AuthSecretStorage,
-  CoValueLoadingState,
   Credentials,
   ID,
   InMemoryKVStore,
@@ -172,7 +171,7 @@ describe("createContext methods", () => {
       ).rejects.toThrow("migration failed");
     }, 2000);
 
-    test("load() settles as unavailable when a discriminated union has no matching variant", async () => {
+    test("does not hang when an account migration loads a discriminated union with no matching variant", async () => {
       const TypeA = co.map({ type: z.literal("a"), data: z.string() });
       const TypeB = co.map({ type: z.literal("b"), data: z.string() });
 
@@ -181,10 +180,32 @@ describe("createContext methods", () => {
       });
       const typeAValue = TypeA.create({ type: "a", data: "hello" }, account);
 
+      // Schema only knows TypeB, so loading a TypeA value through it used
+      // to throw from the async subscription callback and leave load()
+      // unsettled, hanging the account migration and createContext with it.
       const UnionBOnly = co.discriminatedUnion("type", [TypeB]);
-      const loaded = await UnionBOnly.load(typeAValue.$jazz.id);
 
-      expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+      const AccountSchema = co
+        .account()
+        .withMigration(async (loadedAccount) => {
+          await UnionBOnly.load(typeAValue.$jazz.id, {
+            loadAs: loadedAccount,
+          });
+        });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials: {
+          accountID: account.$jazz.id,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        },
+        peers: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        AccountSchema,
+        sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
+      });
+      expect(context.account).toBeDefined();
+      context.done();
     }, 2000);
 
     test("calls onLogOut callback when logging out", async () => {
