@@ -603,4 +603,84 @@ describe("signature mismatch recovery", () => {
     // Session2's edits (assignee from alice2) should also be preserved
     expect(recovered.get("assignee")).toBe("carol");
   }, 15000);
+
+  test.fails(
+    "deleted task recovery stays tombstone-only for charlie and future sync",
+    async () => {
+      /**
+       * KNOWN DESIGN GAP: deleted recovery may serialize historical
+       * non-delete sessions to fresh peers instead of tombstone-only state.
+       *
+       * Alice crashes after the delete reached the server but not her disk.
+       * After recovery, a fresh loader (charlie) should see only the tombstone.
+       *
+       * Topology
+       *   Alice --------> Jazz Cloud
+       *                       |
+       *               (after recovery)
+       *                       |
+       *                   Charlie (fresh load)
+       *
+       * Before reconnect
+       *   Alice disk   : title (no delete)
+       *   Jazz Cloud   : title, delete-session
+       *
+       * Expected after recovery
+       *   Alice: isDeleted === true
+       *   Charlie: isDeleted === true (tombstone only, no historical content)
+       */
+      const { alice, aliceStorage } = setupRecoveryActors();
+
+      const { mapId, map } = await createSharedTaskMap(alice, {
+        title: "Fix login bug",
+      });
+
+      // Block storage, delete on server, crash
+      const originalStore = aliceStorage.store.bind(aliceStorage);
+      aliceStorage.store = () => {};
+
+      map.core.deleteCoValue();
+
+      // Wait for delete to sync to server peers
+      const peers = Object.values(alice.node.syncManager.peers);
+      await Promise.all(
+        peers.map((peer) =>
+          alice.node.syncManager.waitForSyncWithPeer(peer.id, mapId, 10_000),
+        ),
+      );
+
+      alice.disconnect();
+      aliceStorage.store = originalStore;
+
+      await alice.restart();
+      alice.addStorage({ storage: aliceStorage });
+
+      const mapAfterRestart = (await loadCoValueOrFail(
+        alice.node,
+        mapId,
+      )) as RawCoMap;
+
+      // Make divergent txs to trigger mismatch (alice doesn't know it's deleted)
+      mapAfterRestart.set("priority", "high", "trusting");
+      mapAfterRestart.set("archived", "false", "trusting");
+
+      alice.connectToSyncServer();
+
+      await waitForRecovery(() => {
+        const core = alice.node.getCoValue(mapId);
+        return core.isDeleted;
+      });
+
+      // Charlie loads fresh — should see only tombstone
+      const charlie = setupTestNode();
+      charlie.addStorage();
+      charlie.connectToSyncServer();
+
+      // Wait for charlie to load
+      await new Promise((r) => setTimeout(r, 2000));
+      const charlieCore = charlie.node.getCoValue(mapId);
+      expect(charlieCore.isDeleted).toBe(true);
+    },
+    20000,
+  );
 });
