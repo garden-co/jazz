@@ -78,4 +78,9 @@ export declare function mintSelfSignedToken(seedB64: string, audience: string, t
 
 export declare function parseSchema(json: string): any
 
-export declare function verifySelfSignedToken(token: string, expectedAudience: string): string
+export declare function verifySelfSignedToken(token: string, expectedAudience: string): VerifyTokenResult
+
+export interface VerifyTokenResult {
+  ok: boolean
+  id: string
+}

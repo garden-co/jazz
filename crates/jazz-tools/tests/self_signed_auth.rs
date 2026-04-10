@@ -45,7 +45,7 @@ async fn valid_self_signed_jwt_authenticates() {
     let headers = bearer_headers(&token);
     let config = self_signed_config();
 
-    let result = extract_session(&headers, app_id, &config, None).await;
+    let result = extract_session(&headers, app_id, &config, None, None).await;
 
     let session = result
         .expect("should succeed")
@@ -64,11 +64,11 @@ async fn same_seed_same_identity() {
 
     let config = self_signed_config();
 
-    let session1 = extract_session(&bearer_headers(&token1), app_id, &config, None)
+    let session1 = extract_session(&bearer_headers(&token1), app_id, &config, None, None)
         .await
         .unwrap()
         .unwrap();
-    let session2 = extract_session(&bearer_headers(&token2), app_id, &config, None)
+    let session2 = extract_session(&bearer_headers(&token2), app_id, &config, None, None)
         .await
         .unwrap()
         .unwrap();
@@ -89,11 +89,11 @@ async fn different_seeds_different_identities() {
 
     let config = self_signed_config();
 
-    let alice_session = extract_session(&bearer_headers(&alice_token), app_id, &config, None)
+    let alice_session = extract_session(&bearer_headers(&alice_token), app_id, &config, None, None)
         .await
         .unwrap()
         .unwrap();
-    let bob_session = extract_session(&bearer_headers(&bob_token), app_id, &config, None)
+    let bob_session = extract_session(&bearer_headers(&bob_token), app_id, &config, None, None)
         .await
         .unwrap()
         .unwrap();
@@ -113,7 +113,7 @@ async fn wrong_audience_rejected() {
     let config = self_signed_config();
     let app_id = test_app_id();
 
-    let result = extract_session(&headers, app_id, &config, None).await;
+    let result = extract_session(&headers, app_id, &config, None, None).await;
 
     assert!(
         result.is_err(),
@@ -133,7 +133,7 @@ async fn self_signed_disabled_rejected() {
         ..Default::default()
     };
 
-    let result = extract_session(&headers, app_id, &config, None).await;
+    let result = extract_session(&headers, app_id, &config, None, None).await;
 
     assert!(
         result.is_err(),
@@ -151,7 +151,7 @@ async fn expired_token_rejected() {
     let headers = bearer_headers(&token);
     let config = self_signed_config();
 
-    let result = extract_session(&headers, app_id, &config, None).await;
+    let result = extract_session(&headers, app_id, &config, None, None).await;
 
     assert!(
         result.is_err(),
