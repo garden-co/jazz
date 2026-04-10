@@ -1447,9 +1447,11 @@ impl WasmRuntime {
         seed_b64: &str,
         audience: &str,
         ttl_seconds: u64,
+        now_seconds: u64,
     ) -> Result<String, JsError> {
         let seed = decode_seed(seed_b64)?;
-        identity::mint_self_signed_token(&seed, audience, ttl_seconds).map_err(|e| JsError::new(&e))
+        identity::mint_self_signed_token_at(&seed, audience, ttl_seconds, now_seconds)
+            .map_err(|e| JsError::new(&e))
     }
 
     #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
