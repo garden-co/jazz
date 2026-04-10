@@ -104,7 +104,10 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
     });
   });
 
-  it("uses an HTTP wasm URL when the runtime module itself is loaded from file://", async () => {
+  it("lets wasm-bindgen self-resolve the URL when the page is web-hosted and module is file://", async () => {
+    // Covers bundlers (Turbopack, webpack) that compile import.meta.url of client.ts
+    // to a file:// URL in the browser bundle. The bundler already bakes the correct
+    // asset URL into jazz_wasm.js, so we must not override it.
     setBrowserLikeProcess();
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/",
@@ -113,8 +116,6 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
     await loadWasmModule();
 
     expect(wasmDefaultInit).toHaveBeenCalledTimes(1);
-    expect(wasmDefaultInit).toHaveBeenCalledWith({
-      module_or_path: "http://localhost:3000/jazz_wasm_bg.wasm",
-    });
+    expect(wasmDefaultInit).toHaveBeenCalledWith();
   });
 });
