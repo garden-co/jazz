@@ -16,7 +16,7 @@ use super::key_codec::{
     strip_raw_table_key, visible_row_key, visible_row_prefix, visible_row_versions_key,
     visible_row_versions_prefix, visible_table_prefix,
 };
-use super::{RawTableKeys, RawTableRows, StorageError};
+use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError};
 
 fn storage_codec_error(action: &str, label: &str, err: impl std::fmt::Display) -> StorageError {
     StorageError::IoError(format!("{action} {label}: {err}"))
@@ -170,6 +170,19 @@ pub(super) fn raw_table_scan_range_keys_core(
 }
 
 #[allow(dead_code)]
+pub(super) fn append_history_region_row_bytes_core(
+    table: &str,
+    rows: &[HistoryRowBytes<'_>],
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for row in rows {
+        let key = history_row_key(table, row.row_id, row.version_id);
+        set(&key, row.bytes)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub(super) fn append_history_region_rows_core(
     table: &str,
     rows: &[StoredRowVersion],
@@ -202,6 +215,34 @@ pub(super) fn upsert_visible_region_rows_core(
         set(&row_versions_key, &version_id)?;
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn load_history_row_version_bytes_core(
+    table: &str,
+    row_id: ObjectId,
+    version_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    let key = history_row_key(table, row_id, version_id);
+    get(&key)
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_history_region_bytes_core(
+    table: &str,
+    scan: HistoryScan,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<Vec<u8>>, StorageError> {
+    let prefix = match scan {
+        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
+        HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
+    };
+
+    Ok(scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect())
 }
 
 #[allow(dead_code)]
@@ -400,13 +441,13 @@ pub(super) fn scan_visible_region_row_versions_core(
 pub(super) fn scan_history_row_versions_core(
     table: &str,
     row_id: ObjectId,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
 ) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = history_row_versions_prefix(table, row_id);
-    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| decode_history_row(&bytes))
-        .collect::<Result<_, _>>()?;
+    let mut rows: Vec<StoredRowVersion> =
+        scan_history_region_bytes_core(table, HistoryScan::Row { row_id }, scan_prefix)?
+            .into_iter()
+            .map(|bytes| decode_history_row(&bytes))
+            .collect::<Result<_, _>>()?;
     rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
     Ok(rows)
 }
@@ -416,10 +457,9 @@ pub(super) fn load_history_row_version_core(
     table: &str,
     row_id: ObjectId,
     version_id: CommitId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<StoredRowVersion>, StorageError> {
-    let key = history_row_key(table, row_id, version_id);
-    match get(&key)? {
+    match load_history_row_version_bytes_core(table, row_id, version_id, get)? {
         Some(bytes) => Ok(Some(decode_history_row(&bytes)?)),
         None => Ok(None),
     }
@@ -430,10 +470,9 @@ pub(super) fn load_history_query_row_version_core(
     table: &str,
     row_id: ObjectId,
     version_id: CommitId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<QueryRowVersion>, StorageError> {
-    let key = history_row_key(table, row_id, version_id);
-    match get(&key)? {
+    match load_history_row_version_bytes_core(table, row_id, version_id, get)? {
         Some(bytes) => Ok(Some(decode_query_row(&bytes)?)),
         None => Ok(None),
     }
@@ -444,16 +483,11 @@ pub(super) fn scan_history_region_core(
     table: &str,
     branch: &str,
     scan: HistoryScan,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
 ) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = match scan {
-        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
-        HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
-    };
-
-    let scanned: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+    let scanned: Vec<StoredRowVersion> = scan_history_region_bytes_core(table, scan, scan_prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_history_row(&bytes))
+        .map(|bytes| decode_history_row(&bytes))
         .collect::<Result<_, _>>()?;
 
     let mut rows: Vec<StoredRowVersion> = match scan {
