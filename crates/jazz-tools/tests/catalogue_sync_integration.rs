@@ -13,9 +13,13 @@ use std::time::Duration;
 use jazz_tools::schema_manager::{Lens, generate_lens};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
+    AppContext, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema,
+    Value,
 };
-use support::{push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query};
+use support::{
+    publish_schema_and_permissions, push_catalogue_in_memory, wait_for_edge_query_ready,
+    wait_for_query,
+};
 
 fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
     HashMap::from([
@@ -37,7 +41,8 @@ fn schema_v1() -> jazz_tools::Schema {
         .table(
             TableSchema::builder("users")
                 .column("id", ColumnType::Uuid)
-                .column("name", ColumnType::Text),
+                .column("name", ColumnType::Text)
+                .policies(support::allow_all_policies()),
         )
         .build()
 }
@@ -58,6 +63,17 @@ fn v1_to_v2_lens() -> Lens {
     generate_lens(&schema_v1(), &schema_v2())
 }
 
+fn make_user_context(
+    server: &TestingServer,
+    schema: jazz_tools::Schema,
+    user_id: &str,
+) -> AppContext {
+    let mut context = server.make_client_context_for_user(schema, user_id);
+    context.backend_secret = None;
+    context.admin_secret = None;
+    context
+}
+
 /// Alice writes under schema v1. The v2 schema and v1→v2 lens are pushed
 /// to the server via the real catalogue sync pipeline. Bob connects with
 /// schema v2 and sees Alice's data transformed through the lens.
@@ -74,12 +90,14 @@ fn v1_to_v2_lens() -> Lens {
 #[tokio::test]
 async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     let server = TestingServer::start().await;
+    publish_schema_and_permissions(&server.base_url(), server.admin_secret(), &schema_v1())
+        .await
+        .expect("publish v1 schema and permissions");
 
     // === Alice connects with v1, creates a user ===
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-catalogue"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(make_user_context(&server, schema_v1(), "alice-catalogue"))
+        .await
+        .expect("connect alice");
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
@@ -114,10 +132,9 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     .expect("push catalogue");
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-catalogue"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(make_user_context(&server, schema_v2(), "bob-catalogue"))
+        .await
+        .expect("connect bob");
 
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
@@ -187,7 +204,7 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
     .expect("push catalogue");
 
     // === Bob connects with v2, creates a user with the new email column ===
-    let bob = JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-backward"))
+    let bob = JazzClient::connect(make_user_context(&server, schema_v2(), "bob-backward"))
         .await
         .expect("connect bob");
 
@@ -214,10 +231,9 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
     .await;
 
     // === Alice connects with v1, queries — should see Bob's row without email ===
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-backward"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(make_user_context(&server, schema_v1(), "alice-backward"))
+        .await
+        .expect("connect alice");
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 

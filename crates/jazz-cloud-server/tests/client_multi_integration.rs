@@ -7,6 +7,7 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::object::BranchName;
 use jazz_tools::query_manager::types::{ComposedBranchName, SchemaHash};
+use jazz_tools::server::TestingServer;
 use jazz_tools::storage::{RocksDBStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
@@ -51,6 +52,24 @@ struct JwtClaims {
 #[derive(Debug, Deserialize)]
 struct CreateAppResponse {
     app_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadView {
+    bundle_object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadResponse {
+    head: Option<PermissionsHeadView>,
 }
 
 struct JwksServer {
@@ -260,6 +279,35 @@ fn test_schema() -> jazz_tools::Schema {
         .build()
 }
 
+fn split_inline_policies(
+    schema: &jazz_tools::Schema,
+) -> (
+    jazz_tools::Schema,
+    HashMap<
+        jazz_tools::query_manager::types::TableName,
+        jazz_tools::query_manager::types::TablePolicies,
+    >,
+) {
+    let mut structural_schema = jazz_tools::Schema::with_capacity(schema.len());
+    let mut permissions = HashMap::new();
+
+    for (table_name, table_schema) in schema {
+        structural_schema.insert(
+            *table_name,
+            TableSchema {
+                columns: table_schema.columns.clone(),
+                policies: jazz_tools::query_manager::types::TablePolicies::default(),
+            },
+        );
+
+        if table_schema.policies != jazz_tools::query_manager::types::TablePolicies::default() {
+            permissions.insert(*table_name, table_schema.policies.clone());
+        }
+    }
+
+    (structural_schema, permissions)
+}
+
 fn make_context(
     app_id: AppId,
     server_url: String,
@@ -278,6 +326,79 @@ fn make_context(
         admin_secret: Some(ADMIN_SECRET.to_string()),
         sync_tracer: None,
     }
+}
+
+fn make_user_context(
+    app_id: AppId,
+    server_url: String,
+    data_dir: PathBuf,
+    jwt_token: String,
+) -> AppContext {
+    let mut context = make_context(app_id, server_url, data_dir, jwt_token);
+    context.backend_secret = None;
+    context.admin_secret = None;
+    context
+}
+
+async fn publish_schema_and_permissions(
+    server_url: &str,
+    app_id: AppId,
+    schema: &jazz_tools::Schema,
+) {
+    let client = Client::new();
+    let base = format!("{server_url}/apps/{app_id}/admin");
+    let (structural_schema, permissions) = split_inline_policies(schema);
+
+    let publish_schema = client
+        .post(format!("{base}/schemas"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+        .json(&json!({ "schema": structural_schema }))
+        .send()
+        .await
+        .expect("publish schema request")
+        .error_for_status()
+        .expect("publish schema response")
+        .json::<PublishSchemaResponse>()
+        .await
+        .expect("publish schema json");
+    let schema_hash =
+        SchemaHash::from_hex(&publish_schema.hash).expect("parse published schema hash");
+
+    if permissions.is_empty() {
+        return;
+    }
+
+    let current_head = client
+        .get(format!("{base}/permissions/head"))
+        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+        .send()
+        .await
+        .expect("permissions head request")
+        .error_for_status()
+        .expect("permissions head response")
+        .json::<PermissionsHeadResponse>()
+        .await
+        .expect("permissions head json")
+        .head;
+
+    client
+        .post(format!("{base}/permissions"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+        .json(&json!({
+            "schemaHash": schema_hash.to_string(),
+            "permissions": permissions
+                .into_iter()
+                .map(|(table_name, table_policies)| (table_name.to_string(), table_policies))
+                .collect::<HashMap<_, _>>(),
+            "expectedParentBundleObjectId": current_head.map(|head| head.bundle_object_id),
+        }))
+        .send()
+        .await
+        .expect("publish permissions request")
+        .error_for_status()
+        .expect("publish permissions response");
 }
 
 /// Wait for a query to reach the expected row count.
@@ -459,34 +580,20 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
 
 #[tokio::test]
 async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
-    let jwks_server = JwksServer::start().await;
-    let server_data = TempDir::new().expect("temp server dir");
-    let server = ServerProcess::start(server_data.path()).await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
-    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+    let server = TestingServer::start_with_schema(test_schema()).await;
 
-    let client_a_dir = TempDir::new().expect("client a dir");
-    let client_a = JazzClient::connect(make_context(
-        app_id,
-        server.base_url(),
-        client_a_dir.path().to_path_buf(),
-        make_jwt("client-a"),
-    ))
-    .await
-    .expect("connect client a");
+    let client_a =
+        JazzClient::connect(server.make_client_context_for_user(test_schema(), "alice-sync"))
+            .await
+            .expect("connect client a");
 
     // Warm up auth/JWKS + schema/catalogue sync before first row write.
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
-    let client_b_dir = TempDir::new().expect("client b dir");
-    let client_b = JazzClient::connect(make_context(
-        app_id,
-        server.base_url(),
-        client_b_dir.path().to_path_buf(),
-        make_jwt("client-b"),
-    ))
-    .await
-    .expect("connect client b");
+    let client_b =
+        JazzClient::connect(server.make_client_context_for_user(test_schema(), "bob-sync"))
+            .await
+            .expect("connect client b");
 
     // Ensure query path is fully ready before asserting cross-client sync.
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
@@ -532,6 +639,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
 
     client_a.shutdown().await.expect("shutdown client a");
     client_b.shutdown().await.expect("shutdown client b");
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -541,10 +649,13 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     let seed_server = ServerProcess::start(server_data.path()).await;
     let app = seed_server.create_app(&jwks_server.endpoint()).await;
     let app_id = AppId::from_string(&app.app_id).expect("parse app id");
+    let schema = test_schema();
+
+    publish_schema_and_permissions(&seed_server.base_url(), app_id, &schema).await;
 
     // Phase 1: seed persisted row without artificial delay.
     let client_a_dir = TempDir::new().expect("client a dir");
-    let client_a = JazzClient::connect(make_context(
+    let client_a = JazzClient::connect(make_user_context(
         app_id,
         seed_server.base_url(),
         client_a_dir.path().to_path_buf(),
@@ -555,7 +666,7 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
 
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
-    client_a
+    let _ = client_a
         .create("todos", todo_values("ordering-precision-seed", false))
         .await
         .expect("client a create todo");
@@ -582,7 +693,7 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     .await;
 
     let client_b_dir = TempDir::new().expect("client b dir");
-    let client_b = JazzClient::connect(make_context(
+    let client_b = JazzClient::connect(make_user_context(
         app_id,
         delayed_server.base_url(),
         client_b_dir.path().to_path_buf(),
@@ -780,31 +891,18 @@ async fn jazz_tools_where_subscription_drops_row_when_remote_client_updates_it_o
     //  client-b ──► update(row-1, completed = true)
     //  client-a ◄── subscription delta: removed = [row-1]
 
-    let jwks_server = JwksServer::start().await;
-    let server_data = TempDir::new().expect("temp server dir");
-    let server = ServerProcess::start(server_data.path()).await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
-    let app_id = AppId::from_string(&app.app_id).expect("parse app id");
-
-    let client_a_dir = TempDir::new().expect("client a dir");
-    let client_a = JazzClient::connect(make_context(
-        app_id,
-        server.base_url(),
-        client_a_dir.path().to_path_buf(),
-        make_jwt("where-exit-client-a"),
-    ))
+    let server = TestingServer::start_with_schema(test_schema()).await;
+    let client_a = JazzClient::connect(
+        server.make_client_context_for_user(test_schema(), "where-exit-client-a"),
+    )
     .await
     .expect("connect client a");
 
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
-    let client_b_dir = TempDir::new().expect("client b dir");
-    let client_b = JazzClient::connect(make_context(
-        app_id,
-        server.base_url(),
-        client_b_dir.path().to_path_buf(),
-        make_jwt("where-exit-client-b"),
-    ))
+    let client_b = JazzClient::connect(
+        server.make_client_context_for_user(test_schema(), "where-exit-client-b"),
+    )
     .await
     .expect("connect client b");
 
@@ -865,6 +963,9 @@ async fn jazz_tools_where_subscription_drops_row_when_remote_client_updates_it_o
             .expect("stream closed before row was removed")
             .expect("stream ended before row was removed");
         if delta.removed.iter().any(|r| r.id == row_id) {
+            client_a.shutdown().await.expect("shutdown client a");
+            client_b.shutdown().await.expect("shutdown client b");
+            server.shutdown().await;
             return; // pass
         }
     }

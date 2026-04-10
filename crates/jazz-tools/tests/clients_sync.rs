@@ -2,6 +2,7 @@
 
 mod support;
 
+use jazz_tools::AppContext;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
-use support::wait_for_query;
+use support::{publish_schema_and_permissions, wait_for_query};
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -21,6 +22,17 @@ fn test_schema() -> jazz_tools::Schema {
                 .policies(support::allow_all_policies()),
         )
         .build()
+}
+
+fn make_user_context(
+    server: &TestingServer,
+    schema: jazz_tools::Schema,
+    user_id: &str,
+) -> AppContext {
+    let mut context = server.make_client_context_for_user(schema, user_id);
+    context.backend_secret = None;
+    context.admin_secret = None;
+    context
 }
 
 async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
@@ -57,10 +69,12 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 
     let server = TestingServer::start().await;
     let schema = test_schema();
-    let writer =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
-            .await
-            .expect("connect history writer");
+    publish_schema_and_permissions(&server.base_url(), server.admin_secret(), &schema)
+        .await
+        .expect("publish test schema and permissions");
+    let writer = JazzClient::connect(make_user_context(&server, schema.clone(), "alice-history"))
+        .await
+        .expect("connect history writer");
 
     wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
 
@@ -106,10 +120,9 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     assert_eq!(writer_rows.len(), 1);
     assert_eq!(writer_rows[0].1[0], Value::Text(final_title.clone()));
 
-    let fresh_client =
-        JazzClient::connect(server.make_client_context_for_user(schema, "bob-fresh-history"))
-            .await
-            .expect("connect fresh history reader");
+    let fresh_client = JazzClient::connect(make_user_context(&server, schema, "bob-fresh-history"))
+        .await
+        .expect("connect fresh history reader");
     wait_for_edge_query_ready(&fresh_client, Duration::from_secs(30)).await;
 
     let fresh_rows = wait_for_query(
@@ -141,10 +154,14 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 #[tokio::test]
 async fn jazz_tools_cli_two_clients_sync_values() {
     let server = TestingServer::start().await;
-    let client_a = JazzClient::connect(server.make_client_context(test_schema()))
+    let schema = test_schema();
+    publish_schema_and_permissions(&server.base_url(), server.admin_secret(), &schema)
+        .await
+        .expect("publish test schema and permissions");
+    let client_a = JazzClient::connect(make_user_context(&server, schema.clone(), "cli-sync-user"))
         .await
         .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(test_schema()))
+    let client_b = JazzClient::connect(make_user_context(&server, schema, "cli-sync-user"))
         .await
         .expect("connect client b");
 
@@ -217,14 +234,20 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 #[tokio::test]
 async fn jazz_tools_cli_two_different_users_sync_values() {
     let server = TestingServer::start().await;
-    let client_alice =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "alice-sync-user"))
-            .await
-            .expect("connect alice client");
-    let client_bob =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "bob-sync-user"))
-            .await
-            .expect("connect bob client");
+    let schema = test_schema();
+    publish_schema_and_permissions(&server.base_url(), server.admin_secret(), &schema)
+        .await
+        .expect("publish test schema and permissions");
+    let client_alice = JazzClient::connect(make_user_context(
+        &server,
+        schema.clone(),
+        "alice-sync-user",
+    ))
+    .await
+    .expect("connect alice client");
+    let client_bob = JazzClient::connect(make_user_context(&server, schema, "bob-sync-user"))
+        .await
+        .expect("connect bob client");
 
     wait_for_edge_query_ready(&client_alice, Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&client_bob, Duration::from_secs(30)).await;

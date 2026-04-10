@@ -338,7 +338,9 @@ mod tests {
 
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
+    use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::query::{Query, QueryBuilder};
+    use crate::query_manager::types::TablePolicies;
     use crate::sync_manager::SyncManager;
 
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.

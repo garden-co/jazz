@@ -10,7 +10,7 @@ use jazz_tools::{
     AppContext, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
-use support::{TestingClient, publish_schema_and_permissions, wait_for_query};
+use support::{TestingClient, wait_for_query};
 use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
