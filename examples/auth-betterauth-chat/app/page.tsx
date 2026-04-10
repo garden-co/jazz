@@ -3,7 +3,7 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
 import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants";
+import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
@@ -103,7 +103,8 @@ export default function Page(): React.JSX.Element {
   const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(true);
   const localAuth = React.useMemo(
-    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
+    () =>
+      getActiveSyntheticAuth(process.env.NEXT_PUBLIC_JAZZ_APP_ID!, { defaultMode: "anonymous" }),
     [],
   );
 
@@ -139,10 +140,10 @@ export default function Page(): React.JSX.Element {
 
   const config = React.useMemo((): DbConfig => {
     const sharedConfig = {
-      appId: DEFAULT_APP_ID,
+      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
       env: "dev" as const,
       userBranch: "main" as const,
-      serverUrl: SYNC_SERVER_URL,
+      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
       driver: { type: "memory" as const },
     };
 

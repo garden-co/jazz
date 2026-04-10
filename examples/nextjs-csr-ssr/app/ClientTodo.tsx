@@ -7,8 +7,8 @@ export default function ClientTodo() {
   return (
     <JazzProvider
       config={{
-        appId: process.env.NEXT_PUBLIC_APP_ID!,
-        serverUrl: process.env.NEXT_PUBLIC_SYNC_SERVER_URL!,
+        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
         localAuthMode: "anonymous",
         driver: { type: "memory" },
       }}

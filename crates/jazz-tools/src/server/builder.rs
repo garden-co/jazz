@@ -370,7 +370,7 @@ fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     )
 }
 
-async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
+async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<Arc<JwksCache>>, String> {
     let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
         return Ok(None);
     };
@@ -386,16 +386,33 @@ async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>,
         .map(Duration::from_secs)
         .unwrap_or(JWKS_MAX_STALE);
 
-    let cache = JwksCache::new(
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
+
+    let cache = Arc::new(JwksCache::new(
         jwks_url.clone(),
-        reqwest::Client::new(),
+        http_client,
         jwks_ttl,
         jwks_max_stale,
-    );
-    cache
-        .load(false)
-        .await
-        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+    ));
+
+    // Warm the cache in the background. The JWKS endpoint may not be
+    // available yet (e.g. Jazz server starts during Next.js config resolution,
+    // before the app is listening). First auth request will block on fetch
+    // if the background warm hasn't completed.
+    {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            if let Err(e) = cache.load(false).await {
+                tracing::warn!(
+                    "Background JWKS warm failed (will retry on first auth request): {e}"
+                );
+            }
+        });
+    }
 
     Ok(Some(cache))
 }

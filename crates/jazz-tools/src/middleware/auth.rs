@@ -485,7 +485,7 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
             state.app_id,
             &state.auth_config,
             Some(&external_identities),
-            state.jwks_cache.as_ref(),
+            state.jwks_cache.as_deref(),
         )
         .await
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
