@@ -112,9 +112,26 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
+  const errorMessage = document.createElement("p");
+  errorMessage.id = "error-message";
+  errorMessage.hidden = true;
+  errorMessage.setAttribute("role", "alert");
+  container.appendChild(errorMessage);
+
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
+
+  const setErrorMessage = (message: string) => {
+    errorMessage.textContent = message;
+    errorMessage.hidden = false;
+  };
+
+  const clearErrorMessage = () => {
+    errorMessage.textContent = "";
+    errorMessage.hidden = true;
+  };
+
   // Subscribe to all todos.
   const query = app.todos;
   const unsubscribe = db.subscribeAll(query, ({ all: todos }) => {
@@ -146,6 +163,7 @@ export async function startApp(
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!sessionUserId) return;
+    clearErrorMessage();
     const selectedParentId = parentSelect.value;
     db.insert(app.todos, {
       title: input.value,
@@ -165,9 +183,20 @@ export async function startApp(
 
     if (target.classList.contains("toggle")) {
       const checkbox = target as HTMLInputElement;
-      db.update(app.todos, id, { done: checkbox.checked });
+      try {
+        db.update(app.todos, id, { done: checkbox.checked });
+        clearErrorMessage();
+      } catch {
+        checkbox.checked = !checkbox.checked;
+        setErrorMessage("You don't have permission to update this task");
+      }
     } else if (target.classList.contains("delete-btn")) {
-      db.delete(app.todos, id);
+      try {
+        db.delete(app.todos, id);
+        clearErrorMessage();
+      } catch {
+        setErrorMessage("You don't have permission to delete this task");
+      }
     }
   });
 

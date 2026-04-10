@@ -6,6 +6,7 @@
 		getActiveSyntheticAuth,
 	} from 'jazz-tools/svelte';
 	import type { DbConfig } from 'jazz-tools';
+	import { Toaster } from 'svelte-sonner';
 	import TodoList from './TodoList.svelte';
 
 	interface Props {
@@ -44,6 +45,7 @@
 	{#snippet children({ db })}
 		<h1>Todos</h1>
 		<TodoList />
+		<Toaster />
 	{/snippet}
 	{#snippet fallback()}
 		<p>Loading...</p>
