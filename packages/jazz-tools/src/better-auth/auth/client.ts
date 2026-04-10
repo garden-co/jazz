@@ -26,8 +26,10 @@ export const jazzPluginClient = () => {
   let jazzContext: JazzContextType<Account>;
   let authSecretStorage: AuthSecretStorage;
   let signOutUnsubscription: () => void;
+  let authGeneration = 0;
 
   const authenticateOnJazz = async (jazzAuth: AuthSetPayload) => {
+    authGeneration++;
     const parsedJazzAuth = {
       ...jazzAuth,
       secretSeed: jazzAuth.secretSeed
@@ -89,6 +91,10 @@ export const jazzPluginClient = () => {
         name: "jazz-plugin",
         hooks: {
           async onRequest(context) {
+            context.headers.set(
+              "x-jazz-auth-generation",
+              String(authGeneration),
+            );
             if (
               SIGNUP_URLS.some((url) => context.url.toString().includes(url))
             ) {
@@ -123,7 +129,13 @@ export const jazzPluginClient = () => {
 
             if (context.request.url.toString().includes("/get-session")) {
               if (context.data === null) {
-                if (authSecretStorage.isAuthenticated === true) {
+                const requestAuthGeneration = Number(
+                  context.request.headers.get("x-jazz-auth-generation") ?? "0",
+                );
+                if (
+                  authSecretStorage.isAuthenticated === true &&
+                  requestAuthGeneration === authGeneration
+                ) {
                   console.info(
                     "Jazz is authenticated, but the session is null. Logging out",
                   );
