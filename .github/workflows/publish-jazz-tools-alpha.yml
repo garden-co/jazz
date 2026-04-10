@@ -666,12 +666,20 @@ jobs:
         with:
           cache-on-failure: true
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
       - name: Install/build React Native iOS prerequisites
         env:
           JAZZ_RN_PLATFORM: ios
         run: pnpm run ensure:rust-toolchain
 
       - name: Build jazz-rn iOS native payload
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: on
+          SCCACHE_CACHE_SIZE: 8G
         run: pnpm --filter jazz-rn build:rn:ios
 
       - name: Verify built jazz-rn iOS native payload
