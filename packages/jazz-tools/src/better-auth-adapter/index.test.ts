@@ -399,6 +399,13 @@ describe("jazzAdapter", () => {
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
       expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
+      expect(generated.code).toContain(
+        "export const permissions = s.definePermissions(app, ({ policy }) => {",
+      );
+      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
     });
   });
 

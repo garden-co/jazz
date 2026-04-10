@@ -361,6 +361,20 @@ export function buildJazzSchemaSourceText(args: {
     blocks.push(lines.join("\n"));
   }
 
+  const tableNames = Object.keys(tables).map((modelName) => getModelName(modelName));
+
+  const permissionLines: string[] = [];
+  for (const tableName of tableNames) {
+    if (permissionLines.length > 0) {
+      permissionLines.push("");
+    }
+    const key = formatObjectKey(tableName);
+    permissionLines.push(`  policy.${key}.allowRead.never();`);
+    permissionLines.push(`  policy.${key}.allowInsert.never();`);
+    permissionLines.push(`  policy.${key}.allowUpdate.never();`);
+    permissionLines.push(`  policy.${key}.allowDelete.never();`);
+  }
+
   return [
     'import { schema as s } from "jazz-tools";',
     "",
@@ -371,6 +385,10 @@ export function buildJazzSchemaSourceText(args: {
     "type AppSchema = s.Schema<typeof schema>;",
     "export const app: s.App<AppSchema> = s.defineApp(schema);",
     "export const wasmSchema = app.wasmSchema;",
+    "",
+    "export const permissions = s.definePermissions(app, ({ policy }) => {",
+    ...permissionLines,
+    "});",
     "",
   ].join("\n");
 }
