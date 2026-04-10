@@ -88,7 +88,9 @@ covers those patterns in more detail.
 
 <Accordions type="single">
   <Accordion title="What does the driver do?">
-    The `persistent` driver stores data on disk using [Fjall](https://github.com/fjall-rs/fjall), a fast Rust key-value store bundled inside `jazz-napi`. The `dataPath` is the directory where Fjall writes its data.
+    The `persistent` driver stores data on disk through the native `jazz-napi` runtime. In the
+    current Node.js setup that means SQLite-backed local persistence. `dataPath` is the directory
+    where that local database lives.
 
     There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
 
