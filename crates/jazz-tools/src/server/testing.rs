@@ -224,6 +224,7 @@ impl TestingServer {
             jwks_url: Some(jwks_url),
             allow_anonymous: true,
             allow_demo: true,
+            allow_self_signed: false,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
         };
