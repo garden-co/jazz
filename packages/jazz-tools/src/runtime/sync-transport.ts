@@ -21,21 +21,6 @@ export interface SyncAuth {
   pathPrefix?: string;
 }
 
-export interface LinkExternalAuth {
-  jwtToken: string;
-  localAuthMode: "anonymous" | "demo";
-  localAuthToken: string;
-  pathPrefix?: string;
-}
-
-export interface LinkExternalResponse {
-  app_id?: string;
-  principal_id: string;
-  issuer: string;
-  subject: string;
-  created: boolean;
-}
-
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
   onSyncMessage(payloadJson: string, seq?: number | null): void;
@@ -725,60 +710,6 @@ export async function sendSyncPayloadBatch(
     body,
     logPrefix,
   );
-}
-
-/**
- * Link a local anonymous/demo identity to an external JWT identity.
- *
- * This endpoint requires both auth forms on the same request:
- * - `Authorization: Bearer <jwt>`
- * - `X-Jazz-Local-Mode` + `X-Jazz-Local-Token`
- */
-export async function linkExternalIdentity(
-  serverUrl: string,
-  auth: LinkExternalAuth,
-  logPrefix = "",
-): Promise<LinkExternalResponse> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${auth.jwtToken}`,
-    "X-Jazz-Local-Mode": auth.localAuthMode,
-    "X-Jazz-Local-Token": auth.localAuthToken,
-  };
-
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(
-      buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix),
-      {
-        method: "POST",
-        headers,
-      },
-      SYNC_FETCH_TIMEOUT_MS,
-    );
-  } catch (e) {
-    if ((e as { name?: string })?.name === "AbortError") {
-      console.error(`${logPrefix}Link external timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-      throw new Error(`${logPrefix}Link external failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-    }
-    if (isExpectedFetchAbortError(e)) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`${logPrefix}Link external failed: ${msg}`);
-    }
-    console.error(`${logPrefix}Link external fetch error:`, e);
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`${logPrefix}Link external failed: ${msg}`);
-  }
-
-  if (!response.ok) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    const body = await response.text().catch(() => "");
-    const bodySuffix = body ? `: ${body}` : "";
-    throw new Error(
-      `${logPrefix}Link external failed: ${response.status}${statusText}${bodySuffix}`,
-    );
-  }
-
-  return (await response.json()) as LinkExternalResponse;
 }
 
 /**

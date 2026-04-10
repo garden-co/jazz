@@ -1330,34 +1330,6 @@ describe("cloud-server integration (Jazz TS)", () => {
     }
   }, 30000);
 
-  it("links local anonymous identity to external JWT via JazzClient call path", async () => {
-    const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-cloud-server-link-");
-    const server = await startCloudServer({ dataRoot });
-    let client: JazzClient | null = null;
-
-    try {
-      const app = await createApp(server.baseUrl, jwks.url);
-      client = await connectClient({
-        ...makeContext(app.app_id, server.baseUrl, signJwt("linked-user", JWT_SECRET)),
-        localAuthMode: "anonymous",
-        localAuthToken: "device-token-a",
-      });
-
-      const first = await client.linkExternalIdentity();
-      expect(first.created).toBe(true);
-      expect(first.subject).toBe("linked-user");
-
-      const second = await client.linkExternalIdentity();
-      expect(second.created).toBe(false);
-      expect(second.principal_id).toBe(first.principal_id);
-    } finally {
-      if (client) await client.shutdown();
-      await stopProcess(server.child);
-      await jwks.stop();
-    }
-  }, 30000);
-
   it("resolves empty settled-tier query snapshots", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
     const dataRoot = allocTempDir("jazz-ts-cloud-server-empty-query-");
