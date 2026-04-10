@@ -28,17 +28,16 @@ use crate::row_histories::{
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    Storage, StorageError,
+    HistoryRowBytes, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_rows_core, load_history_query_row_version_core,
-        load_history_row_version_core, load_visible_query_row_core,
-        load_visible_query_row_for_tier_core, load_visible_region_entry_core,
-        load_visible_region_frontier_core, load_visible_region_row_core,
-        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_core,
-        scan_history_row_versions_core, scan_visible_region_core,
+        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
+        load_visible_query_row_core, load_visible_query_row_for_tier_core,
+        load_visible_region_entry_core, load_visible_region_frontier_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        scan_history_region_bytes_core, scan_visible_region_core,
         scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
@@ -293,12 +292,12 @@ impl Storage for OpfsBTreeStorage {
         })
     }
 
-    fn append_history_region_rows(
+    fn append_history_region_row_bytes(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        append_history_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
     }
 
     fn upsert_visible_region_rows(
@@ -395,39 +394,21 @@ impl Storage for OpfsBTreeStorage {
         )
     }
 
-    fn scan_history_row_versions(
-        &self,
-        table: &str,
-        row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        scan_history_row_versions_core(table, row_id, |prefix| self.tree_scan_prefix(prefix))
-    }
-
-    fn load_history_row_version(
+    fn load_history_row_version_bytes(
         &self,
         table: &str,
         row_id: ObjectId,
         version_id: CommitId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
-        load_history_row_version_core(table, row_id, version_id, |key| self.tree_read(key))
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        load_history_row_version_bytes_core(table, row_id, version_id, |key| self.tree_read(key))
     }
 
-    fn load_history_query_row_version(
+    fn scan_history_region_bytes(
         &self,
         table: &str,
-        row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        load_history_query_row_version_core(table, row_id, version_id, |key| self.tree_read(key))
-    }
-
-    fn scan_history_region(
-        &self,
-        table: &str,
-        branch: &str,
         scan: HistoryScan,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        scan_history_region_core(table, branch, scan, |prefix| self.tree_scan_prefix(prefix))
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        scan_history_region_bytes_core(table, scan, |prefix| self.tree_scan_prefix(prefix))
     }
 
     fn flush(&self) {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::commit::CommitId;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
@@ -87,6 +88,25 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -141,6 +161,14 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.append_history_region_rows(table, rows)
     }
 
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
@@ -193,6 +221,24 @@ impl Storage for RowRegionReadFailingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(
@@ -283,6 +329,25 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -337,6 +402,14 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.append_history_region_rows(table, rows)
     }
 
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
@@ -387,6 +460,24 @@ impl Storage for LegacyPersistenceObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(
@@ -477,6 +568,25 @@ impl Storage for RowMutationObservingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -529,6 +639,14 @@ impl Storage for RowMutationObservingStorage {
         rows: &[crate::row_histories::StoredRowVersion],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
     }
 
     fn upsert_visible_region_rows(
@@ -593,6 +711,24 @@ impl Storage for RowMutationObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(

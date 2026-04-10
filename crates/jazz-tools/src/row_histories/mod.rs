@@ -226,8 +226,48 @@ fn visible_row_entry_descriptor() -> &'static RowDescriptor {
     })
 }
 
+fn flat_history_row_format_id() -> ObjectId {
+    ObjectId::from_uuid(Uuid::from_bytes([
+        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x68, 0x69, 0x73, 0x74, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d,
+        0x31,
+    ]))
+}
+
+fn flat_history_row_marker_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "_jazz_format_id",
+            ColumnType::Uuid,
+        )])
+    })
+}
+
+fn flat_history_row_identity_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
+            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
+        ])
+    })
+}
+
+fn flat_history_row_branch_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
+            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
+            ColumnDescriptor::new("_jazz_version_id", ColumnType::Bytea),
+            ColumnDescriptor::new("_jazz_branch", ColumnType::Text),
+        ])
+    })
+}
+
 fn history_row_system_columns() -> Vec<ColumnDescriptor> {
     vec![
+        ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
         ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
         ColumnDescriptor::new("_jazz_version_id", ColumnType::Bytea),
         ColumnDescriptor::new("_jazz_branch", ColumnType::Text),
@@ -259,6 +299,7 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
 
 fn history_row_system_values(row: &StoredRowVersion) -> Vec<Value> {
     vec![
+        Value::Uuid(flat_history_row_format_id()),
         Value::Uuid(row.row_id),
         commit_id_to_value(row.version_id),
         Value::Text(row.branch.to_string()),
@@ -288,6 +329,23 @@ fn history_row_system_values(row: &StoredRowVersion) -> Vec<Value> {
 
 fn history_row_system_column_count() -> usize {
     history_row_system_columns().len()
+}
+
+pub(crate) fn is_flat_history_row(data: &[u8]) -> bool {
+    matches!(
+        column_bytes(flat_history_row_marker_descriptor(), data, 0),
+        Ok(Some(bytes)) if bytes == flat_history_row_format_id().uuid().as_bytes()
+    )
+}
+
+pub(crate) fn flat_history_row_id(data: &[u8]) -> Result<ObjectId, EncodingError> {
+    let value = decode_column(flat_history_row_identity_descriptor(), data, 1)?;
+    expect_uuid(&value, "row_id")
+}
+
+pub(crate) fn flat_history_row_branch(data: &[u8]) -> Result<BranchName, EncodingError> {
+    let value = decode_column(flat_history_row_branch_descriptor(), data, 3)?;
+    Ok(BranchName::new(expect_text(&value, "branch")?))
 }
 
 /// Build the physical row descriptor used when row-history state is stored as a
@@ -333,8 +391,8 @@ pub fn decode_flat_history_row(
     let system_count = history_row_system_column_count();
 
     let user_values = &values[system_count..];
-    let delete_kind = delete_kind_from_value(&values[11])?;
-    let is_deleted = expect_bool(&values[12], "is_deleted")?;
+    let delete_kind = delete_kind_from_value(&values[12])?;
+    let is_deleted = expect_bool(&values[13], "is_deleted")?;
     let user_data = if delete_kind == Some(DeleteKind::Hard)
         || (is_deleted && user_values.iter().all(Value::is_null))
     {
@@ -343,7 +401,7 @@ pub fn decode_flat_history_row(
         encode_row(user_descriptor, user_values)?
     };
 
-    let parents = match &values[3] {
+    let parents = match &values[4] {
         Value::Array(values) => values
             .iter()
             .map(commit_id_from_value)
@@ -354,21 +412,21 @@ pub fn decode_flat_history_row(
     };
 
     Ok(StoredRowVersion {
-        row_id: expect_uuid(&values[0], "row_id")?,
-        version_id: commit_id_from_value(&values[1])?,
-        branch: expect_text(&values[2], "branch")?.into(),
+        row_id: expect_uuid(&values[1], "row_id")?,
+        version_id: commit_id_from_value(&values[2])?,
+        branch: expect_text(&values[3], "branch")?.into(),
         parents,
-        updated_at: expect_timestamp(&values[4], "updated_at")?,
-        created_by: expect_text(&values[5], "created_by")?.into(),
-        created_at: expect_timestamp(&values[6], "created_at")?,
-        updated_by: expect_text(&values[7], "updated_by")?.into(),
-        batch_id: batch_id_from_value(&values[8])?,
-        state: row_state_from_value(&values[9])?,
-        confirmed_tier: durability_tier_from_value(&values[10])?,
+        updated_at: expect_timestamp(&values[5], "updated_at")?,
+        created_by: expect_text(&values[6], "created_by")?.into(),
+        created_at: expect_timestamp(&values[7], "created_at")?,
+        updated_by: expect_text(&values[8], "updated_by")?.into(),
+        batch_id: batch_id_from_value(&values[9])?,
+        state: row_state_from_value(&values[10])?,
+        confirmed_tier: durability_tier_from_value(&values[11])?,
         delete_kind,
         is_deleted,
         data: user_data.into(),
-        metadata: metadata_from_value(&values[13])?,
+        metadata: metadata_from_value(&values[14])?,
     })
 }
 

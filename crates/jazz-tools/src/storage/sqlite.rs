@@ -10,16 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use super::{
-    Storage, StorageError,
+    HistoryRowBytes, Storage, StorageError,
     storage_core::{
-        append_history_region_rows_core, load_history_query_row_version_core,
-        load_history_row_version_core, load_visible_query_row_core,
-        load_visible_query_row_for_tier_core, load_visible_region_entry_core,
-        load_visible_region_frontier_core, load_visible_region_row_core,
-        patch_row_region_rows_by_batch_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_core,
-        scan_history_row_versions_core, scan_visible_region_core,
+        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
+        load_visible_query_row_core, load_visible_query_row_for_tier_core,
+        load_visible_region_entry_core, load_visible_region_frontier_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        scan_history_region_bytes_core, scan_visible_region_core,
         scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
     },
 };
@@ -370,15 +369,15 @@ impl Storage for SqliteStorage {
         })
     }
 
-    fn append_history_region_rows(
+    fn append_history_region_row_bytes(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
-                append_history_region_rows_core(table, rows, |key, bytes| {
+                append_history_region_row_bytes_core(table, rows, |key, bytes| {
                     Self::set(&inner.conn, key, bytes)
                 })
             })
@@ -509,52 +508,26 @@ impl Storage for SqliteStorage {
         })
     }
 
-    fn scan_history_row_versions(
-        &self,
-        table: &str,
-        row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            scan_history_row_versions_core(table, row_id, |prefix| {
-                Self::scan_prefix(&inner.conn, prefix)
-            })
-        })
-    }
-
-    fn load_history_row_version(
+    fn load_history_row_version_bytes(
         &self,
         table: &str,
         row_id: ObjectId,
         version_id: CommitId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_history_row_version_core(table, row_id, version_id, |key| {
+            load_history_row_version_bytes_core(table, row_id, version_id, |key| {
                 Self::get(&inner.conn, key)
             })
         })
     }
 
-    fn load_history_query_row_version(
+    fn scan_history_region_bytes(
         &self,
         table: &str,
-        row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_history_query_row_version_core(table, row_id, version_id, |key| {
-                Self::get(&inner.conn, key)
-            })
-        })
-    }
-
-    fn scan_history_region(
-        &self,
-        table: &str,
-        branch: &str,
         scan: HistoryScan,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            scan_history_region_core(table, branch, scan, |prefix| {
+            scan_history_region_bytes_core(table, scan, |prefix| {
                 Self::scan_prefix(&inner.conn, prefix)
             })
         })

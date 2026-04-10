@@ -7,8 +7,12 @@ use std::ops::Bound;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
-use crate::query_manager::types::Value;
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
+use crate::row_format::encode_row;
+use crate::row_histories::{
+    HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_flat_history_row,
+};
+use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{IndexMutation, Storage};
 use crate::sync_manager::DurabilityTier;
 
@@ -290,6 +294,66 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
             .unwrap(),
         Some(vec![version_id])
     );
+}
+
+pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("done", ColumnType::Boolean),
+        )
+        .build();
+    let schema_hash = SchemaHash::compute(&schema);
+    let descriptor = schema[&"tasks".into()].columns.clone();
+    let row_id = ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(
+            &descriptor,
+            &[Value::Text("Ship flat rows".into()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .append_history_region_rows("tasks", std::slice::from_ref(&row))
+        .unwrap();
+
+    let encoded = storage
+        .load_history_row_version_bytes("tasks", row_id, row.version_id())
+        .unwrap()
+        .expect("history row should persist");
+
+    assert_eq!(decode_flat_history_row(&descriptor, &encoded).unwrap(), row);
 }
 
 pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -742,6 +806,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn row_region_round_trip() {
                 conformance::test_row_region_round_trip(&$factory);
+            }
+
+            #[test]
+            fn row_region_uses_flat_history_bytes_when_schema_known() {
+                conformance::test_row_region_uses_flat_history_bytes_when_schema_known(&$factory);
             }
 
             #[test]

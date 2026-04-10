@@ -4,7 +4,8 @@ use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{
-    QueryRowVersion, RowState, RowVisibilityChange, StoredRowVersion, apply_row_version,
+    QueryRowVersion, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
+    apply_row_version,
 };
 use crate::schema_manager::resolve_current_table_name;
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
@@ -196,14 +197,31 @@ impl QueryManager {
     fn apply_local_row_history_write<H: Storage>(
         &mut self,
         storage: &mut H,
-        _table: &str,
+        table: &str,
         branch_name: &BranchName,
         row_id: ObjectId,
         row: StoredRowVersion,
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(CommitId, RowVisibilityChange), QueryError> {
+        if storage
+            .load_row_locator(row_id)
+            .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
+            .is_none()
+        {
+            let row_locator = self.row_locator_for_branch(table, branch_name.as_str());
+            self.persist_row_locator(storage, row_id, &row_locator);
+        }
+
         let applied = apply_row_version(storage, row_id, branch_name, row, index_mutations)
-            .map_err(|_| QueryError::ObjectNotFound(row_id))?;
+            .map_err(|error| match error {
+                RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
+                RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
+                    "missing row-history parent {parent:?} while applying local write for {row_id:?}"
+                )),
+                RowHistoryError::StorageError(error) => {
+                    QueryError::EncodingError(format!("apply row version: {error}"))
+                }
+            })?;
 
         let version_id = applied.version_id;
         let visibility_change = applied.visibility_change.ok_or_else(|| {
