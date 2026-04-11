@@ -1,0 +1,20 @@
+[package]
+name = "jazz-swift"
+version = "0.1.0"
+edition = "2021"
+description = "UniFFI-based Rust binding surface for Apple-platform Jazz Swift bindings"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz2"
+
+[dependencies]
+futures = "0.3"
+jazz_tools = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
+  "sqlite",
+] }
+serde_json = "1.0"
+thiserror = "1.0.64"
+uniffi = "0.30.0"
+uuid = { version = "1", features = ["v7"] }
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]

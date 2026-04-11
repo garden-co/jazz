@@ -1669,6 +1669,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-swift"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "jazz-tools",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uniffi",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 dependencies = [
