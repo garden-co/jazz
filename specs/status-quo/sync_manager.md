@@ -75,7 +75,7 @@ That payload set matches the table-first runtime model:
 ### Local write
 
 1. A runtime appends a new row version locally.
-2. Storage updates the visible entry and indices.
+2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
 4. The Sync Manager queues `RowVersionCreated` (and later state changes if needed) for peers and servers.
 

@@ -40,7 +40,9 @@ For user data, storage persists both:
 - the append-friendly history region for row versions
 - the compact visible region for current reads
 
-Those are exposed through dedicated helpers such as history scans, visible-row loads, and row-state patch operations.
+Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` columns plus the
+table's user columns. Storage exposes them through dedicated helpers such as history scans,
+visible-row loads, and row-state patch operations.
 
 ### 5. Catalogue entries
 
@@ -55,8 +57,8 @@ raw user tables
   -> application rows and index keys
 
 row-history regions
-  -> history entries keyed by (row_id, version_id)
-  -> visible entries keyed by (branch, row_id)
+  -> flat history rows keyed by (row_id, version_id)
+  -> flat visible rows keyed by (branch, row_id)
 
 system tables
   -> __metadata
@@ -71,11 +73,13 @@ That is the core architectural shift to keep in mind while reading the rest of t
 Storage does not invent its own payload format. It relies on `row_format` for:
 
 - encoding application rows
+- encoding flat history and visible rows
 - reprojection into column subsets
-- deterministic decoding for system rows
+- deterministic decoding for engine-managed rows
 - validating values against column descriptors
 
-This shared binary format is what lets user rows, visible entries, and catalogue rows all move through the system without every layer inventing a different shape.
+This shared binary format is what lets user rows, visible rows, history rows, and catalogue rows
+all move through the system without every layer inventing a different shape.
 
 ## Durable Backends
 

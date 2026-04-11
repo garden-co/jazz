@@ -38,10 +38,13 @@ A `StoredRowVersion` is one concrete version of that logical row. It carries:
 - engine/user metadata
 - the application row values
 
-Conceptually, a stored row version is one row-format record containing both the application columns
-and the reserved engine columns. The current Rust type still exposes the application portion through
-its `data` field for convenience, but that is an implementation detail rather than a separate
-architectural layer.
+Physically, a stored row version is one flat `row_format` record:
+
+- reserved `_jazz_*` columns first
+- user columns after that
+
+The current Rust type still exposes the user-column slice through `data`, but that is just a
+decoded view over the flat stored bytes.
 
 ### 3. Visible row entry
 
@@ -51,7 +54,9 @@ A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pai
 - the current visible row values for that branch view
 - optional tier-specific winner ids for `worker`, `edge`, and `global`
 
-That lets ordinary reads stay fast while still allowing lower-tier queries to resolve older settled winners when needed.
+Physically, the visible region is also stored as flat `row_format` rows with the same user columns
+and a slightly larger `_jazz_*` prefix. That lets ordinary reads stay fast while still allowing
+lower-tier queries to resolve older settled winners when needed.
 
 ## Reserved Engine Fields
 
@@ -60,19 +65,20 @@ Conceptually, every user table has:
 - the application columns you defined in `schema.ts`
 - a reserved set of engine fields that explain how the row should behave
 
-The important reserved fields are:
+The important reserved columns are:
 
-- `$row_id` — stable logical row identity
-- `$branch` — the branch view this version belongs to
-- `$version_id` — identity of this concrete version
-- `$parents` — parent version ids for row-local ancestry
-- `$state` — whether the version is visible, staging, or rejected
-- `$confirmed_tier` — highest durability tier known for that version
-- `$is_deleted` — tombstone marker
-- `$metadata` — engine/user metadata blob
-- actor fields such as `created_by` and `updated_by`
+- `_jazz_row_id` — stable logical row identity
+- `_jazz_branch` — the branch view this version belongs to
+- `_jazz_version_id` — identity of this concrete version
+- `_jazz_parents` — parent version ids for row-local ancestry
+- `_jazz_state` — whether the version is visible, staging, or rejected
+- `_jazz_confirmed_tier` — highest durability tier known for that version
+- `_jazz_is_deleted` — tombstone marker
+- `_jazz_metadata` — engine/user metadata blob
+- actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
-The important idea is not the exact field names. The important idea is that visibility, ancestry, durability, and deletion are expressed directly as row data inside the table-first engine.
+The important idea is that visibility, ancestry, durability, and deletion are expressed directly as
+table columns inside the engine's flat row format.
 
 ## How a Direct Write Lands
 

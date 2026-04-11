@@ -102,7 +102,8 @@ If a client updates a row that was originally stored on an older schema branch, 
 2. apply the user's update in the current schema
 3. write a new row version on the current schema branch
 
-The old stored row history remains intact. The new visible row lives where current code expects it.
+The old stored row history remains intact. The new visible row is written as a fresh flat visible
+record on the current schema branch.
 
 ## Why This Fits the Table-First Engine
 
