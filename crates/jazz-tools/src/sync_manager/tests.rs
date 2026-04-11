@@ -1,13 +1,35 @@
 use super::*;
 use crate::metadata::{MetadataKey, RowProvenance};
+use crate::query_manager::encoding::encode_row;
 use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
 use crate::row_histories::{StoredRowVersion, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
-use crate::test_row_history::create_test_row_with_id;
+use crate::test_row_history::{create_test_row_with_id, persist_test_schema};
 use std::collections::{HashMap, HashSet};
 
+fn users_test_schema() -> crate::query_manager::types::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("value", ColumnType::Text))
+        .build()
+}
+
+fn users_schema_hash() -> SchemaHash {
+    SchemaHash::compute(&users_test_schema())
+}
+
+fn seed_users_schema(storage: &mut MemoryStorage) {
+    persist_test_schema(storage, &users_test_schema());
+}
+
 fn row_metadata(table: &str) -> HashMap<String, String> {
-    HashMap::from([(MetadataKey::Table.to_string(), table.to_string())])
+    HashMap::from([
+        (MetadataKey::Table.to_string(), table.to_string()),
+        (
+            MetadataKey::OriginSchemaHash.to_string(),
+            users_schema_hash().to_string(),
+        ),
+    ])
 }
 
 fn visible_row(
@@ -17,11 +39,16 @@ fn visible_row(
     updated_at: u64,
     data: &[u8],
 ) -> crate::row_histories::StoredRowVersion {
+    let payload = std::str::from_utf8(data).expect("sync-manager test row payload should be utf8");
     crate::row_histories::StoredRowVersion::new(
         row_id,
         branch,
         parents,
-        data.to_vec(),
+        encode_row(
+            &users_test_schema()[&"users".into()].columns,
+            &[Value::Text(payload.to_string())],
+        )
+        .expect("sync-manager test row should encode"),
         RowProvenance::for_insert(row_id.to_string(), updated_at),
         HashMap::new(),
         crate::row_histories::RowState::VisibleDirect,
@@ -35,6 +62,7 @@ fn seed_visible_row(
     table: &str,
     row: crate::row_histories::StoredRowVersion,
 ) {
+    seed_users_schema(io);
     create_test_row_with_id(io, row.row_id, Some(row_metadata(table)));
     io.append_history_region_rows(table, std::slice::from_ref(&row))
         .unwrap();
@@ -258,6 +286,7 @@ fn row_version_created_stamps_local_durability_into_storage() {
     let server_id = ServerId::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    seed_users_schema(&mut io);
 
     sm.process_from_server(
         &mut io,
@@ -520,6 +549,7 @@ fn forward_update_to_servers_with_storage_replays_row_history_without_visible_re
 
     add_server(&mut sm, &io, server_id);
     sm.take_outbox();
+    seed_users_schema(&mut io);
     create_test_row_with_id(&mut io, row_id, Some(row_metadata("users")));
     io.append_history_region_rows("users", std::slice::from_ref(&row))
         .unwrap();
@@ -542,6 +572,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     let older = visible_row(row_id, "main", Vec::new(), 1_000, b"older");
     let newer = visible_row(row_id, "main", vec![older.version_id()], 2_000, b"newer");
 
+    seed_users_schema(&mut io);
     io.put_metadata(row_id, row_metadata("users")).unwrap();
     io.append_history_region_rows("users", &[older.clone(), newer.clone()])
         .unwrap();
@@ -559,16 +590,38 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     sm.add_server_with_storage(server_id, false, &io);
 
     let outbox = sm.take_outbox();
-    assert_eq!(outbox.len(), 2);
+    let schema_syncs = outbox
+        .iter()
+        .filter(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::CatalogueEntryUpdated { .. },
+            } if *id == server_id
+        ))
+        .count();
+    assert_eq!(schema_syncs, 1);
+
+    let row_syncs = outbox
+        .iter()
+        .filter(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowVersionCreated { .. },
+            } if *id == server_id
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(row_syncs.len(), 2);
     assert!(matches!(
-        &outbox[0],
+        row_syncs[0],
         OutboxEntry {
             destination: Destination::Server(id),
             payload: SyncPayload::RowVersionCreated { row, metadata, .. },
         } if *id == server_id && row.version_id() == older.version_id() && metadata.is_some()
     ));
     assert!(matches!(
-        &outbox[1],
+        row_syncs[1],
         OutboxEntry {
             destination: Destination::Server(id),
             payload: SyncPayload::RowVersionCreated { row, metadata, .. },

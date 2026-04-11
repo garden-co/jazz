@@ -13,23 +13,19 @@ use rocksdb::{
 };
 
 use super::{
-    HistoryRowBytes, IndexMutation, Storage, StorageError, key_codec,
+    HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
         append_history_region_row_bytes_core, load_history_row_version_bytes_core,
-        load_visible_query_row_core, load_visible_query_row_for_tier_core,
-        load_visible_region_entry_core, load_visible_region_frontier_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
-        scan_history_region_bytes_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
+        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        upsert_visible_region_row_bytes_core,
     },
 };
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_histories::{
-    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
-};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 struct RocksDBInner {
@@ -378,14 +374,14 @@ impl Storage for RocksDBStorage {
         })
     }
 
-    fn upsert_visible_region_rows(
+    fn upsert_visible_region_row_bytes(
         &mut self,
         table: &str,
-        entries: &[VisibleRowEntry],
+        rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            upsert_visible_region_rows_core(table, entries, |key, bytes| {
+            upsert_visible_region_row_bytes_core(table, rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
             Self::commit_txn(txn.into_inner())
@@ -414,7 +410,18 @@ impl Storage for RocksDBStorage {
             append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
-            upsert_visible_region_rows_core(table, visible_entries, |key, bytes| {
+            let encoded_visible_rows =
+                super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
+            let borrowed_visible_rows = encoded_visible_rows
+                .iter()
+                .map(|row| VisibleRowBytes {
+                    branch: row.branch.as_str(),
+                    row_id: row.row_id,
+                    current_version_id: row.current_version_id,
+                    bytes: &row.bytes,
+                })
+                .collect::<Vec<_>>();
+            upsert_visible_region_row_bytes_core(table, &borrowed_visible_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
             Self::apply_index_mutations_on_txn(&txn, index_mutations)?;
@@ -429,94 +436,36 @@ impl Storage for RocksDBStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            patch_row_region_rows_by_batch_core(
-                table,
-                batch_id,
-                state,
-                confirmed_tier,
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-                |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
+        super::patch_row_region_rows_by_batch_with_storage(
+            self,
+            table,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
     }
 
-    fn scan_visible_region(
+    fn load_visible_region_row_bytes(
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            scan_visible_region_core(table, branch, |prefix| {
+            load_visible_region_row_bytes_core(table, branch, row_id, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_bytes_core(table, branch, |prefix| {
                 Self::scan_prefix_from_db(&inner.db, prefix)
-            })
-        })
-    }
-
-    fn load_visible_region_row(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_row_core(table, branch, row_id, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
-    }
-
-    fn load_visible_query_row(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_query_row_core(table, branch, row_id, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
-    }
-
-    fn load_visible_region_entry(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_entry_core(table, branch, row_id, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
-    }
-
-    fn load_visible_query_row_for_tier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-        required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_query_row_for_tier_core(table, branch, row_id, required_tier, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
-    }
-
-    fn load_visible_region_frontier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<Vec<CommitId>>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_frontier_core(table, branch, row_id, |key| {
-                Self::get_from_db(&inner.db, key)
             })
         })
     }
@@ -526,14 +475,20 @@ impl Storage for RocksDBStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            scan_visible_region_row_versions_core(
-                table,
-                row_id,
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-                |key| Self::get_from_db(&inner.db, key),
-            )
-        })
+        let branches = self.with_inner(|inner| {
+            scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
+                Self::scan_prefix_keys_from_db(&inner.db, prefix)
+            })
+        })?;
+
+        let mut rows = Vec::new();
+        for branch in branches {
+            if let Some(row) = self.load_visible_region_row(table, &branch, row_id)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
     fn load_history_row_version_bytes(

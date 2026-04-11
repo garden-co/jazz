@@ -481,8 +481,9 @@ fn schema_hash_deterministic() {
 }
 
 #[test]
-fn schema_hash_column_order_independent() {
-    // Schema with columns in different order should have same hash
+fn schema_hash_column_order_sensitive() {
+    // Schema with columns in different order should have a different hash so
+    // physical row layouts can be bootstrapped precisely from catalogue schemas.
     let schema1 = SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -506,7 +507,7 @@ fn schema_hash_column_order_independent() {
 
     let hash1 = SchemaHash::compute(&schema1);
     let hash2 = SchemaHash::compute(&schema2);
-    assert_eq!(hash1, hash2, "Column order should not affect hash");
+    assert_ne!(hash1, hash2, "Column order should affect schema hash");
 }
 
 #[test]
@@ -727,8 +728,8 @@ fn row_descriptor_content_hash() {
         ColumnDescriptor::new("id", ColumnType::Uuid),
     ]);
 
-    // Same columns, different order -> same hash (order-independent)
-    assert_eq!(desc1.content_hash(), desc2.content_hash());
+    // Same columns, different order -> different hash because physical layout changes.
+    assert_ne!(desc1.content_hash(), desc2.content_hash());
 
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);

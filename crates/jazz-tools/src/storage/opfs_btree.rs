@@ -22,23 +22,19 @@ use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::object::ObjectId;
-use crate::row_histories::{
-    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
-};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    HistoryRowBytes, Storage, StorageError,
+    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
         append_history_region_row_bytes_core, load_history_row_version_bytes_core,
-        load_visible_query_row_core, load_visible_query_row_for_tier_core,
-        load_visible_region_entry_core, load_visible_region_frontier_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
-        scan_history_region_bytes_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
+        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        upsert_visible_region_row_bytes_core,
     },
 };
 use crate::commit::CommitId;
@@ -300,12 +296,12 @@ impl Storage for OpfsBTreeStorage {
         append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
     }
 
-    fn upsert_visible_region_rows(
+    fn upsert_visible_region_row_bytes(
         &mut self,
         table: &str,
-        entries: &[VisibleRowEntry],
+        rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        upsert_visible_region_rows_core(table, entries, |key, bytes| self.tree_insert(key, bytes))
+        upsert_visible_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
     }
 
     fn patch_row_region_rows_by_batch(
@@ -315,70 +311,30 @@ impl Storage for OpfsBTreeStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        patch_row_region_rows_by_batch_core(
+        super::patch_row_region_rows_by_batch_with_storage(
+            self,
             table,
             batch_id,
             state,
             confirmed_tier,
-            |prefix| self.tree_scan_prefix(prefix),
-            |key, bytes| self.tree_insert(key, bytes),
         )
     }
 
-    fn scan_visible_region(
-        &self,
-        table: &str,
-        branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        scan_visible_region_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
-    }
-
-    fn load_visible_region_row(
+    fn load_visible_region_row_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
-        load_visible_region_row_core(table, branch, row_id, |key| self.tree_read(key))
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        load_visible_region_row_bytes_core(table, branch, row_id, |key| self.tree_read(key))
     }
 
-    fn load_visible_query_row(
+    fn scan_visible_region_bytes(
         &self,
         table: &str,
         branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        load_visible_query_row_core(table, branch, row_id, |key| self.tree_read(key))
-    }
-
-    fn load_visible_region_entry(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        load_visible_region_entry_core(table, branch, row_id, |key| self.tree_read(key))
-    }
-
-    fn load_visible_query_row_for_tier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-        required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        load_visible_query_row_for_tier_core(table, branch, row_id, required_tier, |key| {
-            self.tree_read(key)
-        })
-    }
-
-    fn load_visible_region_frontier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<Vec<CommitId>>, StorageError> {
-        load_visible_region_frontier_core(table, branch, row_id, |key| self.tree_read(key))
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        scan_visible_region_bytes_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
     }
 
     fn scan_visible_region_row_versions(
@@ -386,12 +342,18 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        scan_visible_region_row_versions_core(
-            table,
-            row_id,
-            |prefix| self.tree_scan_prefix(prefix),
-            |key| self.tree_read(key),
-        )
+        let branches = scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
+            self.tree_scan_prefix_keys(prefix)
+        })?;
+
+        let mut rows = Vec::new();
+        for branch in branches {
+            if let Some(row) = self.load_visible_region_row(table, &branch, row_id)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
     fn load_history_row_version_bytes(
@@ -437,21 +399,53 @@ mod tests {
     use super::*;
     use crate::catalogue::CatalogueEntry;
     use crate::metadata::RowProvenance;
-    use crate::query_manager::types::Value;
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
     use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
+    use crate::test_row_history::persist_test_schema;
+
+    fn users_test_schema() -> crate::query_manager::types::Schema {
+        SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("value", ColumnType::Text))
+            .build()
+    }
+
+    fn users_schema_hash() -> SchemaHash {
+        SchemaHash::compute(&users_test_schema())
+    }
+
+    fn seed_users_schema(storage: &mut OpfsBTreeStorage) {
+        persist_test_schema(storage, &users_test_schema());
+    }
+
+    fn seed_users_row(storage: &mut OpfsBTreeStorage, row_id: ObjectId) {
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&crate::storage::RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(users_schema_hash()),
+                }),
+            )
+            .unwrap();
+    }
 
     fn make_row_version(
         row_id: ObjectId,
         branch: &str,
         updated_at: u64,
-        value: &[u8],
+        value: &str,
     ) -> StoredRowVersion {
         StoredRowVersion::new(
             row_id,
             branch,
             Vec::new(),
-            value.to_vec(),
+            encode_row(
+                &users_test_schema()[&"users".into()].columns,
+                &[Value::Text(value.to_string())],
+            )
+            .unwrap(),
             RowProvenance::for_insert(row_id.to_string(), updated_at),
             HashMap::new(),
             RowState::VisibleDirect,
@@ -487,9 +481,11 @@ mod tests {
     #[test]
     fn opfs_btree_row_region_roundtrip() {
         let mut storage = test_storage();
+        seed_users_schema(&mut storage);
 
         let row_id = ObjectId::new();
-        let row = make_row_version(row_id, "main", 12345, b"first");
+        seed_users_row(&mut storage, row_id);
+        let row = make_row_version(row_id, "main", 12345, "first");
 
         storage
             .append_history_region_rows("users", std::slice::from_ref(&row))
@@ -618,8 +614,10 @@ mod tests {
     #[test]
     fn opfs_btree_row_region_patch_roundtrip() {
         let mut storage = test_storage();
+        seed_users_schema(&mut storage);
         let row_id = ObjectId::new();
-        let row = make_row_version(row_id, "main", 12345, b"first");
+        seed_users_row(&mut storage, row_id);
+        let row = make_row_version(row_id, "main", 12345, "first");
 
         storage
             .append_history_region_rows("users", std::slice::from_ref(&row))
@@ -657,15 +655,20 @@ mod tests {
         let db_path = temp_dir.path().join("test.opfsbtree");
 
         let id = ObjectId::new();
-        let row = make_row_version(id, "main", 12345, b"persistent data");
+        let row = make_row_version(id, "main", 12345, "persistent data");
         let mut metadata = HashMap::new();
         metadata.insert(
             crate::metadata::MetadataKey::Table.to_string(),
             "users".to_string(),
         );
+        metadata.insert(
+            crate::metadata::MetadataKey::OriginSchemaHash.to_string(),
+            users_schema_hash().to_string(),
+        );
 
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
+            seed_users_schema(&mut storage);
             storage.put_metadata(id, metadata.clone()).unwrap();
             storage
                 .append_history_region_rows("users", std::slice::from_ref(&row))

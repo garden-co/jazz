@@ -2,12 +2,45 @@
 
 use std::collections::HashMap;
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
+use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::{Schema, SchemaHash};
 use crate::row_histories::{
     ApplyRowVersionResult, RowHistoryError, StoredRowVersion, apply_row_version,
 };
-use crate::storage::{Storage, StorageError, metadata_from_row_locator, row_locator_from_metadata};
+use crate::schema_manager::encoding::encode_schema;
+use crate::storage::{
+    MemoryStorage, Storage, StorageError, metadata_from_row_locator, row_locator_from_metadata,
+};
+
+pub fn persist_test_schema<H: Storage + ?Sized>(storage: &mut H, schema: &Schema) -> SchemaHash {
+    let schema_hash = SchemaHash::compute(schema);
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([
+                (
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                ),
+                (
+                    MetadataKey::SchemaHash.to_string(),
+                    schema_hash.to_string(),
+                ),
+            ]),
+            content: encode_schema(schema),
+        })
+        .expect("test schema should persist to catalogue");
+    schema_hash
+}
+
+pub fn seeded_memory_storage(schema: &Schema) -> MemoryStorage {
+    let mut storage = MemoryStorage::new();
+    persist_test_schema(&mut storage, schema);
+    storage
+}
 
 pub fn create_test_row<H: Storage>(
     storage: &mut H,
