@@ -1,6 +1,44 @@
 use super::*;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+    fn batch_id_for_row_version_ack(
+        &self,
+        row_version_key: crate::sync_manager::RowVersionKey,
+    ) -> Option<crate::row_histories::BatchId> {
+        let row_locator = match self.storage.load_row_locator(row_version_key.row_id) {
+            Ok(Some(row_locator)) => row_locator,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    row_id = %row_version_key.row_id,
+                    ?row_version_key.version_id,
+                    %error,
+                    "failed to load row locator for durability ack"
+                );
+                return None;
+            }
+        };
+
+        match self.storage.load_history_row_version(
+            row_locator.table.as_str(),
+            row_version_key.row_id,
+            row_version_key.version_id,
+        ) {
+            Ok(Some(row)) => Some(row.batch_id),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    table = row_locator.table.as_str(),
+                    row_id = %row_version_key.row_id,
+                    ?row_version_key.version_id,
+                    %error,
+                    "failed to load row history for durability ack"
+                );
+                None
+            }
+        }
+    }
+
     // =========================================================================
     // Tick Methods
     // =========================================================================
@@ -171,12 +209,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .sync_manager_mut()
             .take_received_row_version_acks();
         for (row_version_key, acked_tier) in received_acks {
-            if let Some(watchers) = self.ack_watchers.remove(&row_version_key) {
+            let Some(batch_id) = self.batch_id_for_row_version_ack(row_version_key) else {
+                continue;
+            };
+            if let Some(watchers) = self.ack_watchers.remove(&batch_id) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
                         tracing::debug!(
-                            ?row_version_key,
+                            ?batch_id,
                             ?acked_tier,
                             ?requested_tier,
                             "ack watcher resolved"
@@ -187,7 +228,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     }
                 }
                 if !remaining.is_empty() {
-                    self.ack_watchers.insert(row_version_key, remaining);
+                    self.ack_watchers.insert(batch_id, remaining);
                 }
             }
         }
