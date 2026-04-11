@@ -31,10 +31,19 @@ export declare class NapiRuntime {
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
   insertDurable(table: string, values: Record<string, unknown>, tier: string): Promise<any>
   insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string): Promise<any>
+  insertPersisted(table: string, values: Record<string, unknown>, tier: string): any
+  insertPersistedWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string): any
   updateDurable(objectId: string, values: any, tier: string): Promise<void>
   updateDurableWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): Promise<void>
+  updatePersisted(objectId: string, values: any, tier: string): any
+  updatePersistedWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): any
   deleteDurable(objectId: string, tier: string): Promise<void>
   deleteDurableWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): Promise<void>
+  deletePersisted(objectId: string, tier: string): any
+  deletePersistedWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): any
+  loadLocalBatchRecord(batchId: string): any | null
+  loadLocalBatchRecords(): any[]
+  acknowledgeRejectedBatch(batchId: string): boolean
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
