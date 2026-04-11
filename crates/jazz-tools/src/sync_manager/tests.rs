@@ -743,6 +743,55 @@ fn row_version_state_changed_relays_accepted_transaction_settlement_to_intereste
 }
 
 #[test]
+fn row_version_state_changed_persists_accepted_transaction_tier_upgrade_authoritatively() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let row_id = ObjectId::new();
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    row.state = crate::row_histories::RowState::VisibleTransactional;
+    row.confirmed_tier = Some(DurabilityTier::Worker);
+    let version_id = row.version_id();
+
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    io.upsert_authoritative_batch_settlement(&BatchSettlement::AcceptedTransaction {
+        batch_id: row.batch_id,
+        confirmed_tier: DurabilityTier::Worker,
+        visible_members: vec![VisibleBatchMember {
+            object_id: row_id,
+            branch_name: BranchName::new("main"),
+            batch_id: row.batch_id,
+        }],
+    })
+    .unwrap();
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(row.batch_id)
+            .unwrap(),
+        Some(BatchSettlement::AcceptedTransaction {
+            batch_id: row.batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id: row.batch_id,
+            }],
+        })
+    );
+}
+
+#[test]
 fn row_version_state_changed_stops_relaying_after_scope_removal() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
