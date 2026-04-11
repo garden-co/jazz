@@ -5,6 +5,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_dir="${JAZZ_SWIFT_TARGET_DIR:-$repo_root/target}"
 output_dir="${JAZZ_SWIFT_GENERATED_DIR:-$repo_root/crates/jazz-swift/generated}"
+package_sources_dir="${JAZZ_SWIFT_PACKAGE_SOURCES_DIR:-$repo_root/crates/jazz-swift/Sources/JazzSwiftBindings}"
+package_generated_file="$package_sources_dir/jazz_swift.swift"
 profile="${JAZZ_SWIFT_PROFILE:-debug}"
 local_uniffi_bindgen="$repo_root/target/tools/bin/uniffi-bindgen"
 
@@ -19,6 +21,7 @@ else
 fi
 
 mkdir -p "$output_dir"
+mkdir -p "$package_sources_dir"
 
 build_cmd=(cargo --config 'net.git-fetch-with-cli=true' build -p jazz-swift --lib)
 if [[ "$profile" == "release" ]]; then
@@ -54,3 +57,11 @@ fi
   --out-dir "$output_dir"
 
 echo "Swift bindings generated in $output_dir"
+
+{
+  printf '%s\n' '#if canImport(jazz_swiftFFI)'
+  cat "$output_dir/jazz_swift.swift"
+  printf '\n%s\n' '#endif'
+} > "$package_generated_file"
+
+echo "Swift package source synced to $package_generated_file"
