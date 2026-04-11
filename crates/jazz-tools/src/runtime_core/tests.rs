@@ -3395,6 +3395,202 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
 }
 
 #[test]
+fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
+    // alice -> worker
+    //   alice stages one transactional batch locally
+    //   worker rejects it authoritatively
+    //   alice acknowledges the replayable rejection
+    //   the local batch record is pruned while rejected row history stays intact
+    let schema = test_schema();
+    let mut alice = create_runtime_with_schema(schema.clone(), "transactional-ack-reject-test");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "transactional-ack-reject-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .set_authorization_schema(users_insert_denied_authorization_schema());
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    worker.add_client(client_id, Some(alice_session.clone()));
+    alice.add_server(server_id);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::User);
+
+    alice.batched_tick();
+    worker.batched_tick();
+    alice.sync_sender().take();
+    worker.sync_sender().take();
+
+    let write_context = WriteContext::from_session(alice_session)
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
+    let ((row_id, _row_values), _receiver) = alice
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows = alice
+        .storage()
+        .scan_history_row_versions("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
+
+    for entry in worker.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            alice.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    alice.batched_tick();
+
+    assert!(
+        alice
+            .storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .is_some(),
+        "rejected batch should be replayably persisted before acknowledgement"
+    );
+
+    assert!(
+        alice.acknowledge_rejected_batch(batch_id).unwrap(),
+        "first acknowledgement should prune the rejected batch record"
+    );
+    assert_eq!(
+        alice.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "acknowledged rejected batch should no longer remain in local batch storage"
+    );
+    assert!(
+        !alice.acknowledge_rejected_batch(batch_id).unwrap(),
+        "acknowledging an already-pruned batch should be a no-op"
+    );
+
+    let alice_history_rows = alice
+        .storage()
+        .scan_history_row_versions("users", row_id)
+        .unwrap();
+    assert_eq!(alice_history_rows.len(), 1);
+    assert_eq!(
+        alice_history_rows[0].state,
+        crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
+fn rc_rejected_batch_survives_restart_until_acknowledged() {
+    // alice -> worker
+    //   alice receives a replayable transactional rejection
+    //   restart preserves that rejected batch record
+    //   acknowledgement after restart prunes only the local batch record
+    let schema = test_schema();
+    let mut alice = create_runtime_with_schema(schema.clone(), "transactional-restart-reject-test");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "transactional-restart-reject-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .set_authorization_schema(users_insert_denied_authorization_schema());
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    worker.add_client(client_id, Some(alice_session.clone()));
+    alice.add_server(server_id);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::User);
+
+    alice.batched_tick();
+    worker.batched_tick();
+    alice.sync_sender().take();
+    worker.sync_sender().take();
+
+    let write_context = WriteContext::from_session(alice_session)
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
+    let ((row_id, _row_values), _receiver) = alice
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows = alice
+        .storage()
+        .scan_history_row_versions("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
+
+    for entry in worker.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            alice.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    alice.batched_tick();
+
+    let storage = alice.into_storage();
+    let mut restarted = create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+
+    assert!(matches!(
+        restarted
+            .storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .and_then(|record| record.latest_settlement),
+        Some(crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. })
+            if settled_batch_id == batch_id
+    ));
+
+    assert!(
+        restarted.acknowledge_rejected_batch(batch_id).unwrap(),
+        "restart should preserve a rejection record that can still be acknowledged"
+    );
+    assert_eq!(
+        restarted.storage().load_local_batch_record(batch_id).unwrap(),
+        None
+    );
+
+    let restarted_history_rows = restarted
+        .storage()
+        .scan_history_row_versions("users", row_id)
+        .unwrap();
+    assert_eq!(restarted_history_rows.len(), 1);
+    assert_eq!(
+        restarted_history_rows[0].state,
+        crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
 fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
     // alice -> worker
     //   alice stages one transactional batch

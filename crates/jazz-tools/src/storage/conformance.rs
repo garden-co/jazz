@@ -781,6 +781,30 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
     assert_eq!(records[1].batch_id, high);
 }
 
+pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Transactional,
+        DurabilityTier::Worker,
+        Some(BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        }),
+    );
+
+    storage.upsert_local_batch_record(&record).unwrap();
+    assert_eq!(
+        storage.load_local_batch_record(batch_id).unwrap(),
+        Some(record)
+    );
+
+    storage.delete_local_batch_record(batch_id).unwrap();
+    assert_eq!(storage.load_local_batch_record(batch_id).unwrap(), None);
+}
+
 pub fn test_authoritative_batch_settlement_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let batch_id = crate::row_histories::BatchId::new();
@@ -1141,6 +1165,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn local_batch_record_scan_returns_sorted_entries() {
                 conformance::test_local_batch_record_scan_returns_sorted_entries(&$factory);
+            }
+
+            #[test]
+            fn local_batch_record_delete_removes_record() {
+                conformance::test_local_batch_record_delete_removes_record(&$factory);
             }
 
             #[test]

@@ -149,6 +149,129 @@ fn set_query_scope_stores_session() {
 }
 
 #[test]
+fn set_query_scope_emits_query_scope_snapshot_to_client() {
+    let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let query_id = QueryId(7);
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        query_id,
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::QueryScopeSnapshot { query_id: snapshot_query_id, scope },
+        } if id == client_id
+            && snapshot_query_id == query_id
+            && scope == vec![(row_id, BranchName::new("main"))]
+    )));
+}
+
+#[test]
+fn query_scope_snapshot_from_server_is_stored_for_query() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let query_id = QueryId(11);
+    let first_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
+    let second_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(2));
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::QueryScopeSnapshot {
+            query_id,
+            scope: vec![
+                (second_row_id, BranchName::new("main")),
+                (first_row_id, BranchName::new("main")),
+            ],
+        },
+    );
+
+    assert_eq!(
+        sm.remote_query_scope(query_id),
+        HashSet::from([
+            (first_row_id, BranchName::new("main")),
+            (second_row_id, BranchName::new("main")),
+        ])
+    );
+}
+
+#[test]
+fn query_scope_snapshot_from_server_relays_to_interested_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let query_id = QueryId(15);
+    let row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(15));
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    sm.query_origin
+        .entry(query_id)
+        .or_default()
+        .insert(client_id);
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::QueryScopeSnapshot {
+            query_id,
+            scope: vec![(row_id, BranchName::new("main"))],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::QueryScopeSnapshot { query_id: relayed_query_id, scope },
+        } if id == client_id
+            && relayed_query_id == query_id
+            && scope == vec![(row_id, BranchName::new("main"))]
+    )));
+}
+
+#[test]
+fn remove_server_clears_remote_query_scope() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let query_id = QueryId(23);
+    let row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(23));
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::QueryScopeSnapshot {
+            query_id,
+            scope: vec![(row_id, BranchName::new("main"))],
+        },
+    );
+    assert_eq!(
+        sm.remote_query_scope(query_id),
+        HashSet::from([(row_id, BranchName::new("main"))])
+    );
+
+    sm.remove_server(server_id);
+
+    assert!(sm.remote_query_scope(query_id).is_empty());
+}
+
+#[test]
 fn send_query_subscription_includes_session() {
     let mut sm = SyncManager::new();
     let io = MemoryStorage::new();

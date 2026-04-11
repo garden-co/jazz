@@ -907,6 +907,9 @@ impl<'a> Normalizer<'a> {
             SyncPayload::QueryUnsubscription { query_id } => {
                 format!("query:{}", query_id.0)
             }
+            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+                format!("query:{} scope:{}", query_id.0, scope.len())
+            }
             SyncPayload::QuerySettled {
                 query_id,
                 through_seq,
@@ -1013,6 +1016,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::QueryUnsubscription { query_id } => {
             format!("query:{}", query_id.0)
+        }
+        SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+            format!("query:{} scope:{}", query_id.0, scope.len())
         }
         SyncPayload::QuerySettled {
             query_id,

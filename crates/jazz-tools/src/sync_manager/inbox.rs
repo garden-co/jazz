@@ -491,6 +491,23 @@ impl SyncManager {
                     batch_ids,
                 );
             }
+            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+                let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
+                self.remote_query_scopes
+                    .insert((server_id, query_id), scope_set);
+
+                if let Some(clients) = self.query_origin.get(&query_id) {
+                    for &cid in clients {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::QueryScopeSnapshot {
+                                query_id,
+                                scope: scope.clone(),
+                            },
+                        });
+                    }
+                }
+            }
             SyncPayload::QuerySettled {
                 query_id,
                 tier,
@@ -840,6 +857,13 @@ impl SyncManager {
                     %client_id,
                     query_id = warning.query_id.0,
                     "client attempted to send SchemaWarning payload; ignoring"
+                );
+            }
+            SyncPayload::QueryScopeSnapshot { query_id, .. } => {
+                tracing::warn!(
+                    %client_id,
+                    query_id = query_id.0,
+                    "client attempted to send QueryScopeSnapshot payload; ignoring"
                 );
             }
             // Clients shouldn't send these
