@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::BatchSettlement;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
@@ -112,6 +113,21 @@ impl SyncManager {
         }
     }
 
+    fn replayable_direct_batch_settlement<H: Storage>(
+        &self,
+        storage: &H,
+        row_id: ObjectId,
+        branch_name: BranchName,
+    ) -> Option<BatchSettlement> {
+        let row_locator = storage.load_row_locator(row_id).ok().flatten()?;
+        self.load_current_direct_batch_settlement_from_storage(
+            storage,
+            row_id,
+            &branch_name,
+            &row_locator,
+        )
+    }
+
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
@@ -209,6 +225,11 @@ impl SyncManager {
                 if let Some(clients) = self.row_version_interest.get(&key) {
                     interested.extend(clients);
                 }
+                let settlement =
+                    self.replayable_direct_batch_settlement(storage, row_id, branch_name);
+                if let Some(settlement) = settlement.clone() {
+                    self.pending_batch_settlements.push(settlement);
+                }
                 for cid in interested {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Client(cid),
@@ -218,6 +239,43 @@ impl SyncManager {
                             version_id,
                             state,
                             confirmed_tier,
+                        },
+                    });
+                    if let Some(settlement) = settlement.clone() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::BatchSettlement { settlement },
+                        });
+                    }
+                }
+            }
+            SyncPayload::BatchSettlement { settlement } => {
+                self.pending_batch_settlements.push(settlement.clone());
+                let interested: HashSet<ClientId> = match &settlement {
+                    BatchSettlement::DurableDirect {
+                        visible_members, ..
+                    }
+                    | BatchSettlement::AcceptedTransaction {
+                        visible_members, ..
+                    } => visible_members
+                        .iter()
+                        .flat_map(|member| {
+                            self.clients.iter().filter_map(move |(client_id, client)| {
+                                client
+                                    .is_in_scope(member.object_id, &member.branch_name)
+                                    .then_some(*client_id)
+                            })
+                        })
+                        .collect(),
+                    BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
+                        HashSet::new()
+                    }
+                };
+                for cid in interested {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::BatchSettlement {
+                            settlement: settlement.clone(),
                         },
                     });
                 }
@@ -518,6 +576,11 @@ impl SyncManager {
                     interested.extend(clients);
                 }
                 interested.remove(&client_id);
+                let settlement =
+                    self.replayable_direct_batch_settlement(storage, *row_id, *branch_name);
+                if let Some(settlement) = settlement.clone() {
+                    self.pending_batch_settlements.push(settlement);
+                }
                 for cid in interested {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Client(cid),
@@ -529,7 +592,16 @@ impl SyncManager {
                             confirmed_tier: *confirmed_tier,
                         },
                     });
+                    if let Some(settlement) = settlement.clone() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::BatchSettlement { settlement },
+                        });
+                    }
                 }
+            }
+            SyncPayload::BatchSettlement { settlement } => {
+                self.pending_batch_settlements.push(settlement.clone());
             }
             SyncPayload::QuerySettled {
                 query_id,
@@ -610,6 +682,9 @@ impl SyncManager {
                         );
                     }
                 }
+            }
+            SyncPayload::BatchSettlement { settlement } => {
+                self.pending_batch_settlements.push(settlement);
             }
             _ => {}
         }

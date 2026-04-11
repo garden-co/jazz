@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::encoding::encode_row;
 use crate::query_manager::query::QueryBuilder;
@@ -452,6 +453,98 @@ fn row_version_state_changed_relays_to_clients_that_received_row_version_needed(
                     ..
                 },
         } if id == client_id && changed_row_id == row_id && changed_version_id == version_id
+    )));
+}
+
+#[test]
+fn initial_query_sync_replays_current_direct_batch_settlement() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    row.confirmed_tier = Some(DurabilityTier::Worker);
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if *id == client_id && *settlement == BatchSettlement::DurableDirect {
+            batch_id: row.batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id: row.batch_id,
+            }],
+        }
+    )));
+}
+
+#[test]
+fn row_version_state_changed_relays_direct_batch_settlement_to_interested_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let version_id = row.version_id();
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+    let _ = sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if id == client_id && settlement == BatchSettlement::DurableDirect {
+            batch_id: row.batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id: row.batch_id,
+            }],
+        }
     )));
 }
 

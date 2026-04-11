@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
@@ -63,6 +64,8 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
+    /// Pending replayable batch settlements for RuntimeCore to process.
+    pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
     /// Row-version state acks received during inbox processing.
     pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
@@ -100,6 +103,7 @@ impl std::fmt::Debug for SyncManager {
             .field("row_version_interest", &self.row_version_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
+            .field("pending_batch_settlements", &self.pending_batch_settlements)
             .field("received_row_version_acks", &self.received_row_version_acks)
             .finish()
     }
@@ -156,6 +160,7 @@ impl SyncManager {
             row_version_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
+            pending_batch_settlements: Vec::new(),
             received_row_version_acks: Vec::new(),
         }
     }
@@ -551,6 +556,11 @@ impl SyncManager {
     /// Re-queue QuerySettled notifications that are still blocked on stream sequencing.
     pub fn requeue_pending_query_settled(&mut self, pending: Vec<PendingQuerySettled>) {
         self.pending_query_settled.extend(pending);
+    }
+
+    /// Take pending replayable batch settlements for RuntimeCore to process.
+    pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
+        std::mem::take(&mut self.pending_batch_settlements)
     }
 
     /// Take received row-version persistence state since last call.

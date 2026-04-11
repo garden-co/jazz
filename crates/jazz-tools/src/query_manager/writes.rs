@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::batch_fate::BatchMode;
 use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
@@ -40,6 +41,12 @@ struct PreparedUpdateCommit<'a> {
     branch: &'a str,
     id: ObjectId,
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
+}
+
+struct RowVersionAuthoring<'a> {
+    provenance: &'a RowProvenance,
+    delete_kind: Option<DeleteKind>,
+    row_state: RowState,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -89,25 +96,44 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    fn resolve_write_row_state(write_context: Option<&WriteContext>) -> RowState {
+        match write_context.map(WriteContext::batch_mode) {
+            Some(BatchMode::Transactional) => RowState::StagingPending,
+            Some(BatchMode::Direct) | None => RowState::VisibleDirect,
+        }
+    }
+
+    fn row_version_authoring<'a>(
+        &self,
+        provenance: &'a RowProvenance,
+        delete_kind: Option<DeleteKind>,
+        write_context: Option<&WriteContext>,
+    ) -> RowVersionAuthoring<'a> {
+        RowVersionAuthoring {
+            provenance,
+            delete_kind,
+            row_state: Self::resolve_write_row_state(write_context),
+        }
+    }
+
     fn authored_row_version(
         &self,
         row_id: ObjectId,
         branch_name: &str,
         parents: impl IntoIterator<Item = CommitId>,
         data: Vec<u8>,
-        provenance: &RowProvenance,
-        delete_kind: Option<DeleteKind>,
+        authoring: RowVersionAuthoring<'_>,
     ) -> StoredRowVersion {
         StoredRowVersion::new(
             row_id,
             branch_name,
             parents,
             data,
-            provenance.clone(),
-            Self::row_commit_metadata(provenance, delete_kind)
+            authoring.provenance.clone(),
+            Self::row_commit_metadata(authoring.provenance, authoring.delete_kind)
                 .into_iter()
                 .collect(),
-            RowState::VisibleDirect,
+            authoring.row_state,
             self.sync_manager.max_local_durability_tier(),
         )
     }
@@ -170,18 +196,10 @@ impl QueryManager {
     fn apply_local_row_version<H: Storage>(
         &mut self,
         storage: &mut H,
-        row_id: ObjectId,
         update: RowVisibilityChange,
     ) -> Result<StoredRowVersion, QueryError> {
         let row = update.row.clone();
         self.handle_row_update_with_origin(storage, update, true, false);
-        if let Ok(Some(row_locator)) = storage.load_row_locator(row_id) {
-            self.sync_manager.forward_row_version_to_servers(
-                row_id,
-                metadata_from_row_locator(&row_locator),
-                row.clone(),
-            );
-        }
         Ok(row)
     }
 
@@ -202,7 +220,7 @@ impl QueryManager {
         row_id: ObjectId,
         row: StoredRowVersion,
         index_mutations: &[crate::storage::IndexMutation<'_>],
-    ) -> Result<(CommitId, RowVisibilityChange), QueryError> {
+    ) -> Result<(CommitId, Option<RowVisibilityChange>), QueryError> {
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
 
@@ -215,6 +233,7 @@ impl QueryManager {
             self.persist_row_locator(storage, row_id, &row_locator);
         }
 
+        let forwarded_row = row.clone();
         let applied = apply_row_version(storage, row_id, branch_name, row, index_mutations)
             .map_err(|error| match error {
                 RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
@@ -226,15 +245,14 @@ impl QueryManager {
                 }
             })?;
 
-        let version_id = applied.version_id;
-        let visibility_change = applied.visibility_change.ok_or_else(|| {
-            QueryError::EncodingError(format!(
-                "missing visible-row update for local row version {:?} on {}",
-                version_id, row_id
-            ))
-        })?;
+        self.sync_manager.forward_row_version_to_servers(
+            row_id,
+            metadata_from_row_locator(&applied.row_locator),
+            forwarded_row,
+        );
 
-        Ok((version_id, visibility_change))
+        let version_id = applied.version_id;
+        Ok((version_id, applied.visibility_change))
     }
 
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
@@ -477,6 +495,7 @@ impl QueryManager {
         commit: PreparedUpdateCommit<'_>,
         prepared: &PreparedUpdateWrite,
         provenance: &RowProvenance,
+        write_context: Option<&WriteContext>,
     ) -> Result<CommitId, QueryError> {
         let PreparedUpdateCommit {
             table,
@@ -491,8 +510,7 @@ impl QueryManager {
             branch,
             parents,
             prepared.new_data.clone(),
-            provenance,
-            None,
+            self.row_version_authoring(provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
         let (version_id, visibility_change) = self.apply_local_row_history_write(
@@ -504,7 +522,9 @@ impl QueryManager {
             index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(version_id)
     }
@@ -682,8 +702,7 @@ impl QueryManager {
             branch.as_str(),
             vec![],
             data.clone(),
-            &provenance,
-            None,
+            self.row_version_authoring(&provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (row_version_id, visibility_change) = self.apply_local_row_history_write(
@@ -696,7 +715,9 @@ impl QueryManager {
         )?;
 
         tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
-        let _ = self.apply_local_row_version(storage, object_id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         tracing::debug!(%object_id, ?row_version_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
@@ -826,8 +847,13 @@ impl QueryManager {
             &data,
             &descriptor,
         );
-        let row =
-            self.authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
+        let row = self.authored_row_version(
+            object_id,
+            branch,
+            vec![],
+            data.clone(),
+            self.row_version_authoring(&provenance, None, write_context),
+        );
         let branch_name = BranchName::new(branch);
         let (row_version_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -838,7 +864,9 @@ impl QueryManager {
             &index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, object_id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(InsertResult {
             row_id: object_id,
@@ -1439,6 +1467,7 @@ impl QueryManager {
             },
             &prepared,
             &new_provenance,
+            write_context,
         )?;
 
         Ok(version_id)
@@ -1520,6 +1549,7 @@ impl QueryManager {
             },
             &prepared,
             &new_provenance,
+            write_context,
         )?;
 
         let _ = existing_branch_data;
@@ -1669,8 +1699,7 @@ impl QueryManager {
             branch.as_str(),
             parents,
             old_data.to_vec(),
-            &delete_provenance,
-            Some(DeleteKind::Soft),
+            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
         let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
             &table,
@@ -1690,7 +1719,9 @@ impl QueryManager {
         )?;
 
         tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
-        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1812,8 +1843,7 @@ impl QueryManager {
             branch,
             parents,
             old_data_for_policy.to_vec(),
-            &delete_provenance,
-            Some(DeleteKind::Soft),
+            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
         let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
             table,
@@ -1834,7 +1864,9 @@ impl QueryManager {
 
         let _ = old_branch_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1921,8 +1953,7 @@ impl QueryManager {
             branch.as_str(),
             parents,
             new_data.clone(),
-            &row_provenance,
-            None,
+            self.row_version_authoring(&row_provenance, None, None),
         );
         let index_mutations = Self::index_mutations_for_undelete_on_branch(
             &table,
@@ -1941,7 +1972,9 @@ impl QueryManager {
             &index_mutations,
         )?;
 
-        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(InsertResult {
             row_id: id,
@@ -2002,8 +2035,7 @@ impl QueryManager {
             branch.as_str(),
             parents,
             vec![],
-            &delete_provenance,
-            Some(DeleteKind::Hard),
+            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Hard), None),
         );
         let index_mutations = Self::index_mutations_for_hard_delete_on_branch(
             &table,
@@ -2024,7 +2056,9 @@ impl QueryManager {
 
         let _ = old_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_version(storage, id, visibility_change)?;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,

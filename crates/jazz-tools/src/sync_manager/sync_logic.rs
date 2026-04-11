@@ -60,10 +60,7 @@ impl SyncManager {
             return;
         };
 
-        for row in rows
-            .into_iter()
-            .filter(|row| !matches!(row.state, RowState::StagingPending))
-        {
+        for row in rows.into_iter() {
             row_sync.push((object_id, metadata.clone(), row));
         }
     }
@@ -250,6 +247,15 @@ impl SyncManager {
                 self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
+        }
+
+        if let Some(settlement) = self.load_current_direct_batch_settlement_from_storage(
+            storage,
+            object_id,
+            &branch_name,
+            &row_locator,
+        ) {
+            self.queue_batch_settlement_to_client(client_id, settlement);
         }
     }
 
