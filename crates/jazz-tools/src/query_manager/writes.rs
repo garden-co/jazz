@@ -203,6 +203,9 @@ impl QueryManager {
         row: StoredRowVersion,
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(CommitId, RowVisibilityChange), QueryError> {
+        self.ensure_known_schemas_catalogued(storage)
+            .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
+
         if storage
             .load_row_locator(row_id)
             .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?

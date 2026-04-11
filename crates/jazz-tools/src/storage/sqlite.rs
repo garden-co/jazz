@@ -10,23 +10,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use super::{
-    HistoryRowBytes, Storage, StorageError,
+    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
     storage_core::{
         append_history_region_row_bytes_core, load_history_row_version_bytes_core,
-        load_visible_query_row_core, load_visible_query_row_for_tier_core,
-        load_visible_region_entry_core, load_visible_region_frontier_core,
-        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
-        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
-        scan_history_region_bytes_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, upsert_visible_region_rows_core,
+        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        upsert_visible_region_row_bytes_core,
     },
 };
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_histories::{
-    HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
-};
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
@@ -384,15 +380,15 @@ impl Storage for SqliteStorage {
         })
     }
 
-    fn upsert_visible_region_rows(
+    fn upsert_visible_region_row_bytes(
         &mut self,
         table: &str,
-        entries: &[VisibleRowEntry],
+        rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
-                upsert_visible_region_rows_core(table, entries, |key, bytes| {
+                upsert_visible_region_row_bytes_core(table, rows, |key, bytes| {
                     Self::set(&inner.conn, key, bytes)
                 })
             })
@@ -406,89 +402,34 @@ impl Storage for SqliteStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        self.with_inner_mut(|inner| {
-            inner.ensure_write_tx()?;
-            Self::with_savepoint(&inner.conn, || {
-                patch_row_region_rows_by_batch_core(
-                    table,
-                    batch_id,
-                    state,
-                    confirmed_tier,
-                    |prefix| Self::scan_prefix(&inner.conn, prefix),
-                    |key, bytes| Self::set(&inner.conn, key, bytes),
-                )
-            })
-        })
+        super::patch_row_region_rows_by_batch_with_storage(
+            self,
+            table,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
     }
 
-    fn scan_visible_region(
+    fn load_visible_region_row_bytes(
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            scan_visible_region_core(table, branch, |prefix| {
+            load_visible_region_row_bytes_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_bytes_core(table, branch, |prefix| {
                 Self::scan_prefix(&inner.conn, prefix)
-            })
-        })
-    }
-
-    fn load_visible_region_row(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
-        })
-    }
-
-    fn load_visible_query_row(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_query_row_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
-        })
-    }
-
-    fn load_visible_region_entry(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_entry_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
-        })
-    }
-
-    fn load_visible_query_row_for_tier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-        required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_query_row_for_tier_core(table, branch, row_id, required_tier, |key| {
-                Self::get(&inner.conn, key)
-            })
-        })
-    }
-
-    fn load_visible_region_frontier(
-        &self,
-        table: &str,
-        branch: &str,
-        row_id: ObjectId,
-    ) -> Result<Option<Vec<CommitId>>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_frontier_core(table, branch, row_id, |key| {
-                Self::get(&inner.conn, key)
             })
         })
     }
@@ -498,14 +439,20 @@ impl Storage for SqliteStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        self.with_inner(|inner| {
-            scan_visible_region_row_versions_core(
-                table,
-                row_id,
-                |prefix| Self::scan_prefix(&inner.conn, prefix),
-                |key| Self::get(&inner.conn, key),
-            )
-        })
+        let branches = self.with_inner(|inner| {
+            scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
+                Self::scan_prefix_keys(&inner.conn, prefix)
+            })
+        })?;
+
+        let mut rows = Vec::new();
+        for branch in branches {
+            if let Some(row) = self.load_visible_region_row(table, &branch, row_id)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
     fn load_history_row_version_bytes(
