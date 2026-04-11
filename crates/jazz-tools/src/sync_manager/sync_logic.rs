@@ -249,7 +249,7 @@ impl SyncManager {
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
         }
 
-        if let Some(settlement) = self.load_current_direct_batch_settlement_from_storage(
+        if let Some(settlement) = self.load_current_batch_settlement_from_storage(
             storage,
             object_id,
             &branch_name,

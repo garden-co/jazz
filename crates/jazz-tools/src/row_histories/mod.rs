@@ -1011,16 +1011,17 @@ fn rebuild_visible_entry_from_history<H: Storage>(
     branch_name: &SharedString,
 ) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
     let history_rows = load_branch_history(io, table, object_id, branch_name)?;
-    let Some(current_row) = history_rows
+    Ok(visible_entry_from_history_rows(&history_rows))
+}
+
+fn visible_entry_from_history_rows(history_rows: &[StoredRowVersion]) -> Option<VisibleRowEntry> {
+    let current_row = history_rows
         .iter()
         .filter(|row| row.state.is_visible())
         .max_by_key(|row| (row.updated_at, row.version_id()))
-        .cloned()
-    else {
-        return Ok(None);
-    };
+        .cloned()?;
 
-    Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
+    Some(VisibleRowEntry::rebuild(current_row, history_rows))
 }
 
 fn load_previous_visible_entry<H: Storage>(
@@ -1384,8 +1385,18 @@ pub fn patch_row_version_state<H: Storage>(
         Some(entry) if state.is_none() => {
             visible_entry_after_tier_upgrade(io, &table, entry, &patched_row)?
         }
-        _ => rebuild_visible_entry_from_history(io, &table, object_id, &branch)?
-            .ok_or(RowHistoryError::ObjectNotFound(object_id))?,
+        _ => {
+            let mut history_rows = load_branch_history(io, &table, object_id, &branch)?;
+            let Some(existing) = history_rows
+                .iter_mut()
+                .find(|candidate| candidate.version_id() == version_id)
+            else {
+                return Err(RowHistoryError::ObjectNotFound(object_id));
+            };
+            *existing = patched_row.clone();
+            visible_entry_from_history_rows(&history_rows)
+                .ok_or(RowHistoryError::ObjectNotFound(object_id))?
+        }
     };
     io.apply_row_mutation(
         &table,

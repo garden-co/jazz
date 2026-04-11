@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
@@ -113,19 +113,97 @@ impl SyncManager {
         }
     }
 
-    fn replayable_direct_batch_settlement<H: Storage>(
+    fn replayable_visible_batch_settlement<H: Storage>(
         &self,
         storage: &H,
         row_id: ObjectId,
         branch_name: BranchName,
     ) -> Option<BatchSettlement> {
         let row_locator = storage.load_row_locator(row_id).ok().flatten()?;
-        self.load_current_direct_batch_settlement_from_storage(
+        self.load_current_batch_settlement_from_storage(storage, row_id, &branch_name, &row_locator)
+    }
+
+    fn maybe_accept_transactional_row_from_client<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        client_id: ClientId,
+        row: &StoredRowVersion,
+    ) {
+        if !matches!(row.state, RowState::StagingPending) {
+            return;
+        }
+
+        let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
+            return;
+        };
+
+        let row_id = row.row_id;
+        let branch_name = BranchName::new(&row.branch);
+        let version_id = row.version_id();
+        let settlement = BatchSettlement::AcceptedTransaction {
+            batch_id: row.batch_id,
+            confirmed_tier,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id: row.batch_id,
+            }],
+        };
+
+        let visibility_change = patch_row_version_state(
             storage,
             row_id,
             &branch_name,
-            &row_locator,
+            version_id,
+            Some(RowState::VisibleTransactional),
+            Some(confirmed_tier),
         )
+        .ok()
+        .flatten();
+
+        self.pending_batch_settlements.push(settlement.clone());
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::RowVersionStateChanged {
+                row_id,
+                branch_name,
+                version_id,
+                state: Some(RowState::VisibleTransactional),
+                confirmed_tier: Some(confirmed_tier),
+            },
+        });
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::BatchSettlement {
+                settlement: settlement.clone(),
+            },
+        });
+
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id,
+                    branch_name,
+                    version_id,
+                    state: Some(RowState::VisibleTransactional),
+                    confirmed_tier: Some(confirmed_tier),
+                },
+            });
+        }
+
+        if visibility_change.is_some() {
+            self.pending_row_visibility_changes
+                .extend(visibility_change.clone());
+            self.forward_update_to_clients_except_with_storage(
+                storage,
+                row_id,
+                branch_name,
+                client_id,
+            );
+        }
     }
 
     /// Process a single inbox entry.
@@ -226,7 +304,7 @@ impl SyncManager {
                     interested.extend(clients);
                 }
                 let settlement =
-                    self.replayable_direct_batch_settlement(storage, row_id, branch_name);
+                    self.replayable_visible_batch_settlement(storage, row_id, branch_name);
                 if let Some(settlement) = settlement.clone() {
                     self.pending_batch_settlements.push(settlement);
                 }
@@ -577,7 +655,7 @@ impl SyncManager {
                 }
                 interested.remove(&client_id);
                 let settlement =
-                    self.replayable_direct_batch_settlement(storage, *row_id, *branch_name);
+                    self.replayable_visible_batch_settlement(storage, *row_id, *branch_name);
                 if let Some(settlement) = settlement.clone() {
                     self.pending_batch_settlements.push(settlement);
                 }
@@ -656,30 +734,36 @@ impl SyncManager {
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
                     let version_id = applied.row.version_id();
-
-                    for tier in self.my_tiers.iter().copied() {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::RowVersionStateChanged {
-                                row_id: object_id,
-                                branch_name,
-                                version_id,
-                                state: None,
-                                confirmed_tier: Some(tier),
-                            },
-                        });
-                    }
-
                     self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
-
-                    if let Some(update) = applied.visibility_change {
-                        self.pending_row_visibility_changes.push(update);
-                        self.forward_update_to_clients_except_with_storage(
+                    if matches!(applied.row.state, RowState::StagingPending) {
+                        self.maybe_accept_transactional_row_from_client(
                             storage,
-                            object_id,
-                            branch_name,
                             client_id,
+                            &applied.row,
                         );
+                    } else {
+                        for tier in self.my_tiers.iter().copied() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::RowVersionStateChanged {
+                                    row_id: object_id,
+                                    branch_name,
+                                    version_id,
+                                    state: None,
+                                    confirmed_tier: Some(tier),
+                                },
+                            });
+                        }
+
+                        if let Some(update) = applied.visibility_change {
+                            self.pending_row_visibility_changes.push(update);
+                            self.forward_update_to_clients_except_with_storage(
+                                storage,
+                                object_id,
+                                branch_name,
+                                client_id,
+                            );
+                        }
                     }
                 }
             }

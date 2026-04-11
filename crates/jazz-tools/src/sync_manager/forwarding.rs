@@ -33,7 +33,7 @@ impl SyncManager {
             .max_by_key(|row| (row.updated_at, row.version_id()))
     }
 
-    pub(super) fn load_current_direct_batch_settlement_from_storage<
+    pub(super) fn load_current_batch_settlement_from_storage<
         H: crate::storage::Storage + ?Sized,
     >(
         &self,
@@ -44,21 +44,31 @@ impl SyncManager {
     ) -> Option<BatchSettlement> {
         let row =
             self.load_current_row_from_storage(storage, object_id, branch_name, row_locator)?;
-        if row.branch != branch_name.as_str()
-            || !matches!(row.state, crate::row_histories::RowState::VisibleDirect)
-        {
+        if row.branch != branch_name.as_str() {
             return None;
         }
         let confirmed_tier = row.confirmed_tier?;
-        Some(BatchSettlement::DurableDirect {
+        let visible_members = vec![VisibleBatchMember {
+            object_id,
+            branch_name: *branch_name,
             batch_id: row.batch_id,
-            confirmed_tier,
-            visible_members: vec![VisibleBatchMember {
-                object_id,
-                branch_name: *branch_name,
+        }];
+        match row.state {
+            crate::row_histories::RowState::VisibleDirect => Some(BatchSettlement::DurableDirect {
                 batch_id: row.batch_id,
-            }],
-        })
+                confirmed_tier,
+                visible_members,
+            }),
+            crate::row_histories::RowState::VisibleTransactional => {
+                Some(BatchSettlement::AcceptedTransaction {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                    visible_members,
+                })
+            }
+            crate::row_histories::RowState::StagingPending
+            | crate::row_histories::RowState::Rejected => None,
+        }
     }
 
     pub(super) fn queue_batch_settlement_to_client(
@@ -165,7 +175,7 @@ impl SyncManager {
                     row.clone(),
                     false,
                 );
-                if let Some(settlement) = self.load_current_direct_batch_settlement_from_storage(
+                if let Some(settlement) = self.load_current_batch_settlement_from_storage(
                     storage,
                     object_id,
                     &branch_name,
