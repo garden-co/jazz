@@ -15,8 +15,8 @@ behaves the way it does.
 Jazz stays table-first all the way down.
 
 Your schema defines normal application columns such as `title`, `done`, and `projectId`. Under the
-hood, the engine also tracks a small set of reserved fields that explain how each row behaves over
-time, such as:
+hood, the engine also tracks a small set of reserved `_jazz_*` columns that explain how each row
+behaves over time, such as:
 
 - a stable row id
 - the branch view the row belongs to
@@ -27,10 +27,9 @@ time, such as:
 - delete markers
 - engine/user metadata
 
-Conceptually, the whole row-version record lives in one row-format value space that includes both
-application columns and reserved engine columns. Some Rust types still expose the application
-portion separately for convenience, but that is an implementation detail rather than a different
-storage model.
+The important physical fact is that Jazz stores one flat `row_format` row containing both the user
+columns and the reserved engine columns. Some Rust types still expose the user-column slice
+separately for convenience, but that is just a decoded view rather than a different storage model.
 
 ### Visible entries and row histories
 
@@ -52,6 +51,11 @@ todos
 
 This is why Jazz can feel like "just tables" at the app layer while still keeping rich local-first
 history underneath.
+
+Both storage shapes are flat rows:
+
+- history rows use reserved `_jazz_*` columns plus the user columns
+- visible rows use a slightly larger `_jazz_*` prefix plus the same user columns
 
 ### Automatic column indexing
 
@@ -166,7 +170,7 @@ It typically:
 
 1. looks up the visible entry for the relevant branch
 2. falls back to row history only when the query needs an older settled winner
-3. decodes or reprojects the row payload
+3. decodes or reprojects the flat row, dropping the reserved engine columns before returning app-facing values
 4. emits row-level deltas to the downstream graph
 
 This is why the visible region matters so much: most current reads never need to reconstruct a row

@@ -60,11 +60,13 @@ Every write to a row creates a new **row version**.
 
 That version records:
 
-- the new row payload
+- the new row values
 - which earlier version(s) it came from
 - engine-managed metadata such as branch, delete state, and durability state
 
-So the runtime keeps a row-local history graph rather than just overwriting the row in place.
+Physically, that row version is still one flat stored row: user columns plus reserved `_jazz_*`
+columns in the same binary row format. So the runtime keeps a row-local history graph rather than
+just overwriting the row in place.
 
 ### Concurrent edits
 

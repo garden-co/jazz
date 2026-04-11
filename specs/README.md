@@ -6,7 +6,7 @@ The easiest way to picture the runtime is:
 
 - application code talks about tables, rows, filters, and subscriptions
 - the engine stores those rows in raw tables
-- every row carries a small set of reserved engine fields alongside the application payload
+- every stored row is one flat `row_format` record with reserved `_jazz_*` columns plus the application columns
 - current reads come from compact visible entries
 - history, replay, sync, and durability all speak the same row-version language
 
@@ -16,7 +16,7 @@ These docs describe the system as it works today.
 
 ### 1. Table-First Foundation
 
-**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row versions, visible entries, reserved system fields, and why ordinary reads are "visible-region first".
+**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row versions, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
 
 **[Storage](status-quo/storage.md)** — The synchronous storage boundary beneath the runtime. Covers raw tables, indices, row locators, catalogue rows, row-history persistence, and the current durable backends.
 
@@ -71,7 +71,7 @@ Typed App + Db APIs
 
 If you want one sentence to hold onto while reading the rest:
 
-> Jazz stores application data as raw relational tables, and the engine-managed fields needed for history, branching, visibility, sync, and durability live right next to that table data instead of in a separate conceptual universe.
+> Jazz stores application data as flat relational rows, and the engine-managed columns needed for history, branching, visibility, sync, and durability live in that same row format instead of in a separate conceptual universe.
 
 ## TODO Specs
 

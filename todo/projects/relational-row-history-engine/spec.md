@@ -5,7 +5,7 @@ This document records the shape of the current storage foundation and the slices
 The guiding idea is simple:
 
 - user data lives in raw tables
-- the engine stores a small set of reserved system fields next to that data
+- the engine stores reserved `_jazz_*` columns in the same flat row format as the user columns
 - current reads come from compact visible entries
 - replay, sync, and recovery work from row histories rather than inventing a separate history model
 
@@ -13,11 +13,11 @@ The guiding idea is simple:
 
 Jazz now treats each user table as a table-first storage surface with three closely related pieces:
 
-### 1. Application payload
+### 1. Application columns
 
 The columns defined in `schema.ts`.
 
-### 2. Reserved engine fields
+### 2. Reserved engine columns
 
 The engine-managed facts that make local-first behavior work, including:
 
@@ -55,14 +55,14 @@ Conceptually, one user table looks like this:
 
 ```text
 todos
-  visible: (branch, row_id) -> current winner + tier fallbacks + current payload
-  history: (row_id, version_id) -> stored row versions over time
+  visible: (branch, row_id) -> flat visible row with current winner + tier fallbacks + user columns
+  history: (row_id, version_id) -> flat history row with ancestry + state + user columns
 ```
 
-Conceptually, the whole row-version shape belongs to one shared row-format universe containing both
-application columns and engine-managed columns. The current Rust types still expose the application
-portion separately in places, but that should be understood as an implementation convenience rather
-than as the intended architecture.
+Both shapes live in one shared `row_format` universe containing both application columns and
+engine-managed columns. The current Rust types still expose the user-column slice separately in a
+few places, but that should be understood as a decoded view rather than as a separate storage
+architecture.
 
 That gives Jazz one coherent storage story:
 
@@ -74,17 +74,17 @@ That gives Jazz one coherent storage story:
 
 ## Reserved System Fields
 
-The important fields are:
+The important columns are:
 
-- `$row_id`
-- `$branch`
-- `$version_id`
-- `$parents`
-- `$state`
-- `$confirmed_tier`
-- `$is_deleted`
-- `$metadata`
-- actor/provenance fields such as `created_by` and `updated_by`
+- `_jazz_row_id`
+- `_jazz_branch`
+- `_jazz_version_id`
+- `_jazz_parents`
+- `_jazz_state`
+- `_jazz_confirmed_tier`
+- `_jazz_is_deleted`
+- `_jazz_metadata`
+- actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
 The exact encoded representation can evolve, but the architectural point should stay the same: these are ordinary engine-managed table fields, not a second hidden world the rest of the runtime has to reconstruct later.
 

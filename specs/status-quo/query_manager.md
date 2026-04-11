@@ -68,7 +68,7 @@ Given candidate row ids, it:
 1. resolves the row's table if necessary
 2. loads the current visible entry for the relevant branch
 3. falls back to a history lookup only when the query asks for a lower durability tier than the current visible winner
-4. decodes or reprojects the row payload through `row_format`
+4. decodes or reprojects the flat row through `row_format`, projecting away the reserved `_jazz_*` columns when producing the app-facing row
 5. emits added/updated/removed tuple deltas
 
 This is why the visible region matters so much. Most current-state queries never need to reconstruct a row from raw history scans.
@@ -95,7 +95,7 @@ It works with branch-aware and schema-aware context from `SchemaManager`:
 
 - branch names identify which visible table image to read
 - live schema sets determine which branches are relevant
-- lenses translate columns and row payloads when old data is read through a newer schema view
+- lenses translate columns and row values when old data is read through a newer schema view
 
 That means a query can still feel like a normal table query even when the runtime is simultaneously serving multiple schema generations.
 
