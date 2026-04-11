@@ -37,6 +37,7 @@ export {
   createDb,
   Db,
   DbPersistedWrite,
+  DbTransaction,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type QueryBuilder,
