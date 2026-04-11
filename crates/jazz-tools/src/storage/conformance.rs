@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use std::ops::Bound;
 
+use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
@@ -59,7 +60,12 @@ fn seed_row_history_locator(
         .unwrap();
 }
 
-fn make_row_version(row_id: ObjectId, branch: &str, updated_at: u64, value: &str) -> StoredRowVersion {
+fn make_row_version(
+    row_id: ObjectId,
+    branch: &str,
+    updated_at: u64,
+    value: &str,
+) -> StoredRowVersion {
     StoredRowVersion::new(
         row_id,
         branch,
@@ -397,7 +403,9 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
     assert_eq!(decode_flat_history_row(&descriptor, &encoded).unwrap(), row);
 }
 
-pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_visible_region_uses_flat_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
     let mut storage = factory();
     let schema = SchemaBuilder::new()
         .table(
@@ -415,7 +423,10 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() 
         Vec::new(),
         encode_row(
             &descriptor,
-            &[Value::Text("Ship visible rows".into()), Value::Boolean(false)],
+            &[
+                Value::Text("Ship visible rows".into()),
+                Value::Boolean(false),
+            ],
         )
         .unwrap(),
         RowProvenance::for_insert("alice".to_string(), 100),
@@ -453,7 +464,10 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() 
         .unwrap()
         .expect("visible row should persist");
 
-    assert_eq!(decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(), entry);
+    assert_eq!(
+        decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(),
+        entry
+    );
 }
 
 pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -713,6 +727,60 @@ pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<d
     );
 }
 
+pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        DurabilityTier::GlobalServer,
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(91)),
+                branch_name: crate::object::BranchName::new("main"),
+                batch_id,
+            }],
+        }),
+    );
+
+    storage.upsert_local_batch_record(&record).unwrap();
+
+    assert_eq!(
+        storage.load_local_batch_record(batch_id).unwrap(),
+        Some(record)
+    );
+}
+
+pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let low = crate::row_histories::BatchId(uuid::Uuid::from_u128(1));
+    let high = crate::row_histories::BatchId(uuid::Uuid::from_u128(2));
+
+    storage
+        .upsert_local_batch_record(&LocalBatchRecord::new(
+            high,
+            BatchMode::Direct,
+            DurabilityTier::Worker,
+            None,
+        ))
+        .unwrap();
+    storage
+        .upsert_local_batch_record(&LocalBatchRecord::new(
+            low,
+            BatchMode::Transactional,
+            DurabilityTier::EdgeServer,
+            Some(BatchSettlement::Missing { batch_id: low }),
+        ))
+        .unwrap();
+
+    let records = storage.scan_local_batch_records().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].batch_id, low);
+    assert_eq!(records[1].batch_id, high);
+}
+
 // ============================================================================
 // Persistence tests
 // ============================================================================
@@ -791,6 +859,41 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
 
     factory(path).close().unwrap();
     factory(path).close().unwrap();
+}
+
+pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        DurabilityTier::EdgeServer,
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(111)),
+                branch_name: crate::object::BranchName::new("main"),
+                batch_id,
+            }],
+        }),
+    );
+
+    {
+        let mut storage = factory(path);
+        storage.upsert_local_batch_record(&record).unwrap();
+        storage.flush();
+        storage.close().unwrap();
+    }
+
+    {
+        let storage = factory(path);
+        assert_eq!(
+            storage.load_local_batch_record(batch_id).unwrap(),
+            Some(record)
+        );
+    }
 }
 
 // ============================================================================
@@ -978,6 +1081,16 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
+            fn local_batch_record_round_trip() {
+                conformance::test_local_batch_record_round_trip(&$factory);
+            }
+
+            #[test]
+            fn local_batch_record_scan_returns_sorted_entries() {
+                conformance::test_local_batch_record_scan_returns_sorted_entries(&$factory);
+            }
+
+            #[test]
             fn alice_bob_branch_isolation() {
                 conformance::test_alice_bob_branch_isolation(&$factory);
             }
@@ -1002,6 +1115,11 @@ macro_rules! storage_conformance_tests_persistent {
             #[test]
             fn close_releases_resources_for_reopen() {
                 conformance::test_close_releases_resources_for_reopen(&$reopen_factory);
+            }
+
+            #[test]
+            fn local_batch_record_survives_close_reopen() {
+                conformance::test_local_batch_record_survives_close_reopen(&$reopen_factory);
             }
         }
     };

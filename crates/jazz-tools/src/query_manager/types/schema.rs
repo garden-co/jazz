@@ -143,7 +143,6 @@ impl ColumnType {
             _ => None,
         }
     }
-
 }
 
 /// Interned column name type.
@@ -474,7 +473,6 @@ impl SchemaBuilder {
 
 /// Schema mapping table names to their table schemas.
 pub type Schema = HashMap<TableName, TableSchema>;
-
 
 /// Validate that no INHERITS cycles exist in the schema.
 ///

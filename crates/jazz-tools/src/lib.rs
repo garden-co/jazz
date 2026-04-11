@@ -1,3 +1,4 @@
+pub mod batch_fate;
 pub mod binding_support;
 pub mod catalogue;
 pub mod commit;

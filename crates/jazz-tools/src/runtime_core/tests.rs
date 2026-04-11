@@ -2570,6 +2570,73 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 }
 
 #[test]
+fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+    let version_id = visible_row.version_id();
+
+    let initial_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("persisted write should create a local batch record");
+    assert_eq!(initial_record.batch_id, batch_id);
+    assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
+    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
+    assert_eq!(
+        initial_record.latest_settlement, None,
+        "client-side persisted direct writes should start pending until an upstream durability settlement arrives"
+    );
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(receiver.try_recv(), Ok(Some(())));
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("settled local batch record should still be present");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+}
+
+#[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =
@@ -3389,7 +3456,9 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
         .storage()
         .scan_history_region_bytes(
             "users",
-            crate::row_histories::HistoryScan::Row { row_id: inserted_id },
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
         )
         .expect("history bytes should be readable after old-client update");
     assert!(
@@ -3458,7 +3527,9 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
         .storage()
         .scan_history_region_bytes(
             "users",
-            crate::row_histories::HistoryScan::Row { row_id: inserted_id },
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
         )
         .expect("history bytes should be readable after insert");
     assert_eq!(history_bytes.len(), 1);
@@ -3472,8 +3543,9 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
         .expect("users table should exist")
         .columns
         .clone();
-    let decoded = crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
-        .expect("flat history row should decode with the catalogue-backed descriptor");
+    let decoded =
+        crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
+            .expect("flat history row should decode with the catalogue-backed descriptor");
     assert_eq!(decoded.row_id, inserted_id);
     assert_eq!(decoded.data.len() > 0, true);
 }
