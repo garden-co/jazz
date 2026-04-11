@@ -888,6 +888,9 @@ impl<'a> Normalizer<'a> {
                     self.commit(version_id),
                 )
             }
+            SyncPayload::BatchSettlement { settlement } => {
+                format!("{settlement:?}")
+            }
             SyncPayload::CatalogueEntryUpdated { entry } => {
                 format!(
                     "catalogue obj:{} type:{}",
@@ -995,6 +998,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 branch_name,
                 names.commit(version_id),
             )
+        }
+        SyncPayload::BatchSettlement { settlement } => {
+            format!("{settlement:?}")
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
             format!("query:{}", query_id.0)

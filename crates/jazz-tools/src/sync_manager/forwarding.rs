@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{HistoryScan, StoredRowVersion};
 use crate::storage::{RowLocator, metadata_from_row_locator};
@@ -30,6 +31,45 @@ impl SyncManager {
             .into_iter()
             .filter(|row| row.state.is_visible())
             .max_by_key(|row| (row.updated_at, row.version_id()))
+    }
+
+    pub(super) fn load_current_direct_batch_settlement_from_storage<
+        H: crate::storage::Storage + ?Sized,
+    >(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        row_locator: &RowLocator,
+    ) -> Option<BatchSettlement> {
+        let row =
+            self.load_current_row_from_storage(storage, object_id, branch_name, row_locator)?;
+        if row.branch != branch_name.as_str()
+            || !matches!(row.state, crate::row_histories::RowState::VisibleDirect)
+        {
+            return None;
+        }
+        let confirmed_tier = row.confirmed_tier?;
+        Some(BatchSettlement::DurableDirect {
+            batch_id: row.batch_id,
+            confirmed_tier,
+            visible_members: vec![VisibleBatchMember {
+                object_id,
+                branch_name: *branch_name,
+                batch_id: row.batch_id,
+            }],
+        })
+    }
+
+    pub(super) fn queue_batch_settlement_to_client(
+        &mut self,
+        client_id: ClientId,
+        settlement: BatchSettlement,
+    ) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        });
     }
 
     #[cfg(test)]
@@ -125,6 +165,14 @@ impl SyncManager {
                     row.clone(),
                     false,
                 );
+                if let Some(settlement) = self.load_current_direct_batch_settlement_from_storage(
+                    storage,
+                    object_id,
+                    &branch_name,
+                    &row_locator,
+                ) {
+                    self.queue_batch_settlement_to_client(*client_id, settlement);
+                }
             }
         }
     }

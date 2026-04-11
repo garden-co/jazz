@@ -4,6 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
@@ -270,6 +271,9 @@ pub enum SyncPayload {
         confirmed_tier: Option<DurabilityTier>,
     },
 
+    /// Replayable fate for one logical batch.
+    BatchSettlement { settlement: BatchSettlement },
+
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
@@ -379,6 +383,15 @@ impl SyncPayload {
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
             SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::BatchSettlement { settlement } => match settlement {
+                BatchSettlement::DurableDirect {
+                    visible_members, ..
+                }
+                | BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => visible_members.first().map(|member| member.object_id),
+                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
+            },
             _ => None,
         }
     }
@@ -389,6 +402,15 @@ impl SyncPayload {
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(BranchName::new(&row.branch)),
             SyncPayload::RowVersionStateChanged { branch_name, .. } => Some(*branch_name),
+            SyncPayload::BatchSettlement { settlement } => match settlement {
+                BatchSettlement::DurableDirect {
+                    visible_members, ..
+                }
+                | BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => visible_members.first().map(|member| member.branch_name),
+                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
+            },
             _ => None,
         }
     }
@@ -401,6 +423,7 @@ impl SyncPayload {
                 | SyncPayload::RowVersionCreated { .. }
                 | SyncPayload::RowVersionNeeded { .. }
                 | SyncPayload::RowVersionStateChanged { .. }
+                | SyncPayload::BatchSettlement { .. }
         )
     }
 
@@ -439,6 +462,7 @@ impl SyncPayload {
             SyncPayload::RowVersionCreated { .. } => "RowVersionCreated",
             SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
             SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
+            SyncPayload::BatchSettlement { .. } => "BatchSettlement",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::QuerySettled { .. } => "QuerySettled",

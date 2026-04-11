@@ -3403,6 +3403,7 @@ fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     let bob_attribution = WriteContext {
         session: None,
         attribution: Some("bob".into()),
+        batch_mode: None,
     };
 
     let note = qm
@@ -3539,6 +3540,7 @@ fn created_by_permissions_allow_creators_and_hide_system_rows() {
     let alice_attribution = WriteContext {
         session: None,
         attribution: Some("alice".into()),
+        batch_mode: None,
     };
 
     let alice_owned = qm

@@ -1,5 +1,4 @@
 use super::*;
-use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     fn batch_id_for_row_version_ack(
@@ -40,32 +39,39 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
     }
 
-    fn record_direct_batch_settlement(
-        &mut self,
-        batch_id: crate::row_histories::BatchId,
-        row_version_key: crate::sync_manager::RowVersionKey,
-        confirmed_tier: DurabilityTier,
-    ) {
-        let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) else {
-            return;
-        };
-        record.apply_settlement(BatchSettlement::DurableDirect {
-            batch_id,
-            confirmed_tier,
-            visible_members: vec![VisibleBatchMember {
-                object_id: row_version_key.row_id,
-                branch_name: row_version_key.branch_name,
-                batch_id,
-            }],
-        });
-        if let Err(error) = self.storage.upsert_local_batch_record(&record) {
-            tracing::warn!(
-                ?batch_id,
-                row_id = %row_version_key.row_id,
-                ?row_version_key.version_id,
-                %error,
-                "failed to persist local batch settlement"
-            );
+    fn apply_received_batch_settlement(&mut self, settlement: crate::batch_fate::BatchSettlement) {
+        let batch_id = settlement.batch_id();
+        if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
+            record.apply_settlement(settlement.clone());
+            if let Err(error) = self.storage.upsert_local_batch_record(&record) {
+                tracing::warn!(
+                    ?batch_id,
+                    %error,
+                    "failed to persist local batch settlement"
+                );
+            }
+        }
+
+        if let Some(acked_tier) = settlement.confirmed_tier()
+            && let Some(watchers) = self.ack_watchers.remove(&batch_id)
+        {
+            let mut remaining = Vec::new();
+            for (requested_tier, sender) in watchers {
+                if acked_tier >= requested_tier {
+                    tracing::debug!(
+                        ?batch_id,
+                        ?acked_tier,
+                        ?requested_tier,
+                        "batch settlement resolved ack watcher"
+                    );
+                    let _ = sender.send(());
+                } else {
+                    remaining.push((requested_tier, sender));
+                }
+            }
+            if !remaining.is_empty() {
+                self.ack_watchers.insert(batch_id, remaining);
+            }
         }
     }
 
@@ -232,7 +238,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 3b. Process received persistence acks — resolve matching watchers
+        // 3b. Process replayable batch settlements before row-level ack fallbacks.
+        let received_batch_settlements = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_pending_batch_settlements();
+        for settlement in received_batch_settlements {
+            self.apply_received_batch_settlement(settlement);
+        }
+
+        // 3c. Process received row-version persistence acks — resolve matching watchers
         let received_acks = self
             .schema_manager
             .query_manager_mut()
@@ -242,7 +258,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let Some(batch_id) = self.batch_id_for_row_version_ack(row_version_key) else {
                 continue;
             };
-            self.record_direct_batch_settlement(batch_id, row_version_key, acked_tier);
             if let Some(watchers) = self.ack_watchers.remove(&batch_id) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {

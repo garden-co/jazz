@@ -2637,6 +2637,201 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
 }
 
 #[test]
+fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Worker,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(())),
+        "persisted receivers should resolve from replayable batch settlement even when a live row-version ack was missed"
+    );
+}
+
+#[test]
+fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
+    // alice -> worker
+    //   write reaches worker, but the live settlement never comes back
+    //   then alice reconnects and asks for the batch fate explicitly
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "without the return settlement, the persisted receiver should still be pending"
+    );
+
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(())),
+        "reconnect should reconcile the still-pending batch from the server's current durable truth"
+    );
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("reconciled local batch record should still be present");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+}
+
+#[test]
+fn rc_transactional_insert_stages_row_without_affecting_ordinary_visibility() {
+    // alice stages one transactional write
+    //   both alice and the worker keep ordinary visible reads empty
+    //   but the staged history row still syncs upstream
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    let (row_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    assert_eq!(
+        s.a.storage()
+            .load_visible_region_row("users", s.a.schema_manager().branch_name().as_str(), row_id)
+            .unwrap(),
+        None,
+        "ordinary visible state should ignore transactional staging rows"
+    );
+
+    pump_a_to_b(&mut s);
+
+    assert_eq!(
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap(),
+        None,
+        "upstream ordinary visible state should also ignore staged transactional rows"
+    );
+
+    let history_rows =
+        s.b.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::StagingPending
+    );
+}
+
+#[test]
+fn rc_transactional_insert_replays_staging_row_on_upstream_reconnect() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    s.a.remove_server(s.b_server_for_a);
+
+    let (row_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    assert!(
+        s.b.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap()
+            .is_empty(),
+        "disconnected upstream should not receive staged history yet"
+    );
+
+    s.a.add_server(s.b_server_for_a);
+    pump_a_to_b(&mut s);
+
+    let history_rows =
+        s.b.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::StagingPending
+    );
+}
+
+#[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =

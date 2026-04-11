@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::batch_fate::BatchMode;
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
 
 /// Session context for policy evaluation.
@@ -129,6 +130,8 @@ pub struct WriteContext {
     pub session: Option<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_mode: Option<BatchMode>,
 }
 
 impl WriteContext {
@@ -136,11 +139,21 @@ impl WriteContext {
         Self {
             session: Some(session),
             attribution: None,
+            batch_mode: None,
         }
+    }
+
+    pub fn with_batch_mode(mut self, batch_mode: BatchMode) -> Self {
+        self.batch_mode = Some(batch_mode);
+        self
     }
 
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
+    }
+
+    pub fn batch_mode(&self) -> BatchMode {
+        self.batch_mode.unwrap_or(BatchMode::Direct)
     }
 
     pub fn author_principal(&self) -> &str {
@@ -223,17 +236,29 @@ mod tests {
         let context = WriteContext {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
+            batch_mode: None,
         };
 
         assert_eq!(context.author_principal(), "attributed-user");
+        assert_eq!(context.batch_mode(), BatchMode::Direct);
     }
 
     #[test]
     fn test_write_context_author_principal_falls_back_to_session_then_system() {
         let session_context = WriteContext::from_session(Session::new("session-user"));
         assert_eq!(session_context.author_principal(), "session-user");
+        assert_eq!(session_context.batch_mode(), BatchMode::Direct);
 
         let system_context = WriteContext::default();
         assert_eq!(system_context.author_principal(), SYSTEM_PRINCIPAL_ID);
+        assert_eq!(system_context.batch_mode(), BatchMode::Direct);
+    }
+
+    #[test]
+    fn test_write_context_batch_mode_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_batch_mode(BatchMode::Transactional);
+
+        assert_eq!(context.batch_mode(), BatchMode::Transactional);
     }
 }
