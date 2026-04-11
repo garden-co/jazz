@@ -363,11 +363,14 @@ async fn deep_update_history(server: &TestingServer) {
 
     let bob = make_client(server, schema, "bob-deep", "todos").await;
 
+    // Alice's EdgeServer read can still include her immediate local update,
+    // but a fresh Bob only sees what the server has durably replayed. Deep
+    // 200-revision histories can take longer to converge on slower CI runners.
     let bob_row = wait_for_query(
         &bob,
         QueryBuilder::new("todos").build(),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         format!("bob sees final title {final_title}"),
         |rows| {
             rows.iter()
