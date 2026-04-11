@@ -5,13 +5,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::batch_fate::BatchMode;
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
+use crate::row_histories::BatchId;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
@@ -42,6 +44,33 @@ struct UnverifiedJwtClaims {
     claims: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientReadOptions {
+    pub durability_tier: Option<DurabilityTier>,
+    pub local_updates: LocalUpdates,
+    pub strict_transactions: bool,
+}
+
+impl Default for ClientReadOptions {
+    fn default() -> Self {
+        Self {
+            durability_tier: None,
+            local_updates: LocalUpdates::Immediate,
+            strict_transactions: false,
+        }
+    }
+}
+
+impl From<ClientReadOptions> for ReadDurabilityOptions {
+    fn from(value: ClientReadOptions) -> Self {
+        Self {
+            tier: value.durability_tier,
+            local_updates: value.local_updates,
+            strict_transactions: value.strict_transactions,
+        }
+    }
+}
+
 /// Jazz client for building applications.
 ///
 /// Combines local storage with server sync.
@@ -65,6 +94,13 @@ pub struct JazzClient {
 /// State for an active subscription.
 struct SubscriptionState {
     runtime_handle: RuntimeSubHandle,
+}
+
+/// Explicit transactional batch helper for grouping multiple writes under one
+/// logical `BatchId`.
+pub struct Transaction<'a> {
+    client: &'a JazzClient,
+    write_context: WriteContext,
 }
 
 fn build_client_schema_manager<S: Storage + ?Sized>(
@@ -362,15 +398,26 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_internal(query, self.default_session.clone())
+        self.subscribe_with_read_options(query, ClientReadOptions::default())
+            .await
+    }
+
+    /// Subscribe with explicit read behavior.
+    pub async fn subscribe_with_read_options(
+        &self,
+        query: Query,
+        options: ClientReadOptions,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_internal_with_options(query, self.default_session.clone(), options)
             .await
     }
 
     /// Internal subscribe with optional session.
-    async fn subscribe_internal(
+    async fn subscribe_internal_with_options(
         &self,
         query: Query,
         session: Option<Session>,
+        options: ClientReadOptions,
     ) -> Result<SubscriptionStream> {
         let handle = SubscriptionHandle(
             self.next_handle
@@ -387,7 +434,7 @@ impl JazzClient {
         // The callback bridges runtime updates to the channel
         let runtime_handle = self
             .runtime
-            .subscribe(
+            .subscribe_with_durability_and_propagation(
                 query.clone(),
                 move |delta| {
                     // Route delta to the subscription stream without dropping
@@ -395,6 +442,8 @@ impl JazzClient {
                     let _ = tx.send(delta.ordered_delta);
                 },
                 session,
+                options.into(),
+                crate::sync_manager::QueryPropagation::Full,
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
 
@@ -415,17 +464,29 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        self.query_with_read_options(
+            query,
+            ClientReadOptions {
+                durability_tier,
+                ..ClientReadOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// One-shot query with explicit read behavior.
+    pub async fn query_with_read_options(
+        &self,
+        query: Query,
+        options: ClientReadOptions,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let query_for_alignment = query.clone();
         let future = self
             .runtime
             .query(
                 query,
                 self.default_session.clone(),
-                ReadDurabilityOptions {
-                    tier: durability_tier,
-                    local_updates: LocalUpdates::Immediate,
-                    strict_transactions: false,
-                },
+                options.into(),
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
@@ -499,6 +560,12 @@ impl JazzClient {
         }
     }
 
+    /// Start an explicit transactional batch. All writes through the returned
+    /// handle share one logical `BatchId`.
+    pub fn begin_transaction(&self) -> Transaction<'_> {
+        self.begin_transaction_internal(None)
+    }
+
     /// Shutdown the client and release resources.
     pub async fn shutdown(mut self) -> Result<()> {
         // Abort stream listener first (it holds TokioRuntime clone)
@@ -553,6 +620,28 @@ impl JazzClient {
             })
             .collect()
     }
+
+    fn align_created_row_to_declared_schema(&self, table: &str, row_values: Vec<Value>) -> Vec<Value> {
+        match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        }
+    }
+
+    fn begin_transaction_internal(&self, session: Option<Session>) -> Transaction<'_> {
+        let mut write_context = session.map(WriteContext::from_session).unwrap_or_default();
+        write_context.batch_mode = Some(BatchMode::Transactional);
+        write_context.batch_id = Some(BatchId::new());
+        Transaction {
+            client: self,
+            write_context,
+        }
+    }
 }
 
 /// Session-scoped client for backend operations.
@@ -603,19 +692,26 @@ impl<'a> SessionClient<'a> {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        self.query_with_read_options(
+            query,
+            ClientReadOptions {
+                durability_tier,
+                ..ClientReadOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn query_with_read_options(
+        &self,
+        query: Query,
+        options: ClientReadOptions,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let query_for_alignment = query.clone();
         let future = self
             .client
             .runtime
-            .query(
-                query,
-                Some(self.session.clone()),
-                ReadDurabilityOptions {
-                    tier: durability_tier,
-                    local_updates: LocalUpdates::Immediate,
-                    strict_transactions: false,
-                },
-            )
+            .query(query, Some(self.session.clone()), options.into())
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
@@ -627,9 +723,61 @@ impl<'a> SessionClient<'a> {
     }
 
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.client
-            .subscribe_internal(query, Some(self.session.clone()))
+        self.subscribe_with_read_options(query, ClientReadOptions::default())
             .await
+    }
+
+    pub async fn subscribe_with_read_options(
+        &self,
+        query: Query,
+        options: ClientReadOptions,
+    ) -> Result<SubscriptionStream> {
+        self.client
+            .subscribe_internal_with_options(query, Some(self.session.clone()), options)
+            .await
+    }
+
+    pub fn begin_transaction(&self) -> Transaction<'_> {
+        self.client
+            .begin_transaction_internal(Some(self.session.clone()))
+    }
+}
+
+impl<'a> Transaction<'a> {
+    pub fn batch_id(&self) -> BatchId {
+        self.write_context
+            .batch_id()
+            .expect("transaction handles always carry a batch id")
+    }
+
+    pub async fn create(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .client
+            .runtime
+            .insert_with_write_context(table, values, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok((
+            object_id,
+            self.client.align_created_row_to_declared_schema(table, row_values),
+        ))
+    }
+
+    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+        self.client
+            .runtime
+            .update_with_write_context(object_id, updates, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+        self.client
+            .runtime
+            .delete_with_write_context(object_id, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))
     }
 }
 
@@ -685,6 +833,7 @@ fn reorder_values_by_column_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row_histories::RowState;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
@@ -765,10 +914,22 @@ mod tests {
     ) -> (SchemaHash, SchemaHash) {
         std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
 
-        #[cfg(feature = "rocksdb")]
         let storage = {
-            let db_path = data_dir.join("jazz.rocksdb");
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+            #[cfg(feature = "rocksdb")]
+            {
+                let db_path = data_dir.join("jazz.rocksdb");
+                RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
+                    .expect("open seeded client storage")
+            }
+            #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+            {
+                let db_path = data_dir.join("jazz.sqlite");
+                SqliteStorage::open(&db_path).expect("open seeded sqlite client storage")
+            }
+            #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+            {
+                MemoryStorage::new()
+            }
         };
         let bundled_schema = declared_todo_schema();
         let learned_schema = learned_runtime_todo_schema();
@@ -814,10 +975,22 @@ mod tests {
     }
 
     fn expected_client_catalogue_hash(context: &AppContext) -> String {
-        #[cfg(feature = "rocksdb")]
         let storage = {
-            let db_path = context.data_dir.join("jazz.rocksdb");
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+            #[cfg(feature = "rocksdb")]
+            {
+                let db_path = context.data_dir.join("jazz.rocksdb");
+                RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
+                    .expect("open seeded client storage")
+            }
+            #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+            {
+                let db_path = context.data_dir.join("jazz.sqlite");
+                SqliteStorage::open(&db_path).expect("open seeded sqlite client storage")
+            }
+            #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+            {
+                MemoryStorage::new()
+            }
         };
         let schema_manager = build_client_schema_manager(&storage, context)
             .expect("rehydrate client schema manager");
@@ -911,6 +1084,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
     #[tokio::test]
     async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -948,6 +1122,7 @@ mod tests {
         client.shutdown().await.expect("shutdown client");
     }
 
+    #[cfg(any(feature = "rocksdb", feature = "sqlite"))]
     #[tokio::test]
     async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -979,6 +1154,108 @@ mod tests {
         assert!(
             lens_path_exists,
             "permissions rehydrate should preserve the target schema's learned lens context"
+        );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_transaction_reuses_one_batch_id_for_multiple_creates() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-batch");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let transaction = client.begin_transaction();
+        let batch_id = transaction.batch_id();
+
+        let (first_id, _) = transaction
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("first".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create first transactional row");
+        let (second_id, _) = transaction
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("second".to_string())),
+                    ("completed".to_string(), Value::Boolean(true)),
+                ]),
+            )
+            .await
+            .expect("create second transactional row");
+
+        client
+            .runtime
+            .with_storage(|storage| {
+                let first_rows = storage
+                    .scan_history_row_versions("todos", first_id)
+                    .expect("scan first history rows");
+                let second_rows = storage
+                    .scan_history_row_versions("todos", second_id)
+                    .expect("scan second history rows");
+
+                assert_eq!(first_rows.len(), 1);
+                assert_eq!(second_rows.len(), 1);
+                assert_eq!(first_rows[0].batch_id, batch_id);
+                assert_eq!(second_rows[0].batch_id, batch_id);
+                assert_eq!(first_rows[0].state, RowState::StagingPending);
+                assert_eq!(second_rows[0].state, RowState::StagingPending);
+            })
+            .expect("inspect client storage");
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_query_with_read_options_supports_strict_transactions() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-strict-transaction-query");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        client
+            .begin_transaction()
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create transactional row");
+
+        let rows = client
+            .query_with_read_options(
+                Query::new("todos"),
+                ClientReadOptions {
+                    strict_transactions: true,
+                    ..ClientReadOptions::default()
+                },
+            )
+            .await
+            .expect("query with strict transaction options");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].1,
+            vec![Value::Text("draft".to_string()), Value::Boolean(false)]
         );
 
         client.shutdown().await.expect("shutdown client");
@@ -1184,6 +1461,7 @@ async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorag
     }
     #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
     {
+        let _ = data_dir;
         tracing::warn!("no persistent storage backend enabled, falling back to MemoryStorage");
         Ok(Box::new(MemoryStorage::new()))
     }

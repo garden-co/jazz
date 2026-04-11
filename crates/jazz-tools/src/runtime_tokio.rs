@@ -249,16 +249,38 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // =========================================================================
 
     /// Insert a row into a table.
+    pub fn insert_with_write_context(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let result = core.insert(table, values, write_context)?;
+        Ok(result)
+    }
+
+    /// Insert a row into a table.
     pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result = core.insert(table, values, owned.as_ref())?;
-        Ok(result)
+        self.insert_with_write_context(table, values, owned.as_ref())
+    }
+
+    /// Update a row (partial update by column name).
+    pub fn update_with_write_context(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.update(object_id, values, write_context)?;
+        Ok(())
     }
 
     /// Update a row (partial update by column name).
@@ -268,9 +290,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        core.update(object_id, values, owned.as_ref())?;
+        self.update_with_write_context(object_id, values, owned.as_ref())
+    }
+
+    /// Delete a row.
+    pub fn delete_with_write_context(
+        &self,
+        object_id: ObjectId,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.delete(object_id, write_context)?;
         Ok(())
     }
 
@@ -280,10 +311,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        core.delete(object_id, owned.as_ref())?;
-        Ok(())
+        self.delete_with_write_context(object_id, owned.as_ref())
     }
 
     /// Flush pending operations to storage.
@@ -365,6 +394,29 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.subscribe(query, callback, session)
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
+    }
+
+    /// Subscribe to a query with explicit durability and propagation options.
+    pub fn subscribe_with_durability_and_propagation<F>(
+        &self,
+        query: Query,
+        callback: F,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+    ) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + Send + 'static,
+    {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.subscribe_with_durability_and_propagation(
+            query,
+            callback,
+            session,
+            durability,
+            propagation,
+        )
+        .map_err(|e| RuntimeError::QueryError(e.to_string()))
     }
 
     /// Unsubscribe from a query.
