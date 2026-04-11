@@ -418,7 +418,9 @@ impl Storage for SqliteStorage {
         row_id: ObjectId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_visible_region_row_bytes_core(table, branch, row_id, |key| Self::get(&inner.conn, key))
+            load_visible_region_row_bytes_core(table, branch, row_id, |key| {
+                Self::get(&inner.conn, key)
+            })
         })
     }
 

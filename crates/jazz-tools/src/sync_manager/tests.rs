@@ -592,25 +592,29 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     let outbox = sm.take_outbox();
     let schema_syncs = outbox
         .iter()
-        .filter(|entry| matches!(
-            entry,
-            OutboxEntry {
-                destination: Destination::Server(id),
-                payload: SyncPayload::CatalogueEntryUpdated { .. },
-            } if *id == server_id
-        ))
+        .filter(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(id),
+                    payload: SyncPayload::CatalogueEntryUpdated { .. },
+                } if *id == server_id
+            )
+        })
         .count();
     assert_eq!(schema_syncs, 1);
 
     let row_syncs = outbox
         .iter()
-        .filter(|entry| matches!(
-            entry,
-            OutboxEntry {
-                destination: Destination::Server(id),
-                payload: SyncPayload::RowVersionCreated { .. },
-            } if *id == server_id
-        ))
+        .filter(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(id),
+                    payload: SyncPayload::RowVersionCreated { .. },
+                } if *id == server_id
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(row_syncs.len(), 2);
     assert!(matches!(

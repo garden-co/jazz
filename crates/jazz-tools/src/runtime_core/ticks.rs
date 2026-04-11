@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     fn batch_id_for_row_version_ack(
@@ -36,6 +37,35 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 );
                 None
             }
+        }
+    }
+
+    fn record_direct_batch_settlement(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+        row_version_key: crate::sync_manager::RowVersionKey,
+        confirmed_tier: DurabilityTier,
+    ) {
+        let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) else {
+            return;
+        };
+        record.apply_settlement(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_version_key.row_id,
+                branch_name: row_version_key.branch_name,
+                batch_id,
+            }],
+        });
+        if let Err(error) = self.storage.upsert_local_batch_record(&record) {
+            tracing::warn!(
+                ?batch_id,
+                row_id = %row_version_key.row_id,
+                ?row_version_key.version_id,
+                %error,
+                "failed to persist local batch settlement"
+            );
         }
     }
 
@@ -212,6 +242,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let Some(batch_id) = self.batch_id_for_row_version_ack(row_version_key) else {
                 continue;
             };
+            self.record_direct_batch_settlement(batch_id, row_version_key, acked_tier);
             if let Some(watchers) = self.ack_watchers.remove(&batch_id) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {

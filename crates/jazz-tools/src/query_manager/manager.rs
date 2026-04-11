@@ -10,8 +10,8 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{QueryRowVersion, RowVisibilityChange, StoredRowVersion};
 use crate::schema_manager::{
-    encoding::encode_schema,
-    LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
+    LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
+    translate_table_name_to_schema,
 };
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::{
@@ -637,10 +637,7 @@ impl QueryManager {
                         MetadataKey::Type.to_string(),
                         ObjectType::CatalogueSchema.to_string(),
                     ),
-                    (
-                        MetadataKey::SchemaHash.to_string(),
-                        schema_hash.to_string(),
-                    ),
+                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
                 ]),
                 content: encode_schema(&schema),
             })?;
