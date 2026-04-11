@@ -1,6 +1,25 @@
 use super::*;
+use crate::row_histories::BatchId;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+    fn current_visible_batch_id(&self, row_id: ObjectId) -> Result<BatchId, RuntimeError> {
+        let row_locator = self
+            .storage
+            .load_row_locator(row_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            .ok_or_else(|| RuntimeError::WriteError(format!("missing row locator for {row_id}")))?;
+        let visible = self
+            .storage
+            .load_visible_region_row(
+                row_locator.table.as_str(),
+                self.schema_manager.branch_name().as_str(),
+                row_id,
+            )
+            .map_err(|err| RuntimeError::WriteError(format!("load visible row: {err}")))?
+            .ok_or_else(|| RuntimeError::WriteError(format!("missing visible row for {row_id}")))?;
+        Ok(visible.batch_id)
+    }
+
     // =========================================================================
     // CRUD Operations
     // =========================================================================
@@ -76,10 +95,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
-        let row_version_id = result.row_version_id;
+        let batch_id = self.current_visible_batch_id(row_id)?;
         let row_values = result.row_values;
-        let row_version_key =
-            RowVersionKey::new(row_id, self.schema_manager.branch_name(), row_version_id);
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -91,7 +108,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(row_version_key)
+                .entry(batch_id)
                 .or_default()
                 .push((tier, sender));
         }
@@ -114,8 +131,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        let row_version_key =
-            RowVersionKey::new(object_id, self.schema_manager.branch_name(), version_id);
+        let _ = version_id;
+        let batch_id = self.current_visible_batch_id(object_id)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -127,7 +144,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(row_version_key)
+                .entry(batch_id)
                 .or_default()
                 .push((tier, sender));
         }
@@ -149,11 +166,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        let row_version_key = RowVersionKey::new(
-            handle.row_id,
-            self.schema_manager.branch_name(),
-            handle.delete_version_id,
-        );
+        let _ = handle;
+        let batch_id = self.current_visible_batch_id(object_id)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -165,7 +179,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(row_version_key)
+                .entry(batch_id)
                 .or_default()
                 .push((tier, sender));
         }

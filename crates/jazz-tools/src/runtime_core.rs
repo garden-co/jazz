@@ -44,11 +44,10 @@ use crate::query_manager::types::{
     OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowVersionKey, ServerId,
-};
+use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -254,9 +253,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (row version, requested_tier) → senders.
+    /// Watchers for persistence acks: (logical write batch, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<RowVersionKey, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<BatchId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,

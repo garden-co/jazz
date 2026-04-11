@@ -23,10 +23,6 @@ impl BatchId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
-
-    pub fn from_commit_id(commit_id: CommitId) -> Self {
-        Self(Uuid::new_v5(&Uuid::NAMESPACE_OID, &commit_id.0))
-    }
 }
 
 impl Default for BatchId {
@@ -197,8 +193,8 @@ fn flat_history_row_identity_descriptor() -> &'static RowDescriptor {
 
 fn flat_visible_row_format_id() -> ObjectId {
     ObjectId::from_uuid(Uuid::from_bytes([
-        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d,
-        0x31, 0x00,
+        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d, 0x31,
+        0x00,
     ]))
 }
 
@@ -389,7 +385,8 @@ fn flat_user_data_from_values(
     delete_kind: Option<DeleteKind>,
     is_deleted: bool,
 ) -> Result<Vec<u8>, EncodingError> {
-    if delete_kind == Some(DeleteKind::Hard) || (is_deleted && user_values.iter().all(Value::is_null))
+    if delete_kind == Some(DeleteKind::Hard)
+        || (is_deleted && user_values.iter().all(Value::is_null))
     {
         Ok(Vec::new())
     } else {
@@ -404,7 +401,8 @@ fn stored_row_version_from_flat_parts(
 ) -> Result<StoredRowVersion, EncodingError> {
     let delete_kind = delete_kind_from_value(&system_values[12])?;
     let is_deleted = expect_bool(&system_values[13], "is_deleted")?;
-    let user_data = flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
+    let user_data =
+        flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
 
     let parents = match &system_values[4] {
         Value::Array(values) => values
@@ -830,6 +828,31 @@ impl StoredRowVersion {
         state: RowState,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Self {
+        Self::new_with_batch_id(
+            BatchId::new(),
+            row_id,
+            branch,
+            parents,
+            data,
+            provenance,
+            metadata,
+            state,
+            confirmed_tier,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_batch_id(
+        batch_id: BatchId,
+        row_id: ObjectId,
+        branch: impl Into<String>,
+        parents: impl IntoIterator<Item = CommitId>,
+        data: Vec<u8>,
+        provenance: RowProvenance,
+        metadata: HashMap<String, String>,
+        state: RowState,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Self {
         let delete_kind = delete_kind_from_metadata(&metadata);
         let is_deleted = delete_kind.is_some();
         let metadata = RowMetadata::from_hash_map(
@@ -858,7 +881,7 @@ impl StoredRowVersion {
             created_by: provenance.created_by.into(),
             created_at: provenance.created_at,
             updated_by: provenance.updated_by.into(),
-            batch_id: BatchId::from_commit_id(version_id),
+            batch_id,
             state,
             confirmed_tier,
             delete_kind,
@@ -1682,5 +1705,40 @@ mod tests {
             decode_flat_history_row(&user_descriptor, &encoded).expect("decode hard delete");
         assert_eq!(decoded.data.as_ref(), &[] as &[u8]);
         assert!(decoded.is_hard_deleted());
+    }
+
+    #[test]
+    fn direct_row_writes_get_distinct_batch_ids_even_when_version_ids_match() {
+        let provenance = RowProvenance::for_insert("alice".to_string(), 100);
+        let first = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(101)),
+            "main",
+            Vec::new(),
+            vec![1, 2, 3],
+            provenance.clone(),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+        let second = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(202)),
+            "main",
+            Vec::new(),
+            vec![1, 2, 3],
+            provenance,
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+
+        assert_eq!(
+            first.version_id(),
+            second.version_id(),
+            "this test intentionally holds all hashed version inputs constant across two different rows"
+        );
+        assert_ne!(
+            first.batch_id, second.batch_id,
+            "logical write batches must stay distinct across rows even when raw version ids collide"
+        );
     }
 }
