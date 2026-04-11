@@ -29,9 +29,11 @@
     "stress-test-todo-react": "0.1.0",
     "nextjs-csr-ssr": "0.1.0",
     "world-tour": "0.0.0",
-    "cloudflare-worker-runtime-ts": "0.1.0"
+    "cloudflare-worker-runtime-ts": "0.1.0",
+    "moon-lander-react": "0.1.0"
   },
   "changesets": [
+    "allow-fk-ref-without-id",
     "authorship-edit-metadata-mvp",
     "backend-high-level-only",
     "blue-pets-reflect",
@@ -55,6 +57,7 @@
     "fix-jazz-napi-loader-scope-regression",
     "fix-local-auth-query-sessions",
     "fix-napi-timestamp-writes",
+    "fix-nested-policy-enum-literals",
     "fix-outer-row-id-in-exists-policies",
     "fix-oversized-index-mutation-errors",
     "fix-query-subscription-session-fallback",
@@ -101,6 +104,7 @@
     "quick-days-jam",
     "remove-nitro-modules",
     "rocksdb-storage-backend",
+    "row-input-macro",
     "runtime-context-setup",
     "rust-frozen-sql-quoting",
     "server-context-api",
@@ -117,6 +121,7 @@
     "tall-bees-grow",
     "tidy-points-guess",
     "tiny-files-sing",
+    "unified-row-history-engine",
     "vue-bindings-docs",
     "wet-rivers-send",
     "wise-pans-dream",
