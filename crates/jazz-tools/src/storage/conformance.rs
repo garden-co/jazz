@@ -781,6 +781,27 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
     assert_eq!(records[1].batch_id, high);
 }
 
+pub fn test_authoritative_batch_settlement_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+
+    storage
+        .upsert_authoritative_batch_settlement(&settlement)
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_authoritative_batch_settlement(batch_id)
+            .unwrap(),
+        Some(settlement)
+    );
+}
+
 // ============================================================================
 // Persistence tests
 // ============================================================================
@@ -892,6 +913,38 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         assert_eq!(
             storage.load_local_batch_record(batch_id).unwrap(),
             Some(record)
+        );
+    }
+}
+
+pub fn test_authoritative_batch_settlement_survives_close_reopen(
+    factory: &PersistentStorageFactory,
+) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "session_required".to_string(),
+        reason: "transaction needs an authenticated session".to_string(),
+    };
+
+    {
+        let mut storage = factory(path);
+        storage
+            .upsert_authoritative_batch_settlement(&settlement)
+            .unwrap();
+        storage.flush();
+        storage.close().unwrap();
+    }
+
+    {
+        let storage = factory(path);
+        assert_eq!(
+            storage
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap(),
+            Some(settlement)
         );
     }
 }
@@ -1091,6 +1144,11 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
+            fn authoritative_batch_settlement_round_trip() {
+                conformance::test_authoritative_batch_settlement_round_trip(&$factory);
+            }
+
+            #[test]
             fn alice_bob_branch_isolation() {
                 conformance::test_alice_bob_branch_isolation(&$factory);
             }
@@ -1120,6 +1178,13 @@ macro_rules! storage_conformance_tests_persistent {
             #[test]
             fn local_batch_record_survives_close_reopen() {
                 conformance::test_local_batch_record_survives_close_reopen(&$reopen_factory);
+            }
+
+            #[test]
+            fn authoritative_batch_settlement_survives_close_reopen() {
+                conformance::test_authoritative_batch_settlement_survives_close_reopen(
+                    &$reopen_factory,
+                );
             }
         }
     };

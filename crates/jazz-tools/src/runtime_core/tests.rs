@@ -3076,6 +3076,70 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
 }
 
 #[test]
+fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_server() {
+    // alice -> worker
+    //   alice stages one transactional batch locally
+    //   worker has a durable rejection record for that batch
+    //   reconnect must reconcile the rejection without any visible row replay
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    s.a.remove_server(s.b_server_for_a);
+
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    s.b.storage_mut()
+        .upsert_authoritative_batch_settlement(&crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+        .unwrap();
+
+    s.a.add_server(s.b_server_for_a);
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("rejected transactional batch record should still be present");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+    );
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "rejections should not resolve durability waiters as successful writes"
+    );
+}
+
+#[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =

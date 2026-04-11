@@ -79,6 +79,10 @@ impl SyncManager {
         storage: &H,
         batch_id: BatchId,
     ) -> Option<BatchSettlement> {
+        if let Ok(Some(settlement)) = storage.load_authoritative_batch_settlement(batch_id) {
+            return Some(settlement);
+        }
+
         let row_locators = storage.scan_row_locators().ok()?;
         let mut visible_members = Vec::new();
         let mut batch_kind: Option<crate::row_histories::RowState> = None;
