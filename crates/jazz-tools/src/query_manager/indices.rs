@@ -399,4 +399,38 @@ impl QueryManager {
             .apply_index_mutations(&mutations)
             .map_err(Self::map_index_storage_error)
     }
+
+    pub(crate) fn retract_local_pending_transaction_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+    ) {
+        let table_name = TableName::new(table);
+        let Some(table_schema) = self.schema.get(&table_name) else {
+            self.clear_local_pending_row_overlay(table, row_id);
+            return;
+        };
+
+        if let Err(error) = Self::update_indices_for_hard_delete_on_branch(
+            storage,
+            table,
+            branch,
+            row_id,
+            Some(row_data),
+            &table_schema.columns,
+        ) {
+            tracing::warn!(
+                table,
+                branch,
+                object_id = %row_id,
+                %error,
+                "failed to retract local pending transaction indices"
+            );
+        }
+
+        self.clear_local_pending_row_overlay(table, row_id);
+    }
 }

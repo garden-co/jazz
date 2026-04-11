@@ -93,6 +93,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let Ok(row_locators) = self.storage.scan_row_locators() else {
             return;
         };
+        let mut cleared_overlays = Vec::new();
 
         for (row_id, row_locator) in row_locators {
             let Ok(history_rows) = self
@@ -116,7 +117,24 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     Some(RowState::Rejected),
                     None,
                 );
+                cleared_overlays.push((
+                    row_locator.table.to_string(),
+                    row.branch.to_string(),
+                    row_id,
+                    row.data.to_vec(),
+                ));
             }
+        }
+
+        let query_manager = self.schema_manager.query_manager_mut();
+        for (table, branch, row_id, row_data) in cleared_overlays {
+            query_manager.retract_local_pending_transaction_row(
+                &mut self.storage,
+                &table,
+                &branch,
+                row_id,
+                &row_data,
+            );
         }
     }
 
@@ -211,6 +229,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     query_manager
                         .apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 }
+            }
+            self.schema_manager.process(&mut self.storage);
+        }
+
+        // 2c. Apply replayable batch settlements before collecting subscription
+        // updates so settlement-driven visibility changes land in the same tick.
+        let received_batch_settlements = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_pending_batch_settlements();
+        if !received_batch_settlements.is_empty() {
+            for settlement in received_batch_settlements {
+                self.apply_received_batch_settlement(settlement);
             }
             self.schema_manager.process(&mut self.storage);
         }
@@ -310,17 +342,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 3b. Process replayable batch settlements before row-level ack fallbacks.
-        let received_batch_settlements = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_pending_batch_settlements();
-        for settlement in received_batch_settlements {
-            self.apply_received_batch_settlement(settlement);
-        }
-
-        // 3c. Process received row-version persistence acks — resolve matching watchers
+        // 3b. Process received row-version persistence acks — resolve matching watchers
         let received_acks = self
             .schema_manager
             .query_manager_mut()

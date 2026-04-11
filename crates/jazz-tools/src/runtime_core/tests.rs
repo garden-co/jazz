@@ -4261,6 +4261,176 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
 }
 
 #[test]
+fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
+    // alice strict-subscribes at EdgeServer durability
+    //   alice stages one transactional row locally
+    //   worker frontier completion unblocks the first snapshot
+    //   the row should appear via alice's local pending overlay even before EdgeServer settlement
+    //   later EdgeServer settlement should not emit the same row again
+    let mut s = create_3tier_rc();
+
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                let rows = decode_added_rows(&delta);
+                received_clone.lock().unwrap().push(rows);
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: true,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+    };
+
+    let (row_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "alice-pending"),
+            Some(&write_context),
+        )
+        .unwrap();
+    s.a.immediate_tick();
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "initial delivery should still wait for the first upstream frontier"
+    );
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "worker frontier completion should unblock the first snapshot"
+    );
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "alice should see her own staged transactional row through the local overlay"
+    );
+    assert_eq!(calls[0][0].0, row_id);
+    drop(calls);
+
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "EdgeServer settlement should not emit a duplicate visible delta for the same row"
+    );
+}
+
+#[test]
+fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejected() {
+    // alice strict-subscribes at EdgeServer durability
+    //   worker frontier first opens the subscription with an empty snapshot
+    //   alice then stages one transactional row locally
+    //   the row appears only through the local pending overlay
+    //   a replayable rejected batch settlement should remove that overlay immediately
+    let mut s = create_3tier_rc();
+
+    let received = Arc::new(Mutex::new(Vec::<SubscriptionDelta>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                received_clone.lock().unwrap().push(delta);
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: true,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    {
+        let calls = received.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].ordered_delta.added.is_empty());
+        assert!(calls[0].ordered_delta.removed.is_empty());
+    }
+
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+    };
+
+    let (row_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "alice-pending"),
+            Some(&write_context),
+        )
+        .unwrap();
+    s.a.immediate_tick();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    {
+        let calls = received.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(decode_added_rows(&calls[1]).len(), 1);
+        assert_eq!(decode_added_rows(&calls[1])[0].0, row_id);
+    }
+
+    s.a.park_sync_message(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lacks publish rights".to_string(),
+            },
+        },
+    });
+    s.a.batched_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        3,
+        "rejected settlement should trigger a removal callback after the local overlay add"
+    );
+    assert_eq!(calls[2].ordered_delta.added.len(), 0);
+    assert_eq!(calls[2].ordered_delta.updated.len(), 0);
+    assert_eq!(calls[2].ordered_delta.removed.len(), 1);
+    assert_eq!(calls[2].ordered_delta.removed[0].id, row_id);
+}
+
+#[test]
 fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_complete() {
     // alice authors one transactional batch with two rows
     //   worker accepts it and reports both rows in the query scope snapshot

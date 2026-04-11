@@ -402,7 +402,9 @@ impl SyncPayload {
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
-            SyncPayload::QueryScopeSnapshot { scope, .. } => scope.first().map(|(object_id, _)| *object_id),
+            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+                scope.first().map(|(object_id, _)| *object_id)
+            }
             _ => None,
         }
     }
