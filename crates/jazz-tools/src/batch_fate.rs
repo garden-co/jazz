@@ -75,6 +75,14 @@ impl BatchSettlement {
             Self::Missing { .. } | Self::Rejected { .. } => None,
         }
     }
+
+    pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
+        postcard::to_allocvec(self).map_err(|err| format!("encode batch settlement: {err}"))
+    }
+
+    pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
+        postcard::from_bytes(bytes).map_err(|err| format!("decode batch settlement: {err}"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

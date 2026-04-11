@@ -16,6 +16,20 @@ struct AppliedRowVersion {
     visibility_change: Option<RowVisibilityChange>,
 }
 impl SyncManager {
+    fn persist_authoritative_batch_settlement<H: Storage>(
+        &self,
+        storage: &mut H,
+        settlement: &BatchSettlement,
+    ) {
+        if let Err(error) = storage.upsert_authoritative_batch_settlement(settlement) {
+            tracing::warn!(
+                batch_id = ?settlement.batch_id(),
+                %error,
+                "failed to persist authoritative batch settlement"
+            );
+        }
+    }
+
     fn ensure_object_metadata<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -150,13 +164,68 @@ impl SyncManager {
             return;
         }
 
-        let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
-            return;
-        };
-
         let row_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
         let version_id = row.version_id();
+
+        if let Ok(Some(settlement)) = storage.load_authoritative_batch_settlement(row.batch_id) {
+            let (state, confirmed_tier) = match &settlement {
+                BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
+                    (Some(RowState::VisibleTransactional), Some(*confirmed_tier))
+                }
+                BatchSettlement::Rejected { .. } => (Some(RowState::Rejected), None),
+                BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => {
+                    tracing::warn!(
+                        batch_id = ?row.batch_id,
+                        "transactional staging row resolved against unexpected authoritative settlement"
+                    );
+                    return;
+                }
+            };
+
+            let visibility_change = patch_row_version_state(
+                storage,
+                row_id,
+                &branch_name,
+                version_id,
+                state,
+                confirmed_tier,
+            )
+            .ok()
+            .flatten();
+
+            self.pending_batch_settlements.push(settlement.clone());
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id,
+                    branch_name,
+                    version_id,
+                    state,
+                    confirmed_tier,
+                },
+            });
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::BatchSettlement { settlement },
+            });
+
+            if visibility_change.is_some() {
+                self.pending_row_visibility_changes
+                    .extend(visibility_change.clone());
+                self.forward_update_to_clients_except_with_storage(
+                    storage,
+                    row_id,
+                    branch_name,
+                    client_id,
+                );
+            }
+            return;
+        }
+
+        let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
+            return;
+        };
         let settlement = BatchSettlement::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier,
@@ -178,6 +247,7 @@ impl SyncManager {
         .ok()
         .flatten();
 
+        self.persist_authoritative_batch_settlement(storage, &settlement);
         self.pending_batch_settlements.push(settlement.clone());
 
         self.outbox.push(OutboxEntry {
@@ -345,6 +415,7 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchSettlement { settlement } => {
+                self.persist_authoritative_batch_settlement(storage, &settlement);
                 self.pending_batch_settlements.push(settlement.clone());
                 let interested: HashSet<ClientId> = match &settlement {
                     BatchSettlement::DurableDirect {

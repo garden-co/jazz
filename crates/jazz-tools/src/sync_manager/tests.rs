@@ -604,6 +604,40 @@ fn batch_settlement_needed_returns_missing_for_unknown_batch() {
 }
 
 #[test]
+fn batch_settlement_needed_returns_persisted_rejected_without_visible_rows() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    io.upsert_authoritative_batch_settlement(&settlement)
+        .unwrap();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement: returned },
+        } if id == client_id && returned == settlement
+    )));
+}
+
+#[test]
 fn row_version_state_changed_relays_direct_batch_settlement_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

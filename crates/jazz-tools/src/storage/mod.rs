@@ -30,7 +30,7 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 use smolset::SmolSet;
 
-use crate::batch_fate::LocalBatchRecord;
+use crate::batch_fate::{BatchSettlement, LocalBatchRecord};
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
@@ -97,6 +97,7 @@ pub type RawTableKeys = Vec<String>;
 const METADATA_TABLE: &str = "__metadata";
 const ROW_LOCATOR_TABLE: &str = "__row_locator";
 const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
+const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowLocator {
@@ -903,6 +904,57 @@ pub trait Storage {
         Ok(records)
     }
 
+    fn upsert_authoritative_batch_settlement(
+        &mut self,
+        settlement: &BatchSettlement,
+    ) -> Result<(), StorageError> {
+        let bytes = settlement.encode_storage_row().map_err(|err| {
+            StorageError::IoError(format!("encode authoritative batch settlement: {err}"))
+        })?;
+        self.raw_table_put(
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            &local_batch_record_key(settlement.batch_id()),
+            &bytes,
+        )
+    }
+
+    fn load_authoritative_batch_settlement(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<BatchSettlement>, StorageError> {
+        match self.raw_table_get(
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            &local_batch_record_key(batch_id),
+        )? {
+            Some(bytes) => BatchSettlement::decode_storage_row(&bytes)
+                .map(Some)
+                .map_err(|err| {
+                    StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
+                }),
+            None => Ok(None),
+        }
+    }
+
+    fn scan_authoritative_batch_settlements(&self) -> Result<Vec<BatchSettlement>, StorageError> {
+        let mut settlements = Vec::new();
+        for (key, bytes) in
+            self.raw_table_scan_prefix(AUTHORITATIVE_BATCH_SETTLEMENT_TABLE, "batch:")?
+        {
+            let batch_id = decode_local_batch_record_key(&key)?;
+            let settlement = BatchSettlement::decode_storage_row(&bytes).map_err(|err| {
+                StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
+            })?;
+            if settlement.batch_id() != batch_id {
+                return Err(StorageError::IoError(format!(
+                    "authoritative batch settlement key/row mismatch for {key}"
+                )));
+            }
+            settlements.push(settlement);
+        }
+        settlements.sort_by_key(|settlement| settlement.batch_id().0);
+        Ok(settlements)
+    }
+
     // ================================================================
     // Row-history storage
     // ================================================================
@@ -1519,6 +1571,24 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {
         (**self).scan_local_batch_records()
+    }
+
+    fn upsert_authoritative_batch_settlement(
+        &mut self,
+        settlement: &BatchSettlement,
+    ) -> Result<(), StorageError> {
+        (**self).upsert_authoritative_batch_settlement(settlement)
+    }
+
+    fn load_authoritative_batch_settlement(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<BatchSettlement>, StorageError> {
+        (**self).load_authoritative_batch_settlement(batch_id)
+    }
+
+    fn scan_authoritative_batch_settlements(&self) -> Result<Vec<BatchSettlement>, StorageError> {
+        (**self).scan_authoritative_batch_settlements()
     }
 
     fn append_history_region_row_bytes(
