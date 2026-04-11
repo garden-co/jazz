@@ -1,8 +1,9 @@
 use super::*;
 use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{HistoryScan, StoredRowVersion};
+use crate::row_histories::{BatchId, HistoryScan, StoredRowVersion};
 use crate::storage::{RowLocator, metadata_from_row_locator};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 impl SyncManager {
@@ -62,6 +63,104 @@ impl SyncManager {
             crate::row_histories::RowState::VisibleTransactional => {
                 Some(BatchSettlement::AcceptedTransaction {
                     batch_id: row.batch_id,
+                    confirmed_tier,
+                    visible_members,
+                })
+            }
+            crate::row_histories::RowState::StagingPending
+            | crate::row_histories::RowState::Rejected => None,
+        }
+    }
+
+    pub(super) fn load_batch_settlement_by_batch_id_from_storage<
+        H: crate::storage::Storage + ?Sized,
+    >(
+        &self,
+        storage: &H,
+        batch_id: BatchId,
+    ) -> Option<BatchSettlement> {
+        let row_locators = storage.scan_row_locators().ok()?;
+        let mut visible_members = Vec::new();
+        let mut batch_kind: Option<crate::row_histories::RowState> = None;
+        let mut confirmed_tier: Option<DurabilityTier> = None;
+
+        for (object_id, row_locator) in row_locators {
+            let Ok(history_rows) =
+                storage.scan_history_row_versions(row_locator.table.as_str(), object_id)
+            else {
+                continue;
+            };
+
+            let branch_names: HashSet<_> = history_rows
+                .into_iter()
+                .filter(|row| row.batch_id == batch_id)
+                .map(|row| BranchName::new(&row.branch))
+                .collect();
+
+            for branch_name in branch_names {
+                let Some(row) = self.load_current_row_from_storage(
+                    storage,
+                    object_id,
+                    &branch_name,
+                    &row_locator,
+                ) else {
+                    continue;
+                };
+                if row.batch_id != batch_id || !row.state.is_visible() {
+                    continue;
+                }
+                if !matches!(
+                    row.state,
+                    crate::row_histories::RowState::VisibleDirect
+                        | crate::row_histories::RowState::VisibleTransactional
+                ) {
+                    continue;
+                }
+
+                if let Some(existing_kind) = batch_kind {
+                    if existing_kind != row.state {
+                        tracing::warn!(
+                            ?batch_id,
+                            object_id = %object_id,
+                            branch = %branch_name,
+                            existing_state = ?existing_kind,
+                            row_state = ?row.state,
+                            "batch has mixed visible states; skipping settlement reconstruction"
+                        );
+                        return None;
+                    }
+                } else {
+                    batch_kind = Some(row.state);
+                }
+
+                let row_tier = row.confirmed_tier?;
+                confirmed_tier = Some(match confirmed_tier {
+                    Some(existing) => existing.min(row_tier),
+                    None => row_tier,
+                });
+                visible_members.push(VisibleBatchMember {
+                    object_id,
+                    branch_name,
+                    batch_id,
+                });
+            }
+        }
+
+        let state = batch_kind?;
+        let confirmed_tier = confirmed_tier?;
+        if visible_members.is_empty() {
+            return None;
+        }
+
+        match state {
+            crate::row_histories::RowState::VisibleDirect => Some(BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            }),
+            crate::row_histories::RowState::VisibleTransactional => {
+                Some(BatchSettlement::AcceptedTransaction {
+                    batch_id,
                     confirmed_tier,
                     visible_members,
                 })

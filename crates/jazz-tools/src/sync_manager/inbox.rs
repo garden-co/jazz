@@ -123,6 +123,23 @@ impl SyncManager {
         self.load_current_batch_settlement_from_storage(storage, row_id, &branch_name, &row_locator)
     }
 
+    fn respond_to_batch_settlement_request<H: Storage>(
+        &mut self,
+        storage: &H,
+        destination: Destination,
+        batch_ids: Vec<crate::row_histories::BatchId>,
+    ) {
+        for batch_id in batch_ids {
+            let settlement = self
+                .load_batch_settlement_by_batch_id_from_storage(storage, batch_id)
+                .unwrap_or(BatchSettlement::Missing { batch_id });
+            self.outbox.push(OutboxEntry {
+                destination: destination.clone(),
+                payload: SyncPayload::BatchSettlement { settlement },
+            });
+        }
+    }
+
     fn maybe_accept_transactional_row_from_client<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -357,6 +374,13 @@ impl SyncManager {
                         },
                     });
                 }
+            }
+            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+                self.respond_to_batch_settlement_request(
+                    storage,
+                    Destination::Server(server_id),
+                    batch_ids,
+                );
             }
             SyncPayload::QuerySettled {
                 query_id,
@@ -681,6 +705,13 @@ impl SyncManager {
             SyncPayload::BatchSettlement { settlement } => {
                 self.pending_batch_settlements.push(settlement.clone());
             }
+            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+                self.respond_to_batch_settlement_request(
+                    storage,
+                    Destination::Client(client_id),
+                    batch_ids.clone(),
+                );
+            }
             SyncPayload::QuerySettled {
                 query_id,
                 tier,
@@ -769,6 +800,13 @@ impl SyncManager {
             }
             SyncPayload::BatchSettlement { settlement } => {
                 self.pending_batch_settlements.push(settlement);
+            }
+            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+                self.respond_to_batch_settlement_request(
+                    storage,
+                    Destination::Client(client_id),
+                    batch_ids,
+                );
             }
             _ => {}
         }

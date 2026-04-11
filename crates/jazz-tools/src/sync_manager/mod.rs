@@ -233,6 +233,21 @@ impl SyncManager {
         }
     }
 
+    pub fn request_batch_settlements_from_server(
+        &mut self,
+        server_id: ServerId,
+        batch_ids: Vec<crate::row_histories::BatchId>,
+    ) {
+        if batch_ids.is_empty() {
+            return;
+        }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        });
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);

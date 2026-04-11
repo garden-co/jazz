@@ -12,7 +12,7 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::StoredRowVersion;
+use crate::row_histories::{BatchId, StoredRowVersion};
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -274,6 +274,9 @@ pub enum SyncPayload {
     /// Replayable fate for one logical batch.
     BatchSettlement { settlement: BatchSettlement },
 
+    /// Request current replayable fate for specific batch ids.
+    BatchSettlementNeeded { batch_ids: Vec<BatchId> },
+
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
@@ -392,6 +395,7 @@ impl SyncPayload {
                 } => visible_members.first().map(|member| member.object_id),
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
+            SyncPayload::BatchSettlementNeeded { .. } => None,
             _ => None,
         }
     }
@@ -411,6 +415,7 @@ impl SyncPayload {
                 } => visible_members.first().map(|member| member.branch_name),
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
+            SyncPayload::BatchSettlementNeeded { .. } => None,
             _ => None,
         }
     }
@@ -463,6 +468,7 @@ impl SyncPayload {
             SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
             SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
             SyncPayload::BatchSettlement { .. } => "BatchSettlement",
+            SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::QuerySettled { .. } => "QuerySettled",

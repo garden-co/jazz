@@ -891,6 +891,9 @@ impl<'a> Normalizer<'a> {
             SyncPayload::BatchSettlement { settlement } => {
                 format!("{settlement:?}")
             }
+            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+                format!("batch_ids:{batch_ids:?}")
+            }
             SyncPayload::CatalogueEntryUpdated { entry } => {
                 format!(
                     "catalogue obj:{} type:{}",
@@ -1001,6 +1004,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::BatchSettlement { settlement } => {
             format!("{settlement:?}")
+        }
+        SyncPayload::BatchSettlementNeeded { batch_ids } => {
+            format!("batch_ids:{batch_ids:?}")
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
             format!("query:{}", query_id.0)

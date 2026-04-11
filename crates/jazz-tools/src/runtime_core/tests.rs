@@ -3036,6 +3036,46 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
 }
 
 #[test]
+fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    s.a.remove_server(s.b_server_for_a);
+
+    let ((row_id, _row_values), _receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
+    )));
+}
+
+#[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =
