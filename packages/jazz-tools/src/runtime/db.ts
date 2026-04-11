@@ -17,11 +17,14 @@ import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   JazzClient,
   loadWasmModule,
+  type LocalBatchRecord,
+  PersistedWrite as RuntimePersistedWrite,
   type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
+  type Row,
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
@@ -231,6 +234,35 @@ export interface TableProxy<T, Init> {
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+}
+
+export class DbPersistedWrite<T> {
+  constructor(
+    private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
+    private readonly transformValue: (value: Row | void) => T,
+    private readonly loadBatchRecord: () => LocalBatchRecord | null,
+    private readonly acknowledgeRejected: () => boolean,
+  ) {}
+
+  batchId(): string {
+    return this.pendingWrite.batchId();
+  }
+
+  value(): T {
+    return this.transformValue(this.pendingWrite.value());
+  }
+
+  async wait(): Promise<T> {
+    return this.transformValue(await this.pendingWrite.wait());
+  }
+
+  localBatchRecord(): LocalBatchRecord | null {
+    return this.loadBatchRecord();
+  }
+
+  acknowledgeRejectedBatch(): boolean {
+    return this.acknowledgeRejected();
+  }
 }
 
 interface BroadcastChannelLike {
@@ -565,6 +597,19 @@ export class Db {
     }
 
     return this.clients.get(key)!;
+  }
+
+  protected wrapPersistedWrite<T>(
+    client: JazzClient,
+    pendingWrite: RuntimePersistedWrite<Row | void>,
+    transformValue: (value: Row | void) => T,
+  ): DbPersistedWrite<T> {
+    return new DbPersistedWrite(
+      pendingWrite,
+      transformValue,
+      () => client.localBatchRecord(pendingWrite.batchId()),
+      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
+    );
   }
 
   /**
@@ -1108,6 +1153,27 @@ export class Db {
   }
 
   /**
+   * Insert a new row and keep a replayable handle for later durability settlement.
+   */
+  insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<T> {
+    const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const pendingWrite = client.createPersisted(table._table, values, options);
+    return this.wrapPersistedWrite(client, pendingWrite as RuntimePersistedWrite<Row | void>, (
+      row,
+    ) => transformRow(row as Row, table._schema, table._table));
+  }
+
+  /**
    * Update an existing row without waiting for durability.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
@@ -1137,6 +1203,28 @@ export class Db {
   }
 
   /**
+   * Update a row and keep a replayable handle for later durability settlement.
+   */
+  updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const pendingWrite = client.updatePersisted(id, updates, options);
+    return this.wrapPersistedWrite(client, pendingWrite as RuntimePersistedWrite<Row | void>, () => {
+      return undefined;
+    });
+  }
+
+  /**
    * Delete a row without waiting for durability.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
@@ -1155,6 +1243,21 @@ export class Db {
     const client = this.getClient(table._schema);
     await this.ensureBridgeReady();
     await client.deleteDurable(id, options);
+  }
+
+  /**
+   * Delete a row and keep a replayable handle for later durability settlement.
+   */
+  deletePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    const client = this.getClient(table._schema);
+    const pendingWrite = client.deletePersisted(id, options);
+    return this.wrapPersistedWrite(client, pendingWrite as RuntimePersistedWrite<Row | void>, () => {
+      return undefined;
+    });
   }
 
   /**
@@ -1551,6 +1654,28 @@ class ClientBackedDb extends Db {
     return transformRow(row, table._schema, table._table);
   }
 
+  override insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<T> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const pendingWrite = this.runtimeClient.createPersistedInternal(
+      table._table,
+      values,
+      this.session,
+      this.attribution,
+      options,
+    );
+    return this.wrapPersistedWrite(
+      this.runtimeClient,
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      (row) => transformRow(row as Row, table._schema, table._table),
+    );
+  }
+
   override update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -1576,6 +1701,29 @@ class ClientBackedDb extends Db {
     );
   }
 
+  override updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const pendingWrite = this.runtimeClient.updatePersistedInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+    );
+    return this.wrapPersistedWrite(
+      this.runtimeClient,
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
+  }
+
   override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
     this.runtimeClient.deleteInternal(id, this.session, this.attribution);
   }
@@ -1586,6 +1734,24 @@ class ClientBackedDb extends Db {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     await this.runtimeClient.deleteDurableInternal(id, this.session, this.attribution, options);
+  }
+
+  override deletePersisted<T, Init>(
+    _table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    const pendingWrite = this.runtimeClient.deletePersistedInternal(
+      id,
+      this.session,
+      this.attribution,
+      options,
+    );
+    return this.wrapPersistedWrite(
+      this.runtimeClient,
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
