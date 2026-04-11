@@ -132,13 +132,13 @@ That means:
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/storage/mod.rs` | Storage trait plus in-memory implementation and shared helpers |
-| `crates/jazz-tools/src/storage/opfs_btree.rs` | Browser worker durable backend |
-| `crates/jazz-tools/src/storage/sqlite.rs` | SQLite durable backend |
-| `crates/jazz-tools/src/storage/rocksdb.rs` | RocksDB durable backend |
-| `crates/jazz-tools/src/row_format.rs` | Shared row encoding |
-| `crates/jazz-wasm/src/runtime.rs` | Browser runtime bridge into storage |
-| `crates/jazz-napi/src/lib.rs` | SQLite-backed NAPI runtime |
-| `crates/jazz-cloud-server/src/server.rs` | RocksDB-backed server runtime |
+| File                                          | Purpose                                                        |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `crates/jazz-tools/src/storage/mod.rs`        | Storage trait plus in-memory implementation and shared helpers |
+| `crates/jazz-tools/src/storage/opfs_btree.rs` | Browser worker durable backend                                 |
+| `crates/jazz-tools/src/storage/sqlite.rs`     | SQLite durable backend                                         |
+| `crates/jazz-tools/src/storage/rocksdb.rs`    | RocksDB durable backend                                        |
+| `crates/jazz-tools/src/row_format.rs`         | Shared row encoding                                            |
+| `crates/jazz-wasm/src/runtime.rs`             | Browser runtime bridge into storage                            |
+| `crates/jazz-napi/src/lib.rs`                 | SQLite-backed NAPI runtime                                     |
+| `crates/jazz-cloud-server/src/server.rs`      | RocksDB-backed server runtime                                  |

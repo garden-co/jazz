@@ -118,11 +118,11 @@ That is why schema evolution can be described as "which table image should we re
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/schema_manager/manager.rs` | SchemaManager orchestration |
-| `crates/jazz-tools/src/schema_manager/context.rs` | Live schema context and branch resolution |
-| `crates/jazz-tools/src/schema_manager/lens.rs` | Lens definitions and transforms |
-| `crates/jazz-tools/src/schema_manager/auto_lens.rs` | Auto-generated migration/lens helpers |
-| `crates/jazz-tools/src/catalogue.rs` | Catalogue entry model |
-| `crates/jazz-tools/src/query_manager/manager.rs` | Query execution with schema context |
+| File                                                | Purpose                                   |
+| --------------------------------------------------- | ----------------------------------------- |
+| `crates/jazz-tools/src/schema_manager/manager.rs`   | SchemaManager orchestration               |
+| `crates/jazz-tools/src/schema_manager/context.rs`   | Live schema context and branch resolution |
+| `crates/jazz-tools/src/schema_manager/lens.rs`      | Lens definitions and transforms           |
+| `crates/jazz-tools/src/schema_manager/auto_lens.rs` | Auto-generated migration/lens helpers     |
+| `crates/jazz-tools/src/catalogue.rs`                | Catalogue entry model                     |
+| `crates/jazz-tools/src/query_manager/manager.rs`    | Query execution with schema context       |

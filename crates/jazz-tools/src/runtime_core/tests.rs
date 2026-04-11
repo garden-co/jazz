@@ -3389,7 +3389,9 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
         .storage()
         .scan_history_region_bytes(
             "users",
-            crate::row_histories::HistoryScan::Row { row_id: inserted_id },
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
         )
         .expect("history bytes should be readable after old-client update");
     assert!(
@@ -3458,7 +3460,9 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
         .storage()
         .scan_history_region_bytes(
             "users",
-            crate::row_histories::HistoryScan::Row { row_id: inserted_id },
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
         )
         .expect("history bytes should be readable after insert");
     assert_eq!(history_bytes.len(), 1);
@@ -3472,8 +3476,9 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
         .expect("users table should exist")
         .columns
         .clone();
-    let decoded = crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
-        .expect("flat history row should decode with the catalogue-backed descriptor");
+    let decoded =
+        crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
+            .expect("flat history row should decode with the catalogue-backed descriptor");
     assert_eq!(decoded.row_id, inserted_id);
     assert_eq!(decoded.data.len() > 0, true);
 }

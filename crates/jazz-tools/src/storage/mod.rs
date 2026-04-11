@@ -234,14 +234,19 @@ fn all_history_user_descriptors<H: Storage + ?Sized>(
         .unwrap_or_else(|| table_hint.to_string());
 
     if let Some(origin_schema_hash) = row_locator.and_then(|locator| locator.origin_schema_hash) {
-        if let Some(descriptor) =
-            load_history_user_descriptor_for_schema_hash(storage, &locator_table, origin_schema_hash)?
-        {
+        if let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+            storage,
+            &locator_table,
+            origin_schema_hash,
+        )? {
             push_descriptor(descriptor);
         }
         if locator_table != table_hint
-            && let Some(descriptor) =
-                load_history_user_descriptor_for_schema_hash(storage, table_hint, origin_schema_hash)?
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
         {
             push_descriptor(descriptor);
         }
@@ -257,8 +262,10 @@ fn all_history_user_descriptors<H: Storage + ?Sized>(
             continue;
         }
 
-        let schema = crate::schema_manager::encoding::decode_schema(&entry.content)
-            .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?;
+        let schema =
+            crate::schema_manager::encoding::decode_schema(&entry.content).map_err(|err| {
+                StorageError::IoError(format!("decode schema for row history: {err}"))
+            })?;
 
         let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
         if let Some(table_schema) = schema.get(&hinted_table_name) {
@@ -345,8 +352,11 @@ fn history_user_descriptor_candidates_for_row<H: Storage + ?Sized>(
             push_descriptor(descriptor);
         }
         if row_locator.table.as_str() != table_hint
-            && let Some(descriptor) =
-                load_history_user_descriptor_for_schema_hash(storage, table_hint, origin_schema_hash)?
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
         {
             push_descriptor(descriptor);
         }
@@ -389,8 +399,11 @@ fn required_history_user_descriptor_for_row<H: Storage + ?Sized>(
         }
 
         if row_locator.table.as_str() != table_hint
-            && let Some(descriptor) =
-                load_history_user_descriptor_for_schema_hash(storage, table_hint, origin_schema_hash)?
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
             && row_data_matches(&descriptor)
         {
             return Ok(descriptor);
@@ -460,8 +473,11 @@ pub(crate) fn encode_visible_row_bytes_for_storage<H: Storage + ?Sized>(
         .map(|entry| {
             let user_descriptor =
                 required_history_user_descriptor_for_row(storage, table, &entry.current_row)?;
-            let bytes = crate::row_histories::encode_flat_visible_row_entry(&user_descriptor, entry)
-                .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
+            let bytes =
+                crate::row_histories::encode_flat_visible_row_entry(&user_descriptor, entry)
+                    .map_err(|err| {
+                        StorageError::IoError(format!("encode flat visible row: {err}"))
+                    })?;
 
             Ok(OwnedVisibleRowBytes {
                 branch: entry.current_row.branch.to_string(),
@@ -598,7 +614,8 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
 
     let mut rebuilt_visible_entries = Vec::new();
     for (branch, row_id) in affected_visible_rows {
-        let Some(existing_entry) = storage.load_visible_region_entry(table, &branch, row_id)? else {
+        let Some(existing_entry) = storage.load_visible_region_entry(table, &branch, row_id)?
+        else {
             continue;
         };
 
@@ -2322,7 +2339,8 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
 
-        let encoded = encode_visible_row_bytes_for_storage(self, table, std::slice::from_ref(&entry))?;
+        let encoded =
+            encode_visible_row_bytes_for_storage(self, table, std::slice::from_ref(&entry))?;
         Ok(encoded.into_iter().next().map(|row| row.bytes))
     }
 
@@ -2481,11 +2499,7 @@ mod tests {
             row_id,
             branch,
             parents,
-            encode_row(
-                &users_test_descriptor(),
-                &[Value::Text(value.to_string())],
-            )
-            .unwrap(),
+            encode_row(&users_test_descriptor(), &[Value::Text(value.to_string())]).unwrap(),
             provenance,
             HashMap::new(),
             state,

@@ -112,10 +112,10 @@ That keeps the transport side from growing a shadow SQL engine.
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription execution |
-| `crates/jazz-tools/src/query_manager/subscriptions.rs` | Local/forwarded subscription lifecycle |
-| `crates/jazz-tools/src/sync_manager/mod.rs` | Query registration and relay state |
-| `crates/jazz-tools/src/sync_manager/inbox.rs` | Inbound query/sync payload handling |
-| `crates/jazz-tools/src/runtime_core/ticks.rs` | Settled-signal release during runtime ticks |
+| File                                                    | Purpose                                     |
+| ------------------------------------------------------- | ------------------------------------------- |
+| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription execution    |
+| `crates/jazz-tools/src/query_manager/subscriptions.rs`  | Local/forwarded subscription lifecycle      |
+| `crates/jazz-tools/src/sync_manager/mod.rs`             | Query registration and relay state          |
+| `crates/jazz-tools/src/sync_manager/inbox.rs`           | Inbound query/sync payload handling         |
+| `crates/jazz-tools/src/runtime_core/ticks.rs`           | Settled-signal release during runtime ticks |

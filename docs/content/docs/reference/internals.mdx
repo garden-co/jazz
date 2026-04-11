@@ -224,10 +224,10 @@ Sync is asymmetric:
 
 Each client connection has a **role** that determines how writes are routed:
 
-| Role    | Write handling                                              |
-| ------- | ----------------------------------------------------------- |
-| `User`  | Writes queued for permission policy evaluation before apply |
-| `Admin` | Writes applied directly, no permission check                |
+| Role    | Write handling                                                    |
+| ------- | ----------------------------------------------------------------- |
+| `User`  | Writes queued for permission policy evaluation before apply       |
+| `Admin` | Writes applied directly, no permission check                      |
 | `Peer`  | Writes applied directly, used for trusted runtime-to-runtime sync |
 
 Frontend clients usually authenticate as `User`. Backend services with a backend secret authenticate
@@ -254,9 +254,9 @@ uses that catalogue state to resolve schema context on demand.
 
 Jazz separates two durability questions:
 
-| Signal | Gates | Question it answers |
-| --- | --- | --- |
-| `QuerySettled` | First read delivery | "Has the query result settled at tier T?" |
+| Signal                  | Gates                    | Question it answers                        |
+| ----------------------- | ------------------------ | ------------------------------------------ |
+| `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
 | Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
 
 Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different
