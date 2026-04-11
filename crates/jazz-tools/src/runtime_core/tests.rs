@@ -2742,10 +2742,10 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
 }
 
 #[test]
-fn rc_transactional_insert_stages_row_without_affecting_ordinary_visibility() {
+fn rc_transactional_insert_stays_local_until_authority_receives_it() {
     // alice stages one transactional write
-    //   both alice and the worker keep ordinary visible reads empty
-    //   but the staged history row still syncs upstream
+    //   ordinary visible reads stay empty locally
+    //   and nothing reaches the worker before sync runs
     let mut s = create_3tier_rc();
     let write_context = WriteContext {
         session: None,
@@ -2769,29 +2769,26 @@ fn rc_transactional_insert_stages_row_without_affecting_ordinary_visibility() {
         "ordinary visible state should ignore transactional staging rows"
     );
 
-    pump_a_to_b(&mut s);
-
     assert_eq!(
         s.b.storage()
             .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
             .unwrap(),
         None,
-        "upstream ordinary visible state should also ignore staged transactional rows"
+        "upstream should not see the row before sync forwards it"
     );
 
     let history_rows =
         s.b.storage()
             .scan_history_row_versions("users", row_id)
             .unwrap();
-    assert_eq!(history_rows.len(), 1);
-    assert_eq!(
-        history_rows[0].state,
-        crate::row_histories::RowState::StagingPending
+    assert!(
+        history_rows.is_empty(),
+        "upstream should not receive transactional history before sync"
     );
 }
 
 #[test]
-fn rc_transactional_insert_replays_staging_row_on_upstream_reconnect() {
+fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     let mut s = create_3tier_rc();
     let write_context = WriteContext {
         session: None,
@@ -2827,7 +2824,214 @@ fn rc_transactional_insert_replays_staging_row_on_upstream_reconnect() {
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
         history_rows[0].state,
-        crate::row_histories::RowState::StagingPending
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Worker));
+
+    let worker_row =
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap()
+            .expect("worker should publish the accepted transactional row on reconnect");
+    assert_eq!(
+        worker_row.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+}
+
+#[test]
+fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
+    // alice stages one transactional row locally
+    //   worker accepts it into visible transactional state
+    //   then alice learns that accepted visible state from sync
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    let (row_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    pump_a_to_b(&mut s);
+
+    let worker_row =
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap()
+            .expect("worker should materialize an accepted visible row");
+    assert_eq!(
+        worker_row.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+
+    assert_eq!(
+        s.a.storage()
+            .load_visible_region_row("users", s.a.schema_manager().branch_name().as_str(), row_id)
+            .unwrap(),
+        None,
+        "alice should still be waiting for the acceptance update before it is visible locally"
+    );
+
+    pump_b_to_a(&mut s);
+
+    let client_row =
+        s.a.storage()
+            .load_visible_region_row("users", s.a.schema_manager().branch_name().as_str(), row_id)
+            .unwrap()
+            .expect("accepted transactional row should become visible on alice after sync");
+    assert_eq!(
+        client_row.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Worker));
+}
+
+#[test]
+fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() {
+    // alice -> worker
+    //   transactional write stages locally
+    //   worker accepts it
+    //   alice resolves from replayable AcceptedTransaction settlement
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+    let branch_name = s.a.schema_manager().branch_name();
+
+    let initial_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("transactional persisted write should create a local batch record");
+    assert_eq!(initial_record.batch_id, batch_id);
+    assert_eq!(
+        initial_record.mode,
+        crate::batch_fate::BatchMode::Transactional
+    );
+    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
+    assert_eq!(initial_record.latest_settlement, None);
+
+    pump_a_to_b(&mut s);
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "worker acceptance should not resolve until the settlement arrives back on alice"
+    );
+
+    pump_b_to_a(&mut s);
+    assert_eq!(receiver.try_recv(), Ok(Some(())));
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("accepted transactional batch record should still be present");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+}
+
+#[test]
+fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
+    // alice -> worker
+    //   worker accepts the transactional batch
+    //   alice misses the live settlement
+    //   reconnect replays the accepted settlement from current server truth
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+    };
+
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+    let branch_name = s.a.schema_manager().branch_name();
+
+    pump_a_to_b(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "without the return settlement, the persisted receiver should still be pending"
+    );
+
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(())),
+        "reconnect should reconcile the accepted transactional batch from the server"
+    );
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("reconciled transactional batch record should still be present");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
     );
 }
 

@@ -1,30 +1,34 @@
 use super::*;
 use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
+use crate::commit::CommitId;
 use crate::row_histories::BatchId;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
-    fn current_visible_batch_id(&self, row_id: ObjectId) -> Result<BatchId, RuntimeError> {
+    fn batch_id_for_row_version(
+        &self,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<BatchId, RuntimeError> {
         let row_locator = self
             .storage
             .load_row_locator(row_id)
             .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
             .ok_or_else(|| RuntimeError::WriteError(format!("missing row locator for {row_id}")))?;
-        let visible = self
+        let row = self
             .storage
-            .load_visible_region_row(
-                row_locator.table.as_str(),
-                self.schema_manager.branch_name().as_str(),
-                row_id,
-            )
-            .map_err(|err| RuntimeError::WriteError(format!("load visible row: {err}")))?
-            .ok_or_else(|| RuntimeError::WriteError(format!("missing visible row for {row_id}")))?;
-        Ok(visible.batch_id)
+            .load_history_row_version(row_locator.table.as_str(), row_id, version_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load history row version: {err}")))?
+            .ok_or_else(|| {
+                RuntimeError::WriteError(format!("missing row version {version_id:?} for {row_id}"))
+            })?;
+        Ok(row.batch_id)
     }
 
-    fn track_local_direct_batch(
+    fn track_local_batch(
         &mut self,
         row_id: ObjectId,
         batch_id: BatchId,
+        mode: BatchMode,
         requested_tier: DurabilityTier,
     ) -> Result<(), RuntimeError> {
         let branch_name = self.schema_manager.branch_name();
@@ -33,22 +37,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             branch_name,
             batch_id,
         }];
-        let latest_settlement = self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .max_local_durability_tier()
-            .map(|confirmed_tier| BatchSettlement::DurableDirect {
-                batch_id,
-                confirmed_tier,
-                visible_members: visible_members.clone(),
-            });
-        let record = LocalBatchRecord::new(
-            batch_id,
-            BatchMode::Direct,
-            requested_tier,
-            latest_settlement,
-        );
+        let latest_settlement = match mode {
+            BatchMode::Direct => self
+                .schema_manager
+                .query_manager()
+                .sync_manager()
+                .max_local_durability_tier()
+                .map(|confirmed_tier| BatchSettlement::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                    visible_members: visible_members.clone(),
+                }),
+            BatchMode::Transactional => None,
+        };
+        let record = LocalBatchRecord::new(batch_id, mode, requested_tier, latest_settlement);
         self.storage
             .upsert_local_batch_record(&record)
             .map_err(|err| RuntimeError::WriteError(format!("persist local batch record: {err}")))
@@ -129,9 +131,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
-        let batch_id = self.current_visible_batch_id(row_id)?;
+        let batch_id = self.batch_id_for_row_version(row_id, result.row_version_id)?;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
         let row_values = result.row_values;
-        self.track_local_direct_batch(row_id, batch_id, tier)?;
+        self.track_local_batch(row_id, batch_id, batch_mode, tier)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -166,9 +171,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        let _ = version_id;
-        let batch_id = self.current_visible_batch_id(object_id)?;
-        self.track_local_direct_batch(object_id, batch_id, tier)?;
+        let batch_id = self.batch_id_for_row_version(object_id, version_id)?;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -202,9 +209,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        let _ = handle;
-        let batch_id = self.current_visible_batch_id(object_id)?;
-        self.track_local_direct_batch(object_id, batch_id, tier)?;
+        let batch_id = self.batch_id_for_row_version(object_id, handle.delete_version_id)?;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
