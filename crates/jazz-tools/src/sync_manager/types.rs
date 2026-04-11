@@ -291,6 +291,12 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
+    /// Replayable scope snapshot for one query subscription.
+    QueryScopeSnapshot {
+        query_id: QueryId,
+        scope: Vec<(ObjectId, BranchName)>,
+    },
+
     /// Query frontier settlement notification.
     ///
     /// This means the upstream server has reached a complete first frontier for the
@@ -396,6 +402,7 @@ impl SyncPayload {
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::QueryScopeSnapshot { scope, .. } => scope.first().map(|(object_id, _)| *object_id),
             _ => None,
         }
     }
@@ -416,6 +423,9 @@ impl SyncPayload {
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+                scope.first().map(|(_, branch_name)| *branch_name)
+            }
             _ => None,
         }
     }
@@ -471,6 +481,7 @@ impl SyncPayload {
             SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+            SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::SchemaWarning(_) => "SchemaWarning",
             SyncPayload::Error(_) => "Error",

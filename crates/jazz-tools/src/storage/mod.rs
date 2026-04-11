@@ -886,6 +886,10 @@ pub trait Storage {
         }
     }
 
+    fn delete_local_batch_record(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        self.raw_table_delete(LOCAL_BATCH_RECORD_TABLE, &local_batch_record_key(batch_id))
+    }
+
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {
         let mut records = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(LOCAL_BATCH_RECORD_TABLE, "batch:")? {
@@ -1567,6 +1571,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         batch_id: BatchId,
     ) -> Result<Option<LocalBatchRecord>, StorageError> {
         (**self).load_local_batch_record(batch_id)
+    }
+
+    fn delete_local_batch_record(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        (**self).delete_local_batch_record(batch_id)
     }
 
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {
