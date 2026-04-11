@@ -221,6 +221,33 @@ impl QueryManager {
         Ok(row)
     }
 
+    fn maybe_track_local_pending_transaction_overlay(
+        &mut self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+        write_context: Option<&WriteContext>,
+        deleted: bool,
+        visibility_change: &Option<RowVisibilityChange>,
+    ) {
+        if visibility_change.is_some()
+            || !matches!(
+                write_context.map(WriteContext::batch_mode),
+                Some(BatchMode::Transactional)
+            )
+        {
+            return;
+        }
+
+        self.pending_local_row_versions.insert(row_id, version_id);
+        self.mark_subscriptions_dirty_local(table);
+        if deleted {
+            self.mark_local_row_deleted_in_subscriptions(table, row_id);
+        } else {
+            self.mark_local_row_updated_in_subscriptions(table, row_id);
+        }
+    }
+
     fn persist_row_locator<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -539,6 +566,14 @@ impl QueryManager {
             row,
             index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            id,
+            version_id,
+            write_context,
+            false,
+            &visibility_change,
+        );
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_version(storage, visibility_change)?;
@@ -731,6 +766,14 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            object_id,
+            row_version_id,
+            write_context,
+            false,
+            &visibility_change,
+        );
 
         tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
         if let Some(visibility_change) = visibility_change {
@@ -881,6 +924,14 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            object_id,
+            row_version_id,
+            write_context,
+            false,
+            &visibility_change,
+        );
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_version(storage, visibility_change)?;
@@ -1736,6 +1787,14 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            id,
+            delete_version_id,
+            write_context,
+            true,
+            &visibility_change,
+        );
 
         tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
         if let Some(visibility_change) = visibility_change {
@@ -1880,6 +1939,14 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            id,
+            delete_version_id,
+            write_context,
+            true,
+            &visibility_change,
+        );
 
         let _ = old_branch_data;
         let _ = descriptor;
@@ -1990,6 +2057,14 @@ impl QueryManager {
             row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            id,
+            row_version_id,
+            None,
+            false,
+            &visibility_change,
+        );
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_version(storage, visibility_change)?;
@@ -2072,6 +2147,14 @@ impl QueryManager {
             delete_row,
             &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            id,
+            delete_version_id,
+            None,
+            true,
+            &visibility_change,
+        );
 
         let _ = old_data;
         let _ = descriptor;

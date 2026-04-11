@@ -9,7 +9,9 @@ use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{BatchId, QueryRowVersion, RowVisibilityChange, StoredRowVersion};
+use crate::row_histories::{
+    BatchId, QueryRowVersion, RowState, RowVisibilityChange, StoredRowVersion,
+};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
     translate_table_name_to_schema,
@@ -1503,6 +1505,12 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn clear_local_pending_row_overlay(&mut self, table: &str, id: ObjectId) {
+        self.pending_local_row_versions.remove(&id);
+        self.mark_subscriptions_dirty_local(table);
+        self.mark_local_row_updated_in_subscriptions(table, id);
+    }
+
     fn load_row_locator(storage: &dyn Storage, row_id: ObjectId) -> Option<RowLocator> {
         storage.load_row_locator(row_id).ok().flatten()
     }
@@ -1593,6 +1601,61 @@ impl QueryManager {
                 .filter(|fallback| *fallback != primary_table)
                 .and_then(|fallback| load(fallback).ok().flatten())
         })
+    }
+
+    fn load_local_pending_query_row_from_candidate_tables(
+        storage: &dyn Storage,
+        primary_table: &str,
+        fallback_table: Option<&str>,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Option<QueryRowVersion> {
+        let load = |table: &str| storage.load_history_query_row_version(table, row_id, version_id);
+
+        load(primary_table).ok().flatten().or_else(|| {
+            fallback_table
+                .filter(|fallback| *fallback != primary_table)
+                .and_then(|fallback| load(fallback).ok().flatten())
+        })
+    }
+
+    fn load_local_pending_query_row_with_hint_or_locator(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        version_id: CommitId,
+        table_hint: Option<&str>,
+        schema_context: &SchemaContext,
+    ) -> Option<(String, QueryRowVersion)> {
+        if let Some(hint) = table_hint
+            && let Some(row) = Self::load_local_pending_query_row_from_candidate_tables(
+                storage, hint, None, row_id, version_id,
+            )
+        {
+            return Some((hint.to_string(), row));
+        }
+
+        let locator = Self::load_row_locator(storage, row_id)?;
+        let original_table = locator.table.as_str();
+        let current_table = locator
+            .origin_schema_hash
+            .filter(|hash| *hash != schema_context.current_hash)
+            .and_then(|origin_schema_hash| {
+                resolve_current_table_name(
+                    schema_context,
+                    original_table,
+                    Some(&origin_schema_hash),
+                )
+            })
+            .filter(|translated| translated != original_table);
+        let current_table_name = current_table.as_deref().unwrap_or(original_table);
+        let row = Self::load_local_pending_query_row_from_candidate_tables(
+            storage,
+            current_table_name,
+            Some(original_table),
+            row_id,
+            version_id,
+        )?;
+        Some((current_table_name.to_string(), row))
     }
 
     fn load_best_visible_row_version_from_storage_with_table_hint(
@@ -1793,6 +1856,20 @@ impl QueryManager {
             )?;
             let (_, row) = &resolved;
             (row.version_id() == pending_version_id).then_some(resolved)
+        })
+        .or_else(|| {
+            let pending_version_id = local_pending_version?;
+            let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
+                storage,
+                row_id,
+                pending_version_id,
+                table_hint,
+                schema_context,
+            )?;
+            let (_, row) = &resolved;
+            (row.version_id() == pending_version_id
+                && matches!(row.state, RowState::StagingPending))
+            .then_some(resolved)
         })?;
         let (table, row) = resolved;
 

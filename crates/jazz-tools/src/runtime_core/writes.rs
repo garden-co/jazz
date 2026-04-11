@@ -237,10 +237,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Acknowledge a replayable rejected batch outcome and prune the local
     /// batch record that kept it alive across reconnect and restart.
-    pub fn acknowledge_rejected_batch(
-        &mut self,
-        batch_id: BatchId,
-    ) -> Result<bool, RuntimeError> {
+    pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
         let Some(record) = self
             .storage
             .load_local_batch_record(batch_id)
@@ -249,7 +246,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return Ok(false);
         };
 
-        if !matches!(record.latest_settlement, Some(BatchSettlement::Rejected { .. })) {
+        if !matches!(
+            record.latest_settlement,
+            Some(BatchSettlement::Rejected { .. })
+        ) {
             return Ok(false);
         }
 

@@ -672,10 +672,12 @@ fn sorted_query_scope_snapshot(
     scope: &HashSet<(ObjectId, BranchName)>,
 ) -> Vec<(ObjectId, BranchName)> {
     let mut entries: Vec<_> = scope.iter().copied().collect();
-    entries.sort_by(|(left_object_id, left_branch), (right_object_id, right_branch)| {
-        left_object_id
-            .cmp(right_object_id)
-            .then_with(|| left_branch.as_str().cmp(right_branch.as_str()))
-    });
+    entries.sort_by(
+        |(left_object_id, left_branch), (right_object_id, right_branch)| {
+            left_object_id
+                .cmp(right_object_id)
+                .then_with(|| left_branch.as_str().cmp(right_branch.as_str()))
+        },
+    );
     entries
 }
