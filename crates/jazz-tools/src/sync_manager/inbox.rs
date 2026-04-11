@@ -430,6 +430,7 @@ impl SyncManager {
                 let settlement =
                     self.replayable_visible_batch_settlement(storage, row_id, branch_name);
                 if let Some(settlement) = settlement.clone() {
+                    self.persist_authoritative_batch_settlement(storage, &settlement);
                     self.pending_batch_settlements.push(settlement);
                 }
                 for cid in interested {
@@ -789,6 +790,7 @@ impl SyncManager {
                 let settlement =
                     self.replayable_visible_batch_settlement(storage, *row_id, *branch_name);
                 if let Some(settlement) = settlement.clone() {
+                    self.persist_authoritative_batch_settlement(storage, &settlement);
                     self.pending_batch_settlements.push(settlement);
                 }
                 for cid in interested {
