@@ -213,7 +213,8 @@ impl ProjectNode {
                 version_id,
                 row_provenance,
             }])
-            .with_provenance(tuple.provenance().clone()),
+            .with_provenance(tuple.provenance().clone())
+            .with_batch_provenance(tuple.batch_provenance().clone()),
         )
     }
 }

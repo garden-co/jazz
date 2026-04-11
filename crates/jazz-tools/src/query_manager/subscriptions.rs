@@ -76,6 +76,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -86,6 +87,7 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
@@ -139,6 +141,7 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier,
                 local_updates,
+                strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 query_frontier_complete,
@@ -210,6 +213,7 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
+                strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 query_frontier_complete: true,
@@ -262,6 +266,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -279,6 +284,7 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
+            false,
             propagation,
         )
     }
@@ -289,6 +295,7 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
@@ -297,6 +304,7 @@ impl QueryManager {
             session.clone(),
             durability_tier,
             local_updates,
+            strict_transactions,
             propagation,
         )?;
 

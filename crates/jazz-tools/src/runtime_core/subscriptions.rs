@@ -6,6 +6,7 @@ use crate::sync_manager::QueryPropagation;
 pub struct ReadDurabilityOptions {
     pub tier: Option<DurabilityTier>,
     pub local_updates: LocalUpdates,
+    pub strict_transactions: bool,
 }
 
 impl Default for ReadDurabilityOptions {
@@ -13,6 +14,7 @@ impl Default for ReadDurabilityOptions {
         Self {
             tier: None,
             local_updates: LocalUpdates::Immediate,
+            strict_transactions: false,
         }
     }
 }
@@ -46,6 +48,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 session,
                 durability.tier,
                 durability.local_updates,
+                durability.strict_transactions,
                 propagation,
             )
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
@@ -331,6 +334,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 session,
                 durability.tier,
                 durability.local_updates,
+                durability.strict_transactions,
                 propagation,
             ) {
             Ok(id) => id,

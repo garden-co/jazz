@@ -1690,6 +1690,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Worker),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -3558,7 +3559,8 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     alice.batched_tick();
 
     let storage = alice.into_storage();
-    let mut restarted = create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+    let mut restarted =
+        create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
 
     assert!(matches!(
         restarted
@@ -3575,7 +3577,10 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
         "restart should preserve a rejection record that can still be acknowledged"
     );
     assert_eq!(
-        restarted.storage().load_local_batch_record(batch_id).unwrap(),
+        restarted
+            .storage()
+            .load_local_batch_record(batch_id)
+            .unwrap(),
         None
     );
 
@@ -3794,6 +3799,7 @@ fn rc_query_settled_tier_holds() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Worker),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -3832,6 +3838,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -3869,6 +3876,7 @@ fn rc_query_settled_tier_empty_resolves() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Worker),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -3959,6 +3967,7 @@ fn query_reads_pick_row_versions_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Worker),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -3969,6 +3978,7 @@ fn query_reads_pick_row_versions_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::GlobalServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -4006,6 +4016,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Worker),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -4121,6 +4132,7 @@ fn rc_subscribe_settled_tier() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::Worker),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -4167,6 +4179,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -4245,6 +4258,206 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         "Second callback should contain one added row"
     );
     assert_eq!(second_delivery[0].0, second_id);
+}
+
+#[test]
+fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_complete() {
+    // alice authors one transactional batch with two rows
+    //   worker accepts it and reports both rows in the query scope snapshot
+    //   downstream strict visibility must hide the first delivered row until the second arrives
+    let mut s = create_3tier_rc();
+
+    let schema = test_schema();
+    let app_id = AppId::from_name("durability-test");
+    let mgr_d = SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut d = RuntimeCore::new(
+        mgr_d,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+
+    let d_client_of_b = ClientId::new();
+    let b_server_for_d = ServerId::new();
+    {
+        s.b.add_client(d_client_of_b, None);
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(d_client_of_b, ClientRole::Peer);
+    }
+    d.add_server(b_server_for_d);
+
+    d.immediate_tick();
+    d.batched_tick();
+    d.sync_sender().take();
+    s.b.immediate_tick();
+    s.b.batched_tick();
+    s.b.sync_sender().take();
+
+    let batch_id = crate::row_histories::BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+    };
+
+    let (first_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice-one"),
+            Some(&write_context),
+        )
+        .unwrap();
+    let (second_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice-two"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    pump_a_to_b(&mut s);
+    s.b.batched_tick();
+    s.b.sync_sender().take();
+
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle = d
+        .subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                received_clone
+                    .lock()
+                    .unwrap()
+                    .push(decode_added_rows(&delta));
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::Worker),
+                local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+                strict_transactions: true,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    d.batched_tick();
+    for entry in d.sync_sender().take() {
+        if entry.destination == Destination::Server(b_server_for_d) {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(d_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    s.b.batched_tick();
+
+    let mut first_row_payload = None;
+    let mut remaining_row_payloads = Vec::new();
+    let mut control_payloads = Vec::new();
+    for entry in s.b.sync_sender().take() {
+        if entry.destination != Destination::Client(d_client_of_b) {
+            continue;
+        }
+
+        match entry.payload {
+            SyncPayload::RowVersionNeeded { metadata, row } => {
+                let row_id = row.row_id;
+                let payload = SyncPayload::RowVersionNeeded { metadata, row };
+                if row_id == first_id && first_row_payload.is_none() {
+                    first_row_payload = Some(payload);
+                } else if row_id == second_id || row_id == first_id {
+                    remaining_row_payloads.push(payload);
+                }
+            }
+            payload @ SyncPayload::QueryScopeSnapshot { .. }
+            | payload @ SyncPayload::BatchSettlement { .. }
+            | payload @ SyncPayload::QuerySettled { .. }
+            | payload @ SyncPayload::RowVersionStateChanged { .. } => {
+                control_payloads.push(payload);
+            }
+            _ => {}
+        }
+    }
+
+    let first_row_payload = first_row_payload.expect("expected first row payload");
+    assert!(
+        control_payloads
+            .iter()
+            .any(|payload| matches!(payload, SyncPayload::QueryScopeSnapshot { query_id, scope }
+                if *query_id == crate::sync_manager::QueryId(0)
+                    && scope.iter().map(|(object_id, _)| *object_id).collect::<std::collections::HashSet<_>>()
+                        == std::collections::HashSet::from([first_id, second_id]))),
+        "expected scope snapshot covering both accepted transaction members, got {control_payloads:#?}"
+    );
+    assert!(
+        control_payloads.iter().any(|payload| matches!(
+            payload,
+            SyncPayload::BatchSettlement {
+                settlement: crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                    batch_id: settled_batch_id,
+                    visible_members,
+                    ..
+                }
+            } if *settled_batch_id == batch_id
+                && visible_members.iter().any(|member| member.object_id == first_id)
+                && visible_members.iter().any(|member| member.object_id == second_id)
+        )),
+        "expected accepted transaction settlement for the shared batch"
+    );
+
+    for payload in control_payloads
+        .into_iter()
+        .chain(std::iter::once(first_row_payload))
+    {
+        d.park_sync_message(InboxEntry {
+            source: Source::Server(b_server_for_d),
+            payload,
+        });
+    }
+    d.batched_tick();
+    d.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "frontier completion should emit one initial snapshot"
+    );
+    assert!(
+        calls[0].is_empty(),
+        "strict visibility should hide the partial accepted batch"
+    );
+    drop(calls);
+
+    for payload in remaining_row_payloads {
+        d.park_sync_message(InboxEntry {
+            source: Source::Server(b_server_for_d),
+            payload,
+        });
+    }
+    d.batched_tick();
+    d.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "completing the batch should emit a second delta"
+    );
+    assert_eq!(
+        calls[1]
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from([first_id, second_id]),
+        "both accepted rows should appear together once the scoped batch is complete"
+    );
 }
 
 fn noop_waker() -> std::task::Waker {

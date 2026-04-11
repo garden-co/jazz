@@ -194,6 +194,7 @@ impl MaterializeNode {
         } else {
             tuple.provenance().clone()
         };
+        let mut materialized_batch_provenance = tuple.batch_provenance().clone();
 
         for (elem_idx, elem) in tuple.iter().enumerate() {
             // Only materialize if this element is in our list
@@ -224,6 +225,7 @@ impl MaterializeNode {
                                 materialized_provenance.insert(scoped_object);
                             }
                         }
+                        materialized_batch_provenance.insert(loaded.batch_id);
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
                             content: loaded.data,
@@ -249,9 +251,10 @@ impl MaterializeNode {
             }
         }
 
-        Some(Tuple::new_with_provenance(
+        Some(Tuple::new_with_shadow_state(
             materialized_elements,
             materialized_provenance,
+            materialized_batch_provenance,
         ))
     }
 
@@ -372,6 +375,7 @@ mod tests {
             version_id,
             RowProvenance::for_insert("jazz:test", 0),
             Default::default(),
+            crate::row_histories::BatchId::default(),
         )
     }
 
