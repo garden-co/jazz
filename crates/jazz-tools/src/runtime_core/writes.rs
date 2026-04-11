@@ -126,6 +126,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
+        let (result, _batch_id, receiver) =
+            self.insert_persisted_with_batch_id(table, values, write_context, tier)?;
+        Ok((result, receiver))
+    }
+
+    /// Insert a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn insert_persisted_with_batch_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
             .insert_with_write_context(&mut self.storage, table, values, write_context)
@@ -155,7 +169,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(((row_id, row_values), receiver))
+        Ok(((row_id, row_values), batch_id, receiver))
     }
 
     /// Update a row and return a receiver that resolves when the requested
@@ -167,6 +181,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+        let (_batch_id, receiver) =
+            self.update_persisted_with_batch_id(object_id, values, write_context, tier)?;
+        Ok(receiver)
+    }
+
+    /// Update a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn update_persisted_with_batch_id(
+        &mut self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
         let version_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
@@ -194,7 +222,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(receiver)
+        Ok((batch_id, receiver))
     }
 
     /// Delete a row and return a receiver that resolves when the requested
@@ -205,6 +233,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+        let (_batch_id, receiver) =
+            self.delete_persisted_with_batch_id(object_id, write_context, tier)?;
+        Ok(receiver)
+    }
+
+    /// Delete a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn delete_persisted_with_batch_id(
+        &mut self,
+        object_id: ObjectId,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
@@ -232,7 +273,25 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(receiver)
+        Ok((batch_id, receiver))
+    }
+
+    /// Load one replayable local batch record by logical batch id.
+    pub fn local_batch_record(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        self.storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))
+    }
+
+    /// Scan all replayable local batch records currently retained by this
+    /// runtime.
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
+        self.storage
+            .scan_local_batch_records()
+            .map_err(|err| RuntimeError::WriteError(format!("scan local batch records: {err}")))
     }
 
     /// Acknowledge a replayable rejected batch outcome and prune the local

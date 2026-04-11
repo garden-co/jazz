@@ -16,10 +16,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use futures::channel::oneshot;
+
+use crate::batch_fate::LocalBatchRecord;
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
+use crate::row_histories::BatchId;
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
@@ -315,6 +319,82 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         self.delete_with_write_context(object_id, owned.as_ref())
     }
 
+    /// Insert a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn insert_persisted_with_write_context(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.insert_persisted_with_batch_id(table, values, write_context, tier)?)
+    }
+
+    /// Insert a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn insert_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.insert_persisted_with_write_context(table, values, owned.as_ref(), tier)
+    }
+
+    /// Update a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn update_persisted_with_write_context(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        write_context: Option<&WriteContext>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.update_persisted_with_batch_id(object_id, values, write_context, tier)?)
+    }
+
+    /// Update a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        session: Option<&Session>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.update_persisted_with_write_context(object_id, values, owned.as_ref(), tier)
+    }
+
+    /// Delete a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn delete_persisted_with_write_context(
+        &self,
+        object_id: ObjectId,
+        write_context: Option<&WriteContext>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.delete_persisted_with_batch_id(object_id, write_context, tier)?)
+    }
+
+    /// Delete a row and return the logical batch id plus a receiver that
+    /// resolves when the requested persistence tier (or higher) acknowledges.
+    pub fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        session: Option<&Session>,
+        tier: crate::sync_manager::DurabilityTier,
+    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.delete_persisted_with_write_context(object_id, owned.as_ref(), tier)
+    }
+
     /// Flush pending operations to storage.
     ///
     /// Call this after CRUD operations if you need to ensure data is persisted
@@ -607,6 +687,28 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn with_storage<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.storage()))
+    }
+
+    /// Load one replayable local batch record by logical batch id.
+    pub fn local_batch_record(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.local_batch_record(batch_id)?)
+    }
+
+    /// Scan all replayable local batch records retained by this runtime.
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.local_batch_records()?)
+    }
+
+    /// Acknowledge a replayable rejected batch outcome and prune its local
+    /// replay record.
+    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.acknowledge_rejected_batch(batch_id)?)
     }
 
     /// Run a closure with read access to the SyncManager (for testing/inspection).
