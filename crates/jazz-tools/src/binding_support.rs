@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::{Value as JsonValue, json};
 
+use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -14,6 +16,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
 
@@ -138,7 +141,47 @@ pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>
 #[serde(untagged)]
 enum WriteContextWire {
     Session(Session),
-    Context(WriteContext),
+    Context(BindingWriteContext),
+}
+
+#[derive(Debug, Deserialize)]
+struct BindingWriteContext {
+    #[serde(default)]
+    session: Option<Session>,
+    #[serde(default)]
+    attribution: Option<String>,
+    #[serde(default, alias = "batchMode")]
+    batch_mode: Option<String>,
+    #[serde(default, alias = "batchId")]
+    batch_id: Option<String>,
+}
+
+impl BindingWriteContext {
+    fn into_write_context(self) -> Result<WriteContext, String> {
+        if self.session.is_none()
+            && self.attribution.is_none()
+            && self.batch_mode.is_none()
+            && self.batch_id.is_none()
+        {
+            return Err("write context did not contain any recognized fields".to_string());
+        }
+
+        let batch_mode = match self.batch_mode {
+            Some(mode) => Some(parse_batch_mode_input(&mode)?),
+            None => None,
+        };
+        let batch_id = match self.batch_id {
+            Some(batch_id) => Some(parse_batch_id_input(&batch_id)?),
+            None => None,
+        };
+
+        Ok(WriteContext {
+            session: self.session,
+            attribution: self.attribution,
+            batch_mode,
+            batch_id,
+        })
+    }
 }
 
 pub fn parse_write_context_input(
@@ -147,10 +190,18 @@ pub fn parse_write_context_input(
     match write_context_json {
         Some(json) => match serde_json::from_str::<WriteContextWire>(json) {
             Ok(WriteContextWire::Session(session)) => Ok(Some(WriteContext::from_session(session))),
-            Ok(WriteContextWire::Context(context)) => Ok(Some(context)),
+            Ok(WriteContextWire::Context(context)) => context.into_write_context().map(Some),
             Err(err) => Err(err.to_string()),
         },
         None => Ok(None),
+    }
+}
+
+fn parse_batch_mode_input(raw: &str) -> Result<BatchMode, String> {
+    match raw {
+        "direct" | "Direct" => Ok(BatchMode::Direct),
+        "transactional" | "Transactional" => Ok(BatchMode::Transactional),
+        other => Err(format!("Invalid batch mode: {other}")),
     }
 }
 
@@ -164,6 +215,93 @@ pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
             tier
         )),
     }
+}
+
+pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
+    match tier {
+        DurabilityTier::Worker => "worker",
+        DurabilityTier::EdgeServer => "edge",
+        DurabilityTier::GlobalServer => "global",
+    }
+}
+
+pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
+    uuid::Uuid::parse_str(batch_id)
+        .map(BatchId)
+        .map_err(|err| format!("Invalid BatchId: {err}"))
+}
+
+fn serialize_batch_mode(mode: BatchMode) -> &'static str {
+    match mode {
+        BatchMode::Direct => "direct",
+        BatchMode::Transactional => "transactional",
+    }
+}
+
+fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
+    json!({
+        "objectId": member.object_id.uuid().to_string(),
+        "branchName": member.branch_name.to_string(),
+        "batchId": member.batch_id.0.to_string(),
+    })
+}
+
+pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
+    match settlement {
+        BatchSettlement::Missing { batch_id } => json!({
+            "kind": "missing",
+            "batchId": batch_id.0.to_string(),
+        }),
+        BatchSettlement::Rejected {
+            batch_id,
+            code,
+            reason,
+        } => json!({
+            "kind": "rejected",
+            "batchId": batch_id.0.to_string(),
+            "code": code,
+            "reason": reason,
+        }),
+        BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "durable_direct",
+            "batchId": batch_id.0.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "accepted_transaction",
+            "batchId": batch_id.0.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
+    json!({
+        "batchId": record.batch_id.0.to_string(),
+        "mode": serialize_batch_mode(record.mode),
+        "requestedTier": serialize_durability_tier(record.requested_tier),
+        "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
+    })
+}
+
+pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
+    JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
@@ -306,15 +444,19 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, query_rows_can_be_schema_aligned, serialize_outbox_entry,
+        parse_read_durability_options, parse_write_context_input, query_rows_can_be_schema_aligned,
+        serialize_outbox_entry,
     };
+    use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use crate::row_histories::BatchId;
     use crate::sync_manager::{Destination, OutboxEntry, QueryId, ServerId, SyncPayload};
+    use serde_json::json;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -432,5 +574,30 @@ mod tests {
         assert!(!serialized.destination_id.is_empty());
         assert!(!serialized.payload_json.is_empty());
         assert!(!serialized.is_catalogue);
+    }
+
+    #[test]
+    fn write_context_parser_accepts_binding_batch_fields() {
+        let batch_id = BatchId::new();
+        let parsed = parse_write_context_input(Some(
+            &json!({
+                "session": {
+                    "user_id": "alice",
+                    "claims": {}
+                },
+                "batch_mode": "transactional",
+                "batch_id": batch_id.0.to_string(),
+            })
+            .to_string(),
+        ))
+        .expect("parse binding write context")
+        .expect("binding write context should exist");
+
+        assert_eq!(
+            parsed.session().map(|session| session.user_id.as_str()),
+            Some("alice")
+        );
+        assert_eq!(parsed.batch_mode(), BatchMode::Transactional);
+        assert_eq!(parsed.batch_id(), Some(batch_id));
     }
 }

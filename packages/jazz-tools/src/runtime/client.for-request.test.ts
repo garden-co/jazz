@@ -34,8 +34,9 @@ function mockRow(id = "todo-1"): Row {
 }
 
 function makeClient() {
-  const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
-    [];
+  const queryCalls: Array<
+    [string, string | undefined, string | undefined, string | undefined]
+  > = [];
   const createSubscriptionCalls: Array<
     [string, string | undefined, string | undefined, string | undefined]
   > = [];
@@ -82,7 +83,10 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -128,7 +132,10 @@ function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -162,7 +169,9 @@ describe("JazzClient.forRequest", () => {
       schema: {},
       serverUrl: "http://localhost:1625",
     });
-    expect(() => client.asBackend()).toThrow("backendSecret required for backend mode");
+    expect(() => client.asBackend()).toThrow(
+      "backendSecret required for backend mode",
+    );
   });
 
   it("throws when backend mode is requested without server URL", () => {
@@ -171,7 +180,9 @@ describe("JazzClient.forRequest", () => {
       schema: {},
       backendSecret: "test-backend-secret",
     });
-    expect(() => client.asBackend()).toThrow("serverUrl required for backend mode");
+    expect(() => client.asBackend()).toThrow(
+      "serverUrl required for backend mode",
+    );
   });
 
   it("extracts sub + claims from a bearer JWT", async () => {
@@ -183,7 +194,9 @@ describe("JazzClient.forRequest", () => {
 
     const scopedClient = client.forRequest({
       header(name: string) {
-        return name.toLowerCase() === "authorization" ? `Bearer ${token}` : undefined;
+        return name.toLowerCase() === "authorization"
+          ? `Bearer ${token}`
+          : undefined;
       },
     });
 
@@ -290,7 +303,8 @@ describe("JazzClient.forRequest", () => {
   });
 
   it("accepts query builders for subscribe calls", async () => {
-    const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
+    const { client, createSubscriptionCalls, executeSubscriptionCalls } =
+      makeClient();
 
     const builder = {
       _build() {
@@ -325,7 +339,10 @@ describe("JazzClient.forRequest", () => {
     client.subscribe(builder, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<string, unknown>;
+    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<
+      string,
+      unknown
+    >;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
@@ -419,13 +436,37 @@ describe("JazzClient.forRequest", () => {
   it("passes query propagation options to runtime query", async () => {
     const { client, queryCalls } = makeClient();
     await client.query('{"table":"todos"}', { propagation: "local-only" });
-    expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({ propagation: "local-only" }),
+    );
+  });
+
+  it("passes strict transaction visibility options to runtime query", async () => {
+    const { client, queryCalls } = makeClient();
+    await client.query('{"table":"todos"}', { strictTransactions: true });
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({ strict_transactions: true }),
+    );
   });
 
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
-    client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
-    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagation: "local-only",
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(
+      JSON.stringify({ propagation: "local-only" }),
+    );
+  });
+
+  it("passes strict transaction visibility options to runtime createSubscription", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      strictTransactions: true,
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(
+      JSON.stringify({ strict_transactions: true }),
+    );
   });
 
   // =========================================================================
@@ -433,7 +474,8 @@ describe("JazzClient.forRequest", () => {
   // =========================================================================
 
   it("createSubscription is called synchronously, executeSubscription is deferred", async () => {
-    const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
+    const { client, createSubscriptionCalls, executeSubscriptionCalls } =
+      makeClient();
     client.subscribe('{"table":"todos"}', () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
@@ -606,18 +648,32 @@ describe("JazzClient schema order", () => {
       localAuthToken: "device-token",
     });
 
-    await client.query(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }));
-    client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), () => {});
+    await client.query(
+      JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }),
+    );
+    client.subscribe(
+      JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }),
+      () => {},
+    );
 
     const expectedSession = JSON.stringify({
-      user_id: await deriveLocalPrincipalId("test-app", "anonymous", "device-token"),
+      user_id: await deriveLocalPrincipalId(
+        "test-app",
+        "anonymous",
+        "device-token",
+      ),
       claims: {
         auth_mode: "local",
         local_mode: "anonymous",
       },
     });
 
-    expect(query).toHaveBeenCalledWith(expect.any(String), expectedSession, "worker", undefined);
+    expect(query).toHaveBeenCalledWith(
+      expect.any(String),
+      expectedSession,
+      "worker",
+      undefined,
+    );
     expect(createSubscription).toHaveBeenCalledWith(
       expect.any(String),
       expectedSession,
@@ -1176,7 +1232,10 @@ describe("JazzClient schema order", () => {
     });
     const callback = vi.fn();
 
-    client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), callback);
+    client.subscribe(
+      JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }),
+      callback,
+    );
     await flushMicrotasks();
     onUpdate?.([
       {

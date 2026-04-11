@@ -6,8 +6,16 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
-import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type {
+  InsertValues,
+  Value,
+  RowDelta,
+  WasmSchema,
+} from "../drivers/types.js";
+import {
+  normalizeRuntimeSchema,
+  serializeRuntimeSchema,
+} from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
   generateClientId,
@@ -27,7 +35,10 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
-import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import {
+  isHiddenIncludeColumnName,
+  resolveSelectedColumns,
+} from "./select-projection.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
@@ -52,8 +63,16 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: InsertValues): Row;
-  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
+  insertWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): Row;
+  insertDurable(
+    table: string,
+    values: InsertValues,
+    tier: string,
+  ): Promise<Row>;
   insertDurableWithSession?(
     table: string,
     values: InsertValues,
@@ -61,7 +80,11 @@ export interface Runtime {
     tier: string,
   ): Promise<Row>;
   update(object_id: string, values: any): void;
-  updateWithSession?(object_id: string, values: any, write_context_json?: string | null): void;
+  updateWithSession?(
+    object_id: string,
+    values: any,
+    write_context_json?: string | null,
+  ): void;
   updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
@@ -70,13 +93,47 @@ export interface Runtime {
     tier: string,
   ): Promise<void>;
   delete(object_id: string): void;
-  deleteWithSession?(object_id: string, write_context_json?: string | null): void;
+  deleteWithSession?(
+    object_id: string,
+    write_context_json?: string | null,
+  ): void;
   deleteDurable(object_id: string, tier: string): Promise<void>;
   deleteDurableWithSession?(
     object_id: string,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
+  insertPersisted?(
+    table: string,
+    values: InsertValues,
+    tier: string,
+  ): PersistedInsertResult;
+  insertPersistedWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedInsertResult;
+  updatePersisted?(
+    object_id: string,
+    values: any,
+    tier: string,
+  ): PersistedMutationResult;
+  updatePersistedWithSession?(
+    object_id: string,
+    values: any,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedMutationResult;
+  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
+  deletePersistedWithSession?(
+    object_id: string,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedMutationResult;
+  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
+  loadLocalBatchRecords?(): LocalBatchRecord[];
+  acknowledgeRejectedBatch?(batch_id: string): boolean;
   query(
     query_json: string,
     session_json?: string | null,
@@ -98,16 +155,25 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
+  onSyncMessageReceived(
+    payload: Uint8Array | string,
+    seq?: number | null,
+  ): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
+  addServer(
+    serverCatalogueStateHash?: string | null,
+    nextSyncSeq?: number | null,
+  ): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
+  onSyncMessageReceivedFromClient?(
+    client_id: string,
+    payload: Uint8Array | string,
+  ): void;
 }
 
 /**
@@ -125,6 +191,7 @@ export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+  strictTransactions?: boolean;
   visibility?: QueryVisibility;
 }
 
@@ -132,11 +199,51 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
+  strictTransactions: boolean;
   visibility: QueryVisibility;
 }
 
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
+}
+
+export type BatchMode = "direct" | "transactional";
+
+export interface VisibleBatchMember {
+  objectId: string;
+  branchName: string;
+  batchId: string;
+}
+
+export type BatchSettlement =
+  | {
+      kind: "missing";
+      batchId: string;
+    }
+  | {
+      kind: "rejected";
+      batchId: string;
+      code: string;
+      reason: string;
+    }
+  | {
+      kind: "durable_direct";
+      batchId: string;
+      confirmedTier: DurabilityTier;
+      visibleMembers: VisibleBatchMember[];
+    }
+  | {
+      kind: "accepted_transaction";
+      batchId: string;
+      confirmedTier: DurabilityTier;
+      visibleMembers: VisibleBatchMember[];
+    };
+
+export interface LocalBatchRecord {
+  batchId: string;
+  mode: BatchMode;
+  requestedTier: DurabilityTier;
+  latestSettlement: BatchSettlement | null;
 }
 
 /**
@@ -150,6 +257,17 @@ export interface Row {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
+  batch_mode?: BatchMode;
+  batch_id?: string;
+}
+
+interface PersistedInsertResult {
+  batchId: string;
+  row: Row;
+}
+
+interface PersistedMutationResult {
+  batchId: string;
 }
 
 /**
@@ -208,6 +326,7 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
+    strictTransactions: options?.strictTransactions ?? false,
     visibility: options?.visibility ?? "public",
   };
 }
@@ -268,7 +387,9 @@ function resolveRelationIrOutputTable(node: unknown): string | null {
   }
 
   if ("Limit" in relation) {
-    return resolveRelationIrOutputTable((relation.Limit as { input?: unknown } | undefined)?.input);
+    return resolveRelationIrOutputTable(
+      (relation.Limit as { input?: unknown } | undefined)?.input,
+    );
   }
 
   if ("Offset" in relation) {
@@ -312,7 +433,9 @@ function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
     plans.push({
       table: plan.table,
       selectColumns: Array.isArray(plan.select_columns)
-        ? plan.select_columns.filter((column): column is string => typeof column === "string")
+        ? plan.select_columns.filter(
+            (column): column is string => typeof column === "string",
+          )
         : [],
       nested: parseArraySubqueryPlans(plan.nested_arrays),
     });
@@ -340,7 +463,9 @@ function resolveQueryAlignmentPlan(queryJson: string): {
           : resolveRelationIrOutputTable(parsed.relation_ir),
       arraySubqueries: parseArraySubqueryPlans(parsed.array_subqueries),
       selectColumns: Array.isArray(parsed.select_columns)
-        ? parsed.select_columns.filter((column): column is string => typeof column === "string")
+        ? parsed.select_columns.filter(
+            (column): column is string => typeof column === "string",
+          )
         : [],
     };
   } catch {
@@ -378,20 +503,77 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
-  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
+function encodeQueryExecutionOptions(
+  options: QueryExecutionOptions,
+): string | undefined {
+  const payload: {
+    propagation?: QueryPropagation;
+    local_updates?: LocalUpdatesMode;
+    strict_transactions?: boolean;
+  } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
   }
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
+  if (options.strictTransactions) {
+    payload.strict_transactions = true;
+  }
 
-  if (!payload.propagation && !payload.local_updates) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.strict_transactions
+  ) {
     return undefined;
   }
 
   return JSON.stringify(payload);
+}
+
+function generateBatchId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return cryptoObj.randomUUID();
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replaceAll(/[xy]/g, (char) => {
+    const randomNibble = Math.floor(Math.random() * 16);
+    const value = char === "x" ? randomNibble : (randomNibble & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function durabilityTierRank(tier: DurabilityTier): number {
+  switch (tier) {
+    case "worker":
+      return 0;
+    case "edge":
+      return 1;
+    case "global":
+      return 2;
+  }
+}
+
+function settlementSatisfiesTier(
+  settlement: BatchSettlement | null | undefined,
+  tier: DurabilityTier,
+): boolean {
+  if (!settlement) {
+    return false;
+  }
+
+  if (
+    settlement.kind !== "durable_direct" &&
+    settlement.kind !== "accepted_transaction"
+  ) {
+    return false;
+  }
+
+  return (
+    durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier)
+  );
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -419,7 +601,9 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   return raw;
 }
 
-function normalizeSubscriptionCallbackArgs(args: unknown[]): RowDelta | string | undefined {
+function normalizeSubscriptionCallbackArgs(
+  args: unknown[],
+): RowDelta | string | undefined {
   if (args.length === 1) {
     return args[0] as RowDelta | string;
   }
@@ -488,6 +672,137 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims };
 }
 
+type TransactionWriteContext = {
+  batchMode: BatchMode;
+  batchId: string;
+};
+
+export class PersistedWrite<T> {
+  constructor(
+    private readonly client: JazzClient,
+    private readonly requestedTier: DurabilityTier,
+    private readonly persistedBatchId: string,
+    private readonly persistedValue: T,
+  ) {}
+
+  batchId(): string {
+    return this.persistedBatchId;
+  }
+
+  value(): T {
+    return this.persistedValue;
+  }
+
+  async wait(): Promise<T> {
+    for (;;) {
+      const record = this.client.localBatchRecord(this.persistedBatchId);
+      if (
+        settlementSatisfiesTier(record?.latestSettlement, this.requestedTier)
+      ) {
+        return this.persistedValue;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+export class Transaction {
+  constructor(
+    private readonly client: JazzClient,
+    private readonly batchContext: TransactionWriteContext,
+    private readonly session?: Session,
+    private readonly attribution?: string,
+  ) {}
+
+  batchId(): string {
+    return this.batchContext.batchId;
+  }
+
+  create(table: string, values: InsertValues): Row {
+    return this.client.createInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.client.createPersistedInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.client.updateInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.updatePersistedInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  delete(objectId: string): void {
+    this.client.deleteInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+  }
+
+  deletePersisted(
+    objectId: string,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.deletePersistedInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
+    return this.client.localBatchRecord(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    return this.client.localBatchRecords();
+  }
+
+  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
+    return this.client.acknowledgeRejectedBatch(batchId);
+  }
+}
+
 /**
  * Session-scoped client for backend operations.
  *
@@ -530,10 +845,27 @@ export class SessionClient {
     return result.object_id;
   }
 
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.client.createPersistedInternal(
+      table,
+      values,
+      this.session,
+      undefined,
+      options,
+    );
+  }
+
   /**
    * Update a row as this session's user.
    */
-  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
+  async update(
+    objectId: string,
+    updates: Record<string, Value>,
+  ): Promise<void> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -554,6 +886,20 @@ export class SessionClient {
     if (!response.ok) {
       throw new Error(`Update failed: ${response.statusText}`);
     }
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.updatePersistedInternal(
+      objectId,
+      updates,
+      this.session,
+      undefined,
+      options,
+    );
   }
 
   /**
@@ -579,10 +925,25 @@ export class SessionClient {
     }
   }
 
+  deletePersisted(
+    objectId: string,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.deletePersistedInternal(
+      objectId,
+      this.session,
+      undefined,
+      options,
+    );
+  }
+
   /**
    * Query as this session's user.
    */
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+  async query(
+    query: string | QueryInput,
+    options?: QueryExecutionOptions,
+  ): Promise<Row[]> {
     return this.client.queryInternal(query, this.session, options);
   }
 
@@ -594,7 +955,35 @@ export class SessionClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
   ): number {
-    return this.client.subscribeInternal(query, callback, this.session, options);
+    return this.client.subscribeInternal(
+      query,
+      callback,
+      this.session,
+      options,
+    );
+  }
+
+  beginTransaction(): Transaction {
+    return new Transaction(
+      this.client,
+      {
+        batchMode: "transactional",
+        batchId: generateBatchId(),
+      },
+      this.session,
+    );
+  }
+
+  localBatchRecord(batchId: string): LocalBatchRecord | null {
+    return this.client.localBatchRecord(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    return this.client.localBatchRecords();
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean {
+    return this.client.acknowledgeRejectedBatch(batchId);
   }
 }
 
@@ -655,7 +1044,9 @@ export class JazzClient {
       },
       onAuthFailure: (reason) => {
         this.remoteSyncConnected = false;
-        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
+        this.rejectPendingRemoteSyncWaiters(
+          new Error(`Sync auth failed: ${reason}`),
+        );
         this.onAuthFailure?.(reason);
       },
     });
@@ -695,7 +1086,10 @@ export class JazzClient {
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+      client.setupSync(
+        resolvedContext.serverUrl,
+        resolvedContext.serverPathPrefix,
+      );
     }
 
     return client;
@@ -738,7 +1132,10 @@ export class JazzClient {
 
     // Set up sync if server URL provided
     if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+      client.setupSync(
+        resolvedContext.serverUrl,
+        resolvedContext.serverPathPrefix,
+      );
     }
 
     return client;
@@ -818,6 +1215,28 @@ export class JazzClient {
     return this.forSession(sessionFromRequest(request));
   }
 
+  beginTransaction(): Transaction {
+    return new Transaction(this, {
+      batchMode: "transactional",
+      batchId: generateBatchId(),
+    });
+  }
+
+  localBatchRecord(batchId: string): LocalBatchRecord | null {
+    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    const records = this.requireBatchRecordMethod("loadLocalBatchRecords")();
+    return [...records].sort((left, right) =>
+      left.batchId.localeCompare(right.batchId),
+    );
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean {
+    return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
+  }
+
   /**
    * Enable backend-scoped sync auth for this client.
    *
@@ -876,11 +1295,15 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private encodeWriteContext(session?: Session, attribution?: string): string | undefined {
-    if (!session && attribution === undefined) {
+  private encodeWriteContext(
+    session?: Session,
+    attribution?: string,
+    batchContext?: TransactionWriteContext,
+  ): string | undefined {
+    if (!session && attribution === undefined && !batchContext) {
       return undefined;
     }
-    if (attribution === undefined && session) {
+    if (attribution === undefined && session && !batchContext) {
       return JSON.stringify(session);
     }
 
@@ -891,10 +1314,17 @@ export class JazzClient {
     if (attribution !== undefined) {
       payload.attribution = attribution;
     }
+    if (batchContext) {
+      payload.batch_mode = batchContext.batchMode;
+      payload.batch_id = batchContext.batchId;
+    }
     return JSON.stringify(payload);
   }
 
-  private resolveWriteSession(session?: Session, attribution?: string): Session | undefined {
+  private resolveWriteSession(
+    session?: Session,
+    attribution?: string,
+  ): Session | undefined {
     if (session) {
       return session;
     }
@@ -922,6 +1352,39 @@ export class JazzClient {
     return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
   }
 
+  private requirePersistedWriteMethod<
+    T extends keyof Pick<
+      Runtime,
+      | "insertPersisted"
+      | "insertPersistedWithSession"
+      | "updatePersisted"
+      | "updatePersistedWithSession"
+      | "deletePersisted"
+      | "deletePersistedWithSession"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
+  private requireBatchRecordMethod<
+    T extends keyof Pick<
+      Runtime,
+      | "loadLocalBatchRecord"
+      | "loadLocalBatchRecords"
+      | "acknowledgeRejectedBatch"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
   private alignRowValuesToDeclaredSchema(
     table: string,
     values: Value[],
@@ -938,9 +1401,12 @@ export class JazzClient {
 
     const projectedVisibleColumnCount =
       selectColumns.length > 0
-        ? resolveSelectedColumns(table, this.context.schema, selectColumns).filter(
-            (columnName) => !isHiddenIncludeColumnName(columnName),
-          ).length
+        ? resolveSelectedColumns(
+            table,
+            this.context.schema,
+            selectColumns,
+          ).filter((columnName) => !isHiddenIncludeColumnName(columnName))
+            .length
         : 0;
 
     if (projectedVisibleColumnCount > 0) {
@@ -959,7 +1425,11 @@ export class JazzClient {
         if (!plan) {
           return value;
         }
-        return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+        return this.alignIncludedValueToDeclaredSchema(
+          value,
+          plan,
+          runtimeSchema,
+        );
       });
 
       return projectedValues.concat(alignedTrailingValues);
@@ -1001,7 +1471,11 @@ export class JazzClient {
       if (!plan) {
         return value;
       }
-      return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+      return this.alignIncludedValueToDeclaredSchema(
+        value,
+        plan,
+        runtimeSchema,
+      );
     });
 
     return reorderedValues.concat(alignedTrailingValues);
@@ -1045,7 +1519,8 @@ export class JazzClient {
     rows: Row[],
     runtimeSchema = this.getSchema(),
   ): Row[] {
-    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
+    const { outputTable, arraySubqueries, selectColumns } =
+      resolveQueryAlignmentPlan(queryJson);
     if (!outputTable) {
       return rows;
     }
@@ -1067,7 +1542,8 @@ export class JazzClient {
     delta: RowDelta,
     runtimeSchema = this.getSchema(),
   ): RowDelta {
-    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
+    const { outputTable, arraySubqueries, selectColumns } =
+      resolveQueryAlignmentPlan(queryJson);
     if (!outputTable || !Array.isArray(delta)) {
       return delta;
     }
@@ -1109,19 +1585,28 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
+    batchContext?: TransactionWriteContext,
   ): Row {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined
+      effectiveSession || attribution !== undefined || batchContext
         ? this.requireSessionWriteMethod("insertWithSession")(
             table,
             values,
-            this.encodeWriteContext(effectiveSession, attribution),
+            this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              batchContext,
+            ),
           )
         : this.runtime.insert(table, values);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.getSchema(),
+      ),
     };
   }
 
@@ -1133,7 +1618,13 @@ export class JazzClient {
     values: InsertValues,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
-    return this.createDurableInternal(table, values, undefined, undefined, options);
+    return this.createDurableInternal(
+      table,
+      values,
+      undefined,
+      undefined,
+      options,
+    );
   }
 
   /**
@@ -1160,8 +1651,63 @@ export class JazzClient {
         : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.getSchema(),
+      ),
     };
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.createPersistedInternal(
+      table,
+      values,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  createPersistedInternal(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: TransactionWriteContext,
+  ): PersistedWrite<Row> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext
+        ? this.requirePersistedWriteMethod("insertPersistedWithSession")(
+            table,
+            values,
+            this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              batchContext,
+            ),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("insertPersisted")(
+            table,
+            values,
+            tier,
+          );
+    return new PersistedWrite(this, tier, result.batchId, {
+      ...result.row,
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        result.row.values as Value[],
+        this.getSchema(),
+      ),
+    });
   }
 
   /**
@@ -1171,8 +1717,15 @@ export class JazzClient {
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.queryInternal(query, this.resolvedSession ?? undefined, options);
+  async query(
+    query: string | QueryInput,
+    options?: QueryExecutionOptions,
+  ): Promise<Row[]> {
+    return this.queryInternal(
+      query,
+      this.resolvedSession ?? undefined,
+      options,
+    );
   }
 
   /**
@@ -1196,7 +1749,11 @@ export class JazzClient {
       normalizedOptions.tier,
       optionsJson,
     );
-    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
+    return this.alignQueryRowsToDeclaredSchema(
+      queryJson,
+      results as Row[],
+      runtimeSchema,
+    );
   }
 
   /**
@@ -1215,13 +1772,14 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
+    batchContext?: TransactionWriteContext,
   ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || batchContext) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext),
       );
       return;
     }
@@ -1236,7 +1794,13 @@ export class JazzClient {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
-    await this.updateDurableInternal(objectId, updates, undefined, undefined, options);
+    await this.updateDurableInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      options,
+    );
   }
 
   /**
@@ -1264,6 +1828,50 @@ export class JazzClient {
     await this.runtime.updateDurable(objectId, updates, tier);
   }
 
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.updatePersistedInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  updatePersistedInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: TransactionWriteContext,
+  ): PersistedWrite<void> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext
+        ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
+            objectId,
+            updates,
+            this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              batchContext,
+            ),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("updatePersisted")(
+            objectId,
+            updates,
+            tier,
+          );
+    return new PersistedWrite(this, tier, result.batchId, undefined);
+  }
+
   /**
    * Delete a row by ID without waiting for durability.
    */
@@ -1275,12 +1883,17 @@ export class JazzClient {
    * Delete a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
-  deleteInternal(objectId: string, session?: Session, attribution?: string): void {
+  deleteInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    batchContext?: TransactionWriteContext,
+  ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || batchContext) {
       this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext),
       );
       return;
     }
@@ -1290,7 +1903,10 @@ export class JazzClient {
   /**
    * Delete a row by ID and wait for durability at the requested tier.
    */
-  async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+  async deleteDurable(
+    objectId: string,
+    options?: WriteDurabilityOptions,
+  ): Promise<void> {
     await this.deleteDurableInternal(objectId, undefined, undefined, options);
   }
 
@@ -1317,6 +1933,42 @@ export class JazzClient {
     await this.runtime.deleteDurable(objectId, tier);
   }
 
+  deletePersisted(
+    objectId: string,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.deletePersistedInternal(
+      objectId,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  deletePersistedInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: TransactionWriteContext,
+  ): PersistedWrite<void> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext
+        ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
+            objectId,
+            this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              batchContext,
+            ),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
+    return new PersistedWrite(this, tier, result.batchId, undefined);
+  }
+
   /**
    * Subscribe to a query and receive updates when results change.
    *
@@ -1330,7 +1982,12 @@ export class JazzClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
   ): number {
-    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, options);
+    return this.subscribeInternal(
+      query,
+      callback,
+      this.resolvedSession ?? undefined,
+      options,
+    );
   }
 
   /**
@@ -1370,8 +2027,16 @@ export class JazzClient {
         }
 
         const delta: RowDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+          typeof deltaJsonOrObject === "string"
+            ? JSON.parse(deltaJsonOrObject)
+            : deltaJsonOrObject;
+        callback(
+          this.alignSubscriptionDeltaToDeclaredSchema(
+            queryJson,
+            delta,
+            runtimeSchema,
+          ),
+        );
       });
     });
 
@@ -1418,7 +2083,11 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("No server connection");
     }
-    return buildEndpointUrl(this.context.serverUrl, path, this.context.serverPathPrefix);
+    return buildEndpointUrl(
+      this.context.serverUrl,
+      path,
+      this.context.serverPathPrefix,
+    );
   }
 
   /**
@@ -1491,7 +2160,8 @@ export class JazzClient {
 
     const jwtToken = options.jwtToken ?? this.context.jwtToken;
     const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
-    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
+    const localAuthToken =
+      options.localAuthToken ?? this.context.localAuthToken;
 
     if (!jwtToken) {
       throw new Error("linkExternalIdentity requires jwtToken");
@@ -1590,7 +2260,9 @@ export class JazzClient {
     }
   }
 
-  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
+  private async waitForRemoteReadAvailability(
+    tier: DurabilityTier,
+  ): Promise<void> {
     if (
       !this.syncStarted ||
       !this.context.serverUrl ||
@@ -1620,7 +2292,10 @@ export class JazzClient {
     return tracked;
   }
 
-  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
+  private sendSyncMessage(
+    payloadJson: string,
+    isCatalogue: boolean,
+  ): Promise<void> {
     if (this.shuttingDown) {
       return Promise.resolve();
     }
@@ -1680,7 +2355,9 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+export async function loadWasmModule(
+  runtime?: RuntimeSourcesConfig,
+): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);

@@ -22,10 +22,11 @@ use std::sync::{Arc, Mutex, Weak};
 
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
-    generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_outbox_entry, subscription_delta_to_json,
+    generate_id as generate_binding_id, parse_batch_id_input,
+    parse_durability_tier as parse_binding_tier, parse_query_input,
+    parse_read_durability_options as parse_binding_read_durability_options, parse_session_input,
+    parse_write_context_input, query_rows_can_be_schema_aligned, serialize_local_batch_record,
+    serialize_local_batch_records, serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
@@ -845,6 +846,87 @@ impl NapiRuntime {
         }))
     }
 
+    #[napi(js_name = "insertPersisted", ts_return_type = "any")]
+    pub fn insert_persisted(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+
+        let ((object_id, row_values), batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let ((object_id, row_values), batch_id, receiver) = core
+                .insert_persisted_with_batch_id(&table, js_values, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            ((object_id, row_values), batch_id, receiver)
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+            "row": {
+                "id": object_id.uuid().to_string(),
+                "values": row_values,
+            }
+        }))
+    }
+
+    #[napi(js_name = "insertPersistedWithSession", ts_return_type = "any")]
+    pub fn insert_persisted_with_session(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let ((object_id, row_values), batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let ((object_id, row_values), batch_id, receiver) = core
+                .insert_persisted_with_batch_id(
+                    &table,
+                    js_values,
+                    write_context.as_ref(),
+                    persistence_tier,
+                )
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            ((object_id, row_values), batch_id, receiver)
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+            "row": {
+                "id": object_id.uuid().to_string(),
+                "values": row_values,
+            }
+        }))
+    }
+
     #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
     pub async fn update_durable(
         &self,
@@ -907,6 +989,73 @@ impl NapiRuntime {
         Ok(())
     }
 
+    #[napi(js_name = "updatePersisted", ts_return_type = "any")]
+    pub fn update_persisted(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let updates = convert_updates(partial_values);
+
+        let (batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.update_persisted_with_batch_id(oid, updates, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+        }))
+    }
+
+    #[napi(js_name = "updatePersistedWithSession", ts_return_type = "any")]
+    pub fn update_persisted_with_session(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let write_context = parse_write_context_json(write_context_json)?;
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let updates = convert_updates(partial_values);
+
+        let (batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.update_persisted_with_batch_id(
+                oid,
+                updates,
+                write_context.as_ref(),
+                persistence_tier,
+            )
+            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+        }))
+    }
+
     #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
     pub async fn delete_durable(&self, object_id: String, tier: String) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
@@ -953,6 +1102,100 @@ impl NapiRuntime {
 
         let _ = receiver.await;
         Ok(())
+    }
+
+    #[napi(js_name = "deletePersisted", ts_return_type = "any")]
+    pub fn delete_persisted(
+        &self,
+        object_id: String,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+
+        let (batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.delete_persisted_with_batch_id(oid, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+        }))
+    }
+
+    #[napi(js_name = "deletePersistedWithSession", ts_return_type = "any")]
+    pub fn delete_persisted_with_session(
+        &self,
+        object_id: String,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let (batch_id, _receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.delete_persisted_with_batch_id(oid, write_context.as_ref(), persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
+        };
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.0.to_string(),
+        }))
+    }
+
+    #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]
+    pub fn load_local_batch_record(
+        &self,
+        batch_id: String,
+    ) -> napi::Result<Option<serde_json::Value>> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let record = core.local_batch_record(batch_id).map_err(|e| {
+            napi::Error::from_reason(format!("Load local batch record failed: {e}"))
+        })?;
+        Ok(record.as_ref().map(serialize_local_batch_record))
+    }
+
+    #[napi(js_name = "loadLocalBatchRecords", ts_return_type = "any[]")]
+    pub fn load_local_batch_records(&self) -> napi::Result<serde_json::Value> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let records = core.local_batch_records().map_err(|e| {
+            napi::Error::from_reason(format!("Load local batch records failed: {e}"))
+        })?;
+        Ok(serialize_local_batch_records(&records))
+    }
+
+    #[napi(js_name = "acknowledgeRejectedBatch")]
+    pub fn acknowledge_rejected_batch(&self, batch_id: String) -> napi::Result<bool> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.acknowledge_rejected_batch(batch_id).map_err(|e| {
+            napi::Error::from_reason(format!("Acknowledge rejected batch failed: {e}"))
+        })
     }
 
     // =========================================================================
