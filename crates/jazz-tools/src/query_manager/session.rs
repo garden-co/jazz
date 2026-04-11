@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 
 use crate::batch_fate::BatchMode;
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::row_histories::BatchId;
 
 /// Session context for policy evaluation.
 ///
@@ -132,6 +133,8 @@ pub struct WriteContext {
     pub attribution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_mode: Option<BatchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<BatchId>,
 }
 
 impl WriteContext {
@@ -140,11 +143,17 @@ impl WriteContext {
             session: Some(session),
             attribution: None,
             batch_mode: None,
+            batch_id: None,
         }
     }
 
     pub fn with_batch_mode(mut self, batch_mode: BatchMode) -> Self {
         self.batch_mode = Some(batch_mode);
+        self
+    }
+
+    pub fn with_batch_id(mut self, batch_id: BatchId) -> Self {
+        self.batch_id = Some(batch_id);
         self
     }
 
@@ -154,6 +163,10 @@ impl WriteContext {
 
     pub fn batch_mode(&self) -> BatchMode {
         self.batch_mode.unwrap_or(BatchMode::Direct)
+    }
+
+    pub fn batch_id(&self) -> Option<BatchId> {
+        self.batch_id
     }
 
     pub fn author_principal(&self) -> &str {
@@ -237,6 +250,7 @@ mod tests {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
             batch_mode: None,
+            batch_id: None,
         };
 
         assert_eq!(context.author_principal(), "attributed-user");
@@ -260,5 +274,14 @@ mod tests {
             .with_batch_mode(BatchMode::Transactional);
 
         assert_eq!(context.batch_mode(), BatchMode::Transactional);
+    }
+
+    #[test]
+    fn test_write_context_batch_id_override() {
+        let batch_id = BatchId::new();
+        let context =
+            WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
+
+        assert_eq!(context.batch_id(), Some(batch_id));
     }
 }

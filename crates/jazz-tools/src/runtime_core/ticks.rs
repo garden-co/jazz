@@ -1,4 +1,6 @@
 use super::*;
+use crate::row_histories::{RowState, patch_row_version_state};
+use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     fn batch_id_for_row_version_ack(
@@ -52,6 +54,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
+        if matches!(
+            settlement,
+            crate::batch_fate::BatchSettlement::Rejected { .. }
+        ) {
+            self.mark_local_batch_rows_rejected(batch_id);
+        } else if matches!(
+            settlement,
+            crate::batch_fate::BatchSettlement::Missing { .. }
+        ) {
+            self.retransmit_local_batch_to_servers(batch_id);
+        }
+
         if let Some(acked_tier) = settlement.confirmed_tier()
             && let Some(watchers) = self.ack_watchers.remove(&batch_id)
         {
@@ -72,6 +86,64 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             if !remaining.is_empty() {
                 self.ack_watchers.insert(batch_id, remaining);
             }
+        }
+    }
+
+    fn mark_local_batch_rows_rejected(&mut self, batch_id: crate::row_histories::BatchId) {
+        let Ok(row_locators) = self.storage.scan_row_locators() else {
+            return;
+        };
+
+        for (row_id, row_locator) in row_locators {
+            let Ok(history_rows) = self
+                .storage
+                .scan_history_row_versions(row_locator.table.as_str(), row_id)
+            else {
+                continue;
+            };
+
+            for row in history_rows {
+                if row.batch_id != batch_id || !matches!(row.state, RowState::StagingPending) {
+                    continue;
+                }
+
+                let branch_name = crate::object::BranchName::new(&row.branch);
+                let _ = patch_row_version_state(
+                    &mut self.storage,
+                    row_id,
+                    &branch_name,
+                    row.version_id(),
+                    Some(RowState::Rejected),
+                    None,
+                );
+            }
+        }
+    }
+
+    fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
+        let Ok(row_locators) = self.storage.scan_row_locators() else {
+            return;
+        };
+
+        let mut rows_to_retransmit = Vec::new();
+        for (row_id, row_locator) in row_locators {
+            let Ok(history_rows) = self
+                .storage
+                .scan_history_row_versions(row_locator.table.as_str(), row_id)
+            else {
+                continue;
+            };
+
+            for row in history_rows {
+                if row.batch_id == batch_id {
+                    rows_to_retransmit.push((row_id, metadata_from_row_locator(&row_locator), row));
+                }
+            }
+        }
+
+        let sync_manager = self.schema_manager.query_manager_mut().sync_manager_mut();
+        for (row_id, metadata, row) in rows_to_retransmit {
+            sync_manager.force_row_version_to_servers(row_id, metadata, row);
         }
     }
 

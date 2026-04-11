@@ -5,7 +5,7 @@ use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{
-    QueryRowVersion, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
+    BatchId, QueryRowVersion, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
     apply_row_version,
 };
 use crate::schema_manager::resolve_current_table_name;
@@ -47,6 +47,7 @@ struct RowVersionAuthoring<'a> {
     provenance: &'a RowProvenance,
     delete_kind: Option<DeleteKind>,
     row_state: RowState,
+    batch_id: Option<BatchId>,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -113,6 +114,7 @@ impl QueryManager {
             provenance,
             delete_kind,
             row_state: Self::resolve_write_row_state(write_context),
+            batch_id: write_context.and_then(WriteContext::batch_id),
         }
     }
 
@@ -124,18 +126,34 @@ impl QueryManager {
         data: Vec<u8>,
         authoring: RowVersionAuthoring<'_>,
     ) -> StoredRowVersion {
-        StoredRowVersion::new(
-            row_id,
-            branch_name,
-            parents,
-            data,
-            authoring.provenance.clone(),
-            Self::row_commit_metadata(authoring.provenance, authoring.delete_kind)
-                .into_iter()
-                .collect(),
-            authoring.row_state,
-            self.sync_manager.max_local_durability_tier(),
-        )
+        let metadata = Self::row_commit_metadata(authoring.provenance, authoring.delete_kind)
+            .into_iter()
+            .collect();
+
+        if let Some(batch_id) = authoring.batch_id {
+            StoredRowVersion::new_with_batch_id(
+                batch_id,
+                row_id,
+                branch_name,
+                parents,
+                data,
+                authoring.provenance.clone(),
+                metadata,
+                authoring.row_state,
+                self.sync_manager.max_local_durability_tier(),
+            )
+        } else {
+            StoredRowVersion::new(
+                row_id,
+                branch_name,
+                parents,
+                data,
+                authoring.provenance.clone(),
+                metadata,
+                authoring.row_state,
+                self.sync_manager.max_local_durability_tier(),
+            )
+        }
     }
 
     #[cfg(test)]

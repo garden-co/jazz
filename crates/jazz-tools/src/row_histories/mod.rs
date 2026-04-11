@@ -1382,9 +1382,12 @@ pub fn patch_row_version_state<H: Storage>(
     };
 
     let patched_entry = match previous_entry {
-        Some(entry) if state.is_none() => {
-            visible_entry_after_tier_upgrade(io, &table, entry, &patched_row)?
-        }
+        Some(entry) if state.is_none() => Some(visible_entry_after_tier_upgrade(
+            io,
+            &table,
+            entry,
+            &patched_row,
+        )?),
         _ => {
             let mut history_rows = load_branch_history(io, &table, object_id, &branch)?;
             let Some(existing) = history_rows
@@ -1395,21 +1398,27 @@ pub fn patch_row_version_state<H: Storage>(
             };
             *existing = patched_row.clone();
             visible_entry_from_history_rows(&history_rows)
-                .ok_or(RowHistoryError::ObjectNotFound(object_id))?
         }
     };
+    let visible_entries: Vec<_> = patched_entry.iter().cloned().collect();
     io.apply_row_mutation(
         &table,
         std::slice::from_ref(&patched_row),
-        std::slice::from_ref(&patched_entry),
+        &visible_entries,
         &[],
     )
     .map_err(RowHistoryError::StorageError)?;
 
-    let current_visible = patched_entry.current_row;
-    if previous_visible.as_ref() == Some(&current_visible) {
+    let current_visible = patched_entry
+        .as_ref()
+        .map(|entry| entry.current_row.clone());
+    if previous_visible == current_visible {
         return Ok(None);
     }
+
+    let Some(current_visible) = current_visible else {
+        return Ok(None);
+    };
 
     Ok(Some(RowVisibilityChange {
         object_id,
