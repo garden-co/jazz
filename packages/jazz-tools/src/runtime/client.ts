@@ -964,14 +964,7 @@ export class SessionClient {
   }
 
   beginTransaction(): Transaction {
-    return new Transaction(
-      this.client,
-      {
-        batchMode: "transactional",
-        batchId: generateBatchId(),
-      },
-      this.session,
-    );
+    return this.client.beginTransactionInternal(this.session);
   }
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
@@ -1216,10 +1209,23 @@ export class JazzClient {
   }
 
   beginTransaction(): Transaction {
-    return new Transaction(this, {
-      batchMode: "transactional",
-      batchId: generateBatchId(),
-    });
+    return this.beginTransactionInternal();
+  }
+
+  /**
+   * Start an explicit transactional batch, optionally scoped to a session override.
+   * @internal
+   */
+  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+    return new Transaction(
+      this,
+      {
+        batchMode: "transactional",
+        batchId: generateBatchId(),
+      },
+      this.resolveWriteSession(session, attribution),
+      attribution,
+    );
   }
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
