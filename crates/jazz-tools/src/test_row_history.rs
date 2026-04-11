@@ -25,10 +25,7 @@ pub fn persist_test_schema<H: Storage + ?Sized>(storage: &mut H, schema: &Schema
                     MetadataKey::Type.to_string(),
                     ObjectType::CatalogueSchema.to_string(),
                 ),
-                (
-                    MetadataKey::SchemaHash.to_string(),
-                    schema_hash.to_string(),
-                ),
+                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
             ]),
             content: encode_schema(schema),
         })

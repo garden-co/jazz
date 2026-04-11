@@ -197,8 +197,8 @@ fn flat_history_row_identity_descriptor() -> &'static RowDescriptor {
 
 fn flat_visible_row_format_id() -> ObjectId {
     ObjectId::from_uuid(Uuid::from_bytes([
-        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d,
-        0x31, 0x00,
+        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d, 0x31,
+        0x00,
     ]))
 }
 
@@ -389,7 +389,8 @@ fn flat_user_data_from_values(
     delete_kind: Option<DeleteKind>,
     is_deleted: bool,
 ) -> Result<Vec<u8>, EncodingError> {
-    if delete_kind == Some(DeleteKind::Hard) || (is_deleted && user_values.iter().all(Value::is_null))
+    if delete_kind == Some(DeleteKind::Hard)
+        || (is_deleted && user_values.iter().all(Value::is_null))
     {
         Ok(Vec::new())
     } else {
@@ -404,7 +405,8 @@ fn stored_row_version_from_flat_parts(
 ) -> Result<StoredRowVersion, EncodingError> {
     let delete_kind = delete_kind_from_value(&system_values[12])?;
     let is_deleted = expect_bool(&system_values[13], "is_deleted")?;
-    let user_data = flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
+    let user_data =
+        flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
 
     let parents = match &system_values[4] {
         Value::Array(values) => values

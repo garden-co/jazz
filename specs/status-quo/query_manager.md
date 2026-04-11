@@ -113,12 +113,12 @@ That is the reason sync can stay query-scoped without every transport layer need
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/query_manager/manager.rs` | QueryManager orchestration and subscription lifecycle |
-| `crates/jazz-tools/src/query_manager/graph.rs` | Query graph compilation and settle passes |
-| `crates/jazz-tools/src/query_manager/graph_nodes/` | Node implementations such as index scan, materialize, filter, sort, and output |
-| `crates/jazz-tools/src/query_manager/query.rs` | Query builder/data structures |
-| `crates/jazz-tools/src/query_manager/relation_ir_query_plan.rs` | Relation IR planning |
-| `crates/jazz-tools/src/query_manager/policy_graph.rs` | Policy evaluation support |
-| `crates/jazz-tools/src/row_format.rs` | Shared row decoding/reprojection |
+| File                                                            | Purpose                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `crates/jazz-tools/src/query_manager/manager.rs`                | QueryManager orchestration and subscription lifecycle                          |
+| `crates/jazz-tools/src/query_manager/graph.rs`                  | Query graph compilation and settle passes                                      |
+| `crates/jazz-tools/src/query_manager/graph_nodes/`              | Node implementations such as index scan, materialize, filter, sort, and output |
+| `crates/jazz-tools/src/query_manager/query.rs`                  | Query builder/data structures                                                  |
+| `crates/jazz-tools/src/query_manager/relation_ir_query_plan.rs` | Relation IR planning                                                           |
+| `crates/jazz-tools/src/query_manager/policy_graph.rs`           | Policy evaluation support                                                      |
+| `crates/jazz-tools/src/row_format.rs`                           | Shared row decoding/reprojection                                               |

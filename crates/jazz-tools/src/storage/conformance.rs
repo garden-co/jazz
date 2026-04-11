@@ -59,7 +59,12 @@ fn seed_row_history_locator(
         .unwrap();
 }
 
-fn make_row_version(row_id: ObjectId, branch: &str, updated_at: u64, value: &str) -> StoredRowVersion {
+fn make_row_version(
+    row_id: ObjectId,
+    branch: &str,
+    updated_at: u64,
+    value: &str,
+) -> StoredRowVersion {
     StoredRowVersion::new(
         row_id,
         branch,
@@ -397,7 +402,9 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
     assert_eq!(decode_flat_history_row(&descriptor, &encoded).unwrap(), row);
 }
 
-pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_visible_region_uses_flat_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
     let mut storage = factory();
     let schema = SchemaBuilder::new()
         .table(
@@ -415,7 +422,10 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() 
         Vec::new(),
         encode_row(
             &descriptor,
-            &[Value::Text("Ship visible rows".into()), Value::Boolean(false)],
+            &[
+                Value::Text("Ship visible rows".into()),
+                Value::Boolean(false),
+            ],
         )
         .unwrap(),
         RowProvenance::for_insert("alice".to_string(), 100),
@@ -453,7 +463,10 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(factory: &dyn Fn() 
         .unwrap()
         .expect("visible row should persist");
 
-    assert_eq!(decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(), entry);
+    assert_eq!(
+        decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(),
+        entry
+    );
 }
 
 pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {

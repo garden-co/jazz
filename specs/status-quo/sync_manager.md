@@ -139,10 +139,10 @@ This is what makes reconnect feel reliable without every app having to remember 
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/sync_manager/mod.rs` | Core state machine and queues |
-| `crates/jazz-tools/src/sync_manager/inbox.rs` | Applying inbound sync payloads |
-| `crates/jazz-tools/src/sync_manager/types.rs` | Payloads, ids, roles, and durability tiers |
-| `crates/jazz-tools/src/sync_manager/permissions.rs` | Permission-check routing |
-| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling |
+| File                                                    | Purpose                                    |
+| ------------------------------------------------------- | ------------------------------------------ |
+| `crates/jazz-tools/src/sync_manager/mod.rs`             | Core state machine and queues              |
+| `crates/jazz-tools/src/sync_manager/inbox.rs`           | Applying inbound sync payloads             |
+| `crates/jazz-tools/src/sync_manager/types.rs`           | Payloads, ids, roles, and durability tiers |
+| `crates/jazz-tools/src/sync_manager/permissions.rs`     | Permission-check routing                   |
+| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling    |

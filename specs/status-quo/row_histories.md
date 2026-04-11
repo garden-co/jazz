@@ -125,10 +125,10 @@ That split keeps the mental model tidy:
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/row_histories/mod.rs` | Row-history types and reducer logic |
-| `crates/jazz-tools/src/storage/mod.rs` | Storage-backed persistence and lookup helpers |
-| `crates/jazz-tools/src/row_format.rs` | Shared binary row/value encoding |
-| `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization |
-| `crates/jazz-tools/src/sync_manager/types.rs` | Row-version oriented sync payloads |
+| File                                                             | Purpose                                       |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| `crates/jazz-tools/src/row_histories/mod.rs`                     | Row-history types and reducer logic           |
+| `crates/jazz-tools/src/storage/mod.rs`                           | Storage-backed persistence and lookup helpers |
+| `crates/jazz-tools/src/row_format.rs`                            | Shared binary row/value encoding              |
+| `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization          |
+| `crates/jazz-tools/src/sync_manager/types.rs`                    | Row-version oriented sync payloads            |

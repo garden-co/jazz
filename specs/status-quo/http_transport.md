@@ -89,11 +89,11 @@ The cloud server exposes equivalent app-scoped routes under `/apps/:app_id/...` 
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/transport_protocol.rs` | Shared request/event types and framing |
-| `crates/jazz-tools/src/routes.rs` | In-repo server routes |
-| `crates/jazz-tools/src/middleware/auth.rs` | HTTP auth handling |
-| `crates/jazz-tools/src/transport.rs` | Rust client-side transport |
-| `packages/jazz-tools/src/runtime/sync-transport.ts` | TypeScript transport helpers |
-| `crates/jazz-cloud-server/src/server.rs` | Cloud server transport wiring |
+| File                                                | Purpose                                |
+| --------------------------------------------------- | -------------------------------------- |
+| `crates/jazz-tools/src/transport_protocol.rs`       | Shared request/event types and framing |
+| `crates/jazz-tools/src/routes.rs`                   | In-repo server routes                  |
+| `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling                     |
+| `crates/jazz-tools/src/transport.rs`                | Rust client-side transport             |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | TypeScript transport helpers           |
+| `crates/jazz-cloud-server/src/server.rs`            | Cloud server transport wiring          |
