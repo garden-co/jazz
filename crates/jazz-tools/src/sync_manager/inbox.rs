@@ -167,19 +167,60 @@ impl SyncManager {
         let row_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
         let version_id = row.version_id();
+        let visible_member = VisibleBatchMember {
+            object_id: row_id,
+            branch_name,
+            batch_id: row.batch_id,
+        };
 
-        if let Ok(Some(settlement)) = storage.load_authoritative_batch_settlement(row.batch_id) {
-            let (state, confirmed_tier) = match &settlement {
-                BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
-                    (Some(RowState::VisibleTransactional), Some(*confirmed_tier))
+        if let Ok(Some(existing_settlement)) =
+            storage.load_authoritative_batch_settlement(row.batch_id)
+        {
+            let settlement = match existing_settlement {
+                BatchSettlement::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier,
+                    mut visible_members,
+                } => {
+                    if !visible_members
+                        .iter()
+                        .any(|member| member == &visible_member)
+                    {
+                        visible_members.push(visible_member.clone());
+                    }
+                    let settlement = BatchSettlement::AcceptedTransaction {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members,
+                    };
+                    self.persist_authoritative_batch_settlement(storage, &settlement);
+                    settlement
                 }
-                BatchSettlement::Rejected { .. } => (Some(RowState::Rejected), None),
+                BatchSettlement::Rejected {
+                    batch_id,
+                    code,
+                    reason,
+                } => BatchSettlement::Rejected {
+                    batch_id,
+                    code,
+                    reason,
+                },
                 BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => {
                     tracing::warn!(
                         batch_id = ?row.batch_id,
                         "transactional staging row resolved against unexpected authoritative settlement"
                     );
                     return;
+                }
+            };
+
+            let (state, confirmed_tier) = match &settlement {
+                BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
+                    (Some(RowState::VisibleTransactional), Some(*confirmed_tier))
+                }
+                BatchSettlement::Rejected { .. } => (Some(RowState::Rejected), None),
+                BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => {
+                    unreachable!()
                 }
             };
 
@@ -229,11 +270,7 @@ impl SyncManager {
         let settlement = BatchSettlement::AcceptedTransaction {
             batch_id: row.batch_id,
             confirmed_tier,
-            visible_members: vec![VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id: row.batch_id,
-            }],
+            visible_members: vec![visible_member],
         };
 
         let visibility_change = patch_row_version_state(

@@ -48,25 +48,36 @@ impl SyncManager {
         if row.branch != branch_name.as_str() {
             return None;
         }
-        let confirmed_tier = row.confirmed_tier?;
-        let visible_members = vec![VisibleBatchMember {
-            object_id,
-            branch_name: *branch_name,
-            batch_id: row.batch_id,
-        }];
         match row.state {
-            crate::row_histories::RowState::VisibleDirect => Some(BatchSettlement::DurableDirect {
-                batch_id: row.batch_id,
-                confirmed_tier,
-                visible_members,
-            }),
-            crate::row_histories::RowState::VisibleTransactional => {
-                Some(BatchSettlement::AcceptedTransaction {
-                    batch_id: row.batch_id,
-                    confirmed_tier,
-                    visible_members,
-                })
-            }
+            crate::row_histories::RowState::VisibleDirect
+            | crate::row_histories::RowState::VisibleTransactional => self
+                .load_batch_settlement_by_batch_id_from_storage(storage, row.batch_id)
+                .or_else(|| {
+                    let confirmed_tier = row.confirmed_tier?;
+                    let visible_members = vec![VisibleBatchMember {
+                        object_id,
+                        branch_name: *branch_name,
+                        batch_id: row.batch_id,
+                    }];
+                    match row.state {
+                        crate::row_histories::RowState::VisibleDirect => {
+                            Some(BatchSettlement::DurableDirect {
+                                batch_id: row.batch_id,
+                                confirmed_tier,
+                                visible_members,
+                            })
+                        }
+                        crate::row_histories::RowState::VisibleTransactional => {
+                            Some(BatchSettlement::AcceptedTransaction {
+                                batch_id: row.batch_id,
+                                confirmed_tier,
+                                visible_members,
+                            })
+                        }
+                        crate::row_histories::RowState::StagingPending
+                        | crate::row_histories::RowState::Rejected => None,
+                    }
+                }),
             crate::row_histories::RowState::StagingPending
             | crate::row_histories::RowState::Rejected => None,
         }
@@ -228,6 +239,33 @@ impl SyncManager {
         }
 
         for server_id in server_ids {
+            self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+        }
+    }
+
+    pub(crate) fn force_row_version_to_servers(
+        &mut self,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+    ) {
+        let branch_name = BranchName::new(&row.branch);
+        let version_id = row.version_id();
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+
+        for server_id in server_ids {
+            if let Some(server) = self.servers.get_mut(&server_id) {
+                server.sent_metadata.remove(&object_id);
+                if let Some(sent_versions) =
+                    server.sent_row_versions.get_mut(&(object_id, branch_name))
+                {
+                    sent_versions.remove(&version_id);
+                    if sent_versions.is_empty() {
+                        server.sent_row_versions.remove(&(object_id, branch_name));
+                    }
+                }
+            }
+
             self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
         }
     }

@@ -1152,7 +1152,8 @@ impl QueryManager {
                         branch_name,
                         SCHEMA_RESOLUTION_TIMEOUT.as_secs()
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                     return;
                 }
 
@@ -1178,7 +1179,8 @@ impl QueryManager {
                     "{:?} denied on table {} - schema unavailable for branch {}",
                     check.operation, table_name.0, branch_name
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         };
@@ -1189,7 +1191,7 @@ impl QueryManager {
                 self.validate_json_for_content(&branch_table_schema.columns, new_content)
         {
             self.sync_manager
-                .reject_permission_check(check, err.to_string());
+                .reject_permission_check(storage, check, err.to_string());
             return;
         }
 
@@ -1213,7 +1215,8 @@ impl QueryManager {
                         branch_name,
                         SCHEMA_RESOLUTION_TIMEOUT.as_secs()
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                 } else {
                     self.sync_manager
                         .requeue_pending_permission_checks(vec![check]);
@@ -1226,7 +1229,8 @@ impl QueryManager {
                 "{:?} denied on table {} - table missing from current permission schema",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         };
 
@@ -1295,7 +1299,8 @@ impl QueryManager {
                 "{:?} denied on table {} - missing row provenance",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         };
         let source_branch_schema_map = self.branch_schema_map.clone();
@@ -1320,7 +1325,8 @@ impl QueryManager {
                 "{:?} denied by policy on table {}",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         }
 
@@ -1354,12 +1360,13 @@ impl QueryManager {
                 self.validate_json_for_content(&branch_table_schema.columns, new_content)
         {
             self.sync_manager
-                .reject_permission_check(check, err.to_string());
+                .reject_permission_check(storage, check, err.to_string());
             return;
         }
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
             self.sync_manager.reject_permission_check(
+                storage,
                 check,
                 format!(
                     "Update denied on table {} - table missing from current permission schema",
@@ -1387,7 +1394,8 @@ impl QueryManager {
                         "Update denied by USING policy on table {} - no old content",
                         table_name.0
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                     return;
                 }
             };
@@ -1396,7 +1404,8 @@ impl QueryManager {
                     "Update denied by USING policy on table {} - missing old provenance",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             };
 
@@ -1420,7 +1429,8 @@ impl QueryManager {
                     "Update denied by USING policy on table {} - cannot see old row",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         }
@@ -1438,7 +1448,8 @@ impl QueryManager {
                     "Update denied by WITH CHECK policy on table {} - missing new provenance",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             };
 
@@ -1462,7 +1473,8 @@ impl QueryManager {
                     "Update denied by WITH CHECK policy on table {}",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         }
@@ -1642,7 +1654,7 @@ impl QueryManager {
         for (id, reason) in to_reject {
             if let Some(state) = self.active_policy_checks.remove(&id) {
                 self.sync_manager
-                    .reject_permission_check(state.pending_check, reason);
+                    .reject_permission_check(storage, state.pending_check, reason);
             }
         }
     }
