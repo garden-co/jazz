@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(feature = "client")]
-pub use client::{JazzClient, SessionClient};
+pub use client::{ClientReadOptions, JazzClient, PersistedWrite, SessionClient, Transaction};
 
 #[cfg(all(feature = "client", feature = "transport"))]
 pub use jazz_transport::ServerEvent;

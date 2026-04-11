@@ -5,15 +5,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::batch_fate::BatchMode;
+use crate::batch_fate::{BatchMode, LocalBatchRecord};
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
-use crate::runtime_core::ReadDurabilityOptions;
 use crate::row_histories::BatchId;
+use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
@@ -26,8 +26,9 @@ use crate::sync_manager::{
 use base64::Engine;
 use bytes::BytesMut;
 use futures::StreamExt;
+use futures::channel::oneshot as futures_oneshot;
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc, oneshot as tokio_oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
 use crate::{
@@ -101,6 +102,35 @@ struct SubscriptionState {
 pub struct Transaction<'a> {
     client: &'a JazzClient,
     write_context: WriteContext,
+}
+
+/// Result of a persisted write: a logical batch id, the immediate local value,
+/// and a receiver that resolves once the requested durability tier is
+/// acknowledged.
+pub struct PersistedWrite<T> {
+    batch_id: BatchId,
+    value: T,
+    receiver: futures_oneshot::Receiver<()>,
+}
+
+impl<T> PersistedWrite<T> {
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn into_parts(self) -> (T, BatchId, futures_oneshot::Receiver<()>) {
+        (self.value, self.batch_id, self.receiver)
+    }
+
+    pub async fn wait(self) -> Result<T> {
+        let (value, _batch_id, receiver) = self.into_parts();
+        receiver.await.map_err(|_| JazzError::ChannelClosed)?;
+        Ok(value)
+    }
 }
 
 fn build_client_schema_manager<S: Storage + ?Sized>(
@@ -232,7 +262,7 @@ impl JazzClient {
 
         // Spawn binary stream listener if connected to server
         let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = tokio_oneshot::channel();
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -483,11 +513,7 @@ impl JazzClient {
         let query_for_alignment = query.clone();
         let future = self
             .runtime
-            .query(
-                query,
-                self.default_session.clone(),
-                options.into(),
-            )
+            .query(query, self.default_session.clone(), options.into())
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
@@ -517,6 +543,28 @@ impl JazzClient {
         Ok((object_id, row_values))
     }
 
+    /// Create a new row and retain replayable batch fate until the requested
+    /// durability tier resolves.
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<(ObjectId, Vec<Value>)>> {
+        let ((object_id, row_values), batch_id, receiver) = self
+            .runtime
+            .insert_persisted(table, values, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (
+                object_id,
+                self.align_created_row_to_declared_schema(table, row_values),
+            ),
+            receiver,
+        })
+    }
+
     /// Update a row.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
@@ -524,11 +572,48 @@ impl JazzClient {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    /// Update a row and retain replayable batch fate until the requested
+    /// durability tier resolves.
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .runtime
+            .update_persisted(object_id, updates, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
+    }
+
     /// Delete a row.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Delete a row and retain replayable batch fate until the requested
+    /// durability tier resolves.
+    pub async fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .runtime
+            .delete_persisted(object_id, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
     }
 
     /// Unsubscribe from a subscription.
@@ -564,6 +649,31 @@ impl JazzClient {
     /// handle share one logical `BatchId`.
     pub fn begin_transaction(&self) -> Transaction<'_> {
         self.begin_transaction_internal(None)
+    }
+
+    /// Load one replayable local batch record by logical batch id.
+    pub fn local_batch_record(&self, batch_id: BatchId) -> Result<Option<LocalBatchRecord>> {
+        self.runtime
+            .local_batch_record(batch_id)
+            .map_err(|e| JazzError::Storage(e.to_string()))
+    }
+
+    /// Scan all replayable local batch records retained by this client.
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>> {
+        let mut records = self
+            .runtime
+            .local_batch_records()
+            .map_err(|e| JazzError::Storage(e.to_string()))?;
+        records.sort_by(|left, right| left.batch_id.0.as_bytes().cmp(right.batch_id.0.as_bytes()));
+        Ok(records)
+    }
+
+    /// Acknowledge a replayable rejected batch outcome and prune its retained
+    /// local batch record.
+    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool> {
+        self.runtime
+            .acknowledge_rejected_batch(batch_id)
+            .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Shutdown the client and release resources.
@@ -621,7 +731,11 @@ impl JazzClient {
             .collect()
     }
 
-    fn align_created_row_to_declared_schema(&self, table: &str, row_values: Vec<Value>) -> Vec<Value> {
+    fn align_created_row_to_declared_schema(
+        &self,
+        table: &str,
+        row_values: Vec<Value>,
+    ) -> Vec<Value> {
         match self.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -673,6 +787,28 @@ impl<'a> SessionClient<'a> {
         Ok((object_id, row_values))
     }
 
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<(ObjectId, Vec<Value>)>> {
+        let ((object_id, row_values), batch_id, receiver) = self
+            .client
+            .runtime
+            .insert_persisted(table, values, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (
+                object_id,
+                self.client
+                    .align_created_row_to_declared_schema(table, row_values),
+            ),
+            receiver,
+        })
+    }
+
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
             .runtime
@@ -680,11 +816,46 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .update_persisted(object_id, updates, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
+    }
+
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .delete_persisted(object_id, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
     }
 
     pub async fn query(
@@ -741,6 +912,18 @@ impl<'a> SessionClient<'a> {
         self.client
             .begin_transaction_internal(Some(self.session.clone()))
     }
+
+    pub fn local_batch_record(&self, batch_id: BatchId) -> Result<Option<LocalBatchRecord>> {
+        self.client.local_batch_record(batch_id)
+    }
+
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>> {
+        self.client.local_batch_records()
+    }
+
+    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool> {
+        self.client.acknowledge_rejected_batch(batch_id)
+    }
 }
 
 impl<'a> Transaction<'a> {
@@ -762,8 +945,31 @@ impl<'a> Transaction<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))?;
         Ok((
             object_id,
-            self.client.align_created_row_to_declared_schema(table, row_values),
+            self.client
+                .align_created_row_to_declared_schema(table, row_values),
         ))
+    }
+
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<(ObjectId, Vec<Value>)>> {
+        let ((object_id, row_values), batch_id, receiver) = self
+            .client
+            .runtime
+            .insert_persisted_with_write_context(table, values, Some(&self.write_context), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (
+                object_id,
+                self.client
+                    .align_created_row_to_declared_schema(table, row_values),
+            ),
+            receiver,
+        })
     }
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
@@ -773,11 +979,51 @@ impl<'a> Transaction<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .update_persisted_with_write_context(
+                object_id,
+                updates,
+                Some(&self.write_context),
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
+    }
+
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
             .delete_with_write_context(object_id, Some(&self.write_context))
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .delete_persisted_with_write_context(object_id, Some(&self.write_context), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
     }
 }
 
@@ -833,9 +1079,9 @@ fn reorder_values_by_column_name(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row_histories::RowState;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
+    use crate::row_histories::RowState;
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
@@ -1256,6 +1502,232 @@ mod tests {
         assert_eq!(
             rows[0].1,
             vec![Value::Text("draft".to_string()), Value::Boolean(false)]
+        );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_create_persisted_exposes_direct_batch_record() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-direct-persisted-batch");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let pending = client
+            .create_persisted(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+                DurabilityTier::Worker,
+            )
+            .await
+            .expect("create persisted row");
+
+        let batch_id = pending.batch_id();
+        let ((row_id, row_values), returned_batch_id, _receiver) = pending.into_parts();
+        assert_eq!(returned_batch_id, batch_id);
+        assert_eq!(
+            row_values,
+            vec![Value::Text("draft".to_string()), Value::Boolean(false)]
+        );
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load local batch record")
+            .expect("persisted direct write should retain a local batch record");
+        assert_eq!(local_record.batch_id, batch_id);
+        assert_eq!(local_record.mode, BatchMode::Direct);
+        assert_eq!(local_record.requested_tier, DurabilityTier::Worker);
+        assert!(local_record.latest_settlement.is_none());
+
+        client
+            .runtime
+            .with_storage(|storage| {
+                let history_rows = storage
+                    .scan_history_row_versions("todos", row_id)
+                    .expect("scan history rows");
+                assert_eq!(history_rows.len(), 1);
+                assert_eq!(history_rows[0].batch_id, batch_id);
+            })
+            .expect("inspect storage");
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_transaction_persisted_write_replays_batch_settlement() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-persisted-batch");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let pending = client
+            .begin_transaction()
+            .create_persisted(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+                DurabilityTier::Worker,
+            )
+            .await
+            .expect("create transactional persisted row");
+
+        let batch_id = pending.batch_id();
+        let ((row_id, row_values), returned_batch_id, receiver) = pending.into_parts();
+        assert_eq!(returned_batch_id, batch_id);
+        assert_eq!(
+            row_values,
+            vec![Value::Text("draft".to_string()), Value::Boolean(false)]
+        );
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load local batch record")
+            .expect("transactional persisted write should retain a local batch record");
+        assert_eq!(local_record.mode, BatchMode::Transactional);
+        assert_eq!(local_record.latest_settlement, None);
+
+        let branch_name = client
+            .runtime
+            .with_schema_manager(|manager| manager.branch_name())
+            .expect("read branch name");
+        let server_id = ServerId::new();
+        handle_server_event(
+            ServerEvent::SyncUpdate {
+                seq: Some(1),
+                payload: Box::new(SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                        batch_id,
+                        confirmed_tier: DurabilityTier::Worker,
+                        visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                            object_id: row_id,
+                            branch_name,
+                            batch_id,
+                        }],
+                    },
+                }),
+            },
+            &client.runtime,
+            server_id,
+            None,
+        )
+        .expect("apply accepted transaction settlement");
+        client.runtime.flush().await.expect("flush runtime");
+
+        receiver
+            .await
+            .expect("durability ack receiver should resolve");
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("reload local batch record")
+            .expect("accepted transaction should still retain a replayable local batch record");
+        assert_eq!(
+            local_record.latest_settlement,
+            Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::Worker,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name: client
+                        .runtime
+                        .with_schema_manager(|manager| manager.branch_name())
+                        .expect("read branch name again"),
+                    batch_id,
+                }],
+            })
+        );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_acknowledge_rejected_batch_prunes_local_record() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-ack-reject");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let pending = client
+            .begin_transaction()
+            .create_persisted(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+                DurabilityTier::Worker,
+            )
+            .await
+            .expect("create transactional persisted row");
+
+        let batch_id = pending.batch_id();
+        let ((_row_id, _row_values), _returned_batch_id, _receiver) = pending.into_parts();
+
+        handle_server_event(
+            ServerEvent::SyncUpdate {
+                seq: Some(1),
+                payload: Box::new(SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::Rejected {
+                        batch_id,
+                        code: "denied".to_string(),
+                        reason: "not allowed".to_string(),
+                    },
+                }),
+            },
+            &client.runtime,
+            ServerId::new(),
+            None,
+        )
+        .expect("apply rejected transaction settlement");
+        client.runtime.flush().await.expect("flush runtime");
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load rejected local batch record")
+            .expect("rejected transaction should retain replayable local batch record");
+        assert!(matches!(
+            local_record.latest_settlement,
+            Some(crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. })
+                if settled_batch_id == batch_id
+        ));
+
+        assert!(
+            client
+                .acknowledge_rejected_batch(batch_id)
+                .expect("acknowledge rejected batch"),
+            "first acknowledgement should prune the replayable rejection record"
+        );
+        assert_eq!(
+            client
+                .local_batch_record(batch_id)
+                .expect("reload local batch record after acknowledgement"),
+            None
+        );
+        assert!(
+            !client
+                .acknowledge_rejected_batch(batch_id)
+                .expect("repeat acknowledgement should be a no-op")
         );
 
         client.shutdown().await.expect("shutdown client");
