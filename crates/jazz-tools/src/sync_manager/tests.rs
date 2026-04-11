@@ -538,6 +538,72 @@ fn initial_query_sync_replays_current_accepted_transaction_settlement() {
 }
 
 #[test]
+fn batch_settlement_needed_returns_current_accepted_transaction() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    row.state = crate::row_histories::RowState::VisibleTransactional;
+    row.confirmed_tier = Some(DurabilityTier::Worker);
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![row.batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if id == client_id && settlement == BatchSettlement::AcceptedTransaction {
+            batch_id: row.batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id: row.batch_id,
+            }],
+        }
+    )));
+}
+
+#[test]
+fn batch_settlement_needed_returns_missing_for_unknown_batch() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if id == client_id && settlement == BatchSettlement::Missing { batch_id }
+    )));
+}
+
+#[test]
 fn row_version_state_changed_relays_direct_batch_settlement_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
