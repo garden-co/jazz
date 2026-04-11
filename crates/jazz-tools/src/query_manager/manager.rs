@@ -4,11 +4,12 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{QueryRowVersion, RowVisibilityChange, StoredRowVersion};
+use crate::row_histories::{BatchId, QueryRowVersion, RowVisibilityChange, StoredRowVersion};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
     translate_table_name_to_schema,
@@ -27,7 +28,8 @@ use super::query::Query;
 use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
+    SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
+    build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -174,6 +176,9 @@ pub(crate) struct QuerySubscription {
     pub(crate) durability_tier: Option<DurabilityTier>,
     /// How local writes behave while waiting for durability.
     pub(crate) local_updates: LocalUpdates,
+    /// Whether accepted transactional batches must be complete for the
+    /// query's current local scope before becoming visible.
+    pub(crate) strict_transactions: bool,
     /// True when this subscription observed a local write since last delivery.
     pub(crate) has_pending_local_updates: bool,
     /// Row ids that should use the local current version as an overlay while
@@ -1038,142 +1043,88 @@ impl QueryManager {
                 continue;
             }
 
-            if subscription.uses_explicit_authorization_filtering {
+            let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                let visible_rows = self.authorized_rows_from_graph(
+                self.authorized_tuples_from_graph(
                     storage_ref,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,
                     subscription.session.as_ref(),
-                );
-                let visible_rows_by_id: HashMap<_, _> = visible_rows
-                    .iter()
-                    .cloned()
-                    .map(|row| (row.id, row))
-                    .collect();
-                let visible_delta = Self::row_delta_from_rows(
-                    &subscription.current_visible_rows,
-                    &subscription.current_ordered_ids,
-                    &visible_rows,
-                );
-                let ordered_ids_after: Vec<ObjectId> =
-                    visible_rows.iter().map(|row| row.id).collect();
-
-                if !subscription.settled_once {
-                    subscription.settled_once = true;
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &visible_delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    subscription.current_visible_rows = visible_rows_by_id;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = visible_delta.added.len(),
-                        "first delivery (snapshot)"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: visible_delta,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                } else if !visible_delta.is_empty() {
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &visible_delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    subscription.current_visible_rows = visible_rows_by_id;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = visible_delta.added.len(),
-                        removed = visible_delta.removed.len(),
-                        updated = visible_delta.updated.len(),
-                        "incremental delivery"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: visible_delta,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                }
+                )
             } else {
-                subscription.current_visible_rows.clear();
-                if !subscription.settled_once {
-                    // First delivery — full current state snapshot
-                    subscription.settled_once = true;
-                    let full_result = subscription.graph.current_result_as_delta();
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &full_result,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    // Always emit the first snapshot once tier is satisfied, even if empty.
-                    // This guarantees one-shot queries can resolve to [] instead of hanging.
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = full_result.added.len(),
-                        "first delivery (snapshot)"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: full_result,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                } else if !delta.is_empty() {
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = delta.added.len(),
-                        removed = delta.removed.len(),
-                        updated = delta.updated.len(),
-                        "incremental delivery"
-                    );
-                    // Incremental delivery
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: delta.clone(),
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                }
+                subscription.graph.current_output_tuples()
+            };
+
+            if subscription.strict_transactions {
+                visible_tuples = self.filter_strict_transaction_tuples(
+                    storage_ref,
+                    QueryId(sub_id.0),
+                    visible_tuples,
+                );
+            }
+
+            let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
+            let visible_rows_by_id: HashMap<_, _> = visible_rows
+                .iter()
+                .cloned()
+                .map(|row| (row.id, row))
+                .collect();
+            let visible_delta = Self::row_delta_from_rows(
+                &subscription.current_visible_rows,
+                &subscription.current_ordered_ids,
+                &visible_rows,
+            );
+            let ordered_ids_after: Vec<ObjectId> = visible_rows.iter().map(|row| row.id).collect();
+
+            if !subscription.settled_once {
+                subscription.settled_once = true;
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &visible_delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
+                subscription.current_visible_rows = visible_rows_by_id;
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = visible_delta.added.len(),
+                    "first delivery (snapshot)"
+                );
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: sub_id,
+                    delta: visible_delta,
+                    ordered_delta: ordered.delta,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
+                });
+                subscription.has_pending_local_updates = false;
+                subscription.pending_local_row_ids.clear();
+            } else if !visible_delta.is_empty() {
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &visible_delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
+                subscription.current_visible_rows = visible_rows_by_id;
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = visible_delta.added.len(),
+                    removed = visible_delta.removed.len(),
+                    updated = visible_delta.updated.len(),
+                    "incremental delivery"
+                );
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: sub_id,
+                    delta: visible_delta,
+                    ordered_delta: ordered.delta,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
+                });
+                subscription.has_pending_local_updates = false;
+                subscription.pending_local_row_ids.clear();
             }
 
             self.subscriptions.insert(sub_id, subscription);
@@ -1870,6 +1821,7 @@ impl QueryManager {
                         [(row_id, BranchName::new(source_branch))]
                             .into_iter()
                             .collect(),
+                        row.batch_id,
                     ));
                 }
                 Err(err) => {
@@ -1900,6 +1852,7 @@ impl QueryManager {
             [(row_id, BranchName::new(source_branch))]
                 .into_iter()
                 .collect(),
+            row.batch_id,
         ))
     }
 
@@ -1970,6 +1923,91 @@ impl QueryManager {
             moved,
             updated,
         }
+    }
+
+    pub(super) fn rows_from_tuples(graph: &QueryGraph, tuples: &[Tuple]) -> Vec<Row> {
+        tuples
+            .iter()
+            .filter_map(|tuple| {
+                if tuple.len() == 1 {
+                    tuple.to_single_row()
+                } else {
+                    tuple
+                        .flatten_with_descriptors(
+                            &graph.table_descriptors,
+                            &graph.combined_descriptor,
+                        )
+                        .and_then(|flattened| flattened.to_single_row())
+                }
+            })
+            .collect()
+    }
+
+    fn scope_from_tuples(tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
+        tuples
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect()
+    }
+
+    fn transactional_batch_complete_for_query_scope(
+        storage: &dyn Storage,
+        settlement_cache: &mut HashMap<BatchId, Option<BatchSettlement>>,
+        batch_id: BatchId,
+        local_scope: &HashSet<(ObjectId, BranchName)>,
+        query_scope: &HashSet<(ObjectId, BranchName)>,
+    ) -> bool {
+        let settlement = settlement_cache
+            .entry(batch_id)
+            .or_insert_with(|| match storage.load_authoritative_batch_settlement(batch_id) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
+                    None
+                }
+            });
+
+        match settlement {
+            Some(BatchSettlement::AcceptedTransaction {
+                visible_members, ..
+            }) => visible_members
+                .iter()
+                .filter(|member| query_scope.contains(&(member.object_id, member.branch_name)))
+                .all(|member| local_scope.contains(&(member.object_id, member.branch_name))),
+            _ => true,
+        }
+    }
+
+    fn filter_strict_transaction_tuples(
+        &self,
+        storage: &dyn Storage,
+        query_id: QueryId,
+        tuples: Vec<Tuple>,
+    ) -> Vec<Tuple> {
+        if tuples.is_empty() {
+            return tuples;
+        }
+
+        let local_scope = Self::scope_from_tuples(&tuples);
+        let mut query_scope = local_scope.clone();
+        query_scope.extend(self.sync_manager.remote_query_scope(query_id));
+
+        let mut settlement_cache: HashMap<BatchId, Option<BatchSettlement>> = HashMap::new();
+
+        tuples
+            .into_iter()
+            .filter(|tuple| {
+                tuple.batch_provenance().iter().copied().all(|batch_id| {
+                    Self::transactional_batch_complete_for_query_scope(
+                        storage,
+                        &mut settlement_cache,
+                        batch_id,
+                        &local_scope,
+                        &query_scope,
+                    )
+                })
+            })
+            .collect()
     }
     // ========================================================================
     // No-op storage driver (for tests)

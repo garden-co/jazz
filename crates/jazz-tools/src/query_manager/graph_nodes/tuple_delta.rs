@@ -170,11 +170,12 @@ fn tuple_as_id_only(tuple: &Tuple) -> Tuple {
             .collect(),
     )
     .with_provenance(tuple.provenance().clone())
+    .with_batch_provenance(tuple.batch_provenance().clone())
 }
 
 /// Check if tuple content or provenance changed (for tuples with same IDs).
 fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
-    if old.provenance() != new.provenance() {
+    if old.provenance() != new.provenance() || old.batch_provenance() != new.batch_provenance() {
         return true;
     }
 

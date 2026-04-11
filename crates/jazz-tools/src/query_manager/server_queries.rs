@@ -303,6 +303,7 @@ impl QueryManager {
             tip_commit_id,
             tip_provenance,
             [(object_id, branch_name)].into_iter().collect(),
+            row.batch_id,
         ))
     }
 
@@ -428,19 +429,19 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn authorized_rows_from_graph(
+    pub(super) fn authorized_tuples_from_graph(
         &mut self,
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
-    ) -> Vec<Row> {
+    ) -> Vec<super::types::Tuple> {
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
             if !self.authorization_schema_required {
-                return graph.current_result();
+                return graph.current_output_tuples();
             }
             return Vec::new();
         };
@@ -449,60 +450,7 @@ impl QueryManager {
             .values()
             .all(|table_schema| table_schema.policies.select.using.is_none())
         {
-            return graph.current_result();
-        }
-
-        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
-
-        graph
-            .current_output_rows_with_provenance()
-            .into_iter()
-            .filter_map(|(row, provenance)| {
-                provenance
-                    .iter()
-                    .copied()
-                    .all(|(object_id, branch_name)| {
-                        *authorization_cache
-                            .entry((object_id, branch_name))
-                            .or_insert_with(|| {
-                                self.provenance_row_matches_current_select_policy(
-                                    storage,
-                                    object_id,
-                                    branch_name,
-                                    session,
-                                    &auth_schema,
-                                    &auth_context,
-                                    source_branch_schema_map,
-                                )
-                            })
-                    })
-                    .then_some(row)
-            })
-            .collect()
-    }
-
-    fn authorized_scope_from_graph(
-        &mut self,
-        storage: &dyn Storage,
-        graph: &super::graph::QueryGraph,
-        schema_context: &crate::schema_manager::SchemaContext,
-        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
-        session: Option<&Session>,
-    ) -> HashSet<(ObjectId, BranchName)> {
-        let Some((auth_schema, auth_context)) =
-            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
-        else {
-            if !self.authorization_schema_required {
-                return graph.sync_scope_object_ids();
-            }
-            return HashSet::new();
-        };
-
-        if auth_schema
-            .values()
-            .all(|table_schema| table_schema.policies.select.using.is_none())
-        {
-            return graph.sync_scope_object_ids();
+            return graph.current_output_tuples();
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -530,10 +478,29 @@ impl QueryManager {
                                 )
                             })
                     })
-                    .then(|| tuple.provenance().clone())
+                    .then_some(tuple)
             })
-            .flatten()
             .collect()
+    }
+
+    fn authorized_scope_from_graph(
+        &mut self,
+        storage: &dyn Storage,
+        graph: &super::graph::QueryGraph,
+        schema_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        self.authorized_tuples_from_graph(
+            storage,
+            graph,
+            schema_context,
+            source_branch_schema_map,
+            session,
+        )
+        .into_iter()
+        .flat_map(|tuple| tuple.provenance().clone().into_iter())
+        .collect()
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -1618,6 +1585,7 @@ impl QueryManager {
                         version_id,
                         provenance,
                         [(id, source_branch)].into_iter().collect(),
+                        row.batch_id,
                     ))
                 };
 

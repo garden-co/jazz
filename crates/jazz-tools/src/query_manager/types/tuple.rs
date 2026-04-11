@@ -5,6 +5,7 @@ use smolset::SmolSet;
 use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
+use crate::row_histories::BatchId;
 
 use super::encoding::{decode_row, encode_row};
 use super::*;
@@ -98,10 +99,15 @@ impl TupleElement {
 /// A tuple of elements with identity based on IDs only.
 /// Length corresponds to number of tables in query (1 for single-table, 2 for join, etc.)
 #[derive(Clone, Debug)]
-pub struct Tuple(pub Vec<TupleElement>, pub TupleProvenance);
+pub struct Tuple(
+    pub Vec<TupleElement>,
+    pub TupleProvenance,
+    pub TupleBatchProvenance,
+);
 
 pub type ScopedObject = (ObjectId, BranchName);
 pub type TupleProvenance = SmolSet<[ScopedObject; 4]>;
+pub type TupleBatchProvenance = SmolSet<[BatchId; 4]>;
 
 #[derive(Clone, Debug)]
 pub struct LoadedRow {
@@ -109,6 +115,7 @@ pub struct LoadedRow {
     pub version_id: CommitId,
     pub row_provenance: RowProvenance,
     pub provenance: TupleProvenance,
+    pub batch_id: BatchId,
 }
 
 impl LoadedRow {
@@ -117,12 +124,14 @@ impl LoadedRow {
         version_id: CommitId,
         row_provenance: RowProvenance,
         provenance: TupleProvenance,
+        batch_id: BatchId,
     ) -> Self {
         Self {
             data: data.into(),
             version_id,
             row_provenance,
             provenance,
+            batch_id,
         }
     }
 }
@@ -130,12 +139,25 @@ impl LoadedRow {
 impl Tuple {
     /// Create a new tuple from elements.
     pub fn new(elements: Vec<TupleElement>) -> Self {
-        Self(elements, TupleProvenance::new())
+        Self(
+            elements,
+            TupleProvenance::new(),
+            TupleBatchProvenance::new(),
+        )
     }
 
     /// Create a tuple with explicit contributing-object provenance.
     pub fn new_with_provenance(elements: Vec<TupleElement>, provenance: TupleProvenance) -> Self {
-        Self(elements, provenance)
+        Self(elements, provenance, TupleBatchProvenance::new())
+    }
+
+    /// Create a tuple with explicit contributing-object and batch provenance.
+    pub fn new_with_shadow_state(
+        elements: Vec<TupleElement>,
+        provenance: TupleProvenance,
+        batch_provenance: TupleBatchProvenance,
+    ) -> Self {
+        Self(elements, provenance, batch_provenance)
     }
 
     /// Create a single-element tuple from an ObjectId.
@@ -252,6 +274,7 @@ impl Tuple {
             }])
             .with_provenance(self.provenance().clone()),
         )
+        .map(|tuple| tuple.with_batch_provenance(self.batch_provenance().clone()))
     }
 
     /// Iterate over elements.
@@ -269,9 +292,20 @@ impl Tuple {
         &self.1
     }
 
+    /// Get the contributing batch ids for this tuple.
+    pub fn batch_provenance(&self) -> &TupleBatchProvenance {
+        &self.2
+    }
+
     /// Replace the contributing-object provenance for this tuple.
     pub fn with_provenance(mut self, provenance: TupleProvenance) -> Self {
         self.1 = provenance;
+        self
+    }
+
+    /// Replace the contributing batch provenance for this tuple.
+    pub fn with_batch_provenance(mut self, batch_provenance: TupleBatchProvenance) -> Self {
+        self.2 = batch_provenance;
         self
     }
 
@@ -280,12 +314,22 @@ impl Tuple {
         for scoped_object in other.1.iter().copied() {
             self.1.insert(scoped_object);
         }
+        for batch_id in other.2.iter().copied() {
+            self.2.insert(batch_id);
+        }
     }
 
     /// Merge an explicit provenance set into this tuple.
     pub fn merge_provenance(&mut self, provenance: &TupleProvenance) {
         for scoped_object in provenance.iter().copied() {
             self.1.insert(scoped_object);
+        }
+    }
+
+    /// Merge an explicit batch provenance set into this tuple.
+    pub fn merge_batch_provenance(&mut self, batch_provenance: &TupleBatchProvenance) {
+        for batch_id in batch_provenance.iter().copied() {
+            self.2.insert(batch_id);
         }
     }
 }

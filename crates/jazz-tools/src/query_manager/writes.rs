@@ -1202,6 +1202,7 @@ impl QueryManager {
                 version_id,
                 provenance,
                 [(id, source_branch)].into_iter().collect(),
+                row.batch_id,
             ))
         };
 

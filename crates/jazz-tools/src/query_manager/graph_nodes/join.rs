@@ -318,8 +318,11 @@ impl JoinNode {
         let mut elements = Vec::with_capacity(left.len() + right.len());
         elements.extend(left.iter().cloned());
         elements.extend(right.iter().cloned());
-        let mut combined = Tuple::new(elements).with_provenance(left.provenance().clone());
+        let mut combined = Tuple::new(elements)
+            .with_provenance(left.provenance().clone())
+            .with_batch_provenance(left.batch_provenance().clone());
         combined.merge_provenance(right.provenance());
+        combined.merge_batch_provenance(right.batch_provenance());
         combined
     }
 
