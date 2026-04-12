@@ -62,15 +62,16 @@ async function captureConsoleLogs<T>(
   run: () => Promise<T>,
 ): Promise<{ result: T; logs: string[] }> {
   const logs: string[] = [];
+  const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, "");
   const logSpy = vi
     .spyOn(console, "log")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {
-      logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+      logs.push(stripAnsi([message, ...rest].map((value) => String(value ?? "")).join(" ")));
     });
   const warnSpy = vi
     .spyOn(console, "warn")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {
-      logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+      logs.push(stripAnsi([message, ...rest].map((value) => String(value ?? "")).join(" ")));
     });
 
   try {
