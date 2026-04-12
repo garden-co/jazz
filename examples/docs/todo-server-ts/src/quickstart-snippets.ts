@@ -12,6 +12,8 @@ const context = createJazzContext({
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
+  jwksUrl: process.env.JAZZ_JWKS_URL,
+  allowSelfSigned: process.env.JAZZ_ALLOW_SELF_SIGNED !== "false",
 });
 
 const api = new Hono();
@@ -19,7 +21,7 @@ const api = new Hono();
 
 // #region quickstart-server-write-ts
 api.post("/api/todos", async (c) => {
-  const db = context.forRequest(c.req);
+  const db = await context.forRequest(c.req);
   const { title } = await c.req.json();
 
   const todo = db.insert(schemaApp.todos, {
@@ -34,7 +36,7 @@ api.post("/api/todos", async (c) => {
 
 // #region quickstart-server-read-ts
 api.get("/api/todos", async (c) => {
-  const db = context.forRequest(c.req);
+  const db = await context.forRequest(c.req);
   const todos = await db.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
@@ -44,7 +46,7 @@ api.get("/api/todos", async (c) => {
 
 // #region quickstart-server-update-ts
 api.patch("/api/todos/:id", async (c) => {
-  const db = context.forRequest(c.req);
+  const db = await context.forRequest(c.req);
   const { id } = c.req.param();
   const { done } = await c.req.json();
   db.update(schemaApp.todos, id, { done });
@@ -52,7 +54,7 @@ api.patch("/api/todos/:id", async (c) => {
 });
 
 api.delete("/api/todos/:id", async (c) => {
-  const db = context.forRequest(c.req);
+  const db = await context.forRequest(c.req);
   const { id } = c.req.param();
   db.delete(schemaApp.todos, id);
   return c.json({ ok: true });
