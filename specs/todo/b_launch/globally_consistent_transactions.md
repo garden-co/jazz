@@ -11,7 +11,7 @@ MVCC on top of the existing commit graph, with a single global transaction autho
 - Losing transactions are rejected; clients retry or surface the conflict
 - Scope can be narrow: per-table or per-constraint, not necessarily whole-database
 
-This likely wants the object layer to move away from "multiple concurrent tips inside one branch" toward "many linear batches under one branch prefix".
+This likely wants the row-history layer to move toward "many linear batches under one branch prefix".
 
 Related design:
 

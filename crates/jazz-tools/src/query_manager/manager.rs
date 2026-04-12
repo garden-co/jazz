@@ -4,13 +4,16 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
+use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{QueryRowVersion, RowVisibilityChange, StoredRowVersion};
 use crate::schema_manager::{
-    LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
+    LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
+    translate_table_name_to_schema,
 };
-use crate::storage::{RowLocator, Storage};
+use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SchemaWarning, SyncManager,
@@ -601,6 +604,48 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
+        &self,
+        storage: &mut H,
+    ) -> Result<(), StorageError> {
+        if !self.schema_context.is_initialized() {
+            return Ok(());
+        }
+
+        let mut known_schemas = Vec::with_capacity(self.schema_context.live_schemas.len() + 1);
+        known_schemas.push((
+            self.schema_context.current_hash,
+            self.schema_context.current_schema.clone(),
+        ));
+        known_schemas.extend(
+            self.schema_context
+                .live_schemas
+                .iter()
+                .map(|(hash, schema)| (*hash, schema.clone())),
+        );
+
+        for (schema_hash, schema) in known_schemas {
+            let object_id = schema_hash.to_object_id();
+            if storage.load_catalogue_entry(object_id)?.is_some() {
+                continue;
+            }
+
+            storage.upsert_catalogue_entry(&CatalogueEntry {
+                object_id,
+                metadata: HashMap::from([
+                    (
+                        MetadataKey::Type.to_string(),
+                        ObjectType::CatalogueSchema.to_string(),
+                    ),
+                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+                ]),
+                content: encode_schema(&schema),
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Recompile subscriptions that are marked as stale.
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
@@ -833,6 +878,10 @@ impl QueryManager {
     /// - Settles all subscription graphs (row data loaded on-demand from storage)
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
         let _span = tracing::trace_span!("QueryManager::process").entered();
+
+        if let Err(error) = self.ensure_known_schemas_catalogued(storage) {
+            tracing::warn!(%error, "failed to persist known schemas to catalogue storage");
+        }
 
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
