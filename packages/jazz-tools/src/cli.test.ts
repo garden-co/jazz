@@ -62,8 +62,13 @@ async function captureConsoleLogs<T>(
   run: () => Promise<T>,
 ): Promise<{ result: T; logs: string[] }> {
   const logs: string[] = [];
-  const spy = vi
+  const logSpy = vi
     .spyOn(console, "log")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+    });
+  const warnSpy = vi
+    .spyOn(console, "warn")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {
       logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
     });
@@ -72,7 +77,8 @@ async function captureConsoleLogs<T>(
     const result = await run();
     return { result, logs };
   } finally {
-    spy.mockRestore();
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
   }
 }
 
@@ -187,6 +193,71 @@ import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.where({ done: true }),
+]);
+`;
+}
+
+function rootAllExplicitPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.never(),
+  policy.todos.allowUpdate.never(),
+  policy.todos.allowDelete.never(),
+]);
+`;
+}
+
+function rootTodoOwnerSchema(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootReadOnlyPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+]);
+`;
+}
+
+function rootUpdateWithoutDeletePermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowInsert.where({ ownerId: session.user_id }),
+  policy.todos.allowUpdate
+    .whereOld({ ownerId: session.user_id })
+    .whereNew({ ownerId: session.user_id }),
 ]);
 `;
 }
@@ -327,6 +398,60 @@ describe("cli validate", () => {
     await writeFile(join(root, "permissions.ts"), permissionsSchemaNamedExport());
 
     await validate({ schemaDir: root });
+  });
+
+  it("warns once per table and operation when permissions.ts is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes("has no explicit"));
+    expect(warnings).toHaveLength(8);
+    expect(warnings).toContain(
+      'Warning: table "projects" has no explicit read policy in permissions.ts; enforcing runtimes default to deny.',
+    );
+    expect(warnings).toContain(
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+    );
+  });
+
+  it("warns only for missing operations in partial permissions", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootReadOnlyPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes('table "todos"'));
+    expect(warnings).toEqual([
+      'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has no explicit update policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+    ]);
+  });
+
+  it("treats always and never as explicit policies", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootAllExplicitPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    expect(logs.filter((line) => line.includes("has no explicit"))).toEqual([]);
+  });
+
+  it("still warns when delete is omitted but update is explicit", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootTodoOwnerSchema());
+    await writeFile(join(root, "permissions.ts"), rootUpdateWithoutDeletePermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    const warnings = logs.filter((line) => line.includes("has no explicit"));
+    expect(warnings).toEqual([
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+    ]);
   });
 
   it("fails when schema.ts uses inline table permissions", async () => {

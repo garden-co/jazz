@@ -9,7 +9,7 @@ use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName, Value,
+    ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
 };
 use crate::storage::Storage;
 
@@ -19,14 +19,21 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     schema: &'a Schema,
     session: &'a Session,
     branch: &'a str,
+    row_policy_mode: RowPolicyMode,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
-    pub(crate) fn new(schema: &'a Schema, session: &'a Session, branch: &'a str) -> Self {
+    pub(crate) fn new(
+        schema: &'a Schema,
+        session: &'a Session,
+        branch: &'a str,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
         Self {
             schema,
             session,
             branch,
+            row_policy_mode,
         }
     }
 
@@ -69,7 +76,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                     visited_referencing,
                 )
             })
-            .unwrap_or(true);
+            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
@@ -82,9 +89,9 @@ impl<'a> PolicyContextEvaluator<'a> {
     ) -> Option<&PolicyExpr> {
         let table_schema = self.schema.get(&table_name)?;
         match operation {
-            Operation::Select => table_schema.policies.select.using.as_ref(),
-            Operation::Insert => table_schema.policies.insert.with_check.as_ref(),
-            Operation::Update => table_schema.policies.update.using.as_ref(),
+            Operation::Select => table_schema.policies.select_policy(),
+            Operation::Insert => table_schema.policies.insert_policy(),
+            Operation::Update => table_schema.policies.update_using_policy(),
             Operation::Delete => table_schema.policies.effective_delete_using(),
         }
     }
@@ -340,15 +347,15 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         let parent_policy = match operation {
-            Operation::Select => parent_schema.policies.select.using.as_ref(),
-            Operation::Insert => parent_schema.policies.insert.with_check.as_ref(),
-            Operation::Update => parent_schema.policies.update.using.as_ref(),
+            Operation::Select => parent_schema.policies.select_policy(),
+            Operation::Insert => parent_schema.policies.insert_policy(),
+            Operation::Update => parent_schema.policies.update_using_policy(),
             Operation::Delete => parent_schema.policies.effective_delete_using(),
         };
 
         let parent_policy = match parent_policy {
             Some(p) => p,
-            None => return true,
+            None => return false,
         };
 
         let parent_row = Row::new(

@@ -31,6 +31,28 @@ struct QueryExecutionOptionsWire {
     local_updates: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeSchemaInput {
+    pub schema: Schema,
+    pub loaded_policy_bundle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeSchemaEnvelopeWire {
+    #[serde(rename = "__jazzRuntimeSchema")]
+    version: u8,
+    schema: Schema,
+    #[serde(default)]
+    loaded_policy_bundle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RuntimeSchemaWire {
+    Envelope(RuntimeSchemaEnvelopeWire),
+    Schema(Schema),
+}
+
 pub fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
     query.joins.is_empty()
         && query.array_subqueries.is_empty()
@@ -122,6 +144,27 @@ pub fn align_query_rows_to_declared_schema(
 
 pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
     parse_query_json(query_json)
+}
+
+pub fn parse_runtime_schema_input(schema_json: &str) -> Result<RuntimeSchemaInput, String> {
+    match serde_json::from_str::<RuntimeSchemaWire>(schema_json).map_err(|err| err.to_string())? {
+        RuntimeSchemaWire::Envelope(envelope) => {
+            if envelope.version != 1 {
+                return Err(format!(
+                    "unsupported runtime schema envelope version {}",
+                    envelope.version
+                ));
+            }
+            Ok(RuntimeSchemaInput {
+                schema: envelope.schema,
+                loaded_policy_bundle: envelope.loaded_policy_bundle,
+            })
+        }
+        RuntimeSchemaWire::Schema(schema) => Ok(RuntimeSchemaInput {
+            schema,
+            loaded_policy_bundle: false,
+        }),
+    }
 }
 
 pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>, String> {

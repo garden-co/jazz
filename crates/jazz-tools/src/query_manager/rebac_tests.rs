@@ -239,6 +239,7 @@ fn magic_introspection_schema() -> Schema {
     let protected_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
         .with_update(
             Some(PolicyExpr::Exists {
                 table: "admins".into(),
@@ -693,7 +694,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     qm.process(&mut storage);
 
     // Commit should be applied (owner matches session user)
-    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
     assert!(
         tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Insert should be approved when owner matches session"
@@ -1552,7 +1553,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 }
 
 #[test]
-fn rebac_table_without_policy_allows_all_writes() {
+fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy() {
     // Schema with no policies
     let mut schema = Schema::new();
     schema.insert(
@@ -1607,14 +1608,86 @@ fn rebac_table_without_policy_allows_all_writes() {
         ),
     });
 
-    // Process - table without policy should allow
+    // Process - policy-less local runtimes should remain permissive.
     qm.process(&mut storage);
 
     // Commit should be applied
-    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
     assert!(
         tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
-        "Table without policy should allow all writes"
+        "policy-less local runtimes should keep allowing sync-pending writes before a compiled bundle is loaded"
+    );
+}
+
+#[test]
+fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("notes"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]).into(),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.set_authorization_schema(schema);
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "notes".to_string());
+    let obj_id = create_test_row(&mut storage, Some(metadata.clone()));
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let notes_desc = RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    let content = encode_row(&notes_desc, &[Value::Text("A note".into())]).unwrap();
+    let commit = stored_row_commit(
+        smallvec![],
+        content,
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(RowMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            &commit,
+        ),
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| {
+            matches!(
+                (&entry.destination, &entry.payload),
+                (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
+                    if *id == client_id
+            )
+        }),
+        "loaded empty permissions bundle should reject sync writes without explicit permission"
+    );
+
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
+    assert!(
+        !tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+        "denied sync write should not persist"
     );
 }
 
@@ -2103,6 +2176,72 @@ fn rebac_inherits_filters_select_query_results() {
         !has_rows,
         "Charlie should not see Bob's document - he owns neither the doc nor the folder. \
          INHERITS should have denied access, but currently it always returns true."
+    );
+}
+
+#[test]
+fn inherits_select_denies_when_parent_operation_policy_is_missing() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let documents_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
+        operation: Operation::Select,
+        via_column: "folder_id".into(),
+        max_depth: None,
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice".into()), Value::Text("Shared".into())],
+        )
+        .expect("folder insert should succeed");
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Inherited doc".into()),
+            Value::Uuid(folder.row_id),
+        ],
+    )
+    .expect("document insert should succeed");
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("documents").select(&["title"]).build(),
+        Some(Session::new("alice")),
+    );
+
+    assert!(
+        rows.is_empty(),
+        "child rows should be denied when INHERITS reaches a parent table with no explicit SELECT policy"
     );
 }
 

@@ -17,6 +17,13 @@ import type {
 } from "./schema.js";
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
+export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
+
+export interface MissingExplicitPolicyDiagnostic {
+  tableName: string;
+  operation: ExplicitPolicyOperation;
+  message: string;
+}
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -411,11 +418,52 @@ function validatePermissionTables(
   }
 }
 
+function hasExplicitPolicy(
+  tablePolicies: TablePolicies | undefined,
+  operation: ExplicitPolicyOperation,
+): boolean {
+  if (!tablePolicies) {
+    return false;
+  }
+
+  switch (operation) {
+    case "read":
+      return Boolean(tablePolicies.select?.using);
+    case "insert":
+      return Boolean(tablePolicies.insert?.with_check);
+    case "update":
+      return Boolean(tablePolicies.update?.using || tablePolicies.update?.with_check);
+    case "delete":
+      return Boolean(tablePolicies.delete?.using);
+  }
+}
+
 export function validatePermissionsAgainstSchema(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
 ): void {
   validatePermissionTables(schemaTableNames, compiledPermissions);
+}
+
+export function collectMissingExplicitPolicyDiagnostics(
+  schemaTableNames: readonly string[],
+  compiledPermissions?: CompiledPermissionsMap,
+): MissingExplicitPolicyDiagnostic[] {
+  const operations: ExplicitPolicyOperation[] = ["read", "insert", "update", "delete"];
+
+  return schemaTableNames.flatMap((tableName) =>
+    operations.flatMap((operation) =>
+      hasExplicitPolicy(compiledPermissions?.[tableName], operation)
+        ? []
+        : [
+            {
+              tableName,
+              operation,
+              message: `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; enforcing runtimes default to deny.`,
+            },
+          ],
+    ),
+  );
 }
 
 export function normalizePermissionsForWasm(

@@ -126,7 +126,9 @@ export class JazzContext {
   }
 
   private createClient(schema: WasmSchema): JazzClient {
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
 
@@ -193,7 +195,9 @@ export class JazzContext {
    */
   private getClient(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
 
     if (!this.clientInstance) {
       return this.createClient(schema);

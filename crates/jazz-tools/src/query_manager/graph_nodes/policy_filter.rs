@@ -16,7 +16,8 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleElement,
+    LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
+    TupleElement,
 };
 
 use crate::storage::Storage;
@@ -38,6 +39,7 @@ pub struct PolicyFilterNode {
     table_name: String,
     /// Branch name for index lookups.
     branch: String,
+    row_policy_mode: RowPolicyMode,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
     /// Current tuples that pass the policy.
@@ -62,7 +64,16 @@ impl PolicyFilterNode {
         schema: Schema,
         table_name: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, "main", 0)
+        Self::new_with_branch_and_depth_and_policy_mode(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            "main",
+            0,
+            RowPolicyMode::PermissiveLocal,
+        )
     }
 
     /// Create a new policy filter node with explicit branch.
@@ -74,7 +85,37 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         branch: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, branch, 0)
+        Self::new_with_branch_and_depth_and_policy_mode(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            branch,
+            0,
+            RowPolicyMode::PermissiveLocal,
+        )
+    }
+
+    pub fn new_with_branch_and_policy_mode(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
+        Self::new_with_branch_and_depth_and_policy_mode(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            branch,
+            0,
+            row_policy_mode,
+        )
     }
 
     /// Create a new policy filter node with explicit branch and initial recursion depth.
@@ -87,6 +128,28 @@ impl PolicyFilterNode {
         branch: impl Into<String>,
         initial_depth: usize,
     ) -> Self {
+        Self::new_with_branch_and_depth_and_policy_mode(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            branch,
+            initial_depth,
+            RowPolicyMode::PermissiveLocal,
+        )
+    }
+
+    pub fn new_with_branch_and_depth_and_policy_mode(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        initial_depth: usize,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
         let table_name = table_name.into();
         let inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
         let has_inherits = !inherits_tables.is_empty();
@@ -97,6 +160,7 @@ impl PolicyFilterNode {
             schema,
             table_name,
             branch: branch.into(),
+            row_policy_mode,
             initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
@@ -246,7 +310,12 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let evaluator = PolicyContextEvaluator::new(&self.schema, &self.session, &self.branch);
+        let evaluator = PolicyContextEvaluator::new(
+            &self.schema,
+            &self.session,
+            &self.branch,
+            self.row_policy_mode,
+        );
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
             Operation::Select,

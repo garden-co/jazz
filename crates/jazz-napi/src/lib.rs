@@ -24,8 +24,8 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_outbox_entry, subscription_delta_to_json,
+    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
@@ -305,8 +305,9 @@ fn build_napi_runtime(
     tier: Option<String>,
 ) -> napi::Result<NapiRuntime> {
     // Parse schema
-    let schema: Schema = serde_json::from_str(&schema_json)
+    let runtime_schema = parse_runtime_schema_input(&schema_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
+    let schema = runtime_schema.schema;
     let declared_schema = schema.clone();
 
     // Parse optional tier
@@ -319,12 +320,17 @@ fn build_napi_runtime(
     }
 
     // Create schema manager
-    let schema_manager = SchemaManager::new(
+    let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         schema,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,
+        if runtime_schema.loaded_policy_bundle {
+            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+        } else {
+            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+        },
     )
     .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
 
