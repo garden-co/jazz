@@ -93,7 +93,7 @@ export async function validate(options: BuildOptions): Promise<void> {
     compiled.schema.tables.map((table) => table.name),
     compiled.permissions,
   )) {
-    console.warn(diagnostic.message);
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
