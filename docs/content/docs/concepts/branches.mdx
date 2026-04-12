@@ -4,7 +4,10 @@ description: How Jazz uses branches to isolate data across environments, schema 
 reviewedAt: "4059cdef"
 ---
 
-Every commit in Jazz is written to a **branch**&hairsp;—&hairsp;a named, independent line of history, like a Git branch for your data. Some branches are merged automatically at query time (schema versions), while others are fully isolated (environments and user branches). This makes it easy to keep development data separate from production, or to create parallel lines of history like drafts or staging.
+Every row version in Jazz belongs to a **branch**&hairsp;—&hairsp;a named, independent view of your
+data. Some branches are merged automatically at query time (schema versions), while others are
+fully isolated (environments and user branches). This makes it easy to keep development data
+separate from production, or to create parallel lines of work like drafts or staging.
 
 ## How branches are composed
 
@@ -69,8 +72,8 @@ At query time, Jazz automatically fetches data from all known schema versions wi
 
 Unlike schema versions, different environments and user branches are never merged. A query on `dev-*-main` does not include data from `prod-*-main`, and a query on `*-*-staging` does not include data from `*-*-main`. This is hard isolation: there is no way to combine data across environments or user branches at query time.
 
-<Callout type="info" title="Not to be confused with the DAG">
-  The [DAG](/docs/concepts/local-first-data-model#the-dag) describes how concurrent edits diverge
-  and merge within a single row's history. The concept is similar, but branches as described on this
-  page are a separate concept.
+<Callout type="info" title="Not to be confused with row history">
+  A branch is a named table view such as `prod-a1b2c3d4-main`. A row history is the per-row version
+  graph that records how one row changed over time. They are related, but they are not the same
+  thing.
 </Callout>

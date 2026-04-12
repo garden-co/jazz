@@ -457,6 +457,30 @@ impl JazzClient {
         Ok((object_id, row_values))
     }
 
+    /// Create a new row and wait until it reaches the requested durability tier.
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .runtime
+            .insert_persisted(table, values, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
     /// Update a row.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
@@ -464,11 +488,34 @@ impl JazzClient {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    /// Update a row and wait until it reaches the requested durability tier.
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .runtime
+            .update_persisted(object_id, updates, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
+    }
+
     /// Delete a row.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Delete a row and wait until it reaches the requested durability tier.
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .runtime
+            .delete_persisted(object_id, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     /// Unsubscribe from a subscription.
@@ -585,6 +632,30 @@ impl<'a> SessionClient<'a> {
         Ok((object_id, row_values))
     }
 
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .client
+            .runtime
+            .insert_persisted(table, values, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.client.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.client.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
             .runtime
@@ -592,11 +663,34 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .update_persisted(object_id, updates, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
+    }
+
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .delete_persisted(object_id, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     pub async fn query(
@@ -639,6 +733,19 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.recursive.is_none()
         && query.select_columns.is_none()
         && query.result_element_index.is_none()
+}
+
+async fn wait_for_persisted_write(
+    receiver: futures::channel::oneshot::Receiver<()>,
+    operation: &str,
+    tier: DurabilityTier,
+) -> Result<()> {
+    receiver.await.map_err(|_| {
+        JazzError::Sync(format!(
+            "{operation} was cancelled before reaching {tier:?} durability"
+        ))
+    })?;
+    Ok(())
 }
 
 fn align_row_values_to_declared_schema(

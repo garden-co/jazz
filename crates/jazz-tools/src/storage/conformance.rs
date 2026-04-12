@@ -7,25 +7,73 @@ use std::ops::Bound;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
-use crate::query_manager::types::Value;
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
-use crate::storage::{IndexMutation, Storage};
+use crate::query_manager::types::{
+    ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema, Value,
+};
+use crate::row_format::encode_row;
+use crate::row_histories::{
+    HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_flat_history_row,
+    decode_flat_visible_row_entry,
+};
+use crate::schema_manager::encoding::encode_schema;
+use crate::storage::{IndexMutation, RowLocator, Storage};
 use crate::sync_manager::DurabilityTier;
+use crate::test_row_history::persist_test_schema;
 
 /// Factory type for persistence tests that reopen storage at a given path.
 pub type PersistentStorageFactory = dyn Fn(&std::path::Path) -> Box<dyn Storage>;
+
+fn row_history_user_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![crate::query_manager::types::ColumnDescriptor::new(
+        "value",
+        ColumnType::Text,
+    )])
+}
+
+fn row_history_test_schema(table: &str) -> crate::query_manager::types::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder(table).column("value", ColumnType::Text))
+        .build()
+}
+
+fn seed_row_history_table(storage: &mut dyn Storage, table: &str) -> SchemaHash {
+    let schema = row_history_test_schema(table);
+    let schema_hash = persist_test_schema(storage, &schema);
+    schema_hash
+}
+
+fn seed_row_history_locator(
+    storage: &mut dyn Storage,
+    table: &str,
+    row_id: ObjectId,
+    schema_hash: SchemaHash,
+) {
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: table.into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+}
 
 fn make_row_version(
     row_id: ObjectId,
     branch: &str,
     updated_at: u64,
-    value: &[u8],
+    value: &str,
 ) -> StoredRowVersion {
     StoredRowVersion::new(
         row_id,
         branch,
         Vec::new(),
-        value.to_vec(),
+        encode_row(
+            &row_history_user_descriptor(),
+            &[Value::Text(value.to_string())],
+        )
+        .unwrap(),
         RowProvenance::for_insert(row_id.to_string(), updated_at),
         HashMap::new(),
         RowState::VisibleDirect,
@@ -251,8 +299,10 @@ pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>)
 
 pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
-    let version = make_row_version(row_id, "main", 10, b"alice");
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_version(row_id, "main", 10, "alice");
     let version_id = version.version_id();
 
     storage
@@ -292,10 +342,139 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     );
 }
 
+pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("done", ColumnType::Boolean),
+        )
+        .build();
+    let schema_hash = SchemaHash::compute(&schema);
+    let descriptor = schema[&"tasks".into()].columns.clone();
+    let row_id = ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(
+            &descriptor,
+            &[Value::Text("Ship flat rows".into()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .append_history_region_rows("tasks", std::slice::from_ref(&row))
+        .unwrap();
+
+    let encoded = storage
+        .load_history_row_version_bytes("tasks", row_id, row.version_id())
+        .unwrap()
+        .expect("history row should persist");
+
+    assert_eq!(decode_flat_history_row(&descriptor, &encoded).unwrap(), row);
+}
+
+pub fn test_visible_region_uses_flat_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("done", ColumnType::Boolean),
+        )
+        .build();
+    let schema_hash = SchemaHash::compute(&schema);
+    let descriptor = schema[&"tasks".into()].columns.clone();
+    let row_id = ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(
+            &descriptor,
+            &[
+                Value::Text("Ship visible rows".into()),
+                Value::Boolean(false),
+            ],
+        )
+        .unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        Some(DurabilityTier::Worker),
+    );
+    let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+        .unwrap();
+
+    let encoded = storage
+        .load_visible_region_row_bytes("tasks", "main", row_id)
+        .unwrap()
+        .expect("visible row should persist");
+
+    assert_eq!(
+        decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(),
+        entry
+    );
+}
+
 pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
-    let version = make_row_version(row_id, "main", 10, b"alice");
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_version(row_id, "main", 10, "alice");
 
     storage
         .append_history_region_rows("users", std::slice::from_ref(&version))
@@ -343,8 +522,13 @@ pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Stora
 
 pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let main_row = make_row_version(ObjectId::new(), "main", 10, b"main");
-    let draft_row = make_row_version(ObjectId::new(), "draft", 20, b"draft");
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let main_row_id = ObjectId::new();
+    let draft_row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
+    let main_row = make_row_version(main_row_id, "main", 10, "main");
+    let draft_row = make_row_version(draft_row_id, "draft", 20, "draft");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -371,9 +555,11 @@ pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) 
 
 pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
-    let main_row = make_row_version(row_id, "main", 10, b"main");
-    let draft_row = make_row_version(row_id, "draft", 20, b"draft");
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let main_row = make_row_version(row_id, "main", 10, "main");
+    let draft_row = make_row_version(row_id, "draft", 20, "draft");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -400,8 +586,10 @@ pub fn test_apply_row_mutation_combines_row_and_index_effects(
     factory: &dyn Fn() -> Box<dyn Storage>,
 ) {
     let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
-    let version = make_row_version(row_id, "main", 10, b"alice");
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_version(row_id, "main", 10, "alice");
     let visible_entry = make_visible_entry(version.clone(), std::slice::from_ref(&version));
     let index_mutations = [IndexMutation::Insert {
         table: "users",
@@ -548,10 +736,13 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
 
     let object_id = ObjectId::new();
     let row_id = ObjectId::new();
-    let version = make_row_version(row_id, "main", 10, b"alice");
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
+    let version = make_row_version(row_id, "main", 10, "alice");
 
     {
         let mut storage = factory(path);
+        seed_row_history_table(storage.as_mut(), "users");
+        seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
         storage
             .put_metadata(
                 object_id,
@@ -621,8 +812,13 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
 
 pub fn test_alice_bob_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let main_row = make_row_version(ObjectId::new(), "main", 10, b"alice");
-    let draft_row = make_row_version(ObjectId::new(), "draft", 20, b"bob");
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let main_row_id = ObjectId::new();
+    let draft_row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
+    let main_row = make_row_version(main_row_id, "main", 10, "alice");
+    let draft_row = make_row_version(draft_row_id, "draft", 20, "bob");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -742,6 +938,16 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn row_region_round_trip() {
                 conformance::test_row_region_round_trip(&$factory);
+            }
+
+            #[test]
+            fn row_region_uses_flat_history_bytes_when_schema_known() {
+                conformance::test_row_region_uses_flat_history_bytes_when_schema_known(&$factory);
+            }
+
+            #[test]
+            fn visible_region_uses_flat_bytes_when_schema_known() {
+                conformance::test_visible_region_uses_flat_bytes_when_schema_known(&$factory);
             }
 
             #[test]

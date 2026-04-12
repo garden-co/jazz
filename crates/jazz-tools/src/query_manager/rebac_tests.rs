@@ -20,6 +20,7 @@ use crate::sync_manager::{
 };
 use crate::test_row_history::{
     apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
+    seeded_memory_storage,
 };
 
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -527,7 +528,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let schema = recursive_folders_schema(max_depth);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let root_handle = qm
         .insert(
@@ -646,7 +647,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -705,7 +706,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -949,11 +950,10 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
     // Server mode keeps current_branch() at "main", while the write arrives on
     // a composed client branch. The inherited parent lookup must use payload
     // branch context, not current_branch().
+    let mut storage = seeded_memory_storage(&schema);
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
 
     assert_ne!(qm.current_branch(), branch);
-
-    let mut storage = MemoryStorage::new();
     let client_id = ClientId::new();
     connect_client(&mut qm, &storage, client_id);
     qm.sync_manager_mut()
@@ -1013,7 +1013,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
 fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
     let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
     let branch = inherited_insert_branch(schema_hash);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&schema);
 
     let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
     let folder_id = seed_folder_on_branch(
@@ -1074,7 +1074,7 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
 fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is_removed() {
     let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
     let branch = inherited_insert_branch(schema_hash);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&schema);
 
     let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
     let folder_id = seed_folder_on_branch(
@@ -1136,7 +1136,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
 fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch() {
     let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
     let branch = inherited_insert_branch(schema_hash);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&schema);
 
     let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
     let folder_id = seed_folder_on_branch(
@@ -1492,7 +1492,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     known_schemas.insert(restrictive_hash, restrictive);
     qm.set_known_schemas(Arc::new(known_schemas));
 
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let client_id = ClientId::new();
     connect_client(&mut qm, &storage, client_id);
@@ -1562,7 +1562,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -1624,7 +1624,7 @@ fn rebac_two_clients_different_sessions() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Client 1: alice
     let client1 = ClientId::new();
@@ -1748,7 +1748,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Add a client with session for non-admin user
     let client_id = ClientId::new();
@@ -1862,7 +1862,7 @@ fn rebac_update_denied_by_using_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Create Alice's document first (as server/no session)
     let mut metadata = std::collections::HashMap::new();
@@ -2025,7 +2025,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Create Alice's folder
     let mut folder_meta = std::collections::HashMap::new();
@@ -2113,7 +2113,7 @@ fn rebac_recursive_inherits_allows_ancestor_access() {
     let schema = recursive_folders_schema(None);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let root = qm
         .insert(
@@ -2188,7 +2188,7 @@ fn rebac_recursive_inherits_respects_depth_override() {
     let schema = recursive_folders_schema(Some(1));
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let root = qm
         .insert(
@@ -2283,7 +2283,7 @@ fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     let schema = recursive_folders_schema(Some(10));
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let a = qm
         .insert(
@@ -2385,7 +2385,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     // Add Alice as admin (using insert to properly index the row)
     let _alice_admin = qm
@@ -2587,7 +2587,7 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
         .expect("seed admin row");
@@ -2633,7 +2633,7 @@ fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_ro
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert_with_session(
         &mut storage,
@@ -2703,7 +2703,7 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(
         &mut storage,
@@ -2771,7 +2771,7 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let root = qm
         .insert(
@@ -2843,7 +2843,7 @@ fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_
 
     let mut writer_qm = create_query_manager(SyncManager::new(), schema.clone());
     let _branch = get_branch(&writer_qm);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&writer_qm.schema_context().current_schema);
 
     let root = writer_qm
         .insert(
@@ -2908,7 +2908,7 @@ fn rebac_select_policy_with_null_literal_filters_query_results() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let visible_id = qm
         .insert(
@@ -2976,7 +2976,7 @@ fn rebac_select_policy_with_is_null_filters_query_results() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let visible_id = qm
         .insert(
@@ -3051,7 +3051,7 @@ fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
         .expect("seed admin row");
@@ -3115,7 +3115,7 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
         .expect("seed admin row");
@@ -3170,7 +3170,7 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
         .expect("seed admin row");
@@ -3252,7 +3252,7 @@ fn magic_columns_reactively_track_update_and_delete_permissions() {
     let schema = magic_introspection_schema();
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let protected = qm
         .insert(&mut storage, "protected", &[Value::Text("initial".into())])
@@ -3329,7 +3329,7 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
     let schema = magic_introspection_schema();
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     qm.insert(&mut storage, "protected", &[Value::Text("initial".into())])
         .expect("seed protected row");
@@ -3397,7 +3397,7 @@ fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     let sync_manager = SyncManager::new();
     let schema = provenance_notes_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let alice_session = Session::new("alice");
     let bob_attribution = WriteContext {
@@ -3532,7 +3532,7 @@ fn created_by_permissions_allow_creators_and_hide_system_rows() {
     let sync_manager = SyncManager::new();
     let schema = authorship_permissions_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let alice_session = Session::new("alice");
     let bob_session = Session::new("bob");
@@ -3915,7 +3915,7 @@ fn rebac_declared_fk_inheritance_grants_select_access() {
     let schema = declared_file_inheritance_schema(false);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let file_id = qm
         .insert(
@@ -3966,7 +3966,7 @@ fn rebac_declared_fk_inheritance_grants_update_access() {
     let schema = declared_file_inheritance_schema(false);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let file_id = qm
         .insert(
@@ -4011,7 +4011,7 @@ fn rebac_declared_fk_inheritance_array_membership_grants_access() {
     let schema = declared_file_inheritance_schema(true);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let file_id = qm
         .insert(
@@ -4103,7 +4103,7 @@ fn rebac_declared_fk_inheritance_cycle_fails_closed() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let a_id = qm
         .insert(
@@ -4159,7 +4159,7 @@ fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
     let schema = declared_file_inheritance_schema(false);
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
 
     let file_id = qm
         .insert(

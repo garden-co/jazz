@@ -303,7 +303,7 @@ impl RowDescriptor {
         Self { columns }
     }
 
-    /// Compute a content hash of this descriptor (column-order-independent).
+    /// Compute a content hash of this descriptor, preserving declared column order.
     pub fn content_hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         super::branch::hash_row_descriptor(&mut hasher, self);

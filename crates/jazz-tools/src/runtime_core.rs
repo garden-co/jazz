@@ -264,7 +264,14 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Create a new RuntimeCore.
-    pub fn new(schema_manager: SchemaManager, storage: S, scheduler: Sch, sync_sender: Sy) -> Self {
+    pub fn new(
+        mut schema_manager: SchemaManager,
+        mut storage: S,
+        scheduler: Sch,
+        sync_sender: Sy,
+    ) -> Self {
+        let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
+
         Self {
             schema_manager,
             storage,

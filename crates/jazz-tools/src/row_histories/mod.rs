@@ -168,61 +168,326 @@ fn delete_kind_column_type() -> ColumnType {
     }
 }
 
-fn stored_row_version_descriptor() -> &'static RowDescriptor {
+fn flat_history_row_format_id() -> ObjectId {
+    ObjectId::from_uuid(Uuid::from_bytes([
+        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x68, 0x69, 0x73, 0x74, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d,
+        0x31,
+    ]))
+}
+
+fn flat_history_row_marker_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "_jazz_format_id",
+            ColumnType::Uuid,
+        )])
+    })
+}
+
+fn flat_history_row_identity_descriptor() -> &'static RowDescriptor {
     static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
     DESCRIPTOR.get_or_init(|| {
         RowDescriptor::new(vec![
-            ColumnDescriptor::new("row_id", ColumnType::Uuid),
-            ColumnDescriptor::new("version_id", ColumnType::Bytea),
-            ColumnDescriptor::new("branch", ColumnType::Text),
-            ColumnDescriptor::new(
-                "parents",
-                ColumnType::Array {
-                    element: Box::new(ColumnType::Bytea),
-                },
-            ),
-            ColumnDescriptor::new("updated_at", ColumnType::Timestamp),
-            ColumnDescriptor::new("created_by", ColumnType::Text),
-            ColumnDescriptor::new("created_at", ColumnType::Timestamp),
-            ColumnDescriptor::new("updated_by", ColumnType::Text),
-            ColumnDescriptor::new("batch_id", ColumnType::Bytea),
-            ColumnDescriptor::new("state", row_state_column_type()),
-            ColumnDescriptor::new("confirmed_tier", confirmed_tier_column_type()).nullable(),
-            ColumnDescriptor::new("delete_kind", delete_kind_column_type()).nullable(),
-            ColumnDescriptor::new("is_deleted", ColumnType::Boolean),
-            ColumnDescriptor::new("data", ColumnType::Bytea),
-            ColumnDescriptor::new(
-                "metadata",
-                ColumnType::Array {
-                    element: Box::new(ColumnType::Row {
-                        columns: Box::new(metadata_entry_descriptor().clone()),
-                    }),
-                },
-            ),
+            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
+            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
         ])
     })
 }
 
-fn visible_row_entry_descriptor() -> &'static RowDescriptor {
+fn flat_visible_row_format_id() -> ObjectId {
+    ObjectId::from_uuid(Uuid::from_bytes([
+        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d, 0x31,
+        0x00,
+    ]))
+}
+
+fn flat_visible_row_marker_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "_jazz_format_id",
+            ColumnType::Uuid,
+        )])
+    })
+}
+
+fn flat_visible_row_identity_descriptor() -> &'static RowDescriptor {
     static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
     DESCRIPTOR.get_or_init(|| {
         RowDescriptor::new(vec![
-            ColumnDescriptor::new(
-                "current_row",
-                ColumnType::Row {
-                    columns: Box::new(stored_row_version_descriptor().clone()),
-                },
-            ),
-            ColumnDescriptor::new(
-                "branch_frontier",
-                ColumnType::Array {
-                    element: Box::new(ColumnType::Bytea),
-                },
-            ),
-            ColumnDescriptor::new("worker_version_id", ColumnType::Bytea).nullable(),
-            ColumnDescriptor::new("edge_version_id", ColumnType::Bytea).nullable(),
-            ColumnDescriptor::new("global_version_id", ColumnType::Bytea).nullable(),
+            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
+            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
         ])
+    })
+}
+
+fn history_row_system_columns() -> Vec<ColumnDescriptor> {
+    vec![
+        ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
+        ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
+        ColumnDescriptor::new("_jazz_version_id", ColumnType::Bytea),
+        ColumnDescriptor::new("_jazz_branch", ColumnType::Text),
+        ColumnDescriptor::new(
+            "_jazz_parents",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
+        ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_updated_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
+        ColumnDescriptor::new("_jazz_state", row_state_column_type()),
+        ColumnDescriptor::new("_jazz_confirmed_tier", confirmed_tier_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_delete_kind", delete_kind_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_is_deleted", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "_jazz_metadata",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(metadata_entry_descriptor().clone()),
+                }),
+            },
+        ),
+    ]
+}
+
+fn stored_row_system_values(row: &StoredRowVersion, format_id: ObjectId) -> Vec<Value> {
+    vec![
+        Value::Uuid(format_id),
+        Value::Uuid(row.row_id),
+        commit_id_to_value(row.version_id),
+        Value::Text(row.branch.to_string()),
+        Value::Array(
+            row.parents
+                .iter()
+                .copied()
+                .map(commit_id_to_value)
+                .collect(),
+        ),
+        Value::Timestamp(row.updated_at),
+        Value::Text(row.created_by.to_string()),
+        Value::Timestamp(row.created_at),
+        Value::Text(row.updated_by.to_string()),
+        batch_id_to_value(row.batch_id),
+        row_state_to_value(row.state),
+        row.confirmed_tier
+            .map(durability_tier_to_value)
+            .unwrap_or(Value::Null),
+        row.delete_kind
+            .map(delete_kind_to_value)
+            .unwrap_or(Value::Null),
+        Value::Boolean(row.is_deleted),
+        metadata_to_value(&row.metadata),
+    ]
+}
+
+fn history_row_system_values(row: &StoredRowVersion) -> Vec<Value> {
+    stored_row_system_values(row, flat_history_row_format_id())
+}
+
+fn history_row_system_column_count() -> usize {
+    history_row_system_columns().len()
+}
+
+pub(crate) fn is_flat_history_row(data: &[u8]) -> bool {
+    matches!(
+        column_bytes(flat_history_row_marker_descriptor(), data, 0),
+        Ok(Some(bytes)) if bytes == flat_history_row_format_id().uuid().as_bytes()
+    )
+}
+
+pub(crate) fn flat_history_row_id(data: &[u8]) -> Result<ObjectId, EncodingError> {
+    let value = decode_column(flat_history_row_identity_descriptor(), data, 1)?;
+    expect_uuid(&value, "row_id")
+}
+
+fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
+    let mut columns = history_row_system_columns();
+    columns.extend([
+        ColumnDescriptor::new(
+            "_jazz_branch_frontier",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
+        ColumnDescriptor::new("_jazz_worker_version_id", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_edge_version_id", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_global_version_id", ColumnType::Bytea).nullable(),
+    ]);
+    columns
+}
+
+fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
+    let mut values = stored_row_system_values(&entry.current_row, flat_visible_row_format_id());
+    values.extend([
+        commit_ids_to_value(&entry.branch_frontier),
+        optional_commit_id_to_value(entry.worker_version_id),
+        optional_commit_id_to_value(entry.edge_version_id),
+        optional_commit_id_to_value(entry.global_version_id),
+    ]);
+    values
+}
+
+fn visible_row_system_column_count() -> usize {
+    visible_row_system_columns().len()
+}
+
+pub(crate) fn is_flat_visible_row(data: &[u8]) -> bool {
+    matches!(
+        column_bytes(flat_visible_row_marker_descriptor(), data, 0),
+        Ok(Some(bytes)) if bytes == flat_visible_row_format_id().uuid().as_bytes()
+    )
+}
+
+pub(crate) fn flat_visible_row_id(data: &[u8]) -> Result<ObjectId, EncodingError> {
+    let value = decode_column(flat_visible_row_identity_descriptor(), data, 1)?;
+    expect_uuid(&value, "row_id")
+}
+
+/// Build the physical row descriptor used when row-history state is stored as a
+/// single flat row: reserved Jazz columns first, followed by the table's user
+/// columns as nullable storage columns.
+pub fn history_row_physical_descriptor(user_descriptor: &RowDescriptor) -> RowDescriptor {
+    let mut columns = history_row_system_columns();
+    columns.extend(user_descriptor.columns.iter().cloned().map(|mut column| {
+        column.nullable = true;
+        column
+    }));
+    RowDescriptor::new(columns)
+}
+
+pub fn visible_row_physical_descriptor(user_descriptor: &RowDescriptor) -> RowDescriptor {
+    let mut columns = visible_row_system_columns();
+    columns.extend(user_descriptor.columns.iter().cloned().map(|mut column| {
+        column.nullable = true;
+        column
+    }));
+    RowDescriptor::new(columns)
+}
+
+fn flat_user_values(
+    user_descriptor: &RowDescriptor,
+    data: &RowBytes,
+) -> Result<Vec<Value>, EncodingError> {
+    if data.is_empty() {
+        Ok(user_descriptor
+            .columns
+            .iter()
+            .map(|_| Value::Null)
+            .collect::<Vec<_>>())
+    } else {
+        decode_row(user_descriptor, data)
+    }
+}
+
+fn flat_user_data_from_values(
+    user_descriptor: &RowDescriptor,
+    user_values: &[Value],
+    delete_kind: Option<DeleteKind>,
+    is_deleted: bool,
+) -> Result<Vec<u8>, EncodingError> {
+    if delete_kind == Some(DeleteKind::Hard)
+        || (is_deleted && user_values.iter().all(Value::is_null))
+    {
+        Ok(Vec::new())
+    } else {
+        encode_row(user_descriptor, user_values)
+    }
+}
+
+fn stored_row_version_from_flat_parts(
+    user_descriptor: &RowDescriptor,
+    system_values: &[Value],
+    user_values: &[Value],
+) -> Result<StoredRowVersion, EncodingError> {
+    let delete_kind = delete_kind_from_value(&system_values[12])?;
+    let is_deleted = expect_bool(&system_values[13], "is_deleted")?;
+    let user_data =
+        flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
+
+    let parents = match &system_values[4] {
+        Value::Array(values) => values
+            .iter()
+            .map(commit_id_from_value)
+            .collect::<Result<SmallVec<[CommitId; 2]>, _>>()?,
+        other => {
+            return Err(malformed(format!("expected parents array, got {other:?}")));
+        }
+    };
+
+    Ok(StoredRowVersion {
+        row_id: expect_uuid(&system_values[1], "row_id")?,
+        version_id: commit_id_from_value(&system_values[2])?,
+        branch: expect_text(&system_values[3], "branch")?.into(),
+        parents,
+        updated_at: expect_timestamp(&system_values[5], "updated_at")?,
+        created_by: expect_text(&system_values[6], "created_by")?.into(),
+        created_at: expect_timestamp(&system_values[7], "created_at")?,
+        updated_by: expect_text(&system_values[8], "updated_by")?.into(),
+        batch_id: batch_id_from_value(&system_values[9])?,
+        state: row_state_from_value(&system_values[10])?,
+        confirmed_tier: durability_tier_from_value(&system_values[11])?,
+        delete_kind,
+        is_deleted,
+        data: user_data.into(),
+        metadata: metadata_from_value(&system_values[14])?,
+    })
+}
+
+/// Encode a row-history version into a single flat physical row.
+pub fn encode_flat_history_row(
+    user_descriptor: &RowDescriptor,
+    row: &StoredRowVersion,
+) -> Result<Vec<u8>, EncodingError> {
+    let mut values = history_row_system_values(row);
+    values.extend(flat_user_values(user_descriptor, &row.data)?);
+
+    encode_row(&history_row_physical_descriptor(user_descriptor), &values)
+}
+
+/// Decode a flat physical row back into the current `StoredRowVersion` shape.
+pub fn decode_flat_history_row(
+    user_descriptor: &RowDescriptor,
+    data: &[u8],
+) -> Result<StoredRowVersion, EncodingError> {
+    let descriptor = history_row_physical_descriptor(user_descriptor);
+    let values = decode_row(&descriptor, data)?;
+    let (system_values, user_values) = values.split_at(history_row_system_column_count());
+    stored_row_version_from_flat_parts(user_descriptor, system_values, user_values)
+}
+
+pub fn encode_flat_visible_row_entry(
+    user_descriptor: &RowDescriptor,
+    entry: &VisibleRowEntry,
+) -> Result<Vec<u8>, EncodingError> {
+    let mut values = visible_row_system_values(entry);
+    values.extend(flat_user_values(user_descriptor, &entry.current_row.data)?);
+    encode_row(&visible_row_physical_descriptor(user_descriptor), &values)
+}
+
+pub fn decode_flat_visible_row_entry(
+    user_descriptor: &RowDescriptor,
+    data: &[u8],
+) -> Result<VisibleRowEntry, EncodingError> {
+    let descriptor = visible_row_physical_descriptor(user_descriptor);
+    let values = decode_row(&descriptor, data)?;
+    let system_count = history_row_system_column_count();
+    let visible_system_count = visible_row_system_column_count();
+    let current_row = stored_row_version_from_flat_parts(
+        user_descriptor,
+        &values[..system_count],
+        &values[visible_system_count..],
+    )?;
+
+    Ok(VisibleRowEntry {
+        current_row,
+        branch_frontier: commit_ids_from_value(&values[system_count], "branch_frontier")?,
+        worker_version_id: optional_commit_id_from_value(&values[system_count + 1])?,
+        edge_version_id: optional_commit_id_from_value(&values[system_count + 2])?,
+        global_version_id: optional_commit_id_from_value(&values[system_count + 3])?,
     })
 }
 
@@ -438,215 +703,6 @@ fn expect_bool(value: &Value, label: &str) -> Result<bool, EncodingError> {
     }
 }
 
-fn expect_bytea(value: &Value, label: &str) -> Result<Vec<u8>, EncodingError> {
-    match value {
-        Value::Bytea(value) => Ok(value.clone()),
-        other => Err(malformed(format!("expected {label} bytes, got {other:?}"))),
-    }
-}
-
-fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
-    vec![
-        Value::Uuid(row.row_id),
-        commit_id_to_value(row.version_id),
-        Value::Text(row.branch.to_string()),
-        Value::Array(
-            row.parents
-                .iter()
-                .copied()
-                .map(commit_id_to_value)
-                .collect(),
-        ),
-        Value::Timestamp(row.updated_at),
-        Value::Text(row.created_by.to_string()),
-        Value::Timestamp(row.created_at),
-        Value::Text(row.updated_by.to_string()),
-        batch_id_to_value(row.batch_id),
-        row_state_to_value(row.state),
-        row.confirmed_tier
-            .map(durability_tier_to_value)
-            .unwrap_or(Value::Null),
-        row.delete_kind
-            .map(delete_kind_to_value)
-            .unwrap_or(Value::Null),
-        Value::Boolean(row.is_deleted),
-        Value::Bytea(row.data.to_vec()),
-        metadata_to_value(&row.metadata),
-    ]
-}
-
-fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, EncodingError> {
-    if values.len() != stored_row_version_descriptor().columns.len() {
-        return Err(malformed(format!(
-            "expected {} stored row version fields, got {}",
-            stored_row_version_descriptor().columns.len(),
-            values.len()
-        )));
-    }
-
-    let parents = match &values[3] {
-        Value::Array(values) => values
-            .iter()
-            .map(commit_id_from_value)
-            .collect::<Result<SmallVec<[CommitId; 2]>, _>>()?,
-        other => {
-            return Err(malformed(format!("expected parents array, got {other:?}")));
-        }
-    };
-
-    Ok(StoredRowVersion {
-        row_id: expect_uuid(&values[0], "row_id")?,
-        version_id: commit_id_from_value(&values[1])?,
-        branch: expect_text(&values[2], "branch")?.into(),
-        parents,
-        updated_at: expect_timestamp(&values[4], "updated_at")?,
-        created_by: expect_text(&values[5], "created_by")?.into(),
-        created_at: expect_timestamp(&values[6], "created_at")?,
-        updated_by: expect_text(&values[7], "updated_by")?.into(),
-        batch_id: batch_id_from_value(&values[8])?,
-        state: row_state_from_value(&values[9])?,
-        confirmed_tier: durability_tier_from_value(&values[10])?,
-        delete_kind: delete_kind_from_value(&values[11])?,
-        is_deleted: expect_bool(&values[12], "is_deleted")?,
-        data: expect_bytea(&values[13], "data")?.into(),
-        metadata: metadata_from_value(&values[14])?,
-    })
-}
-
-fn stored_row_version_to_value(row: &StoredRowVersion) -> Value {
-    Value::Row {
-        id: None,
-        values: stored_row_version_values(row),
-    }
-}
-
-fn stored_row_version_from_value(value: &Value) -> Result<StoredRowVersion, EncodingError> {
-    let Value::Row { values, .. } = value else {
-        return Err(malformed(format!(
-            "expected stored row version row, got {value:?}"
-        )));
-    };
-
-    stored_row_version_from_values(values)
-}
-
-pub(crate) fn encode_stored_row_version(row: &StoredRowVersion) -> Result<Vec<u8>, EncodingError> {
-    encode_row(
-        stored_row_version_descriptor(),
-        &stored_row_version_values(row),
-    )
-}
-
-pub(crate) fn decode_stored_row_version(data: &[u8]) -> Result<StoredRowVersion, EncodingError> {
-    let values = decode_row(stored_row_version_descriptor(), data)?;
-    stored_row_version_from_values(&values)
-}
-
-pub(crate) fn encode_visible_row_entry(entry: &VisibleRowEntry) -> Result<Vec<u8>, EncodingError> {
-    encode_row(
-        visible_row_entry_descriptor(),
-        &[
-            stored_row_version_to_value(&entry.current_row),
-            commit_ids_to_value(&entry.branch_frontier),
-            optional_commit_id_to_value(entry.worker_version_id),
-            optional_commit_id_to_value(entry.edge_version_id),
-            optional_commit_id_to_value(entry.global_version_id),
-        ],
-    )
-}
-
-pub(crate) fn decode_visible_row_entry(data: &[u8]) -> Result<VisibleRowEntry, EncodingError> {
-    let values = decode_row(visible_row_entry_descriptor(), data)?;
-    if values.len() != visible_row_entry_descriptor().columns.len() {
-        return Err(malformed(format!(
-            "expected {} visible row entry fields, got {}",
-            visible_row_entry_descriptor().columns.len(),
-            values.len()
-        )));
-    }
-
-    Ok(VisibleRowEntry {
-        current_row: stored_row_version_from_value(&values[0])?,
-        branch_frontier: commit_ids_from_value(&values[1], "branch_frontier")?,
-        worker_version_id: optional_commit_id_from_value(&values[2])?,
-        edge_version_id: optional_commit_id_from_value(&values[3])?,
-        global_version_id: optional_commit_id_from_value(&values[4])?,
-    })
-}
-
-pub(crate) fn decode_visible_row_frontier(data: &[u8]) -> Result<Vec<CommitId>, EncodingError> {
-    let value = decode_column(visible_row_entry_descriptor(), data, 1)?;
-    commit_ids_from_value(&value, "branch_frontier")
-}
-
-pub(crate) fn decode_visible_current_row(data: &[u8]) -> Result<StoredRowVersion, EncodingError> {
-    let value = decode_column(visible_row_entry_descriptor(), data, 0)?;
-    stored_row_version_from_value(&value)
-}
-
-fn parse_commit_id_bytes(bytes: &[u8], label: &str) -> Result<CommitId, EncodingError> {
-    if bytes.len() != 32 {
-        return Err(malformed(format!(
-            "expected 32-byte {label}, got {} bytes",
-            bytes.len()
-        )));
-    }
-    let mut commit_id = [0u8; 32];
-    commit_id.copy_from_slice(bytes);
-    Ok(CommitId(commit_id))
-}
-
-fn parse_shared_text(bytes: &[u8], label: &str) -> Result<SharedString, EncodingError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|err| malformed(format!("invalid utf8 for {label}: {err}")))?;
-    Ok(text.into())
-}
-
-fn parse_timestamp_bytes(bytes: &[u8], label: &str) -> Result<u64, EncodingError> {
-    if bytes.len() != 8 {
-        return Err(malformed(format!(
-            "expected 8-byte {label}, got {} bytes",
-            bytes.len()
-        )));
-    }
-    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
-}
-
-fn parse_row_state_bytes(bytes: &[u8]) -> Result<RowState, EncodingError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|err| malformed(format!("invalid utf8 for row state: {err}")))?;
-    row_state_from_value(&Value::Text(text.to_string()))
-}
-
-fn parse_delete_kind_bytes(bytes: Option<&[u8]>) -> Result<Option<DeleteKind>, EncodingError> {
-    match bytes {
-        Some(bytes) => {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|err| malformed(format!("invalid utf8 for delete kind: {err}")))?;
-            delete_kind_from_value(&Value::Text(text.to_string()))
-        }
-        None => Ok(None),
-    }
-}
-
-fn embedded_row_payload<'a>(bytes: &'a [u8], label: &str) -> Result<&'a [u8], EncodingError> {
-    if bytes.is_empty() {
-        return Err(malformed(format!("{label} row payload missing")));
-    }
-    match bytes[0] {
-        0 => Ok(&bytes[1..]),
-        1 => {
-            if bytes.len() < 17 {
-                return Err(malformed(format!("{label} row id too short")));
-            }
-            Ok(&bytes[17..])
-        }
-        marker => Err(malformed(format!(
-            "invalid {label} row id marker: {marker}"
-        ))),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRowVersion {
     pub version_id: CommitId,
@@ -697,79 +753,6 @@ impl From<&StoredRowVersion> for QueryRowVersion {
             data: row.data.clone(),
         }
     }
-}
-
-pub(crate) fn decode_query_row_version(data: &[u8]) -> Result<QueryRowVersion, EncodingError> {
-    let descriptor = stored_row_version_descriptor();
-    Ok(QueryRowVersion {
-        version_id: parse_commit_id_bytes(
-            column_bytes(descriptor, data, 1)?
-                .ok_or_else(|| malformed("version_id cannot be null"))?,
-            "version_id",
-        )?,
-        branch: parse_shared_text(
-            column_bytes(descriptor, data, 2)?.ok_or_else(|| malformed("branch cannot be null"))?,
-            "branch",
-        )?,
-        updated_at: parse_timestamp_bytes(
-            column_bytes(descriptor, data, 4)?
-                .ok_or_else(|| malformed("updated_at cannot be null"))?,
-            "updated_at",
-        )?,
-        created_by: parse_shared_text(
-            column_bytes(descriptor, data, 5)?
-                .ok_or_else(|| malformed("created_by cannot be null"))?,
-            "created_by",
-        )?,
-        created_at: parse_timestamp_bytes(
-            column_bytes(descriptor, data, 6)?
-                .ok_or_else(|| malformed("created_at cannot be null"))?,
-            "created_at",
-        )?,
-        updated_by: parse_shared_text(
-            column_bytes(descriptor, data, 7)?
-                .ok_or_else(|| malformed("updated_by cannot be null"))?,
-            "updated_by",
-        )?,
-        state: parse_row_state_bytes(
-            column_bytes(descriptor, data, 9)?.ok_or_else(|| malformed("state cannot be null"))?,
-        )?,
-        delete_kind: parse_delete_kind_bytes(column_bytes(descriptor, data, 11)?)?,
-        data: column_bytes(descriptor, data, 13)?
-            .ok_or_else(|| malformed("data cannot be null"))?
-            .into(),
-    })
-}
-
-fn decode_visible_tier_pointer(
-    data: &[u8],
-    col_index: usize,
-) -> Result<Option<CommitId>, EncodingError> {
-    column_bytes(visible_row_entry_descriptor(), data, col_index)?
-        .map(|bytes| parse_commit_id_bytes(bytes, "tier version"))
-        .transpose()
-}
-
-pub(crate) fn decode_visible_query_row(data: &[u8]) -> Result<QueryRowVersion, EncodingError> {
-    let current_row = column_bytes(visible_row_entry_descriptor(), data, 0)?
-        .ok_or_else(|| malformed("current_row cannot be null"))?;
-    decode_query_row_version(embedded_row_payload(current_row, "current")?)
-}
-
-pub(crate) fn decode_visible_query_row_version_for_tier(
-    data: &[u8],
-    required_tier: DurabilityTier,
-) -> Result<CommitId, EncodingError> {
-    let current = decode_visible_query_row(data)?;
-    let worker = decode_visible_tier_pointer(data, 2)?;
-    let edge = decode_visible_tier_pointer(data, 3)?;
-    let global = decode_visible_tier_pointer(data, 4)?;
-
-    Ok(match required_tier {
-        DurabilityTier::Worker => worker.unwrap_or(current.version_id),
-        DurabilityTier::EdgeServer => edge.or(worker).unwrap_or(current.version_id),
-        DurabilityTier::GlobalServer => global.or(edge).or(worker).unwrap_or(current.version_id),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1438,6 +1421,7 @@ fn branch_frontier(history_rows: &[StoredRowVersion]) -> Vec<CommitId> {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
+    use crate::row_format::decode_row;
 
     fn visible_row(updated_at: u64, confirmed_tier: Option<DurabilityTier>) -> StoredRowVersion {
         StoredRowVersion::new(
@@ -1453,36 +1437,39 @@ mod tests {
     }
 
     #[test]
-    fn stored_row_version_binary_roundtrips() {
-        let row = StoredRowVersion::new(
-            ObjectId::from_uuid(Uuid::from_u128(7)),
+    fn flat_visible_row_binary_roundtrips_user_and_system_columns() {
+        let user_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean).nullable(),
+        ]);
+        let global = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(21)),
             "main",
-            vec![CommitId([1; 32]), CommitId([2; 32])],
-            vec![1, 2, 3, 4],
-            RowProvenance {
-                created_by: "alice".to_string(),
-                created_at: 100,
-                updated_by: "bob".to_string(),
-                updated_at: 123,
-            },
-            HashMap::from([
-                ("role".to_string(), "admin".to_string()),
-                ("source".to_string(), "test".to_string()),
-            ]),
-            RowState::VisibleTransactional,
-            Some(DurabilityTier::EdgeServer),
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("ship it".into()), Value::Boolean(true)],
+            )
+            .expect("encode global row"),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::from([("source".to_string(), "global".to_string())]),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
         );
-
-        let encoded = encode_stored_row_version(&row).expect("encode row version");
-        let decoded = decode_stored_row_version(&encoded).expect("decode row version");
-
-        assert_eq!(decoded, row);
-    }
-
-    #[test]
-    fn visible_row_entry_binary_roundtrips() {
-        let global = visible_row(10, Some(DurabilityTier::GlobalServer));
-        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let current = StoredRowVersion::new(
+            global.row_id,
+            "main",
+            vec![global.version_id()],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("ship it".into()), Value::Boolean(false)],
+            )
+            .expect("encode current row"),
+            RowProvenance::for_update(&global.row_provenance(), "bob".to_string(), 30),
+            HashMap::from([("source".to_string(), "worker".to_string())]),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
         let entry = VisibleRowEntry {
             current_row: current,
             branch_frontier: vec![global.version_id()],
@@ -1491,8 +1478,10 @@ mod tests {
             global_version_id: Some(global.version_id()),
         };
 
-        let encoded = encode_visible_row_entry(&entry).expect("encode visible row entry");
-        let decoded = decode_visible_row_entry(&encoded).expect("decode visible row entry");
+        let encoded =
+            encode_flat_visible_row_entry(&user_descriptor, &entry).expect("encode flat visible");
+        let decoded =
+            decode_flat_visible_row_entry(&user_descriptor, &encoded).expect("decode flat visible");
 
         assert_eq!(decoded, entry);
     }
@@ -1596,5 +1585,104 @@ mod tests {
             entry.branch_frontier,
             vec![left.version_id(), right.version_id()]
         );
+    }
+
+    fn user_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+        ])
+    }
+
+    #[test]
+    fn history_row_physical_descriptor_appends_nullable_user_columns() {
+        let descriptor = history_row_physical_descriptor(&user_descriptor());
+
+        let title = descriptor
+            .column("title")
+            .expect("physical descriptor should contain title");
+        assert!(title.nullable, "physical user columns should be nullable");
+
+        let done = descriptor
+            .column("done")
+            .expect("physical descriptor should contain done");
+        assert!(done.nullable, "physical user columns should be nullable");
+    }
+
+    #[test]
+    fn flat_history_row_binary_roundtrips_user_and_system_columns() {
+        let user_descriptor = user_descriptor();
+        let user_values = vec![Value::Text("Write docs".into()), Value::Boolean(false)];
+        let user_data = crate::row_format::encode_row(&user_descriptor, &user_values).unwrap();
+        let row = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(42)),
+            "main",
+            vec![CommitId([9; 32])],
+            user_data.clone(),
+            RowProvenance {
+                created_by: "alice".to_string(),
+                created_at: 100,
+                updated_by: "bob".to_string(),
+                updated_at: 123,
+            },
+            HashMap::from([("source".to_string(), "test".to_string())]),
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::EdgeServer),
+        );
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
+        let decoded =
+            decode_flat_history_row(&user_descriptor, &encoded).expect("decode flat history row");
+
+        assert_eq!(decoded, row);
+
+        let physical_descriptor = history_row_physical_descriptor(&user_descriptor);
+        let physical_values = decode_row(&physical_descriptor, &encoded).expect("decode values");
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("title").unwrap()],
+            Value::Text("Write docs".into())
+        );
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("done").unwrap()],
+            Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn flat_history_row_hard_delete_uses_null_user_columns() {
+        let user_descriptor = user_descriptor();
+        let deleted = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(43)),
+            "main",
+            vec![CommitId([7; 32])],
+            vec![],
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::from([(
+                crate::metadata::MetadataKey::Delete.to_string(),
+                "hard".to_string(),
+            )]),
+            RowState::VisibleDirect,
+            None,
+        );
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &deleted).expect("encode hard delete");
+        let physical_descriptor = history_row_physical_descriptor(&user_descriptor);
+        let physical_values = decode_row(&physical_descriptor, &encoded).expect("decode values");
+
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("title").unwrap()],
+            Value::Null
+        );
+        assert_eq!(
+            physical_values[physical_descriptor.column_index("done").unwrap()],
+            Value::Null
+        );
+
+        let decoded =
+            decode_flat_history_row(&user_descriptor, &encoded).expect("decode hard delete");
+        assert_eq!(decoded.data.as_ref(), &[] as &[u8]);
+        assert!(decoded.is_hard_deleted());
     }
 }

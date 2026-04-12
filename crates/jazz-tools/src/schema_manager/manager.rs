@@ -139,7 +139,6 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let schema = normalize_schema(schema);
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -213,7 +212,7 @@ impl SchemaManager {
     ///
     /// Also creates indices for all env/user_branch combinations if known.
     pub fn add_known_schema(&mut self, schema: Schema) {
-        let schema = strip_schema_policies(&normalize_schema(schema));
+        let schema = strip_schema_policies(&schema);
         let hash = SchemaHash::compute(&schema);
 
         // Skip if already known
@@ -332,7 +331,7 @@ impl SchemaManager {
     ///
     /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
-        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
+        let old_schema = strip_schema_policies(&old_schema);
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
         if lens.is_draft() {
@@ -372,7 +371,7 @@ impl SchemaManager {
         old_schema: Schema,
         lens: Lens,
     ) -> Result<(), SchemaError> {
-        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
+        let old_schema = strip_schema_policies(&old_schema);
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
                 source: lens.source_hash,
@@ -686,9 +685,9 @@ impl SchemaManager {
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
-    ) {
+    ) -> bool {
         if latest_catalogue_content_matches(storage, object_id, &content) {
-            return;
+            return false;
         }
 
         let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
@@ -704,6 +703,16 @@ impl SchemaManager {
                     content,
                 },
             );
+        true
+    }
+
+    pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
+        let schema_hash = self.context.current_hash;
+        let object_id = schema_hash.to_object_id();
+        let metadata = self.schema_metadata(&schema_hash);
+        let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
+
+        self.persist_catalogue_object_if_changed(storage, object_id, metadata, content)
     }
 
     /// Persist the current schema to the catalogue as an Object.
@@ -1431,6 +1440,7 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let aligned_values = self.get_insert_values_with_defaults(table, values)?;
         self.query_manager.insert_on_branch_with_write_context(
             storage,
@@ -1461,6 +1471,7 @@ impl SchemaManager {
         values: &[(String, Value)],
         write_context: Option<&WriteContext>,
     ) -> Result<crate::commit::CommitId, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
@@ -1534,6 +1545,7 @@ impl SchemaManager {
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
@@ -1674,23 +1686,9 @@ fn strip_schema_policies(schema: &Schema) -> Schema {
         })
         .collect()
 }
-fn normalize_schema(mut schema: Schema) -> Schema {
-    for table_schema in schema.values_mut() {
-        normalize_table_schema(table_schema);
-    }
-    schema
-}
-
 fn hash_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-}
-
-fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableSchema) {
-    table_schema
-        .columns
-        .columns
-        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 }
 
 /// Parse a hex-encoded SchemaHash string.
@@ -1766,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_manager_new_normalizes_table_columns_by_name() {
+    fn schema_manager_new_preserves_declared_table_column_order() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1787,11 +1785,11 @@ mod tests {
             .map(|column| column.name_str())
             .collect();
 
-        assert_eq!(column_names, vec!["email", "id", "name"]);
+        assert_eq!(column_names, vec!["name", "id", "email"]);
     }
 
     #[test]
-    fn schema_manager_new_hashes_equivalent_column_orderings_identically() {
+    fn schema_manager_new_hashes_reordered_schemas_differently() {
         let schema_a = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1814,7 +1812,7 @@ mod tests {
         let manager_b =
             SchemaManager::new(SyncManager::new(), schema_b, test_app_id(), "dev", "main").unwrap();
 
-        assert_eq!(manager_a.current_hash(), manager_b.current_hash());
+        assert_ne!(manager_a.current_hash(), manager_b.current_hash());
     }
 
     #[test]

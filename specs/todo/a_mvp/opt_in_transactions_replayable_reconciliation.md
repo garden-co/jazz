@@ -26,7 +26,7 @@ This MVP assumes the batch-branch substrate from [Batch Branches and Prefix-Inde
 
 - [Sync Manager — Status Quo](../../status-quo/sync_manager.md)
 - [Query/Sync Integration — Status Quo](../../status-quo/query_sync_integration.md)
-- [Object Manager — Status Quo](../../status-quo/object_manager.md)
+- [Row Histories — Status Quo](../../status-quo/row_histories.md)
 - [Batch Branches and Prefix-Indexed Storage](../b_launch/batch_branches_and_prefix_storage.md)
 - [Globally Consistent Transactions](../b_launch/globally_consistent_transactions.md)
 

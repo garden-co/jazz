@@ -1,77 +1,16 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_histories::{
-    BatchId, HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
-    decode_query_row_version, decode_stored_row_version, decode_visible_current_row,
-    decode_visible_query_row, decode_visible_query_row_version_for_tier, decode_visible_row_entry,
-    decode_visible_row_frontier, encode_stored_row_version, encode_visible_row_entry,
-};
-use crate::sync_manager::DurabilityTier;
+use crate::row_histories::HistoryScan;
 
 use super::key_codec::{
-    history_row_key, history_row_prefix, history_row_versions_prefix, history_table_prefix,
-    increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
-    strip_raw_table_key, visible_row_key, visible_row_prefix, visible_row_versions_key,
-    visible_row_versions_prefix, visible_table_prefix,
+    history_row_key, history_row_prefix, history_row_versions_prefix, increment_string,
+    raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix, strip_raw_table_key,
+    visible_row_key, visible_row_prefix, visible_row_versions_key, visible_row_versions_prefix,
 };
-use super::{RawTableKeys, RawTableRows, StorageError};
-
-fn storage_codec_error(action: &str, label: &str, err: impl std::fmt::Display) -> StorageError {
-    StorageError::IoError(format!("{action} {label}: {err}"))
-}
-
-fn encode_history_row(row: &StoredRowVersion) -> Result<Vec<u8>, StorageError> {
-    encode_stored_row_version(row)
-        .map_err(|err| storage_codec_error("encode", "stored row version", err))
-}
-
-fn encode_visible_entry(entry: &VisibleRowEntry) -> Result<Vec<u8>, StorageError> {
-    encode_visible_row_entry(entry)
-        .map_err(|err| storage_codec_error("encode", "visible row entry", err))
-}
-
-fn decode_visible_entry(bytes: &[u8]) -> Result<VisibleRowEntry, StorageError> {
-    decode_visible_row_entry(bytes)
-        .map_err(|err| storage_codec_error("decode", "visible row entry", err))
-}
-
-fn decode_visible_current(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
-    decode_visible_current_row(bytes)
-        .map_err(|err| storage_codec_error("decode", "visible current row", err))
-}
-
-fn decode_history_row(bytes: &[u8]) -> Result<StoredRowVersion, StorageError> {
-    decode_stored_row_version(bytes)
-        .map_err(|err| storage_codec_error("decode", "stored row version", err))
-}
-
-fn decode_query_row(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
-    decode_query_row_version(bytes)
-        .map_err(|err| storage_codec_error("decode", "query row version", err))
-}
+use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
 
 fn encode_commit_id(version_id: CommitId) -> [u8; 32] {
     version_id.0
-}
-
-fn decode_commit_id(bytes: &[u8]) -> Result<CommitId, StorageError> {
-    if bytes.len() != 32 {
-        return Err(storage_codec_error(
-            "decode",
-            "visible row version index",
-            format!("expected 32 bytes, got {}", bytes.len()),
-        ));
-    }
-    let mut id = [0u8; 32];
-    id.copy_from_slice(bytes);
-    Ok(CommitId(id))
-}
-
-fn decode_visible_query(bytes: &[u8]) -> Result<QueryRowVersion, StorageError> {
-    decode_visible_query_row(bytes)
-        .map_err(|err| storage_codec_error("decode", "visible query row", err))
 }
 
 pub(super) fn raw_table_put_core(
@@ -170,322 +109,98 @@ pub(super) fn raw_table_scan_range_keys_core(
 }
 
 #[allow(dead_code)]
-pub(super) fn append_history_region_rows_core(
+pub(super) fn append_history_region_row_bytes_core(
     table: &str,
-    rows: &[StoredRowVersion],
+    rows: &[HistoryRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, row.row_id, row.version_id());
-        let encoded = encode_history_row(row)?;
-        set(&key, &encoded)?;
+        let key = history_row_key(table, row.row_id, row.version_id);
+        set(&key, row.bytes)?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
-pub(super) fn upsert_visible_region_rows_core(
+pub(super) fn upsert_visible_region_row_bytes_core(
     table: &str,
-    entries: &[VisibleRowEntry],
+    rows: &[VisibleRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    for entry in entries {
-        let key = visible_row_key(table, &entry.current_row.branch, entry.current_row.row_id);
-        let encoded = encode_visible_entry(entry)?;
-        set(&key, &encoded)?;
-        let row_versions_key = visible_row_versions_key(
-            table,
-            entry.current_row.row_id,
-            entry.current_row.branch.as_str(),
-        );
-        let version_id = encode_commit_id(entry.current_row.version_id());
+    for row in rows {
+        let key = visible_row_key(table, row.branch, row.row_id);
+        set(&key, row.bytes)?;
+        let row_versions_key = visible_row_versions_key(table, row.row_id, row.branch);
+        let version_id = encode_commit_id(row.current_version_id);
         set(&row_versions_key, &version_id)?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
-pub(super) fn patch_row_region_rows_by_batch_core(
-    table: &str,
-    batch_id: BatchId,
-    state: Option<RowState>,
-    confirmed_tier: Option<DurabilityTier>,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let mut affected_visible_rows = HashSet::new();
-    let history_entries = scan_prefix(&history_table_prefix(table))?;
-    let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowVersion>>::new();
-
-    for (key, bytes) in history_entries {
-        let mut row = decode_history_row(&bytes)?;
-        if row.batch_id == batch_id {
-            if let Some(state) = state {
-                row.state = state;
-            }
-            row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
-                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                (Some(existing), None) => Some(existing),
-                (None, incoming) => incoming,
-            };
-            let encoded = encode_history_row(&row)?;
-            set(&key, &encoded)?;
-            affected_visible_rows.insert((row.branch.clone(), row.row_id));
-        }
-        history_by_visible_row
-            .entry((row.branch.to_string(), row.row_id))
-            .or_default()
-            .push(row);
-    }
-
-    let visible_entries = scan_prefix(&visible_table_prefix(table))?;
-    let mut visible_by_key = HashMap::<(String, ObjectId), VisibleRowEntry>::new();
-    for (_, bytes) in visible_entries {
-        let mut entry = decode_visible_entry(&bytes)?;
-        let row = &mut entry.current_row;
-        if row.batch_id == batch_id {
-            if let Some(state) = state {
-                row.state = state;
-            }
-            row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
-                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                (Some(existing), None) => Some(existing),
-                (None, incoming) => incoming,
-            };
-            affected_visible_rows.insert((row.branch.clone(), row.row_id));
-        }
-        visible_by_key.insert((row.branch.to_string(), row.row_id), entry);
-    }
-
-    for (branch, row_id) in affected_visible_rows {
-        let Some(entry) = visible_by_key.get(&(branch.to_string(), row_id)).cloned() else {
-            continue;
-        };
-        let current_row = entry.current_row;
-        let mut history_rows = history_by_visible_row
-            .remove(&(branch.to_string(), row_id))
-            .unwrap_or_default();
-        if !history_rows
-            .iter()
-            .any(|row| row.version_id() == current_row.version_id())
-        {
-            history_rows.push(current_row.clone());
-        }
-        let rebuilt = VisibleRowEntry::rebuild(current_row, &history_rows);
-        let encoded = encode_visible_entry(&rebuilt)?;
-        set(&visible_row_key(table, &branch, row_id), &encoded)?;
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_core(
-    table: &str,
-    branch: &str,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = visible_row_prefix(table, branch);
-    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| decode_visible_current(&bytes))
-        .collect::<Result<_, _>>()?;
-    rows.sort_by_key(|row| (row.branch.clone(), row.row_id));
-    Ok(rows)
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_region_row_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<StoredRowVersion>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_visible_current(&bytes)?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_query_row_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<QueryRowVersion>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_visible_query(&bytes)?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_region_entry_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<VisibleRowEntry>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_visible_entry(&bytes)?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_query_row_for_tier_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    required_tier: DurabilityTier,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<QueryRowVersion>, StorageError> {
-    let visible_key = visible_row_key(table, branch, row_id);
-    let Some(bytes) = get(&visible_key)? else {
-        return Ok(None);
-    };
-
-    let current = decode_visible_query(&bytes)?;
-    let version_id = decode_visible_query_row_version_for_tier(&bytes, required_tier)
-        .map_err(|err| storage_codec_error("decode", "visible tier row version", err))?;
-    if version_id == current.version_id {
-        return Ok(Some(current));
-    }
-
-    load_history_query_row_version_core(table, row_id, version_id, get)
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_region_frontier_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<Vec<CommitId>>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_visible_row_frontier(&bytes).map_err(
-            |err| storage_codec_error("decode", "visible row frontier", err),
-        )?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_row_versions_core(
-    table: &str,
-    row_id: ObjectId,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = visible_row_versions_prefix(table, row_id);
-    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| decode_commit_id(&bytes))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter_map(|version_id| {
-            load_history_row_version_core(table, row_id, version_id, &mut get).transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by_key(|row| row.branch.clone());
-    Ok(rows)
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_history_row_versions_core(
-    table: &str,
-    row_id: ObjectId,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<StoredRowVersion>, StorageError> {
-    let prefix = history_row_versions_prefix(table, row_id);
-    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| decode_history_row(&bytes))
-        .collect::<Result<_, _>>()?;
-    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
-    Ok(rows)
-}
-
-#[allow(dead_code)]
-pub(super) fn load_history_row_version_core(
+pub(super) fn load_history_row_version_bytes_core(
     table: &str,
     row_id: ObjectId,
     version_id: CommitId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<StoredRowVersion>, StorageError> {
+) -> Result<Option<Vec<u8>>, StorageError> {
     let key = history_row_key(table, row_id, version_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_history_row(&bytes)?)),
-        None => Ok(None),
-    }
+    get(&key)
 }
 
 #[allow(dead_code)]
-pub(super) fn load_history_query_row_version_core(
-    table: &str,
-    row_id: ObjectId,
-    version_id: CommitId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<QueryRowVersion>, StorageError> {
-    let key = history_row_key(table, row_id, version_id);
-    match get(&key)? {
-        Some(bytes) => Ok(Some(decode_query_row(&bytes)?)),
-        None => Ok(None),
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_history_region_core(
+pub(super) fn load_visible_region_row_bytes_core(
     table: &str,
     branch: &str,
+    row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    let key = visible_row_key(table, branch, row_id);
+    get(&key)
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_history_region_bytes_core(
+    table: &str,
     scan: HistoryScan,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<StoredRowVersion>, StorageError> {
+) -> Result<Vec<Vec<u8>>, StorageError> {
     let prefix = match scan {
         HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
         HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
     };
 
-    let scanned: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+    Ok(scan_prefix(&prefix)?
         .into_iter()
-        .map(|(_, bytes)| decode_history_row(&bytes))
-        .collect::<Result<_, _>>()?;
+        .map(|(_, bytes)| bytes)
+        .collect())
+}
 
-    let mut rows: Vec<StoredRowVersion> = match scan {
-        HistoryScan::Branch | HistoryScan::Row { .. } => scanned
-            .into_iter()
-            .filter(|row| row.branch == branch)
-            .collect(),
-        HistoryScan::AsOf { ts } => {
-            let mut latest_per_row = HashMap::<ObjectId, StoredRowVersion>::new();
-            for row in scanned {
-                if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
-                    continue;
-                }
+#[allow(dead_code)]
+pub(super) fn scan_visible_region_bytes_core(
+    table: &str,
+    branch: &str,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<Vec<u8>>, StorageError> {
+    let prefix = visible_row_prefix(table, branch);
+    Ok(scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect())
+}
 
-                match latest_per_row.get(&row.row_id) {
-                    Some(existing) if existing.updated_at >= row.updated_at => {}
-                    _ => {
-                        latest_per_row.insert(row.row_id, row);
-                    }
-                }
-            }
-            latest_per_row.into_values().collect()
-        }
-    };
-
-    rows.sort_by_key(|row| {
-        (
-            row.branch.clone(),
-            row.row_id,
-            row.updated_at,
-            row.version_id(),
-        )
-    });
-    Ok(rows)
+#[allow(dead_code)]
+pub(super) fn scan_visible_region_row_version_branches_core(
+    table: &str,
+    row_id: ObjectId,
+    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
+) -> Result<Vec<String>, StorageError> {
+    let prefix = visible_row_versions_prefix(table, row_id);
+    let mut branches = scan_prefix_keys(&prefix)?
+        .into_iter()
+        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
 }

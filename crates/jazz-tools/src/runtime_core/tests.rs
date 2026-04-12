@@ -1,4 +1,5 @@
 use super::*;
+use crate::commit::CommitId;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
@@ -87,6 +88,25 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -141,6 +161,14 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.append_history_region_rows(table, rows)
     }
 
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
@@ -193,6 +221,24 @@ impl Storage for RowRegionReadFailingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(
@@ -283,6 +329,25 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -337,6 +402,14 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.append_history_region_rows(table, rows)
     }
 
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
@@ -387,6 +460,24 @@ impl Storage for LegacyPersistenceObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(
@@ -477,6 +568,25 @@ impl Storage for RowMutationObservingStorage {
         self.inner.scan_metadata()
     }
 
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.inner.raw_table_put(table, key, value)
     }
@@ -529,6 +639,14 @@ impl Storage for RowMutationObservingStorage {
         rows: &[crate::row_histories::StoredRowVersion],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[crate::storage::HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
     }
 
     fn upsert_visible_region_rows(
@@ -593,6 +711,24 @@ impl Storage for RowMutationObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
         self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner
+            .load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: crate::row_histories::HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.inner.scan_history_region_bytes(table, scan)
     }
 
     fn scan_history_region(
@@ -3249,6 +3385,22 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
         )
         .expect("Updating a newer-schema row from an old client should succeed");
 
+    let history_bytes = old_runtime
+        .storage()
+        .scan_history_region_bytes(
+            "users",
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
+        )
+        .expect("history bytes should be readable after old-client update");
+    assert!(
+        history_bytes
+            .iter()
+            .all(|bytes| crate::row_histories::is_flat_history_row(bytes)),
+        "all row-history versions should be stored as flat physical rows once their schemas are in catalogue"
+    );
+
     let storage = old_runtime.into_storage();
 
     let mut reloaded_v2 =
@@ -3282,6 +3434,53 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
         Value::Text("".to_string()),
         "Old-client updates remove unseen new-schema fields",
     );
+}
+
+#[test]
+fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
+    let schema = schema_evolution_v1();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut core = create_runtime_with_schema(schema.clone(), "flat-row-history-bootstrap");
+
+    let schema_entry = core
+        .storage()
+        .load_catalogue_entry(schema_hash.to_object_id())
+        .expect("catalogue lookup should succeed");
+    assert!(
+        schema_entry.is_some(),
+        "runtime startup should persist the current schema into catalogue storage"
+    );
+
+    let row_id = ObjectId::new();
+    let (inserted_id, _) = core
+        .insert("users", user_insert_values(row_id, "Alice"), None)
+        .expect("insert should succeed");
+
+    let history_bytes = core
+        .storage()
+        .scan_history_region_bytes(
+            "users",
+            crate::row_histories::HistoryScan::Row {
+                row_id: inserted_id,
+            },
+        )
+        .expect("history bytes should be readable after insert");
+    assert_eq!(history_bytes.len(), 1);
+    assert!(
+        crate::row_histories::is_flat_history_row(&history_bytes[0]),
+        "current-schema inserts should write flat row-history bytes without manual schema seeding"
+    );
+
+    let user_descriptor = schema
+        .get(&TableName::new("users"))
+        .expect("users table should exist")
+        .columns
+        .clone();
+    let decoded =
+        crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
+            .expect("flat history row should decode with the catalogue-backed descriptor");
+    assert_eq!(decoded.row_id, inserted_id);
+    assert_eq!(decoded.data.len() > 0, true);
 }
 
 #[test]

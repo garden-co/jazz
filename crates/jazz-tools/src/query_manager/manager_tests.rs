@@ -17,11 +17,12 @@ use crate::query_manager::types::{
     TablePolicies, TableSchema, Value,
 };
 use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
+use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
     apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    put_test_row_metadata,
+    put_test_row_metadata, seeded_memory_storage,
 };
 
 #[derive(Debug, Clone)]
@@ -108,7 +109,8 @@ fn create_query_manager(
 ) -> (QueryManager, MemoryStorage) {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
-    (qm, MemoryStorage::new())
+    let storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    (qm, storage)
 }
 
 /// Get the current branch name from a QueryManager.
@@ -176,6 +178,60 @@ fn stored_row_commit(
         timestamp,
         author: author.into(),
     }
+}
+
+#[test]
+fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_storage() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+        ])),
+    );
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(schema.clone(), "dev", "main");
+
+    let mut storage = MemoryStorage::new();
+    qm.ensure_known_schemas_catalogued(&mut storage)
+        .expect("schema bootstrap should succeed");
+
+    let schema_entry = storage
+        .load_catalogue_entry(schema_hash.to_object_id())
+        .expect("catalogue lookup should succeed")
+        .expect("schema should be catalogued");
+    assert_eq!(
+        schema_entry.content,
+        encode_schema(&schema),
+        "direct QueryManager bootstrapping should persist canonical schema bytes"
+    );
+
+    let descriptor = qm.schema_context().current_schema[&TableName::new("users")]
+        .columns
+        .clone();
+    let values = descriptor
+        .columns
+        .iter()
+        .map(|column| match column.name.as_str() {
+            "id" => Value::Uuid(ObjectId::new()),
+            "name" => Value::Text("Alice".into()),
+            other => panic!("unexpected column {other}"),
+        })
+        .collect::<Vec<_>>();
+    qm.insert(&mut storage, "users", &values)
+        .expect("insert should succeed");
+
+    let history_bytes = storage
+        .scan_history_region_bytes("users", HistoryScan::Branch)
+        .expect("history bytes should be readable");
+    assert_eq!(history_bytes.len(), 1);
+    assert!(
+        crate::row_histories::is_flat_history_row(&history_bytes[0]),
+        "direct QueryManager writes should persist flat history rows after schema bootstrap"
+    );
 }
 
 fn add_row_commit(
@@ -7120,9 +7176,10 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     let mut known_schemas = HashMap::new();
     known_schemas.insert(schema_hash, structural_schema);
     server_qm.set_known_schemas(Arc::new(known_schemas));
+    let storage_schema = authorization_schema.clone();
     server_qm.set_authorization_schema(authorization_schema);
 
-    let mut storage = MemoryStorage::new();
+    let mut storage = seeded_memory_storage(&storage_schema);
     let author = ObjectId::new();
 
     let mut user_metadata = HashMap::new();
