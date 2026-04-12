@@ -225,7 +225,7 @@ async function verifyExternalJwt(token: string, jwksUrl: string): Promise<void> 
   let jwks = await getRemoteJwksDocument(jwksUrl);
   try {
     await verifyJwtSignatureWithJwks(token, jwks);
-  } catch (error) {
+  } catch {
     try {
       jwks = await getRemoteJwksDocument(jwksUrl, true);
       await verifyJwtSignatureWithJwks(token, jwks);
