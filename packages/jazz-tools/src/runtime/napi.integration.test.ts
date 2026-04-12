@@ -156,23 +156,6 @@ function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, Policy
   };
 }
 
-function makeAllPolicyTodosQuery(schema: WasmSchema): QueryBuilder<PolicyTodo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: undefined as unknown as PolicyTodo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        offset: 0,
-      });
-    },
-  };
-}
-
 function makePolicyTodosByDescriptionQuery(
   schema: WasmSchema,
   description: string,
