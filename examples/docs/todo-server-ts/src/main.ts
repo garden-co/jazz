@@ -100,10 +100,14 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
   // Track active SSE connections for live updates
   const sseConnections = new Set<Response>();
+  const localQueryOptions = { tier: "worker" as const };
+  const localWriteDurability = { tier: "worker" as const };
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    const todos = await db.all(schemaApp.todos);
+    // HTTP handlers in this example serve the local persistent runtime directly.
+    // Opt into edge/global tiers only when a route must wait for remote visibility.
+    const todos = await db.all(schemaApp.todos, localQueryOptions);
     const data = `data: ${JSON.stringify(todos)}\n\n`;
 
     for (const res of sseConnections) {
@@ -123,7 +127,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // List all todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const todos = await db.all(schemaApp.todos);
+      const todos = await db.all(schemaApp.todos, localQueryOptions);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -162,7 +166,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         user_id: req.params.userId,
         claims: {},
       });
-      const todos = await userDb.all(schemaApp.todos);
+      const todos = await userDb.all(schemaApp.todos, localQueryOptions);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -181,7 +185,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     sseConnections.add(res);
 
     // Send initial state
-    const todos = await db.all(schemaApp.todos);
+    const todos = await db.all(schemaApp.todos, localQueryOptions);
     res.write(`data: ${JSON.stringify(todos)}\n\n`);
 
     // Clean up on disconnect
@@ -195,7 +199,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      const todo = await db.one(schemaApp.todos.where({ id }));
+      const todo = await db.one(schemaApp.todos.where({ id }), localQueryOptions);
       if (!todo) {
         res.status(404).json({ error: "Todo not found" });
         return;
@@ -220,7 +224,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
       if (Object.values(updates).every((value) => value === undefined)) {
         // No updates, just return the current todo
-        const todo = await db.one(schemaApp.todos.where({ id }));
+        const todo = await db.one(schemaApp.todos.where({ id }), localQueryOptions);
         if (!todo) {
           res.status(404).json({ error: "Todo not found" });
           return;
@@ -229,10 +233,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.updateDurable(schemaApp.todos, id, updates);
+      await db.updateDurable(schemaApp.todos, id, updates, localWriteDurability);
 
       // Fetch updated todo
-      const todo = await db.one(schemaApp.todos.where({ id }));
+      const todo = await db.one(schemaApp.todos.where({ id }), localQueryOptions);
       if (!todo) {
         res.status(404).json({ error: "Todo not found after update" });
         return;
@@ -251,7 +255,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.deleteDurable(schemaApp.todos, id);
+      await db.deleteDurable(schemaApp.todos, id, localWriteDurability);
       res.status(204).send();
 
       // Notify SSE connections
