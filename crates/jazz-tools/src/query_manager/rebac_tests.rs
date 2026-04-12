@@ -470,7 +470,6 @@ fn seed_folder_on_branch(
     let folder_id = create_test_row(storage, Some(folder_metadata()));
     let folder_content = encode_folder(owner_id, name);
     add_row_commit(
-        qm,
         storage,
         folder_id,
         branch,
@@ -1148,7 +1147,6 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         &folders_descriptor,
     );
     add_row_commit(
-        &mut seed_qm,
         &mut storage,
         folder_id,
         &branch,
@@ -1951,7 +1949,6 @@ fn rebac_update_denied_by_using_policy() {
     .unwrap();
     let author = ObjectId::new();
     let initial_commit = add_row_commit(
-        &mut qm,
         &mut storage,
         obj_id,
         "main",
@@ -2114,7 +2111,6 @@ fn rebac_inherits_filters_select_query_results() {
     .unwrap();
     let author = ObjectId::new();
     add_row_commit(
-        &mut qm,
         &mut storage,
         folder_id,
         "main",
@@ -2139,7 +2135,6 @@ fn rebac_inherits_filters_select_query_results() {
     )
     .unwrap();
     add_row_commit(
-        &mut qm,
         &mut storage,
         doc_id,
         "main",
