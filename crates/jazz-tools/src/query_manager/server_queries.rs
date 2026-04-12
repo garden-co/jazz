@@ -1570,10 +1570,7 @@ impl QueryManager {
                         };
 
                     // Get parent's policy for the specified operation
-                    let parent_schema = match self.schema.get(&parent_table) {
-                        Some(s) => s,
-                        None => return None,
-                    };
+                    let parent_schema = self.schema.get(&parent_table)?;
 
                     let parent_policy = match operation {
                         Operation::Select => parent_schema.policies.select_policy(),
@@ -1582,10 +1579,7 @@ impl QueryManager {
                         Operation::Delete => parent_schema.policies.effective_delete_using(),
                     };
 
-                    let parent_policy = match parent_policy {
-                        Some(p) => p,
-                        None => return None,
-                    };
+                    let parent_policy = parent_policy?;
 
                     // Create policy graph for INHERITS
                     if let Some(graph) = PolicyGraph::for_inherits(

@@ -55,6 +55,23 @@ pub struct PolicyFilterNode {
     inherits_dirty: bool,
 }
 
+#[derive(Debug)]
+struct PolicyFilterOptions {
+    branch: String,
+    initial_depth: usize,
+    row_policy_mode: RowPolicyMode,
+}
+
+impl Default for PolicyFilterOptions {
+    fn default() -> Self {
+        Self {
+            branch: "main".to_string(),
+            initial_depth: 0,
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
+        }
+    }
+}
+
 impl PolicyFilterNode {
     /// Create a new policy filter node.
     pub fn new(
@@ -64,15 +81,13 @@ impl PolicyFilterNode {
         schema: Schema,
         table_name: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth_and_policy_mode(
+        Self::new_with_options(
             descriptor,
             policy,
             session,
             schema,
             table_name,
-            "main",
-            0,
-            RowPolicyMode::PermissiveLocal,
+            PolicyFilterOptions::default(),
         )
     }
 
@@ -85,15 +100,16 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         branch: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth_and_policy_mode(
+        Self::new_with_options(
             descriptor,
             policy,
             session,
             schema,
             table_name,
-            branch,
-            0,
-            RowPolicyMode::PermissiveLocal,
+            PolicyFilterOptions {
+                branch: branch.into(),
+                ..PolicyFilterOptions::default()
+            },
         )
     }
 
@@ -106,15 +122,17 @@ impl PolicyFilterNode {
         branch: impl Into<String>,
         row_policy_mode: RowPolicyMode,
     ) -> Self {
-        Self::new_with_branch_and_depth_and_policy_mode(
+        Self::new_with_options(
             descriptor,
             policy,
             session,
             schema,
             table_name,
-            branch,
-            0,
-            row_policy_mode,
+            PolicyFilterOptions {
+                branch: branch.into(),
+                row_policy_mode,
+                ..PolicyFilterOptions::default()
+            },
         )
     }
 
@@ -128,27 +146,27 @@ impl PolicyFilterNode {
         branch: impl Into<String>,
         initial_depth: usize,
     ) -> Self {
-        Self::new_with_branch_and_depth_and_policy_mode(
+        Self::new_with_options(
             descriptor,
             policy,
             session,
             schema,
             table_name,
-            branch,
-            initial_depth,
-            RowPolicyMode::PermissiveLocal,
+            PolicyFilterOptions {
+                branch: branch.into(),
+                initial_depth,
+                ..PolicyFilterOptions::default()
+            },
         )
     }
 
-    pub fn new_with_branch_and_depth_and_policy_mode(
+    fn new_with_options(
         descriptor: RowDescriptor,
         policy: PolicyExpr,
         session: Session,
         schema: Schema,
         table_name: impl Into<String>,
-        branch: impl Into<String>,
-        initial_depth: usize,
-        row_policy_mode: RowPolicyMode,
+        options: PolicyFilterOptions,
     ) -> Self {
         let table_name = table_name.into();
         let inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
@@ -159,9 +177,9 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            branch: branch.into(),
-            row_policy_mode,
-            initial_depth,
+            branch: options.branch,
+            row_policy_mode: options.row_policy_mode,
+            initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
             dirty: true,

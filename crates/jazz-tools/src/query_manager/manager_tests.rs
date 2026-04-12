@@ -235,7 +235,6 @@ fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_s
 }
 
 fn add_row_commit(
-    _qm: &mut QueryManager,
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
@@ -3652,11 +3651,13 @@ fn join_schema_with_magic_permissions() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("id", ColumnType::Integer),
-            ColumnDescriptor::new("name", ColumnType::Text),
-        ])
-        .into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let posts_descriptor = RowDescriptor::new(vec![
@@ -3666,6 +3667,7 @@ fn join_schema_with_magic_permissions() -> Schema {
     ]);
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let posts_policies = TablePolicies::new()
+        .with_select(owner_policy.clone())
         .with_update(Some(owner_policy.clone()), PolicyExpr::True)
         .with_delete(owner_policy);
     schema.insert(
@@ -6518,7 +6520,10 @@ fn join_policy_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
     schema.insert(
         TableName::new("posts"),
@@ -6614,7 +6619,10 @@ fn current_join_provenance_permission_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
         TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
     schema.insert(
         TableName::new("posts"),
@@ -7244,7 +7252,6 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     let user_id = create_test_row(&mut storage, Some(user_metadata));
     add_row_commit(
-        &mut server_qm,
         &mut storage,
         user_id,
         &branch,
@@ -7262,7 +7269,6 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
     let post_id = create_test_row(&mut storage, Some(post_metadata));
     add_row_commit(
-        &mut server_qm,
         &mut storage,
         post_id,
         &branch,

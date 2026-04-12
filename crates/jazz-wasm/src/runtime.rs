@@ -64,7 +64,7 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};

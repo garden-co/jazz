@@ -71,23 +71,6 @@ pub struct MagicColumnsNode {
 }
 
 impl MagicColumnsNode {
-    pub(crate) fn new(
-        input_tuple_descriptor: TupleDescriptor,
-        requests: &[MagicColumnRequest],
-        session: Option<Session>,
-        schema: Schema,
-        branch: impl Into<String>,
-    ) -> Option<Self> {
-        Self::new_with_policy_mode(
-            input_tuple_descriptor,
-            requests,
-            session,
-            schema,
-            branch,
-            RowPolicyMode::PermissiveLocal,
-        )
-    }
-
     pub(crate) fn new_with_policy_mode(
         input_tuple_descriptor: TupleDescriptor,
         requests: &[MagicColumnRequest],

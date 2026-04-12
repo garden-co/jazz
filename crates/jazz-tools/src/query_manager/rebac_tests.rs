@@ -141,7 +141,6 @@ fn row_version_id_for_commit(
 }
 
 fn add_row_commit(
-    _qm: &mut QueryManager,
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
