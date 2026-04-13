@@ -79,7 +79,7 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowSelfSigned: false`.
+- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
 - `dataPath` controls where local server state persists.
 
 Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
@@ -164,9 +164,9 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
 <Callout type="info">
   `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
-  Jazz self-signed dev token, which works because `allowSelfSigned` defaults to `true`. If you want
-  to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify them
-  via JWKS.
+  Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
+  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
+  them via JWKS.
 </Callout>
 
 ## Authentication

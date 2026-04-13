@@ -1,14 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { type DbConfig, LocalStorageAuthSecretStore } from "jazz-tools";
+import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
-
-const authSecretStore = new LocalStorageAuthSecretStore();
 
 function ChatShell(): React.JSX.Element {
   const db = useDb();
@@ -30,7 +28,7 @@ function ChatShell(): React.JSX.Element {
   }
 
   async function handleSignUp(email: string, password: string) {
-    const proofToken = await db.getSelfSignedToken({
+    const proofToken = await db.getLocalFirstIdentityProof({
       ttlSeconds: 60,
       audience: "betterauth-signup",
     });
@@ -54,7 +52,7 @@ function ChatShell(): React.JSX.Element {
 
   async function handleSignOut() {
     await authClient.signOut();
-    await authSecretStore.clearSecret();
+    await BrowserAuthSecretStore.clearSecret();
   }
 
   const authMode = session?.claims.auth_mode;
@@ -66,7 +64,7 @@ function ChatShell(): React.JSX.Element {
       </span>
       <section className="content-grid">
         <AuthCard
-          loggedIn={authState.status === "authenticated" && authMode !== "self-signed"}
+          loggedIn={authState.status === "authenticated" && authMode !== "local-first"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -144,9 +142,9 @@ export default function Page(): React.JSX.Element {
         if (ac.signal.aborted) return;
         setConfig({ ...sharedConfig, jwtToken: jwtToken! });
       } else {
-        const secret = await authSecretStore.getOrCreateSecret();
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
         if (ac.signal.aborted) return;
-        setConfig({ ...sharedConfig, auth: { seed: secret } });
+        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
       }
     }
 

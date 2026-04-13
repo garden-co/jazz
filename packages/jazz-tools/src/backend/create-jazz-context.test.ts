@@ -291,12 +291,12 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
       appId: "server-app",
       jwksUrl: undefined,
-      allowSelfSigned: true,
+      allowLocalFirstAuth: true,
     });
     expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(2, req, {
       appId: "server-app",
       jwksUrl: undefined,
-      allowSelfSigned: true,
+      allowLocalFirstAuth: true,
     });
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
@@ -332,7 +332,7 @@ describe("backend/create-jazz-context", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       jwksUrl: "https://issuer.example/.well-known/jwks.json",
-      allowSelfSigned: false,
+      allowLocalFirstAuth: false,
     });
 
     const req = {
@@ -345,7 +345,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
       appId: "server-app",
       jwksUrl: "https://issuer.example/.well-known/jwks.json",
-      allowSelfSigned: false,
+      allowLocalFirstAuth: false,
     });
   });
 

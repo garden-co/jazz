@@ -48,14 +48,14 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   tier?: "worker" | "edge" | "global";
   /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
   jwksUrl?: string;
-  /** Whether self-signed bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
-  allowSelfSigned?: boolean;
+  /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
+  allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
-  allowSelfSigned: boolean;
+  allowLocalFirstAuth: boolean;
 };
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
@@ -116,7 +116,7 @@ export class JazzContext {
     assertValidBackendConfig(config);
     this.config = {
       ...resolveLocalAuthDefaults(config),
-      allowSelfSigned: config.allowSelfSigned ?? true,
+      allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
     };
     this.defaultSchemaInput = config.app;
   }
@@ -261,7 +261,7 @@ export class JazzContext {
     return await resolveRequestSession(request, {
       appId: this.config.appId,
       jwksUrl: this.config.jwksUrl,
-      allowSelfSigned: this.config.allowSelfSigned,
+      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
     });
   }
 

@@ -28,7 +28,7 @@ function uint8ArrayToBase64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export interface LocalStorageAuthSecretStoreOptions {
+export interface BrowserAuthSecretStoreOptions {
   /** localStorage key name (default: "jazz-auth-secret") */
   key?: string;
   /** Override storage backend (for testing) */
@@ -38,18 +38,28 @@ export interface LocalStorageAuthSecretStoreOptions {
 /**
  * AuthSecretStore backed by localStorage.
  *
+ * Singleton — call static methods directly: `BrowserAuthSecretStore.getOrCreateSecret()`.
+ *
  * Uses a check-then-write pattern; not atomic across concurrent tabs on
  * first visit. Apps that need strict cross-tab guarantees can use a custom
  * AuthSecretStore with IndexedDB transactions or BroadcastChannel coordination.
  */
-export class LocalStorageAuthSecretStore implements AuthSecretStore {
+export class BrowserAuthSecretStore implements AuthSecretStore {
+  private static defaultInstance: BrowserAuthSecretStore | null = null;
   private readonly key: string;
   private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   private cachedPromise: Promise<string> | null = null;
 
-  constructor(options: LocalStorageAuthSecretStoreOptions = {}) {
+  constructor(options: BrowserAuthSecretStoreOptions = {}) {
     this.key = options.key ?? DEFAULT_KEY;
     this.storage = options.storage ?? globalThis.localStorage;
+  }
+
+  private static getDefault(): BrowserAuthSecretStore {
+    if (!BrowserAuthSecretStore.defaultInstance) {
+      BrowserAuthSecretStore.defaultInstance = new BrowserAuthSecretStore();
+    }
+    return BrowserAuthSecretStore.defaultInstance;
   }
 
   async loadSecret(): Promise<string | null> {
@@ -77,5 +87,21 @@ export class LocalStorageAuthSecretStore implements AuthSecretStore {
       }
     }
     return this.cachedPromise;
+  }
+
+  static loadSecret(): Promise<string | null> {
+    return BrowserAuthSecretStore.getDefault().loadSecret();
+  }
+
+  static saveSecret(secret: string): Promise<void> {
+    return BrowserAuthSecretStore.getDefault().saveSecret(secret);
+  }
+
+  static clearSecret(): Promise<void> {
+    return BrowserAuthSecretStore.getDefault().clearSecret();
+  }
+
+  static getOrCreateSecret(): Promise<string> {
+    return BrowserAuthSecretStore.getDefault().getOrCreateSecret();
   }
 }

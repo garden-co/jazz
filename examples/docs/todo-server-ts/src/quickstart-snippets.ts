@@ -13,7 +13,7 @@ const context = createJazzContext({
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
   jwksUrl: process.env.JAZZ_JWKS_URL,
-  allowSelfSigned: process.env.JAZZ_ALLOW_SELF_SIGNED !== "false",
+  allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false",
 });
 
 const api = new Hono();

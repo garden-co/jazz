@@ -14,7 +14,7 @@ export interface ClientSessionState {
   session: Session | null;
 }
 
-export const SELF_SIGNED_JWT_ISSUER = "urn:jazz:self-signed";
+export const LOCAL_FIRST_JWT_ISSUER = "urn:jazz:local-first";
 
 export interface JwtPayload {
   sub?: unknown;
@@ -297,7 +297,7 @@ export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.auth_mode = issuer === SELF_SIGNED_JWT_ISSUER ? "self-signed" : "external";
+  claims.auth_mode = issuer === LOCAL_FIRST_JWT_ISSUER ? "local-first" : "external";
   if (subject) claims.subject = subject;
   if (issuer) claims.issuer = issuer;
   if (!isRecord(claimsSource) && claimsSource !== undefined) {

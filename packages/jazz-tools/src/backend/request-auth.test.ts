@@ -8,11 +8,11 @@ const JWT_KID = "backend-request-test-kid";
 const JWT_SECRET = "backend-request-test-secret";
 
 const mocks = vi.hoisted(() => ({
-  verifySelfSignedToken: vi.fn(),
+  verifyLocalFirstIdentityProof: vi.fn(),
 }));
 
 vi.mock("jazz-napi", () => ({
-  verifySelfSignedToken: mocks.verifySelfSignedToken,
+  verifyLocalFirstIdentityProof: mocks.verifyLocalFirstIdentityProof,
 }));
 
 function base64Url(input: Buffer | string): string {
@@ -114,7 +114,7 @@ describe("backend request auth", () => {
   const servers = new Set<JwksServer>();
 
   beforeEach(() => {
-    mocks.verifySelfSignedToken.mockReset();
+    mocks.verifyLocalFirstIdentityProof.mockReset();
   });
 
   afterEach(async () => {
@@ -147,15 +147,15 @@ describe("backend request auth", () => {
     ).rejects.toThrow(/jwksUrl/i);
   });
 
-  it("accepts self-signed JWTs without jwksUrl and uses the shared session mapping", async () => {
-    const appId = "self-signed-backend-app";
+  it("accepts local-first JWTs without jwksUrl and uses the shared session mapping", async () => {
+    const appId = "local-first-backend-app";
     const userId = "11111111-1111-1111-1111-111111111111";
     const token = makeUnsignedJwt({
-      iss: "urn:jazz:self-signed",
+      iss: "urn:jazz:local-first",
       sub: userId,
-      auth_mode: "self-signed",
+      auth_mode: "local-first",
     });
-    mocks.verifySelfSignedToken.mockReturnValue({ ok: true, id: userId });
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: userId });
 
     await expect(
       resolveRequestSession(
@@ -171,19 +171,19 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       user_id: userId,
       claims: {
-        auth_mode: "self-signed",
+        auth_mode: "local-first",
         subject: userId,
-        issuer: "urn:jazz:self-signed",
+        issuer: "urn:jazz:local-first",
       },
     });
   });
 
-  it("rejects self-signed JWTs when allowSelfSigned is disabled", async () => {
-    const appId = "self-signed-disabled-app";
+  it("rejects local-first JWTs when allowLocalFirstAuth is disabled", async () => {
+    const appId = "local-first-disabled-app";
     const token = makeUnsignedJwt({
-      iss: "urn:jazz:self-signed",
+      iss: "urn:jazz:local-first",
       sub: "22222222-2222-2222-2222-222222222222",
-      auth_mode: "self-signed",
+      auth_mode: "local-first",
     });
 
     await expect(
@@ -195,10 +195,10 @@ describe("backend request auth", () => {
         },
         {
           appId,
-          allowSelfSigned: false,
+          allowLocalFirstAuth: false,
         },
       ),
-    ).rejects.toThrow(/self-signed/i);
+    ).rejects.toThrow(/local-first/i);
   });
 
   it("verifies external JWTs via JWKS and uses the shared session mapping", async () => {
