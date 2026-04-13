@@ -34,6 +34,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (same conventions as chat-app.test.tsx)
@@ -101,6 +102,7 @@ describe("Send permission — private chat INSERT policy", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     window.location.hash = "";
     for (const { root, container } of mounts) {
       try {
