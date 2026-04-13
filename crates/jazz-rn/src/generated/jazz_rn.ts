@@ -101,6 +101,24 @@ export function generateId(): string {
     )
   );
 }
+export function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: bigint): string /*throws*/ {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_jazz_rn_fn_func_mint_local_first_token(
+          FfiConverterString.lower(seedB64),
+          FfiConverterString.lower(audience),
+          FfiConverterInt64.lower(ttlSeconds),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
 
 export interface BatchedTickCallback {
   /**

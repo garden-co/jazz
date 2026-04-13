@@ -2,10 +2,11 @@
 
 // CLI for jazz-tools schema tooling
 
-import { access, mkdir, readFile, readdir, writeFile } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { createRequire } from "module";
+import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
+import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
-import { register as registerEsm } from "tsx/esm/api";
+import { build, type Plugin } from "esbuild";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -64,9 +65,40 @@ function parseArgs(): { command: string; options: BuildOptions } {
   return { command, options: { jazzBin, schemaDir } };
 }
 
-registerEsm();
-
 let importCounter = 0;
+
+function absoluteExternalsPlugin(sourceDir: string): Plugin {
+  const require = createRequire(join(sourceDir, "__virtual__.js"));
+  return {
+    name: "absolute-externals",
+    setup(pluginBuild) {
+      pluginBuild.onResolve({ filter: /^[^./]/ }, (args) => {
+        try {
+          const resolved = require.resolve(args.path);
+          return { path: pathToFileURL(resolved).href, external: true };
+        } catch {
+          return { path: args.path, external: true };
+        }
+      });
+    },
+  };
+}
+
+async function bundleToTempFile(filePath: string): Promise<string> {
+  const sourceDir = dirname(resolve(filePath));
+  const outFile = join(sourceDir, `.jazz-bundle-${++importCounter}.mjs`);
+
+  await build({
+    entryPoints: [resolve(filePath)],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: outFile,
+    plugins: [absoluteExternalsPlugin(sourceDir)],
+  });
+
+  return outFile;
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -1096,15 +1128,22 @@ function isDefinedMigration(value: unknown): value is DefinedMigration {
 }
 
 async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
-  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
-  const loaded = (await import(url)) as { default?: unknown; migration?: unknown };
-  const migration = loaded.default ?? loaded.migration;
-  if (!isDefinedMigration(migration)) {
-    throw new Error(
-      `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
-    );
+  const outFile = await bundleToTempFile(filePath);
+  try {
+    const loaded = (await import(pathToFileURL(outFile).href)) as {
+      default?: unknown;
+      migration?: unknown;
+    };
+    const migration = loaded.default ?? loaded.migration;
+    if (!isDefinedMigration(migration)) {
+      throw new Error(
+        `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
+      );
+    }
+    return migration;
+  } finally {
+    await rm(outFile, { force: true }).catch(() => undefined);
   }
-  return migration;
 }
 
 async function findMigrationFile(
