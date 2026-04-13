@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -153,23 +153,6 @@ function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, Policy
     _schema: schema,
     _rowType: undefined as unknown as PolicyTodo,
     _initType: undefined as unknown as PolicyTodoInit,
-  };
-}
-
-function makeAllPolicyTodosQuery(schema: WasmSchema): QueryBuilder<PolicyTodo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: undefined as unknown as PolicyTodo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        offset: 0,
-      });
-    },
   };
 }
 
@@ -528,7 +511,6 @@ class JwksServer {
             {
               kty: "oct",
               kid: JWT_KID,
-              alg: "HS256",
               k: base64Url(secret),
             },
           ],
@@ -597,7 +579,15 @@ function toBase64Url(value: unknown): string {
 }
 
 function makeJwt(payload: Record<string, unknown>): string {
-  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
+  const header = toBase64Url({ alg: "HS256", typ: "JWT", kid: JWT_KID });
+  const body = toBase64Url(payload);
+  const signature = createHmac("sha256", JWT_SECRET)
+    .update(`${header}.${body}`, "utf8")
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${header}.${body}.${signature}`;
 }
 
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
@@ -1142,6 +1132,7 @@ describe("NAPI integration", () => {
     const adminSecret = "napi-request-admin-secret";
     const scopeTag = `request-scope-${randomUUID()}`;
     let runtimeData: TempRuntimeData | null = null;
+    const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
@@ -1149,7 +1140,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1177,13 +1168,14 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
         tier: "worker",
       });
 
       const backendDb = context.asBackend();
-      const requestDb = context.forRequest({
+      const requestDb = await context.forRequest({
         headers: {
           authorization: `Bearer ${makeJwt({
             sub: "request-user",
@@ -1264,8 +1256,46 @@ describe("NAPI integration", () => {
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
       await server.stop();
+      await jwks.stop();
     }
   }, 60_000);
+
+  it("rejects external JWT request auth when createJazzContext has no jwksUrl", async () => {
+    const appId = randomUUID();
+    let runtimeData: TempRuntimeData | null = null;
+    let context: {
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      runtimeData = await createTempRuntimeData("jazz-napi-request-no-jwks-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+      });
+
+      await expect(
+        context.forRequest({
+          headers: {
+            authorization: `Bearer ${makeJwt({
+              sub: "request-user",
+              claims: { role: "reviewer", tenant: "beta" },
+            })}`,
+          },
+        }),
+      ).rejects.toThrow(/jwksUrl/i);
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await cleanupTempRuntimeData(runtimeData);
+    }
+  });
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
     const appId = randomUUID();
@@ -1290,7 +1320,7 @@ describe("NAPI integration", () => {
     let readerContext: {
       asBackend(): Db;
       forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const operationTimeoutMs = 20_000;
@@ -1338,6 +1368,7 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1431,7 +1462,7 @@ describe("NAPI integration", () => {
         user_id: "alice",
         claims: {},
       });
-      const aliceRequestDb = readerContext.forRequest({
+      const aliceRequestDb = await readerContext.forRequest({
         headers: {
           authorization: `Bearer ${makeJwt({ sub: "alice" })}`,
         },

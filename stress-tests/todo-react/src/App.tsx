@@ -1,11 +1,7 @@
-import { useState, useEffect } from "react";
-import {
-  JazzProvider,
-  getActiveSyntheticAuth,
-  attachDevTools,
-  useJazzClient,
-} from "jazz-tools/react";
+import { useState, useEffect, use, Suspense } from "react";
+import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { LocalStorageAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
 import { app } from "../schema";
@@ -73,24 +69,34 @@ if (!serverUrl) {
   throw new Error("JAZZ_SERVER_URL is required");
 }
 
-const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-const config: DbConfig = {
-  appId,
-  env: import.meta.env.DEV ? "dev" : "prod",
-  userBranch: "main",
-  devMode: import.meta.env.DEV,
-  localAuthMode: active.localAuthMode,
-  localAuthToken: active.localAuthToken,
-  serverUrl,
-};
+const authSecretStore = new LocalStorageAuthSecretStore();
+const secretPromise = authSecretStore.getOrCreateSecret();
 
-// #region context-setup-react
-export function App() {
+function AppInner() {
+  const secret = use(secretPromise);
+  const config: DbConfig = {
+    appId,
+    env: import.meta.env.DEV ? "dev" : "prod",
+    userBranch: "main",
+    devMode: import.meta.env.DEV,
+    auth: { seed: secret },
+    serverUrl,
+  };
+
   return (
     <JazzProvider config={config} fallback={<p>Loading...</p>}>
       <DevToolsRegistration />
       <Router />
     </JazzProvider>
+  );
+}
+
+// #region context-setup-react
+export function App() {
+  return (
+    <Suspense fallback={<p>Loading...</p>}>
+      <AppInner />
+    </Suspense>
   );
 }
 // #endregion context-setup-react

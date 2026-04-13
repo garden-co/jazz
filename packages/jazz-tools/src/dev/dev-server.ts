@@ -28,6 +28,7 @@ export interface StartLocalJazzServerOptions {
   allowDemo?: boolean;
   backendSecret?: string;
   adminSecret?: string;
+  allowSelfSigned?: boolean;
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
@@ -111,6 +112,7 @@ export async function startLocalJazzServer(
       allowDemo: options.allowDemo,
       backendSecret: options.backendSecret,
       adminSecret: options.adminSecret,
+      allowSelfSigned: options.allowSelfSigned,
       catalogueAuthority: options.catalogueAuthority,
       catalogueAuthorityUrl: options.catalogueAuthorityUrl,
       catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,

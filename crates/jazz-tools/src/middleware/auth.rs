@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::identity;
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
 use crate::server::ServerState;
@@ -73,6 +74,8 @@ pub struct AuthConfig {
     pub allow_anonymous: bool,
     /// Whether demo local auth mode is allowed.
     pub allow_demo: bool,
+    /// Whether self-signed Ed25519 JWT auth is allowed (default: true for new apps).
+    pub allow_self_signed: bool,
     /// Secret for backend session impersonation.
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
@@ -82,7 +85,10 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
-        self.jwks_url.is_some() || self.backend_secret.is_some() || self.admin_secret.is_some()
+        self.jwks_url.is_some()
+            || self.allow_self_signed
+            || self.backend_secret.is_some()
+            || self.admin_secret.is_some()
     }
 
     pub fn is_local_mode_enabled(&self, mode: LocalAuthMode) -> bool {
@@ -759,6 +765,25 @@ pub fn parse_local_auth_headers(
     }
 }
 
+/// Check if a JWT has iss = "urn:jazz:self-signed" by decoding claims without verification.
+fn is_self_signed_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let Ok(claims_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) else {
+        return false;
+    };
+    #[derive(serde::Deserialize)]
+    struct IssOnly {
+        iss: Option<String>,
+    }
+    let Ok(claims) = serde_json::from_slice::<IssOnly>(&claims_bytes) else {
+        return false;
+    };
+    claims.iss.as_deref() == Some(identity::SELF_SIGNED_ISSUER)
+}
+
 /// Extract session from headers with priority resolution.
 ///
 /// Priority:
@@ -820,6 +845,24 @@ pub async fn extract_session(
             return Err(UnauthenticatedResponse::invalid("Empty bearer token"));
         }
 
+        // Self-signed JWT path
+        if is_self_signed_token(token) {
+            if !config.allow_self_signed {
+                return Err(UnauthenticatedResponse::disabled(
+                    "Self-signed auth is not enabled for this app",
+                ));
+            }
+            let verified = identity::verify_self_signed_token(token, &app_id.to_string())
+                .map_err(UnauthenticatedResponse::invalid)?;
+            return Ok(Some(Session {
+                user_id: verified.user_id,
+                claims: serde_json::json!({
+                    "auth_mode": "self-signed",
+                }),
+            }));
+        }
+
+        // JWKS JWT path
         let jwt_result = if let Some(cache) = jwks_cache {
             validate_jwt_with_cache(token, cache).await
         } else {
@@ -948,6 +991,7 @@ mod tests {
             jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
             allow_anonymous: true,
             allow_demo: true,
+            allow_self_signed: false,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
         }
@@ -1314,5 +1358,82 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.code, UnauthenticatedCode::Disabled);
         assert_eq!(error.message, "Demo auth disabled");
+    }
+
+    // Self-signed auth tests
+
+    fn alice_seed() -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        seed[0] = 0xAA;
+        seed[31] = 0x01;
+        seed
+    }
+
+    fn make_self_signed_config() -> AuthConfig {
+        AuthConfig {
+            jwks_url: None,
+            allow_anonymous: false,
+            allow_demo: false,
+            allow_self_signed: true,
+            backend_secret: None,
+            admin_secret: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn self_signed_jwt_authenticates() {
+        let seed = alice_seed();
+        let app_id = test_app_id();
+        let token = identity::mint_self_signed_token(&seed, &app_id.to_string(), 3600).unwrap();
+        let config = make_self_signed_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let session = extract_session(&headers, app_id, &config, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.user_id, identity::derive_user_id(&seed).to_string());
+    }
+
+    #[tokio::test]
+    async fn self_signed_jwt_wrong_audience_rejected() {
+        let token = identity::mint_self_signed_token(&alice_seed(), "wrong-app", 3600).unwrap();
+        let config = make_self_signed_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn self_signed_disabled_rejects() {
+        let app_id = test_app_id();
+        let token =
+            identity::mint_self_signed_token(&alice_seed(), &app_id.to_string(), 3600).unwrap();
+        let mut config = make_self_signed_config();
+        config.allow_self_signed = false;
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let result = extract_session(&headers, app_id, &config, None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn non_self_signed_iss_does_not_use_self_signed_path() {
+        let config = make_self_signed_config();
+        let claims = JwtClaims {
+            sub: "user-123".to_string(),
+            iss: Some("https://auth.example.com".to_string()),
+            jazz_principal_id: None,
+            claims: serde_json::json!({}),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        // Should fail because no JWKS configured in self_signed_config
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
+        assert!(result.is_err());
     }
 }

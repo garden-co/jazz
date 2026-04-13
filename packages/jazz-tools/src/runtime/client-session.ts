@@ -14,11 +14,14 @@ export interface ClientSessionState {
   session: Session | null;
 }
 
-interface JwtPayload {
+export const SELF_SIGNED_JWT_ISSUER = "urn:jazz:self-signed";
+
+export interface JwtPayload {
   sub?: unknown;
   iss?: unknown;
   jazz_principal_id?: unknown;
   claims?: unknown;
+  exp?: unknown;
 }
 
 interface BufferLike {
@@ -106,7 +109,7 @@ function decodeBase64ToUtf8(base64: string): string | null {
   return null;
 }
 
-function parseJwtPayload(jwtToken: string): JwtPayload | null {
+export function parseJwtPayload(jwtToken: string): JwtPayload | null {
   const token = trimOptional(jwtToken);
   if (!token) return null;
 
@@ -286,10 +289,7 @@ export function deriveLocalPrincipalIdSync(
   return encodeLocalPrincipalId(sha256PureJs(input));
 }
 
-export function resolveJwtSession(jwtToken: string): Session | null {
-  const payload = parseJwtPayload(jwtToken);
-  if (!payload) return null;
-
+export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   const subject = asNonEmptyString(payload.sub);
   const issuer = asNonEmptyString(payload.iss);
   const principalId = asNonEmptyString(payload.jazz_principal_id) ?? subject;
@@ -297,7 +297,7 @@ export function resolveJwtSession(jwtToken: string): Session | null {
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.auth_mode = "external";
+  claims.auth_mode = issuer === SELF_SIGNED_JWT_ISSUER ? "self-signed" : "external";
   if (subject) claims.subject = subject;
   if (issuer) claims.issuer = issuer;
   if (!isRecord(claimsSource) && claimsSource !== undefined) {
@@ -308,6 +308,12 @@ export function resolveJwtSession(jwtToken: string): Session | null {
     user_id: principalId,
     claims,
   };
+}
+
+export function resolveJwtSession(jwtToken: string): Session | null {
+  const payload = parseJwtPayload(jwtToken);
+  if (!payload) return null;
+  return sessionFromJwtPayload(payload);
 }
 
 /**

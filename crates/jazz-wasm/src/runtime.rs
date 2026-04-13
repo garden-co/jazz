@@ -55,6 +55,9 @@ fn wasm_log_level_from_global() -> tracing::Level {
     }
 }
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
@@ -1417,5 +1420,44 @@ impl WasmRuntime {
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
+    }
+}
+
+fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| JsError::new(&format!("seed base64 decode error: {e}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("seed must be exactly 32 bytes"))?;
+    Ok(arr)
+}
+
+#[wasm_bindgen]
+impl WasmRuntime {
+    #[wasm_bindgen(js_name = "deriveUserId")]
+    pub fn derive_user_id_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let user_id = identity::derive_user_id(&seed);
+        Ok(user_id.to_string())
+    }
+
+    #[wasm_bindgen(js_name = "mintSelfSignedToken")]
+    pub fn mint_self_signed_token_static(
+        seed_b64: &str,
+        audience: &str,
+        ttl_seconds: u64,
+        now_seconds: u64,
+    ) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        identity::mint_self_signed_token_at(&seed, audience, ttl_seconds, now_seconds)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
+    pub fn get_public_key_b64_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let verifying_key = identity::derive_verifying_key(&seed);
+        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 }

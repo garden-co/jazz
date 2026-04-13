@@ -512,7 +512,6 @@ class JwksServer {
           {
             kty: "oct",
             kid: JWT_KID,
-            alg: "HS256",
             k: base64url(secret),
           },
         ],

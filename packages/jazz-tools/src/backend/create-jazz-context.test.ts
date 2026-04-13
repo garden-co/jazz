@@ -7,6 +7,7 @@ import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
   const resolveLocalAuthDefaults = vi.fn();
+  const resolveRequestSession = vi.fn();
   const runtimeCtor = vi.fn();
   const inMemoryRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ flush: ReturnType<typeof vi.fn> }> = [];
@@ -79,6 +80,7 @@ const mocks = vi.hoisted(() => {
     MockNapiRuntime,
     MockJazzClient,
     resolveLocalAuthDefaults,
+    resolveRequestSession,
     runtimeCtor,
     inMemoryRuntimeCtor,
     runtimeInstances,
@@ -88,6 +90,7 @@ const mocks = vi.hoisted(() => {
     createdDbs,
     reset() {
       resolveLocalAuthDefaults.mockReset();
+      resolveRequestSession.mockReset();
       runtimeCtor.mockReset();
       inMemoryRuntimeCtor.mockReset();
       runtimeInstances.length = 0;
@@ -113,6 +116,10 @@ vi.mock("../runtime/client.js", async () => {
 
 vi.mock("../runtime/local-auth.js", () => ({
   resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
+}));
+
+vi.mock("./request-auth.js", () => ({
+  resolveRequestSession: mocks.resolveRequestSession,
 }));
 
 vi.mock("../runtime/db.js", () => ({
@@ -188,6 +195,10 @@ describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
     mocks.resolveLocalAuthDefaults.mockImplementation((config) => config);
+    mocks.resolveRequestSession.mockResolvedValue({
+      user_id: "u1",
+      claims: {},
+    });
   });
 
   it("BC-U01: lazily initializes runtime/client on first access", () => {
@@ -219,7 +230,7 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U02: supports high-level db/backend/request/session/attribution helpers", () => {
+  it("BC-U02: supports high-level db/backend/request/session/attribution helpers", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -237,11 +248,11 @@ describe("backend/create-jazz-context", () => {
 
     const db = context.db();
     const backendDb = context.asBackend();
-    const requestDb = context.forRequest(req);
+    const requestDb = await context.forRequest(req);
     const sessionDb = context.forSession(session);
     const attributedDb = context.withAttribution("u2");
     const attributedSessionDb = context.withAttributionForSession(session);
-    const attributedRequestDb = context.withAttributionForRequest(req);
+    const attributedRequestDb = await context.withAttributionForRequest(req);
 
     expect(db).toEqual({
       kind: "db",
@@ -276,12 +287,23 @@ describe("backend/create-jazz-context", () => {
       client: mocks.clients[0]!,
       attribution: "u1",
     });
+    expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
+      appId: "server-app",
+      jwksUrl: undefined,
+      allowSelfSigned: true,
+    });
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(2, req, {
+      appId: "server-app",
+      jwksUrl: undefined,
+      allowSelfSigned: true,
+    });
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
     expect(mocks.createDbFromClient).toHaveBeenCalledTimes(7);
   });
 
-  it("BC-U03: request/session/attribution helpers work locally without backend sync config", () => {
+  it("BC-U03: request/session/attribution helpers work locally without backend sync config", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -295,12 +317,36 @@ describe("backend/create-jazz-context", () => {
     };
     const session: Session = { user_id: "u1", claims: {} };
 
-    expect(() => context.forRequest(req)).not.toThrow();
+    await expect(context.forRequest(req)).resolves.toBeDefined();
     expect(() => context.forSession(session)).not.toThrow();
     expect(() => context.withAttribution("u2")).not.toThrow();
     expect(() => context.withAttributionForSession(session)).not.toThrow();
-    expect(() => context.withAttributionForRequest(req)).not.toThrow();
+    await expect(context.withAttributionForRequest(req)).resolves.toBeDefined();
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
+  });
+
+  it("BC-U03b: forwards backend request auth config into request session resolution", async () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      jwksUrl: "https://issuer.example/.well-known/jwks.json",
+      allowSelfSigned: false,
+    });
+
+    const req = {
+      header: (name: string) =>
+        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
+    };
+
+    await context.forRequest(req);
+
+    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
+      appId: "server-app",
+      jwksUrl: "https://issuer.example/.well-known/jwks.json",
+      allowSelfSigned: false,
+    });
   });
 
   it("BC-U04: merges compiled permissions into the runtime schema", () => {
