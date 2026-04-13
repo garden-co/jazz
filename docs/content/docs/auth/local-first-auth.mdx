@@ -1,0 +1,113 @@
+---
+title: Local-first auth
+description: "Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
+---
+
+Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Users can later sign up with an external provider like [BetterAuth](https://www.better-auth.com/) and keep the same identity.
+
+| Mode          | Identity source         | Server needed? | Best for                                               |
+| ------------- | ----------------------- | -------------- | ------------------------------------------------------ |
+| `local-first` | Secret stored on device | No             | Production offline-first apps, try-before-signup flows |
+| `external`    | JWT from auth provider  | Yes            | Production apps with real user accounts                |
+
+## Client setup
+
+Use `BrowserAuthSecretStore` to persist the user's secret across sessions. On first load it generates a new identity; on subsequent loads it reuses the stored one.
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/auth-betterauth-chat/src/docs/local-first-client-snippet.tsx#local-first-client-setup
+</include>
+
+<Callout type="warn">
+  The secret is the user's identity. If it's lost (e.g. `localStorage` cleared), the identity is
+  gone and any data owned by that user becomes inaccessible. For durable identity, upgrade to an
+  external provider.
+</Callout>
+
+## Server configuration
+
+Local-first auth is enabled by default in development. In production, enable it explicitly:
+
+```bash
+jazz-server --allow-local-first-auth
+```
+
+No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.
+
+## Signing up with BetterAuth
+
+Users can try your app before creating an account. When they sign up later through BetterAuth, all the data they created carries over — same account, nothing lost.
+
+<Mermaid chart={`
+sequenceDiagram
+    participant Client
+    participant BetterAuth as BetterAuth server
+
+    Note over Client: User starts with local-first auth
+    Client->>Client: db.getLocalFirstIdentityProof()
+    Client->>BetterAuth: Sign up (email + proofToken)
+    BetterAuth->>BetterAuth: Verify proof, create user with same ID
+    BetterAuth-->>Client: Session + JWT
+    Note over Client: Same user ID, now with an account
+
+`} />
+
+### Generating the proof token
+
+Before calling your sign-up endpoint, the client generates a short-lived proof that it owns the current Jazz identity:
+
+<include cwd lang="tsx" meta='title="SignUp.tsx"'>
+  ../examples/auth-betterauth-chat/src/docs/local-first-proof-snippet.tsx#local-first-proof-signup
+</include>
+
+The `audience` should match what the server expects when verifying. The `ttlSeconds` keeps the window short — 60 seconds is enough for a sign-up round-trip.
+
+### Verifying on sign-up
+
+On the server, a BetterAuth middleware hook intercepts sign-up requests, verifies the proof token, and assigns the proven Jazz user ID to the new BetterAuth user:
+
+<include cwd lang="ts" meta='title="src/lib/auth.ts"'>
+  ../examples/auth-betterauth-chat/src/docs/local-first-server-snippet.ts#local-first-verify-hook
+</include>
+
+`verifyLocalFirstIdentityProof` from `jazz-napi` checks that the proof token is valid and extracts the user ID. The `databaseHooks.user.create.before` hook then assigns that same ID to the new BetterAuth user, so the identity carries over.
+
+### Config resolution
+
+The app switches between local-first auth and external JWT based on whether the user has a BetterAuth session:
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/auth-betterauth-chat/src/docs/local-first-proof-snippet.tsx#local-first-config-resolution
+</include>
+
+## Permissions by auth mode
+
+You can restrict what local-first users can do until they sign up. Define an `isLocalFirstAuthMode` check in your permissions and use it to gate writes:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/auth-betterauth-chat/src/docs/local-first-permissions-snippet.ts#local-first-permissions
+</include>
+
+## Under the hood
+
+Local-first auth uses Ed25519 cryptography to derive a stable identity from a secret:
+
+1. A 32-byte **seed** is hashed with SHA-512 to produce an Ed25519 **signing key**.
+2. The corresponding **public key** (32 bytes) is extracted.
+3. A deterministic **user ID** is derived from the public key using UUIDv5 (namespace `jazz-auth-key-v1`).
+4. The client mints a **self-signed JWT** with:
+   - `alg: "EdDSA"` — Ed25519 signature
+   - `iss: "urn:jazz:local-first"` — identifies the token as local-first
+   - `sub: <user_id>` — the derived user ID
+   - `jazz_pub_key: <base64url>` — the embedded public key
+   - `aud: <app_id>` — scoped to the app
+
+The server verifies the signature using the embedded public key, re-derives the user ID, and confirms it matches `sub`. No external key store is involved — the token is fully self-contained.
+
+Same seed always produces the same user ID, across devices and time.
+
+## Next steps
+
+- [Sessions](/docs/auth/sessions) — read the current user and scope queries to their identity
+- [Permissions](/docs/auth/permissions) — define row-level access policies
+- [Auth provider integration](/docs/recipes/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider

@@ -1,7 +1,7 @@
 import { useState, useEffect, use, Suspense } from "react";
 import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { LocalStorageAuthSecretStore } from "jazz-tools";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
 import { app } from "../schema";
@@ -69,11 +69,8 @@ if (!serverUrl) {
   throw new Error("JAZZ_SERVER_URL is required");
 }
 
-const authSecretStore = new LocalStorageAuthSecretStore();
-const secretPromise = authSecretStore.getOrCreateSecret();
-
 function AppInner() {
-  const secret = use(secretPromise);
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
   const config: DbConfig = {
     appId,
     env: import.meta.env.DEV ? "dev" : "prod",

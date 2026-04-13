@@ -1,14 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { type DbConfig, LocalStorageAuthSecretStore } from "jazz-tools";
+import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
-
-const authSecretStore = new LocalStorageAuthSecretStore();
 
 function ChatShell(): React.JSX.Element {
   const db = useDb();
@@ -54,7 +52,7 @@ function ChatShell(): React.JSX.Element {
 
   async function handleSignOut() {
     await authClient.signOut();
-    await authSecretStore.clearSecret();
+    await BrowserAuthSecretStore.clearSecret();
   }
 
   const authMode = session?.claims.auth_mode;
@@ -144,7 +142,7 @@ export default function Page(): React.JSX.Element {
         if (ac.signal.aborted) return;
         setConfig({ ...sharedConfig, jwtToken: jwtToken! });
       } else {
-        const secret = await authSecretStore.getOrCreateSecret();
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
         if (ac.signal.aborted) return;
         setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
       }
