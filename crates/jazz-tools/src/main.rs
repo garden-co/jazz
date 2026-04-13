@@ -28,6 +28,13 @@ fn resolve_node_env_mode() -> NodeEnvMode {
     }
 }
 
+fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> bool {
+    match mode {
+        NodeEnvMode::Production => enabled_in_production,
+        NodeEnvMode::DevelopmentLike => true,
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "jazz-tools")]
 #[command(bin_name = "jazz-tools")]
@@ -83,6 +90,12 @@ enum Commands {
         #[arg(long, env = "JAZZ_ALLOW_DEMO")]
         allow_demo: bool,
 
+        /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
+        ///
+        /// Required in NODE_ENV=production.
+        #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
+        allow_local_first_auth: bool,
+
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
         backend_secret: Option<String>,
@@ -136,6 +149,7 @@ async fn main() {
             jwks_url,
             allow_anonymous,
             allow_demo,
+            allow_local_first_auth,
             backend_secret,
             admin_secret,
             catalogue_authority,
@@ -143,20 +157,16 @@ async fn main() {
             catalogue_authority_admin_secret,
         } => {
             let node_env_mode = resolve_node_env_mode();
-            let allow_anonymous = match node_env_mode {
-                NodeEnvMode::Production => allow_anonymous,
-                NodeEnvMode::DevelopmentLike => true,
-            };
-            let allow_demo = match node_env_mode {
-                NodeEnvMode::Production => allow_demo,
-                NodeEnvMode::DevelopmentLike => true,
-            };
+            let allow_anonymous = resolve_dev_default_flag(node_env_mode, allow_anonymous);
+            let allow_demo = resolve_dev_default_flag(node_env_mode, allow_demo);
+            let allow_local_first_auth =
+                resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
 
             let auth_config = AuthConfig {
                 jwks_url,
                 allow_anonymous,
                 allow_demo,
-                allow_local_first_auth: true,
+                allow_local_first_auth,
                 backend_secret,
                 admin_secret,
             };
@@ -213,6 +223,44 @@ fn make_env_filter() -> tracing_subscriber::EnvFilter {
         .add_directive("jazz=info".parse().unwrap())
         .add_directive("jazz_tools=info".parse().unwrap())
         .add_directive("tower_http=debug".parse().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_command_parses_allow_local_first_auth_flag() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--allow-local-first-auth",
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                allow_local_first_auth,
+                ..
+            } => assert!(allow_local_first_auth),
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn dev_defaults_enable_local_first_auth() {
+        assert!(resolve_dev_default_flag(
+            NodeEnvMode::DevelopmentLike,
+            false
+        ));
+    }
+
+    #[test]
+    fn production_requires_explicit_local_first_opt_in() {
+        assert!(!resolve_dev_default_flag(NodeEnvMode::Production, false));
+        assert!(resolve_dev_default_flag(NodeEnvMode::Production, true));
+    }
 }
 
 #[cfg(feature = "otel")]

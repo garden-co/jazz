@@ -78,9 +78,10 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 export declare function parseSchema(json: string): any
 
-export declare function verifyLocalFirstIdentityProof(token: string, expectedAudience: string): VerifyTokenResult
+export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {
   ok: boolean
   id: string
+  error?: string
 }

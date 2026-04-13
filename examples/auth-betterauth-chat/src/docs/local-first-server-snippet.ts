@@ -20,23 +20,14 @@ export const auth = betterAuth({
     before: createAuthMiddleware(async (ctx) => {
       if (ctx.path !== "/sign-up/email") return;
 
-      const proofToken = ctx.body?.proofToken;
-      if (!proofToken) {
-        throw new APIError("BAD_REQUEST", {
-          message: "proofToken is required for sign-up",
-        });
-      }
-
-      // Verify the proof token using Jazz's NAPI binding
       const { verifyLocalFirstIdentityProof } = await import("jazz-napi");
-      const { ok, id: provedUserId } = verifyLocalFirstIdentityProof(
-        proofToken,
-        "betterauth-signup",
-      );
+      const {
+        ok,
+        error,
+        id: provedUserId,
+      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "betterauth-signup");
       if (!ok) {
-        throw new APIError("UNAUTHORIZED", {
-          message: "Invalid proof token",
-        });
+        throw new APIError("BAD_REQUEST", { message: error });
       }
 
       return {

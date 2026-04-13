@@ -55,7 +55,7 @@ export interface TodoServerConfig {
   backendSecret?: string;
   adminSecret?: string;
   jwksUrl?: string;
-  allowSelfSigned?: boolean;
+  allowLocalFirst?: boolean;
 }
 
 // ============================================================================
@@ -75,7 +75,8 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
   const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
-  const allowSelfSigned = config.allowSelfSigned ?? process.env.JAZZ_ALLOW_SELF_SIGNED !== "false";
+  const allowLocalFirst =
+    config.allowLocalFirst ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
 
   if (!serverUrl || !backendSecret) {
     throw new Error(
@@ -93,7 +94,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     backendSecret,
     adminSecret,
     jwksUrl,
-    allowSelfSigned,
+    allowLocalFirst,
     env: "dev",
     userBranch: "main",
   });

@@ -29,7 +29,7 @@ Use `BrowserAuthSecretStore` to persist the user's secret across sessions. On fi
 Local-first auth is enabled by default in development. In production, enable it explicitly:
 
 ```bash
-jazz-server --allow-local-first-auth
+jazz-tools server <APP_ID> --allow-local-first-auth
 ```
 
 No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.
@@ -70,7 +70,7 @@ On the server, a BetterAuth middleware hook intercepts sign-up requests, verifie
   ../examples/auth-betterauth-chat/src/docs/local-first-server-snippet.ts#local-first-verify-hook
 </include>
 
-`verifyLocalFirstIdentityProof` from `jazz-napi` checks that the proof token is valid and extracts the user ID. The `databaseHooks.user.create.before` hook then assigns that same ID to the new BetterAuth user, so the identity carries over.
+`verifyLocalFirstIdentityProof` from `jazz-napi` handles validation — it returns `{ ok, id, error }`. If the token is missing or invalid, `error` contains the reason. The `databaseHooks.user.create.before` hook assigns the proven ID to the new BetterAuth user, so the identity carries over.
 
 ### Config resolution
 
