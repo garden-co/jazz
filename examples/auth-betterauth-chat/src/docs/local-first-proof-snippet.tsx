@@ -1,4 +1,4 @@
-import { use, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useDb } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "../lib/auth-client";
