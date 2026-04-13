@@ -3,7 +3,7 @@ title: Local-first auth
 description: "Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
 ---
 
-Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Users can later sign up with an external provider like [BetterAuth](https://www.better-auth.com/) and keep the same identity.
+Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Without a recovery mechanism, that identity lives only on the device — if the secret is lost, it's gone. Linking to an external provider at sign-up is one way to make the identity durable and recoverable.
 
 | Mode          | Identity source         | Server needed? | Best for                                               |
 | ------------- | ----------------------- | -------------- | ------------------------------------------------------ |
@@ -87,6 +87,43 @@ You can restrict what local-first users can do until they sign up. Define an `is
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/auth-betterauth-chat/src/docs/local-first-permissions-snippet.ts#local-first-permissions
 </include>
+
+## Signing up with other providers
+
+The BetterAuth example above uses a framework-specific middleware hook. With any other provider the pattern is the same — you need a server endpoint that:
+
+1. Accepts `proofToken` alongside the sign-up credentials
+2. Verifies it with `verifyLocalFirstIdentityProof` from `jazz-napi`
+3. Stores the proven Jazz user ID linked to the new user account
+4. Issues JWTs with that ID as the `sub` claim
+
+```ts title="server.ts"
+import { verifyLocalFirstIdentityProof } from "jazz-napi";
+
+// POST /signup
+app.post("/signup", async (req, res) => {
+  const { email, password, proofToken } = req.body;
+
+  const {
+    ok,
+    id: jazzUserId,
+    error,
+  } = verifyLocalFirstIdentityProof(
+    proofToken,
+    "my-app-signup", // must match the audience used on the client
+  );
+  if (!ok) return res.status(400).json({ error });
+
+  // Store jazzUserId so you can include it as `sub` in future JWTs
+  const user = await db.users.create({ email, password, jazzId: jazzUserId });
+
+  res.json({ token: issueJwt({ sub: user.jazzId /* ... */ }) });
+});
+```
+
+The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
+
+For managed providers (Auth0, WorkOS, Clerk) that don't let you intercept sign-up directly, call a dedicated `/link-jazz-identity` endpoint immediately after the provider completes sign-up, store the Jazz ID in user metadata, and issue your JWTs with that ID as `sub`.
 
 ## Under the hood
 
