@@ -1080,7 +1080,12 @@ fn latest_visible_version_after_append<H: Storage>(
     }
 
     let Some(previous_winner) = io
-        .load_history_row_version(table, appended_row.row_id, previous_winner_id)
+        .load_history_row_version(
+            table,
+            appended_row.branch.as_str(),
+            appended_row.row_id,
+            previous_winner_id,
+        )
         .map_err(RowHistoryError::StorageError)?
     else {
         return Err(RowHistoryError::StorageError(StorageError::IoError(
@@ -1192,7 +1197,12 @@ fn winner_after_tier_upgrade<H: Storage>(
     }
 
     let Some(previous_winner) = io
-        .load_history_row_version(table, patched_row.row_id, previous_winner_id)
+        .load_history_row_version(
+            table,
+            patched_row.branch.as_str(),
+            patched_row.row_id,
+            previous_winner_id,
+        )
         .map_err(RowHistoryError::StorageError)?
     else {
         return Err(RowHistoryError::StorageError(StorageError::IoError(
@@ -1296,7 +1306,7 @@ pub fn apply_row_version<H: Storage>(
 
     for parent in &row.parents {
         if io
-            .load_history_row_version(&table, object_id, *parent)
+            .load_history_row_version(&table, branch_name.as_str(), object_id, *parent)
             .map_err(RowHistoryError::StorageError)?
             .is_none()
         {
@@ -1305,7 +1315,7 @@ pub fn apply_row_version<H: Storage>(
     }
 
     if io
-        .load_history_row_version(&table, object_id, version_id)
+        .load_history_row_version(&table, branch_name.as_str(), object_id, version_id)
         .map_err(RowHistoryError::StorageError)?
         .is_some()
     {
@@ -1367,7 +1377,7 @@ pub fn patch_row_version_state<H: Storage>(
         .map(|entry| entry.current_row.clone());
 
     let mut patched_row = io
-        .load_history_row_version(&table, object_id, version_id)
+        .load_history_row_version(&table, branch_name.as_str(), object_id, version_id)
         .map_err(RowHistoryError::StorageError)?
         .ok_or(RowHistoryError::ObjectNotFound(object_id))?;
     if patched_row.branch.as_str() != branch_name.as_str() {

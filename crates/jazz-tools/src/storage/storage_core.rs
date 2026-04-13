@@ -115,7 +115,7 @@ pub(super) fn append_history_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, row.row_id, row.version_id);
+        let key = history_row_key(table, row.row_id, row.branch, row.version_id);
         set(&key, row.bytes)?;
     }
     Ok(())
@@ -140,11 +140,12 @@ pub(super) fn upsert_visible_region_row_bytes_core(
 #[allow(dead_code)]
 pub(super) fn load_history_row_version_bytes_core(
     table: &str,
+    branch: &str,
     row_id: ObjectId,
     version_id: CommitId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = history_row_key(table, row_id, version_id);
+    let key = history_row_key(table, row_id, branch, version_id);
     get(&key)
 }
 

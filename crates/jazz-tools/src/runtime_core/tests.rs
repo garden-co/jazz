@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::{CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission};
 use crate::commit::CommitId;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
@@ -6,9 +7,10 @@ use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
+use crate::row_format::encode_row;
 use crate::schema_manager::AppId;
 use crate::storage::{
-    MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, Storage, StorageError,
+    MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, RowLocator, Storage, StorageError,
 };
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
@@ -45,6 +47,11 @@ struct RowMutationObservingStorage {
     calls: Arc<Mutex<RowMutationCallCounts>>,
 }
 
+#[derive(Clone, Default)]
+struct CountingScheduler {
+    schedule_calls: Arc<Mutex<usize>>,
+}
+
 impl RowRegionReadFailingStorage {
     fn new() -> Self {
         Self {
@@ -68,6 +75,18 @@ impl RowMutationObservingStorage {
             inner: MemoryStorage::new(),
             calls,
         }
+    }
+}
+
+impl CountingScheduler {
+    fn schedule_count(&self) -> usize {
+        *self.schedule_calls.lock().unwrap()
+    }
+}
+
+impl Scheduler for CountingScheduler {
+    fn schedule_batched_tick(&self) {
+        *self.schedule_calls.lock().unwrap() += 1;
     }
 }
 
@@ -226,11 +245,12 @@ impl Storage for RowRegionReadFailingStorage {
     fn load_history_row_version_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, row_id, version_id)
+            .load_history_row_version_bytes(table, branch, row_id, version_id)
     }
 
     fn scan_history_region_bytes(
@@ -465,11 +485,12 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn load_history_row_version_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, row_id, version_id)
+            .load_history_row_version_bytes(table, branch, row_id, version_id)
     }
 
     fn scan_history_region_bytes(
@@ -716,11 +737,12 @@ impl Storage for RowMutationObservingStorage {
     fn load_history_row_version_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, row_id, version_id)
+            .load_history_row_version_bytes(table, branch, row_id, version_id)
     }
 
     fn scan_history_region_bytes(
@@ -883,6 +905,29 @@ fn user_insert_values(id: ObjectId, name: &str) -> HashMap<String, Value> {
     ])
 }
 
+fn staged_user_row(
+    row_id: ObjectId,
+    batch_id: BatchId,
+    updated_at: u64,
+    name: &str,
+) -> crate::row_histories::StoredRowVersion {
+    crate::row_histories::StoredRowVersion::new_with_batch_id(
+        batch_id,
+        row_id,
+        "main",
+        Vec::<CommitId>::new(),
+        encode_row(
+            &test_schema()[&TableName::new("users")].columns,
+            &user_row_values(row_id, name),
+        )
+        .expect("user test row should encode"),
+        crate::metadata::RowProvenance::for_insert(row_id.to_string(), updated_at),
+        HashMap::new(),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    )
+}
+
 fn document_insert_values(owner_id: &str, title: &str) -> HashMap<String, Value> {
     HashMap::from([
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
@@ -935,9 +980,17 @@ fn create_runtime_with_schema(schema: Schema, app_name: &str) -> TestCore {
 }
 
 fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemoryStorage) -> TestCore {
+    create_runtime_with_storage_and_sync_manager(schema, app_name, storage, SyncManager::new())
+}
+
+fn create_runtime_with_storage_and_sync_manager(
+    schema: Schema,
+    app_name: &str,
+    storage: MemoryStorage,
+    sync_manager: SyncManager,
+) -> TestCore {
     let app_id = AppId::from_name(app_name);
-    let schema_manager =
-        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
     let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
     core.immediate_tick();
     core
@@ -2331,6 +2384,30 @@ fn rc_batched_tick_skips_flush_wal_without_storage_writes() {
 }
 
 #[test]
+fn rc_local_write_without_outbox_still_schedules_batched_tick_for_flush() {
+    let scheduler = CountingScheduler::default();
+    let app_id = AppId::from_name("row-schedule-flush-without-outbox");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        scheduler.clone(),
+        VecSyncSender::new(),
+    );
+    core.immediate_tick();
+    let scheduled_before = scheduler.schedule_count();
+
+    core.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    assert!(
+        scheduler.schedule_count() > scheduled_before,
+        "local writes without peers should still schedule batched_tick so the WAL flush barrier runs"
+    );
+}
+
+#[test]
 fn rc_batched_tick_flushes_wal_after_local_write() {
     let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
     let mut core = create_runtime_with_boxed_storage(
@@ -2764,6 +2841,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let (row_id, _row_values) =
@@ -2802,12 +2880,16 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
 
 #[test]
 fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
+    // alice stages one transactional row while disconnected
+    //   reconnect alone is not enough
+    //   once alice seals the batch, worker accepts the replayed staged row
     let mut s = create_3tier_rc();
     let write_context = WriteContext {
         session: None,
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     s.a.remove_server(s.b_server_for_a);
@@ -2829,6 +2911,12 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     );
 
     s.a.add_server(s.b_server_for_a);
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    s.a.seal_batch(history_rows[0].batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     let history_rows =
@@ -2856,6 +2944,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
 #[test]
 fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
     // alice stages one transactional row locally
+    //   alice seals the batch
     //   worker accepts it into visible transactional state
     //   then alice learns that accepted visible state from sync
     let mut s = create_3tier_rc();
@@ -2864,6 +2953,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let (row_id, _row_values) =
@@ -2873,6 +2963,12 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
             Some(&write_context),
         )
         .unwrap();
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    s.a.seal_batch(history_rows[0].batch_id).unwrap();
 
     pump_a_to_b(&mut s);
 
@@ -2910,9 +3006,175 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
 }
 
 #[test]
+fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
+    // alice stages one transactional row locally
+    //   worker receives the staged row but keeps it non-visible
+    //   alice seals the batch
+    //   worker accepts it and replays the settlement back
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_a_to_b(&mut s);
+
+    assert_eq!(
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap(),
+        None,
+        "worker should not publish the staged transactional row before seal"
+    );
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "persisted waiters should remain pending until the sealed batch settles"
+    );
+
+    s.a.seal_batch(batch_id).unwrap();
+    pump_a_to_b(&mut s);
+
+    let worker_row =
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap()
+            .expect("worker should publish the row after seal");
+    assert_eq!(
+        worker_row.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "the local waiter should only resolve once alice receives the replayable settlement"
+    );
+
+    pump_b_to_a(&mut s);
+    assert_eq!(receiver.try_recv(), Ok(Some(())));
+}
+
+#[test]
+fn rc_transactional_batch_rejects_writes_after_local_seal() {
+    let mut s = create_3tier_rc();
+    let open_write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), _receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&open_write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    s.a.seal_batch(batch_id).unwrap();
+
+    let sealed_write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    let insert_err =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&sealed_write_context),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        insert_err,
+        RuntimeError::WriteError(message)
+            if message.contains("already sealed")
+    ));
+
+    let persisted_insert_err =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Carol"),
+            Some(&sealed_write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        persisted_insert_err,
+        RuntimeError::WriteError(message)
+            if message.contains("already sealed")
+    ));
+
+    let update_err =
+        s.a.update(
+            row_id,
+            vec![("name".to_string(), Value::Text("Updated".to_string()))],
+            Some(&sealed_write_context),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        update_err,
+        RuntimeError::WriteError(message)
+            if message.contains("already sealed")
+    ));
+
+    let delete_err = s.a.delete(row_id, Some(&sealed_write_context)).unwrap_err();
+    assert!(matches!(
+        delete_err,
+        RuntimeError::WriteError(message)
+            if message.contains("already sealed")
+    ));
+
+    let history_rows_after =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    assert_eq!(
+        history_rows_after.len(),
+        1,
+        "sealed batches should reject follow-up writes before new row versions are created"
+    );
+}
+
+#[test]
 fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() {
     // alice -> worker
     //   transactional write stages locally
+    //   alice seals the batch
     //   worker accepts it
     //   alice resolves from replayable AcceptedTransaction settlement
     let mut s = create_3tier_rc();
@@ -2921,6 +3183,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let ((row_id, _row_values), mut receiver) =
@@ -2951,8 +3214,10 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         crate::batch_fate::BatchMode::Transactional
     );
     assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
+    assert!(!initial_record.sealed);
     assert_eq!(initial_record.latest_settlement, None);
 
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     assert_eq!(
         receiver.try_recv(),
@@ -2968,6 +3233,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
             .load_local_batch_record(batch_id)
             .unwrap()
             .expect("accepted transactional batch record should still be present");
+    assert!(settled_record.sealed);
     assert_eq!(
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
@@ -2985,7 +3251,8 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
 #[test]
 fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
     // alice -> worker
-    //   worker accepts the transactional batch
+    //   alice seals the transactional batch
+    //   worker accepts it
     //   alice misses the live settlement
     //   reconnect replays the accepted settlement from current server truth
     let mut s = create_3tier_rc();
@@ -2994,6 +3261,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let ((row_id, _row_values), mut receiver) =
@@ -3013,6 +3281,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
     let batch_id = history_rows[0].batch_id;
     let branch_name = s.a.schema_manager().branch_name();
 
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     assert_eq!(
@@ -3056,6 +3325,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
 fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch() {
     // alice -> worker
     //   alice stages two transactional writes under one logical batch
+    //   alice seals that shared batch once
     //   worker accepts both rows into one replayable accepted settlement
     //   alice resolves both durability waiters from that shared batch fate
     let mut s = create_3tier_rc();
@@ -3101,7 +3371,9 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
         "shared batch should persist one local batch record"
     );
     assert_eq!(initial_records[0].batch_id, batch_id);
+    assert!(!initial_records[0].sealed);
 
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     assert_eq!(first_receiver.try_recv(), Ok(None));
     assert_eq!(second_receiver.try_recv(), Ok(None));
@@ -3177,6 +3449,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     s.a.remove_server(s.b_server_for_a);
@@ -3197,6 +3470,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
+    s.a.seal_batch(batch_id).unwrap();
     s.a.add_server(s.b_server_for_a);
     s.a.batched_tick();
 
@@ -3222,6 +3496,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     s.a.remove_server(s.b_server_for_a);
@@ -3241,6 +3516,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
+    s.a.seal_batch(batch_id).unwrap();
 
     s.b.storage_mut()
         .upsert_authoritative_batch_settlement(&crate::batch_fate::BatchSettlement::Rejected {
@@ -3596,18 +3872,394 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 }
 
 #[test]
+fn rc_restart_recovers_completed_sealed_batch_from_storage() {
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let batch_id = BatchId::new();
+    let row_id = ObjectId::new();
+    let staged_row = staged_user_row(row_id, batch_id, 1_000, "Alice");
+
+    let mut old_runtime = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "transactional-restart-seal-recovery-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    old_runtime
+        .storage_mut()
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: "users".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .append_history_region_rows("users", std::slice::from_ref(&staged_row))
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            crate::object::BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id: row_id,
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: staged_row.version_id(),
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+
+    let storage = old_runtime.into_storage();
+    let restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "transactional-restart-seal-recovery-test",
+        storage,
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+
+    let settlement = restarted
+        .storage()
+        .load_authoritative_batch_settlement(batch_id)
+        .unwrap()
+        .expect("restart should recover and settle completed sealed batch");
+    assert!(matches!(
+        settlement,
+        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            batch_id: settled_batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            ref visible_members,
+        } if settled_batch_id == batch_id
+            && *visible_members == vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name: crate::object::BranchName::new("main"),
+                batch_id,
+            }]
+    ));
+
+    let visible = restarted
+        .storage()
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("restart recovery should publish the accepted row");
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(visible.batch_id, batch_id);
+    assert_eq!(
+        restarted
+            .storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "recovered settlement should prune the sealed submission marker"
+    );
+}
+
+#[test]
+fn rc_restart_rejects_invalid_multibranch_sealed_batch_from_storage() {
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let batch_id = BatchId::new();
+    let main_row_id = ObjectId::new();
+    let draft_row_id = ObjectId::new();
+    let main_row = staged_user_row(main_row_id, batch_id, 1_000, "Alice");
+    let draft_row = crate::row_histories::StoredRowVersion::new_with_batch_id(
+        batch_id,
+        draft_row_id,
+        "draft",
+        Vec::<CommitId>::new(),
+        encode_row(
+            &test_schema()[&TableName::new("users")].columns,
+            &user_row_values(draft_row_id, "Bob"),
+        )
+        .expect("user test row should encode"),
+        crate::metadata::RowProvenance::for_insert(draft_row_id.to_string(), 1_100),
+        HashMap::new(),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    let mut old_runtime = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "transactional-restart-invalid-seal-recovery-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    for row_id in [main_row_id, draft_row_id] {
+        old_runtime
+            .storage_mut()
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+    }
+    old_runtime
+        .storage_mut()
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            crate::object::BranchName::new("main"),
+            vec![
+                SealedBatchMember {
+                    object_id: main_row_id,
+                    branch_name: crate::object::BranchName::new("main"),
+                    version_id: main_row.version_id(),
+                },
+                SealedBatchMember {
+                    object_id: draft_row_id,
+                    branch_name: crate::object::BranchName::new("draft"),
+                    version_id: draft_row.version_id(),
+                },
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+
+    let storage = old_runtime.into_storage();
+    let restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "transactional-restart-invalid-seal-recovery-test",
+        storage,
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+
+    assert_eq!(
+        restarted
+            .storage()
+            .load_authoritative_batch_settlement(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "invalid_batch_submission".to_string(),
+            reason: "sealed transactional batch members must share a single target branch"
+                .to_string(),
+        })
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_visible_region_row("users", "main", main_row_id)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_visible_region_row("users", "draft", draft_row_id)
+            .unwrap(),
+        None
+    );
+
+    let restarted_main_rows = restarted
+        .storage()
+        .scan_history_row_versions("users", main_row_id)
+        .unwrap();
+    let restarted_draft_rows = restarted
+        .storage()
+        .scan_history_row_versions("users", draft_row_id)
+        .unwrap();
+    assert_eq!(
+        restarted_main_rows[0].state,
+        crate::row_histories::RowState::Rejected
+    );
+    assert_eq!(
+        restarted_draft_rows[0].state,
+        crate::row_histories::RowState::Rejected
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "invalid recovered submission should also be pruned"
+    );
+}
+
+#[test]
+fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let batch_id = BatchId::new();
+    let existing_row_id = ObjectId::new();
+    let conflicting_row_id = ObjectId::new();
+    let staged_row_id = ObjectId::new();
+    let target_branch = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
+    let sibling_branch = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
+    let existing_row = crate::row_histories::StoredRowVersion::new(
+        existing_row_id,
+        target_branch.as_str(),
+        Vec::<CommitId>::new(),
+        encode_row(
+            &test_schema()[&TableName::new("users")].columns,
+            &user_row_values(existing_row_id, "Seen"),
+        )
+        .expect("user test row should encode"),
+        crate::metadata::RowProvenance::for_insert(existing_row_id.to_string(), 900),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    let conflicting_row = crate::row_histories::StoredRowVersion::new(
+        conflicting_row_id,
+        sibling_branch.as_str(),
+        Vec::<CommitId>::new(),
+        encode_row(
+            &test_schema()[&TableName::new("users")].columns,
+            &user_row_values(conflicting_row_id, "Bob"),
+        )
+        .expect("user test row should encode"),
+        crate::metadata::RowProvenance::for_insert(conflicting_row_id.to_string(), 950),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    let staged_row = crate::row_histories::StoredRowVersion::new_with_batch_id(
+        batch_id,
+        staged_row_id,
+        target_branch.as_str(),
+        Vec::<CommitId>::new(),
+        encode_row(
+            &test_schema()[&TableName::new("users")].columns,
+            &user_row_values(staged_row_id, "Alice"),
+        )
+        .expect("user test row should encode"),
+        crate::metadata::RowProvenance::for_insert(staged_row_id.to_string(), 1_000),
+        HashMap::new(),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    let mut old_runtime = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "transactional-restart-frontier-conflict-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    for row_id in [existing_row_id, conflicting_row_id, staged_row_id] {
+        old_runtime
+            .storage_mut()
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+    }
+    old_runtime
+        .storage_mut()
+        .append_history_region_rows(
+            "users",
+            &[
+                existing_row.clone(),
+                conflicting_row.clone(),
+                staged_row.clone(),
+            ],
+        )
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                crate::row_histories::VisibleRowEntry::rebuild(
+                    existing_row.clone(),
+                    std::slice::from_ref(&existing_row),
+                ),
+                crate::row_histories::VisibleRowEntry::rebuild(
+                    conflicting_row.clone(),
+                    std::slice::from_ref(&conflicting_row),
+                ),
+            ],
+        )
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            target_branch,
+            vec![SealedBatchMember {
+                object_id: staged_row_id,
+                branch_name: target_branch,
+                version_id: staged_row.version_id(),
+            }],
+            vec![CapturedFrontierMember {
+                object_id: existing_row_id,
+                branch_name: target_branch,
+                version_id: existing_row.version_id(),
+            }],
+        ))
+        .unwrap();
+
+    let storage = old_runtime.into_storage();
+    let restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "transactional-restart-frontier-conflict-test",
+        storage,
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+
+    assert_eq!(
+        restarted
+            .storage()
+            .load_authoritative_batch_settlement(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "transaction_conflict".to_string(),
+            reason: "family-visible frontier changed since batch was sealed".to_string(),
+        })
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_visible_region_row("users", target_branch.as_str(), staged_row_id)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .scan_history_row_versions("users", staged_row_id)
+            .unwrap()[0]
+            .state,
+        crate::row_histories::RowState::Rejected
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
     // alice -> worker
     //   alice stages one transactional batch
+    //   alice seals it
     //   the initial outbound row is dropped
     //   worker replies Missing
-    //   alice replays the staged row from local history back upstream
+    //   alice replays the staged row and the seal back upstream
     let mut s = create_3tier_rc();
     let write_context = WriteContext {
         session: None,
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let ((row_id, _row_values), _receiver) =
@@ -3625,6 +4277,9 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
+    let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
+    let version_id = history_rows[0].version_id();
+    s.a.seal_batch(batch_id).unwrap();
 
     s.a.batched_tick();
     let dropped_outbox = s.a.sync_sender().take();
@@ -3638,6 +4293,24 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             } if *server_id == s.b_server_for_a && row.row_id == row_id && row.batch_id == batch_id
         )
     }), "expected initial outbound row for batch replay test, got {dropped_outbox:?}");
+    assert!(
+        dropped_outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch { submission },
+            } if *server_id == s.b_server_for_a
+                && submission.batch_id == batch_id
+                && submission.target_branch_name == branch_name
+                && submission.members == vec![SealedBatchMember {
+                    object_id: row_id,
+                    branch_name: branch_name.clone(),
+                    version_id,
+                }]
+                && submission.captured_frontier.is_empty()
+        )),
+        "expected initial outbound seal for batch replay test, got {dropped_outbox:?}"
+    );
 
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
@@ -3658,16 +4331,142 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             } if *server_id == s.b_server_for_a && row.row_id == row_id && row.batch_id == batch_id
         )
     }), "expected replayed outbound row after Missing settlement, got {replay_outbox:?}");
+    assert!(
+        replay_outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch { submission },
+            } if *server_id == s.b_server_for_a
+                && submission.batch_id == batch_id
+                && submission.target_branch_name == branch_name
+                && submission.members == vec![SealedBatchMember {
+                    object_id: row_id,
+                    branch_name: branch_name.clone(),
+                    version_id,
+                }]
+                && submission.captured_frontier.is_empty()
+        )),
+        "expected replayed outbound seal after Missing settlement, got {replay_outbox:?}"
+    );
 
     let local_record =
         s.a.storage()
             .load_local_batch_record(batch_id)
             .unwrap()
             .expect("missing settlement should still retain the local batch record");
+    assert!(local_record.sealed);
     assert_eq!(
         local_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::Missing { batch_id })
     );
+}
+
+#[test]
+fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
+    let mut s = create_3tier_rc();
+    let existing_row_id = ObjectId::new();
+    let later_row_id = ObjectId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let (existing_row_id, _) =
+        s.a.insert("users", user_insert_values(existing_row_id, "Seen"), None)
+            .unwrap();
+    let existing_history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", existing_row_id)
+            .unwrap();
+    let existing_branch_name =
+        crate::object::BranchName::new(existing_history_rows[0].branch.as_str());
+    let existing_version_id = existing_history_rows[0].version_id();
+
+    let ((row_id, _row_values), _receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_versions("users", row_id)
+            .unwrap();
+    let batch_id = history_rows[0].batch_id;
+    let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
+    let version_id = history_rows[0].version_id();
+    s.a.seal_batch(batch_id).unwrap();
+
+    let sealed_submission =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("sealed batch should retain a local batch record")
+            .sealed_submission
+            .expect("sealed batch should persist its original submission");
+    assert_eq!(
+        sealed_submission.captured_frontier,
+        vec![CapturedFrontierMember {
+            object_id: existing_row_id,
+            branch_name: existing_branch_name,
+            version_id: existing_version_id,
+        }]
+    );
+
+    s.a.batched_tick();
+    let dropped_outbox = s.a.sync_sender().take();
+    assert!(dropped_outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::SealBatch { submission },
+        } if *server_id == s.b_server_for_a && *submission == sealed_submission
+    )));
+
+    s.a.insert("users", user_insert_values(later_row_id, "Later"), None)
+        .unwrap();
+
+    s.a.park_sync_message(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Missing { batch_id },
+        },
+    });
+    s.a.batched_tick();
+
+    let replay_outbox = s.a.sync_sender().take();
+    assert!(
+        replay_outbox.iter().any(|entry| matches!(
+            &entry,
+            OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch { submission },
+            } if *server_id == s.b_server_for_a && *submission == sealed_submission
+        )),
+        "expected Missing replay to resend the original sealed submission, got {replay_outbox:?}"
+    );
+    assert!(replay_outbox.iter().all(|entry| !matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::SealBatch { submission },
+        } if *server_id == s.b_server_for_a
+            && submission.batch_id == batch_id
+            && submission.target_branch_name == branch_name
+            && submission.members == vec![SealedBatchMember {
+                object_id: row_id,
+                branch_name: branch_name.clone(),
+                version_id,
+            }]
+            && submission.captured_frontier.iter().any(|member| member.object_id == later_row_id)
+    )), "replayed seal should not recapture rows written after the batch was sealed");
 }
 
 #[test]
@@ -4294,6 +5093,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let (row_id, _row_values) =
@@ -4381,6 +5181,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
+        target_branch_name: None,
     };
 
     let (row_id, _row_values) =
@@ -4471,6 +5272,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
         attribution: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
+        target_branch_name: None,
     };
 
     let (first_id, _row_values) =

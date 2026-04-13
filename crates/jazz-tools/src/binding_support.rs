@@ -154,6 +154,8 @@ struct BindingWriteContext {
     batch_mode: Option<String>,
     #[serde(default, alias = "batchId")]
     batch_id: Option<String>,
+    #[serde(default, alias = "targetBranchName")]
+    target_branch_name: Option<String>,
 }
 
 impl BindingWriteContext {
@@ -162,6 +164,7 @@ impl BindingWriteContext {
             && self.attribution.is_none()
             && self.batch_mode.is_none()
             && self.batch_id.is_none()
+            && self.target_branch_name.is_none()
         {
             return Err("write context did not contain any recognized fields".to_string());
         }
@@ -180,6 +183,7 @@ impl BindingWriteContext {
             attribution: self.attribution,
             batch_mode,
             batch_id,
+            target_branch_name: self.target_branch_name,
         })
     }
 }
@@ -296,6 +300,7 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
         "batchId": record.batch_id.0.to_string(),
         "mode": serialize_batch_mode(record.mode),
         "requestedTier": serialize_durability_tier(record.requested_tier),
+        "sealed": record.sealed,
         "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
     })
 }
@@ -599,5 +604,21 @@ mod tests {
         );
         assert_eq!(parsed.batch_mode(), BatchMode::Transactional);
         assert_eq!(parsed.batch_id(), Some(batch_id));
+    }
+
+    #[test]
+    fn write_context_parser_preserves_transaction_target_branch_name() {
+        let parsed = parse_write_context_input(Some(
+            &json!({
+                "batch_mode": "transactional",
+                "batch_id": BatchId::new().0.to_string(),
+                "target_branch_name": "dev-111111111111-main",
+            })
+            .to_string(),
+        ))
+        .expect("parse binding write context")
+        .expect("binding write context should exist");
+
+        assert_eq!(parsed.target_branch_name(), Some("dev-111111111111-main"));
     }
 }

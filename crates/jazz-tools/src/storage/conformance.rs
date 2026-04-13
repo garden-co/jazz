@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 use std::ops::Bound;
 
-use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
+use crate::batch_fate::{
+    BatchMode, BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchMember,
+    SealedBatchSubmission, VisibleBatchMember,
+};
 use crate::catalogue::CatalogueEntry;
+use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::types::{
@@ -17,7 +21,7 @@ use crate::row_histories::{
     decode_flat_visible_row_entry,
 };
 use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{IndexMutation, RowLocator, Storage};
+use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 use crate::test_row_history::persist_test_schema;
 
@@ -87,6 +91,32 @@ fn make_visible_entry(
     history_rows: &[StoredRowVersion],
 ) -> VisibleRowEntry {
     VisibleRowEntry::rebuild(current_row, history_rows)
+}
+
+// ============================================================================
+// Branch ord tests
+// ============================================================================
+
+pub fn test_branch_ord_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let main = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
+    let draft = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
+
+    let main_ord = storage.resolve_or_alloc_branch_ord(main).unwrap();
+    let draft_ord = storage.resolve_or_alloc_branch_ord(draft).unwrap();
+
+    assert_eq!(storage.resolve_or_alloc_branch_ord(main).unwrap(), main_ord);
+    assert_ne!(main_ord, draft_ord);
+    assert_eq!(storage.load_branch_ord(main).unwrap(), Some(main_ord));
+    assert_eq!(storage.load_branch_ord(draft).unwrap(), Some(draft_ord));
+    assert_eq!(
+        storage.load_branch_name_by_ord(main_ord).unwrap(),
+        Some(main)
+    );
+    assert_eq!(
+        storage.load_branch_name_by_ord(draft_ord).unwrap(),
+        Some(draft)
+    );
 }
 
 // ============================================================================
@@ -343,6 +373,51 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     );
 }
 
+pub fn test_row_region_keeps_same_version_id_distinct_across_branches(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+
+    let shared_version_id = CommitId([0x5a; 32]);
+    let mut main = make_row_version(row_id, "dev/main", 10, "alice");
+    main.version_id = shared_version_id;
+    let mut draft = make_row_version(row_id, "dev/draft", 20, "alice draft");
+    draft.version_id = shared_version_id;
+
+    storage
+        .append_history_region_rows("users", &[main.clone(), draft.clone()])
+        .unwrap();
+
+    let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
+    let main_history = storage
+        .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
+        .unwrap();
+    let draft_history = storage
+        .scan_history_region("users", "dev/draft", HistoryScan::Row { row_id })
+        .unwrap();
+    let main_loaded = storage
+        .load_history_row_version("users", "dev/main", row_id, shared_version_id)
+        .unwrap();
+    let draft_loaded = storage
+        .load_history_row_version("users", "dev/draft", row_id, shared_version_id)
+        .unwrap();
+    let ambiguous_lookup =
+        storage.load_history_row_version_any_branch("users", row_id, shared_version_id);
+
+    assert_eq!(history_by_row, vec![draft.clone(), main.clone()]);
+    assert_eq!(main_history, vec![main]);
+    assert_eq!(draft_history, vec![draft]);
+    assert_eq!(main_loaded, Some(main_history[0].clone()));
+    assert_eq!(draft_loaded, Some(draft_history[0].clone()));
+    assert!(
+        matches!(ambiguous_lookup, Err(StorageError::IoError(ref message)) if message.contains("ambiguous row history version")),
+        "expected ambiguous unscoped lookup, got {ambiguous_lookup:?}"
+    );
+}
+
 pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
     factory: &dyn Fn() -> Box<dyn Storage>,
 ) {
@@ -396,7 +471,7 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
         .unwrap();
 
     let encoded = storage
-        .load_history_row_version_bytes("tasks", row_id, row.version_id())
+        .load_history_row_version_bytes("tasks", row.branch.as_str(), row_id, row.version_id())
         .unwrap()
         .expect("history row should persist");
 
@@ -617,7 +692,7 @@ pub fn test_apply_row_mutation_combines_row_and_index_effects(
     );
     assert_eq!(
         storage
-            .load_history_row_version("users", row_id, version.version_id())
+            .load_history_row_version("users", "main", row_id, version.version_id())
             .unwrap(),
         Some(version.clone())
     );
@@ -730,10 +805,11 @@ pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<d
 pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let batch_id = crate::row_histories::BatchId::new();
-    let record = LocalBatchRecord::new(
+    let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
         DurabilityTier::GlobalServer,
+        true,
         Some(BatchSettlement::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Worker,
@@ -744,12 +820,38 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
             }],
         }),
     );
+    record.sealed_submission = Some(SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            version_id: CommitId([9; 32]),
+        }],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(93)),
+            branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
+            version_id: CommitId([10; 32]),
+        }],
+    ));
 
     storage.upsert_local_batch_record(&record).unwrap();
 
     assert_eq!(
         storage.load_local_batch_record(batch_id).unwrap(),
         Some(record)
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"))
+            .unwrap()
+            .is_some()
     );
 }
 
@@ -763,6 +865,7 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
             high,
             BatchMode::Direct,
             DurabilityTier::Worker,
+            true,
             None,
         ))
         .unwrap();
@@ -771,6 +874,7 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
             low,
             BatchMode::Transactional,
             DurabilityTier::EdgeServer,
+            false,
             Some(BatchSettlement::Missing { batch_id: low }),
         ))
         .unwrap();
@@ -788,6 +892,7 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
         batch_id,
         BatchMode::Transactional,
         DurabilityTier::Worker,
+        false,
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
@@ -823,6 +928,106 @@ pub fn test_authoritative_batch_settlement_round_trip(factory: &dyn Fn() -> Box<
             .load_authoritative_batch_settlement(batch_id)
             .unwrap(),
         Some(settlement)
+    );
+}
+
+pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let alice = ObjectId::from_uuid(uuid::Uuid::from_u128(301));
+    let bob = ObjectId::from_uuid(uuid::Uuid::from_u128(302));
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![
+            SealedBatchMember {
+                object_id: alice,
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: CommitId([1; 32]),
+            },
+            SealedBatchMember {
+                object_id: bob,
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: CommitId([2; 32]),
+            },
+            SealedBatchMember {
+                object_id: alice,
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: CommitId([1; 32]),
+            },
+        ],
+        vec![CapturedFrontierMember {
+            object_id: bob,
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            version_id: CommitId([3; 32]),
+        }],
+    );
+
+    storage.upsert_sealed_batch_submission(&submission).unwrap();
+
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        Some(SealedBatchSubmission::new(
+            batch_id,
+            crate::object::BranchName::new("main"),
+            vec![
+                SealedBatchMember {
+                    object_id: alice,
+                    branch_name: crate::object::BranchName::new("main"),
+                    version_id: CommitId([1; 32]),
+                },
+                SealedBatchMember {
+                    object_id: bob,
+                    branch_name: crate::object::BranchName::new("main"),
+                    version_id: CommitId([2; 32]),
+                },
+            ],
+            vec![CapturedFrontierMember {
+                object_id: bob,
+                branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+                version_id: CommitId([3; 32]),
+            }],
+        ))
+    );
+
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
+            branch_name: crate::object::BranchName::new("main"),
+            version_id: CommitId([4; 32]),
+        }],
+        Vec::new(),
+    );
+
+    storage.upsert_sealed_batch_submission(&submission).unwrap();
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        Some(submission)
+    );
+
+    storage.delete_sealed_batch_submission(batch_id).unwrap();
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        None
     );
 }
 
@@ -910,10 +1115,11 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
     let batch_id = crate::row_histories::BatchId::new();
-    let record = LocalBatchRecord::new(
+    let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
         DurabilityTier::EdgeServer,
+        true,
         Some(BatchSettlement::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Worker,
@@ -924,6 +1130,20 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
             }],
         }),
     );
+    record.sealed_submission = Some(SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            version_id: CommitId([11; 32]),
+        }],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(113)),
+            branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
+            version_id: CommitId([12; 32]),
+        }],
+    ));
 
     {
         let mut storage = factory(path);
@@ -937,6 +1157,18 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         assert_eq!(
             storage.load_local_batch_record(batch_id).unwrap(),
             Some(record)
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"))
+                .unwrap()
+                .is_some()
         );
     }
 }
@@ -970,6 +1202,93 @@ pub fn test_authoritative_batch_settlement_survives_close_reopen(
                 .unwrap(),
             Some(settlement)
         );
+    }
+}
+
+pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![
+            SealedBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(501)),
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: CommitId([5; 32]),
+            },
+            SealedBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(502)),
+                branch_name: crate::object::BranchName::new("main"),
+                version_id: CommitId([6; 32]),
+            },
+        ],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(503)),
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            version_id: CommitId([7; 32]),
+        }],
+    );
+
+    {
+        let mut storage = factory(path);
+        storage.upsert_sealed_batch_submission(&submission).unwrap();
+        storage.flush();
+        storage.close().unwrap();
+    }
+
+    {
+        let storage = factory(path);
+        assert_eq!(
+            storage.load_sealed_batch_submission(batch_id).unwrap(),
+            Some(submission)
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("main"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+pub fn test_branch_ord_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let main = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
+    let draft = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
+
+    let (main_ord, draft_ord) = {
+        let mut storage = factory(path);
+        let main_ord = storage.resolve_or_alloc_branch_ord(main).unwrap();
+        let draft_ord = storage.resolve_or_alloc_branch_ord(draft).unwrap();
+        storage.flush();
+        storage.close().unwrap();
+        (main_ord, draft_ord)
+    };
+
+    {
+        let mut storage = factory(path);
+        assert_eq!(storage.load_branch_ord(main).unwrap(), Some(main_ord));
+        assert_eq!(storage.load_branch_ord(draft).unwrap(), Some(draft_ord));
+        assert_eq!(
+            storage.load_branch_name_by_ord(main_ord).unwrap(),
+            Some(main)
+        );
+        assert_eq!(
+            storage.load_branch_name_by_ord(draft_ord).unwrap(),
+            Some(draft)
+        );
+        let feature = crate::object::BranchName::new("dev-cccccccccccc-main");
+        let feature_ord = storage.resolve_or_alloc_branch_ord(feature).unwrap();
+        assert!(feature_ord > draft_ord);
     }
 }
 
@@ -1108,6 +1427,13 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
+            fn row_region_keeps_same_version_id_distinct_across_branches() {
+                conformance::test_row_region_keeps_same_version_id_distinct_across_branches(
+                    &$factory,
+                );
+            }
+
+            #[test]
             fn row_region_uses_flat_history_bytes_when_schema_known() {
                 conformance::test_row_region_uses_flat_history_bytes_when_schema_known(&$factory);
             }
@@ -1158,6 +1484,11 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
+            fn branch_ord_round_trip() {
+                conformance::test_branch_ord_round_trip(&$factory);
+            }
+
+            #[test]
             fn local_batch_record_round_trip() {
                 conformance::test_local_batch_record_round_trip(&$factory);
             }
@@ -1178,6 +1509,16 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
+            fn sealed_batch_submission_round_trip() {
+                conformance::test_sealed_batch_submission_round_trip(&$factory);
+            }
+
+            #[test]
+            fn sealed_batch_submission_delete_removes_record() {
+                conformance::test_sealed_batch_submission_delete_removes_record(&$factory);
+            }
+
+            #[test]
             fn alice_bob_branch_isolation() {
                 conformance::test_alice_bob_branch_isolation(&$factory);
             }
@@ -1193,6 +1534,11 @@ macro_rules! storage_conformance_tests_persistent {
         mod paste_persistent {
             use super::*;
             use $crate::storage::conformance;
+
+            #[test]
+            fn branch_ord_survives_close_reopen() {
+                conformance::test_branch_ord_survives_close_reopen(&$reopen_factory);
+            }
 
             #[test]
             fn persistence_survives_close_reopen() {
@@ -1214,6 +1560,11 @@ macro_rules! storage_conformance_tests_persistent {
                 conformance::test_authoritative_batch_settlement_survives_close_reopen(
                     &$reopen_factory,
                 );
+            }
+
+            #[test]
+            fn sealed_batch_submission_survives_close_reopen() {
+                conformance::test_sealed_batch_submission_survives_close_reopen(&$reopen_factory);
             }
         }
     };

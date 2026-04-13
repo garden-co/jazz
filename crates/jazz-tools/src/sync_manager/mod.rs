@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
@@ -250,6 +250,18 @@ impl SyncManager {
             destination: Destination::Server(server_id),
             payload: SyncPayload::BatchSettlementNeeded { batch_ids },
         });
+    }
+
+    pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch {
+                    submission: submission.clone(),
+                },
+            });
+        }
     }
 
     /// Remove a server connection.

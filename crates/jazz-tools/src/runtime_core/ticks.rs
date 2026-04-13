@@ -23,6 +23,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         match self.storage.load_history_row_version(
             row_locator.table.as_str(),
+            row_version_key.branch_name.as_str(),
             row_version_key.row_id,
             row_version_key.version_id,
         ) {
@@ -143,6 +144,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return;
         };
 
+        let sealed_submission = self
+            .storage
+            .load_local_batch_record(batch_id)
+            .ok()
+            .flatten()
+            .and_then(|record| {
+                (record.mode == crate::batch_fate::BatchMode::Transactional && record.sealed)
+                    .then_some(record.sealed_submission)
+                    .flatten()
+            });
+
         let mut rows_to_retransmit = Vec::new();
         for (row_id, row_locator) in row_locators {
             let Ok(history_rows) = self
@@ -163,6 +175,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         for (row_id, metadata, row) in rows_to_retransmit {
             sync_manager.force_row_version_to_servers(row_id, metadata, row);
         }
+        if let Some(submission) = sealed_submission {
+            sync_manager.seal_batch_to_servers(submission);
+        }
     }
 
     // =========================================================================
@@ -171,12 +186,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Synchronous tick - processes managers, fulfills completed queries.
     ///
-    /// Schedules batched_tick if there are outbound messages.
+    /// Schedules batched_tick if there are outbound messages or storage writes
+    /// waiting on the WAL flush barrier.
     ///
     /// Call this after any mutation operation (insert, update, delete, etc.)
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
         let _span = trace_span!("immediate_tick", tier = self.tier_label).entered();
+
+        let recovered_sealed_batches = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .recover_completed_sealed_batches_with_storage(&mut self.storage);
+        if recovered_sealed_batches {
+            self.mark_storage_write_pending_flush();
+        }
 
         // 1. Process logical updates (sync, subscriptions)
         self.schema_manager.process(&mut self.storage);
@@ -373,8 +398,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 4. Schedule batched_tick if outbound messages exist
-        if self.has_outbound() {
+        // 4. Schedule batched_tick if outbound messages exist or a WAL flush
+        // barrier is pending.
+        if self.has_outbound() || self.storage_write_pending_flush {
             self.scheduler.schedule_batched_tick();
         }
 

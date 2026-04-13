@@ -8,6 +8,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         records
             .into_iter()
+            .filter(|record| {
+                record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
+            })
             .filter(|record| match record.latest_settlement.as_ref() {
                 None => true,
                 Some(crate::batch_fate::BatchSettlement::Missing { .. }) => true,

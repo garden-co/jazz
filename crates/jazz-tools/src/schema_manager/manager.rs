@@ -274,14 +274,97 @@ impl SchemaManager {
         &self.context.user_branch
     }
 
-    fn get_insert_values_with_defaults(
+    fn schema_for_hash(&self, schema_hash: SchemaHash) -> Option<&Schema> {
+        if schema_hash == self.context.current_hash {
+            return Some(&self.context.current_schema);
+        }
+        self.context.live_schemas.get(&schema_hash)
+    }
+
+    fn resolve_target_branch(
         &self,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(String, SchemaHash), QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let current_hash = self.context.current_hash;
+        let Some(target_branch_name) = write_context.and_then(WriteContext::target_branch_name)
+        else {
+            return Ok((current_branch, current_hash));
+        };
+
+        let parsed =
+            ComposedBranchName::parse(&BranchName::new(target_branch_name)).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "invalid target_branch_name `{target_branch_name}`"
+                ))
+            })?;
+
+        if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
+            return Err(QueryError::EncodingError(format!(
+                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/{}",
+                self.context.env, self.context.user_branch
+            )));
+        }
+
+        if parsed.schema_hash.short() == current_hash.short() {
+            return Ok((current_branch, current_hash));
+        }
+
+        if let Some(hash) = self
+            .context
+            .live_schemas
+            .keys()
+            .copied()
+            .find(|hash| hash.short() == parsed.schema_hash.short())
+        {
+            let canonical =
+                ComposedBranchName::new(&self.context.env, hash, &self.context.user_branch)
+                    .to_branch_name();
+            return Ok((canonical.as_str().to_string(), hash));
+        }
+
+        Err(QueryError::UnknownSchema(parsed.schema_hash))
+    }
+
+    fn schema_context_for_hash(
+        &self,
+        schema_hash: SchemaHash,
+    ) -> Result<SchemaContext, QueryError> {
+        let target_schema = self
+            .schema_for_hash(schema_hash)
+            .ok_or(QueryError::UnknownSchema(schema_hash))?
+            .clone();
+        let mut temp_context = SchemaContext::new(
+            target_schema.clone(),
+            &self.context.env,
+            &self.context.user_branch,
+        );
+
+        for lens in self.context.lenses.values() {
+            temp_context.register_lens(lens.clone());
+        }
+
+        if self.context.current_hash != schema_hash {
+            temp_context.add_pending_schema(self.context.current_schema.clone());
+        }
+
+        for (hash, schema) in &self.context.live_schemas {
+            if *hash != schema_hash {
+                temp_context.add_pending_schema(schema.clone());
+            }
+        }
+
+        temp_context.try_activate_pending();
+        Ok(temp_context)
+    }
+
+    fn get_insert_values_with_defaults_for_schema(
         table: &str,
+        schema: &Schema,
         mut values_by_column: HashMap<String, Value>,
     ) -> Result<Vec<Value>, QueryError> {
         let table_name = TableName::new(table);
-        let table_schema = self
-            .current_schema()
+        let table_schema = schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
 
@@ -1376,14 +1459,22 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
-        self.query_manager.insert_on_branch_with_write_context(
-            storage,
-            table,
-            self.context.branch_name().as_str(),
-            &aligned_values,
-            write_context,
-        )
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let aligned_values =
+            Self::get_insert_values_with_defaults_for_schema(table, &target_schema, values)?;
+        self.query_manager
+            .insert_on_branch_with_schema_and_write_context(
+                storage,
+                table,
+                &target_branch,
+                &aligned_values,
+                &target_schema,
+                write_context,
+            )
     }
 
     pub fn insert_with_session<H: Storage>(
@@ -1407,17 +1498,29 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<crate::commit::CommitId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             self.query_manager
-                .load_row_for_schema_update(storage, object_id, &branches)
+                .load_row_for_schema_update_in_context(
+                    storage,
+                    object_id,
+                    &branches,
+                    &target_context,
+                )
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let table_name = TableName::new(&table);
-        let descriptor = self
-            .context
-            .current_schema
+        let descriptor = target_schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?
             .columns
@@ -1435,28 +1538,22 @@ impl SchemaManager {
             current_values[index] = new_value.clone();
         }
 
-        let commit_id = if source_branch == current_branch {
-            self.query_manager.update_with_write_context(
+        let _ = source_branch;
+        let commit_id = self
+            .query_manager
+            .write_existing_row_on_branch_with_schema_and_write_context(
                 storage,
-                object_id,
-                &current_values,
+                RowBranchWrite {
+                    table: &table,
+                    branch: &target_branch,
+                    id: object_id,
+                    values: &current_values,
+                    old_data_for_policy: &old_current_data,
+                    old_provenance_for_policy: &old_current_provenance,
+                },
+                &target_schema,
                 write_context,
-            )?
-        } else {
-            self.query_manager
-                .write_existing_row_on_branch_with_write_context(
-                    storage,
-                    RowBranchWrite {
-                        table: &table,
-                        branch: &current_branch,
-                        id: object_id,
-                        values: &current_values,
-                        old_data_for_policy: &old_current_data,
-                        old_provenance_for_policy: &old_current_provenance,
-                    },
-                    write_context,
-                )?
-        };
+            )?;
 
         Ok(commit_id)
     }
@@ -1481,31 +1578,42 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             self.query_manager
-                .load_row_for_schema_update(storage, object_id, &branches)
+                .load_row_for_schema_update_in_context(
+                    storage,
+                    object_id,
+                    &branches,
+                    &target_context,
+                )
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        if source_branch == current_branch {
-            self.query_manager
-                .delete_with_write_context(storage, object_id, write_context)
-        } else {
-            self.query_manager
-                .delete_existing_row_on_branch_with_write_context(
-                    storage,
-                    RowBranchDelete {
-                        table: &table,
-                        branch: &current_branch,
-                        id: object_id,
-                        old_data_for_policy: &old_current_data,
-                        old_provenance_for_policy: &old_current_provenance,
-                    },
-                    write_context,
-                )
-        }
+        let _ = source_branch;
+        self.query_manager
+            .delete_existing_row_on_branch_with_schema_and_write_context(
+                storage,
+                RowBranchDelete {
+                    table: &table,
+                    branch: &target_branch,
+                    id: object_id,
+                    old_data_for_policy: &old_current_data,
+                    old_provenance_for_policy: &old_current_provenance,
+                },
+                &target_schema,
+                write_context,
+            )
     }
 
     pub fn delete_with_session<H: Storage>(

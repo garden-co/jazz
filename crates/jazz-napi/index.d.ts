@@ -44,6 +44,7 @@ export declare class NapiRuntime {
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
   acknowledgeRejectedBatch(batchId: string): boolean
+  sealBatch(batchId: string): void
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void

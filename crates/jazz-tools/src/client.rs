@@ -1,5 +1,6 @@
 //! JazzClient implementation.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -102,6 +103,7 @@ struct SubscriptionState {
 pub struct Transaction<'a> {
     client: &'a JazzClient,
     write_context: WriteContext,
+    committed: Cell<bool>,
 }
 
 /// Result of a persisted write: a logical batch id, the immediate local value,
@@ -676,6 +678,15 @@ impl JazzClient {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    /// Seal a transactional batch so authorities can validate it as a
+    /// complete unit.
+    pub fn seal_batch(&self, batch_id: BatchId) -> Result<BatchId> {
+        self.runtime
+            .seal_batch(batch_id)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(batch_id)
+    }
+
     /// Shutdown the client and release resources.
     pub async fn shutdown(mut self) -> Result<()> {
         // Abort stream listener first (it holds TokioRuntime clone)
@@ -754,6 +765,7 @@ impl JazzClient {
         Transaction {
             client: self,
             write_context,
+            committed: Cell::new(false),
         }
     }
 }
@@ -927,10 +939,29 @@ impl<'a> SessionClient<'a> {
 }
 
 impl<'a> Transaction<'a> {
+    fn ensure_writable(&self) -> Result<()> {
+        if self.committed.get() {
+            return Err(JazzError::Write(format!(
+                "transaction {:?} is already committed",
+                self.batch_id()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn batch_id(&self) -> BatchId {
         self.write_context
             .batch_id()
             .expect("transaction handles always carry a batch id")
+    }
+
+    pub fn commit(&self) -> Result<BatchId> {
+        if self.committed.get() {
+            return Ok(self.batch_id());
+        }
+        let batch_id = self.client.seal_batch(self.batch_id())?;
+        self.committed.set(true);
+        Ok(batch_id)
     }
 
     pub async fn create(
@@ -938,6 +969,7 @@ impl<'a> Transaction<'a> {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
+        self.ensure_writable()?;
         let (object_id, row_values) = self
             .client
             .runtime
@@ -956,6 +988,7 @@ impl<'a> Transaction<'a> {
         values: HashMap<String, Value>,
         tier: DurabilityTier,
     ) -> Result<PersistedWrite<(ObjectId, Vec<Value>)>> {
+        self.ensure_writable()?;
         let ((object_id, row_values), batch_id, receiver) = self
             .client
             .runtime
@@ -973,6 +1006,7 @@ impl<'a> Transaction<'a> {
     }
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+        self.ensure_writable()?;
         self.client
             .runtime
             .update_with_write_context(object_id, updates, Some(&self.write_context))
@@ -985,6 +1019,7 @@ impl<'a> Transaction<'a> {
         updates: Vec<(String, Value)>,
         tier: DurabilityTier,
     ) -> Result<PersistedWrite<()>> {
+        self.ensure_writable()?;
         let (batch_id, receiver) = self
             .client
             .runtime
@@ -1003,6 +1038,7 @@ impl<'a> Transaction<'a> {
     }
 
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+        self.ensure_writable()?;
         self.client
             .runtime
             .delete_with_write_context(object_id, Some(&self.write_context))
@@ -1014,6 +1050,7 @@ impl<'a> Transaction<'a> {
         object_id: ObjectId,
         tier: DurabilityTier,
     ) -> Result<PersistedWrite<()>> {
+        self.ensure_writable()?;
         let (batch_id, receiver) = self
             .client
             .runtime
@@ -1459,6 +1496,102 @@ mod tests {
                 assert_eq!(second_rows[0].state, RowState::StagingPending);
             })
             .expect("inspect client storage");
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_transaction_commit_marks_local_batch_record_as_sealed() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-commit");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let transaction = client.begin_transaction();
+        let batch_id = transaction.batch_id();
+
+        transaction
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create transactional row");
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load unsealed local batch record")
+            .expect("transactional write should retain local batch record");
+        assert_eq!(local_record.mode, BatchMode::Transactional);
+        assert!(!local_record.sealed);
+
+        let committed_batch_id = transaction.commit().expect("seal transactional batch");
+        assert_eq!(committed_batch_id, batch_id);
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load sealed local batch record")
+            .expect("sealed transaction should retain local batch record");
+        assert!(local_record.sealed);
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_transaction_rejects_writes_after_commit() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-closed");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let transaction = client.begin_transaction();
+
+        transaction
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create transactional row");
+
+        let batch_id = transaction.commit().expect("seal transactional batch");
+
+        let err = transaction
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("late".to_string())),
+                    ("completed".to_string(), Value::Boolean(true)),
+                ]),
+            )
+            .await
+            .expect_err("committed transaction should reject follow-up writes");
+        assert!(
+            err.to_string().contains("already committed"),
+            "expected committed transaction error, got {err}"
+        );
+
+        let local_record = client
+            .local_batch_record(batch_id)
+            .expect("load sealed local batch record")
+            .expect("sealed transaction should retain local batch record");
+        assert!(local_record.sealed);
 
         client.shutdown().await.expect("shutdown client");
     }

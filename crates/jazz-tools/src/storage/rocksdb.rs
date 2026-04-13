@@ -402,6 +402,7 @@ impl Storage for RocksDBStorage {
             let borrowed_history_rows = encoded_history_rows
                 .iter()
                 .map(|row| HistoryRowBytes {
+                    branch: row.branch.as_str(),
                     row_id: row.row_id,
                     version_id: row.version_id,
                     bytes: &row.bytes,
@@ -494,11 +495,12 @@ impl Storage for RocksDBStorage {
     fn load_history_row_version_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_history_row_version_bytes_core(table, row_id, version_id, |key| {
+            load_history_row_version_bytes_core(table, branch, row_id, version_id, |key| {
                 Self::get_from_db(&inner.db, key)
             })
         })

@@ -267,10 +267,20 @@ export class DbPersistedWrite<T> {
 }
 
 export class DbTransaction {
+  private committed = false;
+
   constructor(
     private readonly client: JazzClient,
     private readonly runtimeTransaction: RuntimeTransaction,
   ) {}
+
+  private ensureWritable(): void {
+    if (this.committed) {
+      throw new Error(
+        `Transaction ${this.runtimeTransaction.batchId()} is already committed`,
+      );
+    }
+  }
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
     return resolveSchemaWithTable(
@@ -296,7 +306,17 @@ export class DbTransaction {
     return this.runtimeTransaction.batchId();
   }
 
+  commit(): string {
+    if (this.committed) {
+      return this.batchId();
+    }
+    const batchId = this.runtimeTransaction.commit();
+    this.committed = true;
+    return batchId;
+  }
+
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    this.ensureWritable();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -311,6 +331,7 @@ export class DbTransaction {
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
+    this.ensureWritable();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -328,6 +349,7 @@ export class DbTransaction {
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+    this.ensureWritable();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -342,6 +364,7 @@ export class DbTransaction {
     data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
+    this.ensureWritable();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -355,6 +378,7 @@ export class DbTransaction {
   }
 
   delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
+    this.ensureWritable();
     this.runtimeTransaction.delete(id);
   }
 
@@ -363,6 +387,7 @@ export class DbTransaction {
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
+    this.ensureWritable();
     const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,

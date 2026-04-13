@@ -36,6 +36,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const localBatchRecordCalls: string[] = [];
   const localBatchRecordsCalls: string[] = [];
   const acknowledgeRejectedBatchCalls: string[] = [];
+  const sealBatchCalls: string[] = [];
   const deleteCalls: string[] = [];
   const deleteDurableCalls: Array<[string, string]> = [];
   const deleteDurableWithSessionCalls: Array<
@@ -46,6 +47,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     batchId: "00000000-0000-0000-0000-000000000041",
     mode: "direct" as const,
     requestedTier: "edge" as const,
+    sealed: true,
     latestSettlement: {
       kind: "durable_direct" as const,
       batchId: "00000000-0000-0000-0000-000000000041",
@@ -236,6 +238,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       acknowledgeRejectedBatchCalls.push(batchId);
       return batchId === localBatchRecord.batchId;
     },
+    sealBatch: (batchId: string) => {
+      sealBatchCalls.push(batchId);
+    },
   };
   const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 
@@ -275,6 +280,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     localBatchRecordCalls,
     localBatchRecordsCalls,
     acknowledgeRejectedBatchCalls,
+    sealBatchCalls,
     localBatchRecord,
   };
 }
@@ -433,6 +439,25 @@ describe("JazzClient mutation durability split", () => {
     });
   });
 
+  it("commits a transactional batch by sealing its batch id", () => {
+    const { client, sealBatchCalls } = makeClient();
+    const transaction = client.beginTransaction();
+
+    expect(transaction.commit()).toBe(transaction.batchId());
+    expect(sealBatchCalls).toEqual([transaction.batchId()]);
+  });
+
+  it("rejects transactional writes after commit", () => {
+    const { client, insertWithSessionCalls } = makeClient();
+    const transaction = client.beginTransaction();
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+
+    transaction.commit();
+
+    expect(() => transaction.create("todos", insertValues)).toThrow(/committed/i);
+    expect(insertWithSessionCalls).toEqual([]);
+  });
+
   it("returns persisted writes with an immediate batch id and local wait handle", async () => {
     const {
       client,
@@ -482,6 +507,39 @@ describe("JazzClient mutation durability split", () => {
     expect(insertContext.batch_id).toBe(transaction.batchId());
     expect(updateContext.batch_id).toBe(transaction.batchId());
     expect(deleteContext.batch_id).toBe(transaction.batchId());
+  });
+
+  it("binds a transaction to the target composed prefix at begin time", () => {
+    let currentSchemaHash =
+      "1111111111111111111111111111111111111111111111111111111111111111";
+    const { client, insertWithSessionCalls, updateWithSessionCalls } = makeClient({
+      getSchemaHash: () => currentSchemaHash,
+    });
+    const transaction = client.beginTransaction();
+
+    currentSchemaHash =
+      "2222222222222222222222222222222222222222222222222222222222222222";
+
+    transaction.create("todos", {
+      title: { type: "Text" as const, value: "Bound prefix" },
+    });
+    transaction.update("row-1", {
+      done: { type: "Boolean" as const, value: true },
+    });
+
+    const insertContext = JSON.parse(insertWithSessionCalls[0]![2]!);
+    const updateContext = JSON.parse(updateWithSessionCalls[0]![2]!);
+
+    expect(insertContext).toMatchObject({
+      batch_mode: "transactional",
+      batch_id: transaction.batchId(),
+      target_branch_name: "dev-111111111111-main",
+    });
+    expect(updateContext).toMatchObject({
+      batch_mode: "transactional",
+      batch_id: transaction.batchId(),
+      target_branch_name: "dev-111111111111-main",
+    });
   });
 
   it("delegates local batch record inspection and rejection acknowledgement", () => {

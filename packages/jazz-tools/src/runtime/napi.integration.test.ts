@@ -714,15 +714,18 @@ describe("NAPI integration", () => {
         batchId: string;
         mode: string;
         requestedTier: string;
+        sealed: boolean;
         latestSettlement: unknown;
       } | null;
       loadLocalBatchRecords(): Array<{
         batchId: string;
         mode: string;
         requestedTier: string;
+        sealed: boolean;
         latestSettlement: unknown;
       }>;
       acknowledgeRejectedBatch(batchId: string): boolean;
+      sealBatch(batchId: string): void;
       close(): void;
     };
 
@@ -746,6 +749,7 @@ describe("NAPI integration", () => {
       batchId: directWrite.batchId,
       mode: "direct",
       requestedTier: "edge",
+      sealed: true,
     });
 
     const transactionalBatchId = randomUUID();
@@ -769,6 +773,13 @@ describe("NAPI integration", () => {
       batchId: transactionalBatchId,
       mode: "transactional",
       requestedTier: "edge",
+      sealed: false,
+    });
+
+    runtime.sealBatch(transactionalBatchId);
+    expect(runtime.loadLocalBatchRecord(transactionalBatchId)).toMatchObject({
+      batchId: transactionalBatchId,
+      sealed: true,
     });
 
     expect(

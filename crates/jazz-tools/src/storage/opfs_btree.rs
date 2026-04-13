@@ -359,10 +359,13 @@ impl Storage for OpfsBTreeStorage {
     fn load_history_row_version_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        load_history_row_version_bytes_core(table, row_id, version_id, |key| self.tree_read(key))
+        load_history_row_version_bytes_core(table, branch, row_id, version_id, |key| {
+            self.tree_read(key)
+        })
     }
 
     fn scan_history_region_bytes(

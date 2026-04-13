@@ -134,6 +134,7 @@ export interface Runtime {
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
+  sealBatch?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -243,6 +244,7 @@ export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
   requestedTier: DurabilityTier;
+  sealed: boolean;
   latestSettlement: BatchSettlement | null;
 }
 
@@ -259,6 +261,7 @@ interface WriteContextPayload {
   attribution?: string;
   batch_mode?: BatchMode;
   batch_id?: string;
+  target_branch_name?: string;
 }
 
 interface PersistedInsertResult {
@@ -675,7 +678,16 @@ export function sessionFromRequest(request: RequestLike): Session {
 type TransactionWriteContext = {
   batchMode: BatchMode;
   batchId: string;
+  targetBranchName: string;
 };
+
+function composeTargetBranchName(schemaContext: {
+  env: string;
+  schema_hash: string;
+  user_branch: string;
+}): string {
+  return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
+}
 
 export class PersistedWrite<T> {
   constructor(
@@ -707,6 +719,8 @@ export class PersistedWrite<T> {
 }
 
 export class Transaction {
+  private committed = false;
+
   constructor(
     private readonly client: JazzClient,
     private readonly batchContext: TransactionWriteContext,
@@ -714,11 +728,29 @@ export class Transaction {
     private readonly attribution?: string,
   ) {}
 
+  private ensureWritable(): void {
+    if (this.committed) {
+      throw new Error(
+        `Transaction ${this.batchContext.batchId} is already committed`,
+      );
+    }
+  }
+
   batchId(): string {
     return this.batchContext.batchId;
   }
 
+  commit(): string {
+    if (this.committed) {
+      return this.batchId();
+    }
+    const batchId = this.client.sealBatch(this.batchId());
+    this.committed = true;
+    return batchId;
+  }
+
   create(table: string, values: InsertValues): Row {
+    this.ensureWritable();
     return this.client.createInternal(
       table,
       values,
@@ -733,6 +765,7 @@ export class Transaction {
     values: InsertValues,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<Row> {
+    this.ensureWritable();
     return this.client.createPersistedInternal(
       table,
       values,
@@ -744,6 +777,7 @@ export class Transaction {
   }
 
   update(objectId: string, updates: Record<string, Value>): void {
+    this.ensureWritable();
     this.client.updateInternal(
       objectId,
       updates,
@@ -758,6 +792,7 @@ export class Transaction {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<void> {
+    this.ensureWritable();
     return this.client.updatePersistedInternal(
       objectId,
       updates,
@@ -769,6 +804,7 @@ export class Transaction {
   }
 
   delete(objectId: string): void {
+    this.ensureWritable();
     this.client.deleteInternal(
       objectId,
       this.session,
@@ -781,6 +817,7 @@ export class Transaction {
     objectId: string,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<void> {
+    this.ensureWritable();
     return this.client.deletePersistedInternal(
       objectId,
       this.session,
@@ -1217,11 +1254,13 @@ export class JazzClient {
    * @internal
    */
   beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+    const targetBranchName = composeTargetBranchName(this.getSchemaContext());
     return new Transaction(
       this,
       {
         batchMode: "transactional",
         batchId: generateBatchId(),
+        targetBranchName,
       },
       this.resolveWriteSession(session, attribution),
       attribution,
@@ -1241,6 +1280,11 @@ export class JazzClient {
 
   acknowledgeRejectedBatch(batchId: string): boolean {
     return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
+  }
+
+  sealBatch(batchId: string): string {
+    this.requireBatchRecordMethod("sealBatch")(batchId);
+    return batchId;
   }
 
   /**
@@ -1323,6 +1367,7 @@ export class JazzClient {
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
       payload.batch_id = batchContext.batchId;
+      payload.target_branch_name = batchContext.targetBranchName;
     }
     return JSON.stringify(payload);
   }
@@ -1382,6 +1427,7 @@ export class JazzClient {
       | "loadLocalBatchRecord"
       | "loadLocalBatchRecords"
       | "acknowledgeRejectedBatch"
+      | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
