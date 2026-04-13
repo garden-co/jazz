@@ -19,13 +19,32 @@ New sign-ups receive `role = "member"` by default (configured via the `admin` pl
 
 ## Setup
 
-### 1. Start the Next app
+### 1. Create `.env`
+
+```bash
+cp .env.example .env
+```
+
+The example reads these values from `.env`:
+
+- `NEXT_PUBLIC_APP_ID` — Jazz app id shared by the Next app and sync server
+- `NEXT_PUBLIC_SYNC_SERVER_URL` — Jazz sync server URL
+- `NEXT_PUBLIC_APP_ORIGIN` — Next app origin used by Better Auth and Playwright
+- `ADMIN_SECRET` — admin secret for the local sync server
+- `BACKEND_SECRET` — backend secret used by the Better Auth Jazz context
+- `NEXT_PUBLIC_CHAT_ID` — general chat room id
+- `NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID` — announcements chat room id
+
+`pnpm dev`, `pnpm sync-server`, and `pnpm test:e2e` all read the same `.env`.
+
+### 2. Start the Next app
 
 ```bash
 pnpm dev
 ```
 
-Starts Next.js on port 3000. Better Auth is mounted under `/api/auth/*` via a Next route handler.
+Starts Next.js at `NEXT_PUBLIC_APP_ORIGIN`. Better Auth is mounted under `/api/auth/*` via a Next
+route handler. This example expects the Jazz sync server to run as a separate process.
 
 Key routes exposed by Better Auth:
 
@@ -34,7 +53,7 @@ Key routes exposed by Better Auth:
 - `GET  /api/auth/token` — exchange active session cookie for a JWT (bearer plugin)
 - `GET  /api/auth/jwks` — public key set used by the Jazz sync server
 
-### 2. Start the Jazz sync server
+### 3. Start the Jazz sync server
 
 ```bash
 pnpm sync-server
@@ -43,7 +62,7 @@ pnpm sync-server
 Builds the `jazz-tools` binary if needed, waits for the Better Auth JWKS endpoint from the Next
 app, starts a local sync server on port 1625, and pushes the schema catalogue in one step.
 
-Open `http://127.0.0.1:3000`.
+Open `NEXT_PUBLIC_APP_ORIGIN`.
 
 ## How the Better Auth integration works
 
@@ -158,6 +177,6 @@ Run the full end-to-end setup and flow tests with:
 pnpm test:e2e
 ```
 
-The Playwright `webServer` starts Next on port 4179. Global setup waits for the Next-hosted JWKS
-endpoint, spins up a local Jazz sync server pointed at that JWKS URL, and pushes the schema
-catalogue before the browser test runs.
+The Playwright `webServer` starts Next at `NEXT_PUBLIC_APP_ORIGIN` from `.env`. Global setup waits
+for the Next-hosted JWKS endpoint, spins up a local Jazz sync server pointed at that JWKS URL, and
+pushes the schema catalogue before the browser test runs.
