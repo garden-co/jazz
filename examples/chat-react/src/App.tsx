@@ -29,6 +29,14 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
 }
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
+  return (
+    <Suspense fallback={<p id="joining-chat">Loading...</p>}>
+      <AppInner config={config} />
+    </Suspense>
+  );
+}
+
+function AppInner({ config }: { config?: Partial<DbConfig> }) {
   const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
   const resolvedConfig = defaultConfig(secret, config);
 
