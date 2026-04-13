@@ -1,6 +1,8 @@
 import { definePermissions } from "jazz-tools/permissions";
-import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "./constants";
 import { app } from "./schema";
+
+const ANNOUNCEMENTS_CHAT_ID = process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID!;
+const CHAT_ID = process.env.NEXT_PUBLIC_CHAT_ID!;
 
 export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });

@@ -4,7 +4,6 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET!;
 const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
 const SYNC_SERVER_URL = process.env.NEXT_PUBLIC_SYNC_SERVER_URL!;
 
-
 export default withJazz(
   {
     reactStrictMode: true,
