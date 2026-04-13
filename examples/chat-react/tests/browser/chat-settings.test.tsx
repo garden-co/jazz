@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,6 +78,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
