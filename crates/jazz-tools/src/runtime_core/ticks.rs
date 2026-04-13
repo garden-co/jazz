@@ -105,7 +105,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             };
 
             for row in history_rows {
-                if row.batch_id != batch_id || !matches!(row.state, RowState::StagingPending) {
+                if row.batch_id != batch_id
+                    || !matches!(row.state, RowState::StagingPending | RowState::Superseded)
+                {
                     continue;
                 }
 

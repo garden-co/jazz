@@ -225,9 +225,7 @@ impl QueryManager {
     fn maybe_track_local_pending_transaction_overlay(
         &mut self,
         table: &str,
-        branch_name: &BranchName,
-        row_id: ObjectId,
-        version_id: CommitId,
+        row_version_key: RowVersionKey,
         write_context: Option<&WriteContext>,
         deleted: bool,
         visibility_change: &Option<RowVisibilityChange>,
@@ -242,12 +240,12 @@ impl QueryManager {
         }
 
         self.pending_local_row_versions
-            .insert(row_id, RowVersionKey::new(row_id, *branch_name, version_id));
+            .insert(row_version_key.row_id, row_version_key);
         self.mark_subscriptions_dirty_local(table);
         if deleted {
-            self.mark_local_row_deleted_in_subscriptions(table, row_id);
+            self.mark_local_row_deleted_in_subscriptions(table, row_version_key.row_id);
         } else {
-            self.mark_local_row_updated_in_subscriptions(table, row_id);
+            self.mark_local_row_updated_in_subscriptions(table, row_version_key.row_id);
         }
     }
 
@@ -369,6 +367,42 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch_name)?;
         Some(row.row_provenance())
+    }
+
+    pub(crate) fn load_latest_transactional_staged_row_on_branch(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        batch_id: BatchId,
+    ) -> Option<(String, QueryRowVersion)> {
+        let table = self.load_row_table_name(storage, row_id)?;
+        let row = storage
+            .scan_history_row_versions(&table, row_id)
+            .ok()?
+            .into_iter()
+            .filter(|row| {
+                row.batch_id == batch_id
+                    && row.branch.as_str() == branch_name
+                    && matches!(row.state, RowState::StagingPending)
+            })
+            .max_by_key(|row| (row.updated_at, row.version_id()))
+            .map(|row| QueryRowVersion::from(&row))?;
+        Some((table, row))
+    }
+
+    fn transactional_staged_row_for_write(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Option<QueryRowVersion> {
+        let batch_id = write_context
+            .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
+            .and_then(WriteContext::batch_id)?;
+        self.load_latest_transactional_staged_row_on_branch(storage, row_id, branch_name, batch_id)
+            .map(|(_, row)| row)
     }
 
     fn load_branch_tip_ids(
@@ -588,9 +622,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            &branch_name,
-            id,
-            version_id,
+            RowVersionKey::new(id, branch_name, version_id),
             write_context,
             false,
             &visibility_change,
@@ -800,9 +832,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            &branch_name,
-            object_id,
-            row_version_id,
+            RowVersionKey::new(object_id, branch_name, row_version_id),
             write_context,
             false,
             &visibility_change,
@@ -959,9 +989,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            &branch_name,
-            object_id,
-            row_version_id,
+            RowVersionKey::new(object_id, branch_name, row_version_id),
             write_context,
             false,
             &visibility_change,
@@ -1086,9 +1114,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            &branch_name,
-            object_id,
-            row_version_id,
+            RowVersionKey::new(object_id, branch_name, row_version_id),
             write_context,
             false,
             &visibility_change,
@@ -1658,8 +1684,17 @@ impl QueryManager {
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let (_, current_row) = self
-            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+        let current_row = self
+            .transactional_staged_row_for_write(
+                storage,
+                id,
+                self.current_branch().as_str(),
+                write_context,
+            )
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                    .map(|(_, row)| row)
+            })
             .ok_or(QueryError::ObjectNotFound(id))?;
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
@@ -1761,11 +1796,21 @@ impl QueryManager {
             &new_provenance,
         )?;
 
-        let existing_branch_data = self
-            .load_visible_row_on_branch(storage, id, branch)
-            .map(|(_, row)| row.data)
-            .filter(|data| !data.is_empty());
-        let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
+        let staged_branch_row =
+            self.transactional_staged_row_for_write(storage, id, branch, write_context);
+        let existing_branch_data = staged_branch_row
+            .as_ref()
+            .map(|row| row.data.clone())
+            .filter(|data| !data.is_empty())
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, branch)
+                    .map(|(_, row)| row.data)
+                    .filter(|data| !data.is_empty())
+            });
+        let was_soft_deleted = staged_branch_row
+            .as_ref()
+            .map(QueryRowVersion::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id));
         let index_mutations = if was_soft_deleted {
             Self::index_mutations_for_undelete_on_branch(
                 table,
@@ -1858,13 +1903,23 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(storage, &table, id) {
+        let current_branch = self.current_branch().to_string();
+        let staged_row =
+            self.transactional_staged_row_for_write(storage, id, &current_branch, write_context);
+        if staged_row
+            .as_ref()
+            .map(QueryRowVersion::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted(storage, &table, id))
+        {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
         // Get old data from the current visible row (for index removal and content preservation)
-        let (_, current_row) = self
-            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+        let current_row = staged_row
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                    .map(|(_, row)| row)
+            })
             .ok_or(QueryError::ObjectNotFound(id))?;
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
@@ -1879,8 +1934,6 @@ impl QueryManager {
                 table_schema.policies.effective_delete_using().cloned(),
             )
         };
-
-        let current_branch = self.current_branch().to_string();
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -1972,9 +2025,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            &branch_name,
-            id,
-            delete_version_id,
+            RowVersionKey::new(id, branch_name, delete_version_id),
             write_context,
             true,
             &visibility_change,
@@ -2035,9 +2086,15 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
+        let staged_branch_row =
+            self.transactional_staged_row_for_write(storage, id, branch, write_context);
         let table_name = TableName::new(table);
         // Check if already soft-deleted on this branch
-        if self.row_is_deleted_on_branch(storage, table, branch, id) {
+        if staged_branch_row
+            .as_ref()
+            .map(QueryRowVersion::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id))
+        {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -2106,10 +2163,15 @@ impl QueryManager {
         }
 
         // Get old data from the current visible row on this branch
-        let old_branch_data = self
-            .load_visible_row_on_branch(storage, id, branch)
-            .map(|(_, row)| row.data)
-            .filter(|data| !data.is_empty());
+        let old_branch_data = staged_branch_row
+            .as_ref()
+            .map(|row| row.data.clone())
+            .filter(|data| !data.is_empty())
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, branch)
+                    .map(|(_, row)| row.data)
+                    .filter(|data| !data.is_empty())
+            });
         let parents = self.load_branch_tip_ids(storage, table, id, branch);
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
@@ -2140,9 +2202,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            &branch_name,
-            id,
-            delete_version_id,
+            RowVersionKey::new(id, branch_name, delete_version_id),
             write_context,
             true,
             &visibility_change,
@@ -2259,9 +2319,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            &branch_name,
-            id,
-            row_version_id,
+            RowVersionKey::new(id, branch_name, row_version_id),
             None,
             false,
             &visibility_change,
@@ -2350,9 +2408,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            &branch_name,
-            id,
-            delete_version_id,
+            RowVersionKey::new(id, branch_name, delete_version_id),
             None,
             true,
             &visibility_change,

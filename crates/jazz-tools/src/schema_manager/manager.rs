@@ -1510,13 +1510,35 @@ impl SchemaManager {
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            self.query_manager
-                .load_row_for_schema_update_in_context(
-                    storage,
-                    object_id,
-                    &branches,
-                    &target_context,
-                )
+            write_context
+                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+                .and_then(WriteContext::batch_id)
+                .and_then(|batch_id| {
+                    self.query_manager
+                        .load_latest_transactional_staged_row_on_branch(
+                            storage,
+                            object_id,
+                            &target_branch,
+                            batch_id,
+                        )
+                        .map(|(table, row)| {
+                            (
+                                table,
+                                target_branch.clone(),
+                                row.data.to_vec(),
+                                row.version_id(),
+                                row.row_provenance(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.query_manager.load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                })
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let table_name = TableName::new(&table);
@@ -1590,13 +1612,35 @@ impl SchemaManager {
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            self.query_manager
-                .load_row_for_schema_update_in_context(
-                    storage,
-                    object_id,
-                    &branches,
-                    &target_context,
-                )
+            write_context
+                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+                .and_then(WriteContext::batch_id)
+                .and_then(|batch_id| {
+                    self.query_manager
+                        .load_latest_transactional_staged_row_on_branch(
+                            storage,
+                            object_id,
+                            &target_branch,
+                            batch_id,
+                        )
+                        .map(|(table, row)| {
+                            (
+                                table,
+                                target_branch.clone(),
+                                row.data.to_vec(),
+                                row.version_id(),
+                                row.row_provenance(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.query_manager.load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                })
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();

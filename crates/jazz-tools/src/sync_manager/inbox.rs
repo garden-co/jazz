@@ -1115,7 +1115,10 @@ impl SyncManager {
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
                     self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
-                    if !matches!(applied.row.state, RowState::StagingPending) {
+                    if !matches!(
+                        applied.row.state,
+                        RowState::StagingPending | RowState::Superseded
+                    ) {
                         for tier in self.my_tiers.iter().copied() {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),

@@ -236,7 +236,7 @@ impl SyncManager {
         for row in rows
             .into_iter()
             .filter(|row| row.branch == branch_name.as_str())
-            .filter(|row| !matches!(row.state, RowState::StagingPending))
+            .filter(|row| !matches!(row.state, RowState::StagingPending | RowState::Superseded))
         {
             self.queue_row_to_client(client_id, object_id, metadata.clone(), row, force_resend);
             sent_any = true;

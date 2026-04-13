@@ -40,6 +40,7 @@ use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, S
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type PersistedWriteResult = ((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -327,7 +328,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<PersistedWriteResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.insert_persisted_with_batch_id(table, values, write_context, tier)?)
     }
@@ -340,7 +341,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         session: Option<&Session>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<PersistedWriteResult, RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.insert_persisted_with_write_context(table, values, owned.as_ref(), tier)
     }

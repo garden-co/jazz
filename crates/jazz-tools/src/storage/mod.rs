@@ -51,6 +51,9 @@ use crate::sync_manager::DurabilityTier;
 // Storage Types
 // ============================================================================
 
+type EncodedHistoryRowKey = (ObjectId, SharedString, CommitId);
+type EncodedTableRowHistories = BTreeMap<EncodedHistoryRowKey, Vec<u8>>;
+
 /// Errors from storage operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageError {
@@ -2590,7 +2593,7 @@ pub struct MemoryStorage {
     /// Row-history storage keyed by table.
     row_histories: HashMap<String, TableRowHistories>,
     /// Raw encoded row-history bytes keyed by table, row id, branch, and version id.
-    row_history_bytes: HashMap<String, BTreeMap<(ObjectId, SharedString, CommitId), Vec<u8>>>,
+    row_history_bytes: HashMap<String, EncodedTableRowHistories>,
 }
 
 impl MemoryStorage {

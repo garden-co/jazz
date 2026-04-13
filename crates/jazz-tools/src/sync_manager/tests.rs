@@ -1505,6 +1505,81 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
 }
 
 #[test]
+fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_seal() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let mut first_row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    first_row.batch_id = batch_id;
+    first_row.state = crate::row_histories::RowState::StagingPending;
+
+    let mut second_row = visible_row(
+        row_id,
+        "main",
+        vec![first_row.version_id()],
+        1_100,
+        b"alice-updated",
+    );
+    second_row.batch_id = batch_id;
+    second_row.state = crate::row_histories::RowState::StagingPending;
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(RowMetadata {
+                id: first_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: first_row.clone(),
+        },
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(RowMetadata {
+                id: second_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: second_row.clone(),
+        },
+    );
+
+    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    let live_pending_rows: Vec<_> = history_rows
+        .iter()
+        .filter(|row| matches!(row.state, crate::row_histories::RowState::StagingPending))
+        .collect();
+    assert_eq!(
+        live_pending_rows.len(),
+        1,
+        "authority staging should keep one live pending member for a same-row batch rewrite"
+    );
+    assert_eq!(live_pending_rows[0].version_id(), second_row.version_id());
+
+    let superseded_rows: Vec<_> = history_rows
+        .iter()
+        .filter(|row| matches!(row.state, crate::row_histories::RowState::Superseded))
+        .collect();
+    assert_eq!(superseded_rows.len(), 1);
+    assert_eq!(superseded_rows[0].version_id(), first_row.version_id());
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "pre-seal transactional rewrites should remain non-visible"
+    );
+}
+
+#[test]
 fn seal_batch_rejects_members_spanning_multiple_target_branches() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mut io = MemoryStorage::new();

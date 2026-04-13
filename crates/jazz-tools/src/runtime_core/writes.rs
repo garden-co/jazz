@@ -147,7 +147,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 .scan_history_row_versions(row_locator.table.as_str(), row_id)
                 .map_err(|err| RuntimeError::WriteError(format!("scan history rows: {err}")))?;
             for row in history_rows {
-                if row.batch_id != batch_id {
+                if row.batch_id != batch_id
+                    || !matches!(row.state, crate::row_histories::RowState::StagingPending)
+                {
                     continue;
                 }
                 let key = (row_id, row.branch.to_string());
