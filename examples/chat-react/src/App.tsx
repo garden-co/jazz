@@ -1,5 +1,6 @@
-import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react";
-import { Suspense } from "react";
+import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { Suspense, use } from "react";
+import { BrowserAuthSecretStore } from "jazz-tools";
 
 type DbConfig = Parameters<typeof createJazzClient>[0];
 
@@ -14,23 +15,22 @@ import Router from "@/components/Router";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "019d4349-2486-7021-a33e-566b0820c5af";
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL || undefined;
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
+function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? APP_ID;
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    auth: { localFirstSecret: secret },
     ...(SERVER_URL ? { serverUrl: SERVER_URL } : {}),
     ...overrides,
   };
 }
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
-  const resolvedConfig = defaultConfig(config);
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const resolvedConfig = defaultConfig(secret, config);
 
   return (
     <JazzProvider

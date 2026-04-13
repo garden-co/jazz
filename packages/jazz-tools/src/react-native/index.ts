@@ -11,25 +11,6 @@ export {
   useDb,
   useSession,
 } from "./provider.js";
-export {
-  useLinkExternalIdentity,
-  type LinkExternalIdentityInput,
-  type UseLinkExternalIdentityOptions,
-} from "../react/use-link-external-identity.js";
-export {
-  createSyntheticUserProfile,
-  getActiveSyntheticAuth,
-  loadSyntheticUserStore,
-  saveSyntheticUserStore,
-  setActiveSyntheticProfile,
-  syntheticUserStorageKey,
-  type ActiveSyntheticAuth,
-  type StorageLike,
-  type SyntheticUserProfile,
-  type SyntheticUserStorageOptions,
-  type SyntheticUserStore,
-} from "../synthetic-users.js";
-
 export type {
   DurabilityTier,
   QueryBuilder,

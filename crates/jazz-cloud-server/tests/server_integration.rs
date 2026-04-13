@@ -27,8 +27,6 @@ struct AppSummaryResponse {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     status: String,
 }
@@ -563,8 +561,6 @@ async fn management_api_create_list_and_status_update_work() {
             "jwks_endpoint": "http://example.invalid/jwks",
             "jwks_cache_ttl_secs": 90,
             "jwks_max_stale_secs": 30,
-            "allow_anonymous": false,
-            "allow_demo": true,
             "backend_secret": "managed-backend-secret",
             "admin_secret": "managed-admin-secret"
         }))
@@ -612,8 +608,6 @@ async fn management_api_create_list_and_status_update_work() {
         ))
         .header("Authorization", &auth_header)
         .json(&json!({
-            "allow_anonymous": true,
-            "allow_demo": false,
             "jwks_endpoint": "",
             "jwks_cache_ttl_secs": 10,
             "jwks_max_stale_secs": 5
@@ -649,8 +643,6 @@ async fn management_api_create_list_and_status_update_work() {
     assert_eq!(listed_created.jwks_endpoint, "");
     assert_eq!(listed_created.jwks_cache_ttl_secs, 10);
     assert_eq!(listed_created.jwks_max_stale_secs, 5);
-    assert!(listed_created.allow_anonymous);
-    assert!(!listed_created.allow_demo);
     assert_eq!(listed_created.status, "active");
 
     let update_response = server

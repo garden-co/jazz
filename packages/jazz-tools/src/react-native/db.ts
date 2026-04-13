@@ -40,8 +40,6 @@ export class Db extends RuntimeDb {
           env: this.nativeConfig.env,
           userBranch: this.nativeConfig.userBranch,
           jwtToken: this.nativeConfig.jwtToken,
-          localAuthMode: this.nativeConfig.localAuthMode,
-          localAuthToken: this.nativeConfig.localAuthToken,
           adminSecret: this.nativeConfig.adminSecret,
           tier,
           defaultDurabilityTier: "worker",

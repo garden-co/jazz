@@ -37,14 +37,6 @@ struct CreateAppResponse {
     app_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct LinkExternalResponse {
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
-}
-
 #[derive(Clone)]
 struct JwksState {
     hits: Arc<AtomicUsize>,
@@ -168,7 +160,7 @@ impl TestServer {
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {
-        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None, None, None)
+        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None)
             .await
     }
 
@@ -180,8 +172,6 @@ impl TestServer {
     ) -> CreateAppResponse {
         self.create_app_with_config(
             Some(jwks_endpoint),
-            None,
-            None,
             backend_secret,
             admin_secret,
             None,
@@ -193,8 +183,6 @@ impl TestServer {
     async fn create_app_with_config(
         &self,
         jwks_endpoint: Option<&str>,
-        allow_anonymous: Option<bool>,
-        allow_demo: Option<bool>,
         backend_secret: Option<&str>,
         admin_secret: Option<&str>,
         jwks_cache_ttl_secs: Option<u64>,
@@ -205,12 +193,6 @@ impl TestServer {
         });
         if let Some(endpoint) = jwks_endpoint {
             payload["jwks_endpoint"] = Value::String(endpoint.to_string());
-        }
-        if let Some(flag) = allow_anonymous {
-            payload["allow_anonymous"] = Value::Bool(flag);
-        }
-        if let Some(flag) = allow_demo {
-            payload["allow_demo"] = Value::Bool(flag);
         }
         if let Some(secret) = backend_secret {
             payload["backend_secret"] = Value::String(secret.to_string());
@@ -252,37 +234,6 @@ impl TestServer {
             .send()
             .await
             .expect("sync request")
-    }
-
-    async fn sync_with_local(&self, app_id: &str, mode: &str, token: &str) -> reqwest::Response {
-        self.client
-            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
-            .header("X-Jazz-Local-Mode", mode)
-            .header("X-Jazz-Local-Token", token)
-            .json(&sync_body())
-            .send()
-            .await
-            .expect("sync request")
-    }
-
-    async fn link_external(
-        &self,
-        app_id: &str,
-        bearer_token: &str,
-        local_mode: &str,
-        local_token: &str,
-    ) -> reqwest::Response {
-        self.client
-            .post(format!(
-                "{}/apps/{app_id}/auth/link-external",
-                self.base_url()
-            ))
-            .header("Authorization", format!("Bearer {bearer_token}"))
-            .header("X-Jazz-Local-Mode", local_mode)
-            .header("X-Jazz-Local-Token", local_token)
-            .send()
-            .await
-            .expect("link external request")
     }
 
     async fn sync_with_backend_session(
@@ -646,74 +597,4 @@ async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
         .sync_with_backend_session(&app.app_id, Some("backend-secret-1"), "backend-user")
         .await;
     assert_ne!(valid_secret.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn local_mode_flags_are_enforced_per_app() {
-    let _guard = auth_jwks_test_guard();
-    let server = TestServer::start().await;
-    let app = server
-        .create_app_with_config(
-            None,
-            Some(false),
-            Some(true),
-            Some("backend-secret-1"),
-            Some("admin-secret-1"),
-            None,
-            None,
-        )
-        .await;
-
-    let anonymous = server
-        .sync_with_local(&app.app_id, "anonymous", "device-a")
-        .await;
-    assert_eq!(anonymous.status(), StatusCode::FORBIDDEN);
-
-    let demo = server
-        .sync_with_local(&app.app_id, "demo", "device-b")
-        .await;
-    assert_ne!(demo.status(), StatusCode::FORBIDDEN);
-    assert_ne!(demo.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn link_external_is_idempotent_and_conflicts_on_relink_to_other_principal() {
-    let _guard = auth_jwks_test_guard();
-    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-link", "secret-link")]).await;
-    let server = TestServer::start().await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
-
-    let bearer = make_jwt_with_options(
-        "external-user-1",
-        "kid-link",
-        "secret-link",
-        Some("https://issuer.link.test"),
-        None,
-    );
-
-    let first = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first_body = first.text().await.expect("first link body");
-    let first_link: LinkExternalResponse =
-        serde_json::from_str(&first_body).expect("first link response");
-    assert!(first_link.created);
-    assert_eq!(first_link.issuer, "https://issuer.link.test");
-    assert_eq!(first_link.subject, "external-user-1");
-
-    let second = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
-        .await;
-    assert_eq!(second.status(), StatusCode::OK);
-    let second_body = second.text().await.expect("second link body");
-    let second_link: LinkExternalResponse =
-        serde_json::from_str(&second_body).expect("second link response");
-    assert!(!second_link.created);
-    assert_eq!(first_link.principal_id, second_link.principal_id);
-
-    let conflict = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-b")
-        .await;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 }

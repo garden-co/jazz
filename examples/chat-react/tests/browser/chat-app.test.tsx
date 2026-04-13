@@ -54,8 +54,7 @@ describe("Chat App E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -393,8 +392,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-a-${Date.now()}`,
+      auth: { localFirstSecret: `chat-access-user-a-${Date.now()}` },
     });
 
     await waitFor(
@@ -481,8 +479,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-b-${Date.now()}`,
+      auth: { localFirstSecret: `chat-access-user-b-${Date.now()}` },
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers

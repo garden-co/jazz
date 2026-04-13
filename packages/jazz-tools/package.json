@@ -70,6 +70,11 @@
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
     },
+    "./expo/auth-secret-store": {
+      "types": "./dist/expo/auth-secret-store.d.ts",
+      "react-native": "./dist/expo/auth-secret-store.js",
+      "default": "./dist/expo/auth-secret-store.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -119,6 +124,7 @@
   },
   "peerDependencies": {
     "expo": ">=54",
+    "expo-secure-store": ">=14.0.0",
     "react": "^18 || ^19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
@@ -126,6 +132,9 @@
   },
   "peerDependenciesMeta": {
     "expo": {
+      "optional": true
+    },
+    "expo-secure-store": {
       "optional": true
     },
     "react": {
