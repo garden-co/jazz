@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { LocalStorageAuthSecretStore, generateAuthSecret } from "./auth-secret-store.js";
+import { BrowserAuthSecretStore, generateAuthSecret } from "./auth-secret-store.js";
 
 function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const store = new Map<string, string>();
@@ -28,13 +28,13 @@ describe("generateAuthSecret", () => {
   });
 });
 
-describe("LocalStorageAuthSecretStore", () => {
+describe("BrowserAuthSecretStore", () => {
   let storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
-  let store: LocalStorageAuthSecretStore;
+  let store: BrowserAuthSecretStore;
 
   beforeEach(() => {
     storage = createMockStorage();
-    store = new LocalStorageAuthSecretStore({ storage });
+    store = new BrowserAuthSecretStore({ storage });
   });
 
   it("loadSecret returns null when no secret stored", async () => {
@@ -78,7 +78,7 @@ describe("LocalStorageAuthSecretStore", () => {
   });
 
   it("uses custom key name", async () => {
-    const customStore = new LocalStorageAuthSecretStore({ storage, key: "my-custom-key" });
+    const customStore = new BrowserAuthSecretStore({ storage, key: "my-custom-key" });
     await customStore.saveSecret("test-secret");
     expect(storage.getItem("my-custom-key")).toBe("test-secret");
   });
