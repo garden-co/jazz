@@ -6,7 +6,6 @@ use super::support::{
     has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
@@ -466,36 +465,31 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
         boolean_policy_document_values("bob", "Bob Only", false)
     );
 
-    let anonymous_user_id = derive_local_principal_id(
-        server.app_id(),
-        LocalAuthMode::Anonymous,
-        "anonymous-owner-restricted-device",
-    );
-    let anonymous = connect_ready_claims(
+    let charlie_user_id = "charlie-bystander";
+    let charlie = connect_ready_claims(
         &server,
         &schema,
-        &anonymous_user_id,
+        charlie_user_id,
         json!({
-            "auth_mode": "local",
-            "local_mode": "anonymous"
+            "auth_mode": "external",
         }),
         "documents",
         READY_TIMEOUT,
     )
     .await;
 
-    let anonymous_rows = wait_for_query(
-        &anonymous,
+    let charlie_rows = wait_for_query(
+        &charlie,
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(3),
-        "anonymous sees no owner-restricted rows",
+        "charlie sees no owner-restricted rows",
         Some,
     )
     .await;
-    assert!(anonymous_rows.is_empty());
+    assert!(charlie_rows.is_empty());
 
-    anonymous.shutdown().await.expect("shutdown anonymous");
+    charlie.shutdown().await.expect("shutdown charlie");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;

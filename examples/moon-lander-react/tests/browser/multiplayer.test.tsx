@@ -88,12 +88,10 @@ async function mountApp(opts: {
   playerId?: string;
   physicsSpeed?: number;
   spawnX?: number;
-  localAuthToken?: string;
-  localAuthMode?: string;
+  localFirstSecret?: string;
   adminSecret?: string;
 }): Promise<HTMLDivElement> {
-  const { physicsSpeed, spawnX, playerId, localAuthToken, localAuthMode, adminSecret, ...config } =
-    opts;
+  const { physicsSpeed, spawnX, playerId, localFirstSecret, adminSecret, ...config } = opts;
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -106,9 +104,7 @@ async function mountApp(opts: {
           config: {
             appId: config.appId ?? APP_ID,
             ...config,
-            ...(localAuthToken
-              ? { localAuthMode: localAuthMode ?? "anonymous", localAuthToken }
-              : {}),
+            ...(localFirstSecret ? { auth: { localFirstSecret } } : {}),
             ...(adminSecret ? { adminSecret } : {}),
           },
           playerId: playerId ?? crypto.randomUUID(),
@@ -549,7 +545,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-a"),
         serverUrl,
-        localAuthToken: sharedToken,
+        localFirstSecret: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });
@@ -558,7 +554,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         appId: APP_ID_MULTI,
         dbName: uniqueDbName("full-b"),
         serverUrl,
-        localAuthToken: sharedToken,
+        localFirstSecret: sharedToken,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
       });

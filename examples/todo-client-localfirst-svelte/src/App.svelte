@@ -2,10 +2,9 @@
 	import {
 		createJazzClient,
 		JazzSvelteProvider,
-		SyntheticUserSwitcher,
-		getActiveSyntheticAuth,
 	} from 'jazz-tools/svelte';
 	import type { DbConfig } from 'jazz-tools';
+	import { BrowserAuthSecretStore, generateAuthSecret } from 'jazz-tools';
 	import { Toaster } from 'svelte-sonner';
 	import TodoList from './TodoList.svelte';
 
@@ -20,17 +19,24 @@
 			?.JAZZ_APP_ID;
 	}
 
+	function getOrCreateSecretSync(): string {
+		const stored = localStorage.getItem('jazz-auth-secret');
+		if (stored) return stored;
+		const secret = generateAuthSecret();
+		localStorage.setItem('jazz-auth-secret', secret);
+		return secret;
+	}
+
 	// #region context-setup-svelte
 	function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
 		const appId = overrides.appId ?? readEnvAppId() ?? '019d4349-2408-7275-9b65-ac87f62b7aa2';
-		const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
+		const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync();
 
 		return {
 			appId,
 			env: 'dev',
 			userBranch: 'main',
-			localAuthMode: active.localAuthMode,
-			localAuthToken: active.localAuthToken,
+			auth: { localFirstSecret: secret },
 			...overrides,
 		};
 	}
@@ -40,7 +46,6 @@
 	const client = createJazzClient(config);
 </script>
 
-<SyntheticUserSwitcher appId={config.appId} defaultMode="demo" />
 <JazzSvelteProvider {client}>
 	{#snippet children({ db })}
 		<h1>Todos</h1>

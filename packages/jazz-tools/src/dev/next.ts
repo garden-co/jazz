@@ -11,8 +11,6 @@ export interface JazzServerOptions {
   adminSecret?: string;
   backendSecret?: string;
   appId?: string;
-  allowAnonymous?: boolean;
-  allowDemo?: boolean;
   allowLocalFirstAuth?: boolean;
   dataDir?: string;
   inMemory?: boolean;
@@ -221,8 +219,6 @@ async function initializeManagedRuntime(options: JazzPluginOptions): Promise<Man
           port: serverConfig.port ?? 0,
           adminSecret,
           backendSecret: serverConfig.backendSecret,
-          allowAnonymous: serverConfig.allowAnonymous,
-          allowDemo: serverConfig.allowDemo,
           allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,
           dataDir: serverConfig.dataDir,
           inMemory: serverConfig.inMemory,

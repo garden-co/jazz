@@ -26,10 +26,4 @@ describe("svelte components produce no state_referenced_locally warnings", () =>
     const bad = warnings.filter((w) => w.code === "state_referenced_locally");
     expect(bad, bad.map((w) => w.message).join("\n")).toEqual([]);
   });
-
-  it("SyntheticUserSwitcher.svelte", async () => {
-    const warnings = await compileAndWarn("SyntheticUserSwitcher.svelte");
-    const bad = warnings.filter((w) => w.code === "state_referenced_locally");
-    expect(bad, bad.map((w) => w.message).join("\n")).toEqual([]);
-  });
 });

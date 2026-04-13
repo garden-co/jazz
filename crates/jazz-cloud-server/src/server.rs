@@ -58,8 +58,6 @@ const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 const DEFAULT_JWKS_MAX_STALE_SECS: u64 = 300;
 const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
-const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
-const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 const MANAGEMENT_USERNAME: &str = "admin";
 const MANAGEMENT_BASIC_AUTH_REALM: &str = "jazz-cloud-server-management";
 const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
@@ -239,8 +237,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
             </label>
           </div>
           <div class="checkboxes">
-            <label><input type="checkbox" id="allow-anonymous" checked /> Allow anonymous local auth</label>
-            <label><input type="checkbox" id="allow-demo" checked /> Allow demo local auth</label>
             <label><input type="checkbox" id="allow-local-first-auth" checked /> Allow local-first auth</label>
           </div>
           <div>
@@ -365,7 +361,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           const authCell = document.createElement("td");
           const authSummary = document.createElement("div");
           authSummary.className = "muted";
-          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ${app.allow_local_first_auth ? "local-first:on" : "local-first:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
+          authSummary.textContent = `${app.allow_local_first_auth ? "local-first:on" : "local-first:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
           authCell.appendChild(authSummary);
 
           const authEditor = document.createElement("div");
@@ -374,20 +370,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           const flags = document.createElement("div");
           flags.className = "checkboxes";
 
-          const anonymousLabel = document.createElement("label");
-          const anonymousCheckbox = document.createElement("input");
-          anonymousCheckbox.type = "checkbox";
-          anonymousCheckbox.checked = Boolean(app.allow_anonymous);
-          anonymousLabel.appendChild(anonymousCheckbox);
-          anonymousLabel.appendChild(document.createTextNode("Allow anonymous"));
-
-          const demoLabel = document.createElement("label");
-          const demoCheckbox = document.createElement("input");
-          demoCheckbox.type = "checkbox";
-          demoCheckbox.checked = Boolean(app.allow_demo);
-          demoLabel.appendChild(demoCheckbox);
-          demoLabel.appendChild(document.createTextNode("Allow demo"));
-
           const localFirstAuthLabel = document.createElement("label");
           const localFirstAuthCheckbox = document.createElement("input");
           localFirstAuthCheckbox.type = "checkbox";
@@ -395,8 +377,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           localFirstAuthLabel.appendChild(localFirstAuthCheckbox);
           localFirstAuthLabel.appendChild(document.createTextNode("Allow local-first auth"));
 
-          flags.appendChild(anonymousLabel);
-          flags.appendChild(demoLabel);
           flags.appendChild(localFirstAuthLabel);
 
           const jwksInput = document.createElement("input");
@@ -426,8 +406,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
             saveAuthButton.disabled = true;
             try {
               const payload = {
-                allow_anonymous: anonymousCheckbox.checked,
-                allow_demo: demoCheckbox.checked,
                 allow_local_first_auth: localFirstAuthCheckbox.checked,
                 jwks_endpoint: jwksInput.value.trim(),
               };
@@ -594,8 +572,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
         const payload = {
           app_name: document.getElementById("app-name").value.trim(),
           jwks_endpoint: document.getElementById("jwks-endpoint").value.trim(),
-          allow_anonymous: document.getElementById("allow-anonymous").checked,
-          allow_demo: document.getElementById("allow-demo").checked,
           allow_local_first_auth: document.getElementById("allow-local-first-auth").checked,
         };
 
@@ -647,8 +623,6 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           setCreateResult(created);
           setStatus("App created.");
           event.target.reset();
-          document.getElementById("allow-anonymous").checked = true;
-          document.getElementById("allow-demo").checked = true;
           document.getElementById("allow-local-first-auth").checked = true;
           await loadApps();
         } catch (error) {
@@ -1315,29 +1289,6 @@ enum AppStatus {
     Disabled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalAuthMode {
-    Anonymous,
-    Demo,
-}
-
-impl LocalAuthMode {
-    fn from_header(value: &str) -> Option<Self> {
-        match value {
-            "anonymous" => Some(Self::Anonymous),
-            "demo" => Some(Self::Demo),
-            _ => None,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Anonymous => "anonymous",
-            Self::Demo => "demo",
-        }
-    }
-}
-
 impl AppStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -1361,8 +1312,6 @@ struct AppConfig {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
@@ -1387,8 +1336,6 @@ struct MetaAppRow {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
@@ -1458,8 +1405,6 @@ impl MetaStore {
                     .column("jwks_endpoint", ColumnType::Text)
                     .column("jwks_cache_ttl_secs", ColumnType::BigInt)
                     .column("jwks_max_stale_secs", ColumnType::BigInt)
-                    .column("allow_anonymous", ColumnType::Boolean)
-                    .column("allow_demo", ColumnType::Boolean)
                     .column("allow_local_first_auth", ColumnType::Boolean)
                     .column("backend_secret_hash", ColumnType::Text)
                     .column("admin_secret_hash", ColumnType::Text)
@@ -1575,8 +1520,6 @@ impl MetaStore {
         jwks_endpoint: String,
         jwks_cache_ttl_secs: u64,
         jwks_max_stale_secs: u64,
-        allow_anonymous: bool,
-        allow_demo: bool,
         allow_local_first_auth: bool,
         backend_secret_hash: String,
         admin_secret_hash: String,
@@ -1592,8 +1535,6 @@ impl MetaStore {
                     None => Value::Null,
                 },
                 "admin_secret_hash" => Value::Text(admin_secret_hash.clone()),
-                "allow_anonymous" => Value::Boolean(allow_anonymous),
-                "allow_demo" => Value::Boolean(allow_demo),
                 "allow_local_first_auth" => Value::Boolean(allow_local_first_auth),
                 "app_id" => Value::Uuid(app_id.as_object_id()),
                 "app_name" => Value::Text(app_name.clone()),
@@ -1629,8 +1570,6 @@ impl MetaStore {
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
-            allow_anonymous,
-            allow_demo,
             allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
@@ -1648,11 +1587,6 @@ impl MetaStore {
                 "jwks_endpoint".to_string(),
                 Value::Text(row.jwks_endpoint.clone()),
             ),
-            (
-                "allow_anonymous".to_string(),
-                Value::Boolean(row.allow_anonymous),
-            ),
-            ("allow_demo".to_string(), Value::Boolean(row.allow_demo)),
             (
                 "allow_local_first_auth".to_string(),
                 Value::Boolean(row.allow_local_first_auth),
@@ -1735,47 +1669,6 @@ impl MetaStore {
         }
     }
 
-    async fn create_external_identity(
-        &self,
-        app_id: AppId,
-        issuer: &str,
-        subject: &str,
-        principal_id: &str,
-    ) -> Result<MetaExternalIdentityRow, String> {
-        let now = now_timestamp_us();
-        let values: HashMap<String, Value> = self
-            .external_identities_descriptor
-            .columns
-            .iter()
-            .map(|column| {
-                let value = match column.name.as_str() {
-                    "app_id" => Value::Uuid(app_id.as_object_id()),
-                    "created_at" => Value::Timestamp(now),
-                    "issuer" => Value::Text(issuer.to_string()),
-                    "principal_id" => Value::Text(principal_id.to_string()),
-                    "subject" => Value::Text(subject.to_string()),
-                    "updated_at" => Value::Timestamp(now),
-                    other => panic!("unexpected external identity column {other}"),
-                };
-                (column.name.to_string(), value)
-            })
-            .collect();
-
-        let object_id = self
-            .runtime
-            .insert("external_identities", values, None)
-            .map_err(|e| format!("failed to insert external identity: {e}"))?;
-        self.runtime
-            .flush()
-            .await
-            .map_err(|e| format!("failed to flush external identity: {e}"))?;
-
-        let _ = object_id;
-        Ok(MetaExternalIdentityRow {
-            principal_id: principal_id.to_string(),
-        })
-    }
-
     fn decode_row(&self, object_id: ObjectId, values: &[Value]) -> Result<MetaAppRow, String> {
         let app_obj_id = match descriptor_value(&self.apps_descriptor, values, "app_id") {
             Some(Value::Uuid(id)) => *id,
@@ -1818,27 +1711,6 @@ impl MetaStore {
             "jwks_max_stale_secs",
             DEFAULT_JWKS_MAX_STALE_SECS,
         )?;
-
-        let allow_anonymous =
-            match descriptor_value(&self.apps_descriptor, values, "allow_anonymous") {
-                Some(Value::Boolean(v)) => *v,
-                Some(other) => {
-                    return Err(format!(
-                        "meta row field allow_anonymous expected boolean, got {other:?}"
-                    ));
-                }
-                None => true,
-            };
-
-        let allow_demo = match descriptor_value(&self.apps_descriptor, values, "allow_demo") {
-            Some(Value::Boolean(v)) => *v,
-            Some(other) => {
-                return Err(format!(
-                    "meta row field allow_demo expected boolean, got {other:?}"
-                ));
-            }
-            None => true,
-        };
 
         let allow_local_first_auth =
             match descriptor_value(&self.apps_descriptor, values, "allow_local_first_auth") {
@@ -1922,8 +1794,6 @@ impl MetaStore {
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
-            allow_anonymous,
-            allow_demo,
             allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
@@ -2406,8 +2276,6 @@ struct CreateAppRequest {
     jwks_endpoint: Option<String>,
     jwks_cache_ttl_secs: Option<u64>,
     jwks_max_stale_secs: Option<u64>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
     allow_local_first_auth: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
@@ -2419,8 +2287,6 @@ struct UpdateAppRequest {
     jwks_endpoint: Option<String>,
     jwks_cache_ttl_secs: Option<u64>,
     jwks_max_stale_secs: Option<u64>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
     allow_local_first_auth: Option<bool>,
     status: Option<AppStatus>,
     rotate_backend_secret: Option<bool>,
@@ -2437,8 +2303,6 @@ struct ManageUpdateAuthRequest {
     jwks_endpoint: Option<String>,
     jwks_cache_ttl_secs: Option<u64>,
     jwks_max_stale_secs: Option<u64>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
     allow_local_first_auth: Option<bool>,
 }
 
@@ -2449,8 +2313,6 @@ struct AppSummaryResponse {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     status: AppStatus,
     worker: usize,
@@ -2463,8 +2325,6 @@ struct CreateAppResponse {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     backend_secret: String,
     admin_secret: String,
@@ -2479,22 +2339,11 @@ struct UpdateAppResponse {
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
-    allow_anonymous: bool,
-    allow_demo: bool,
     allow_local_first_auth: bool,
     status: AppStatus,
     worker: usize,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct LinkExternalResponse {
-    app_id: String,
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2675,10 +2524,6 @@ fn create_router(state: Arc<ServerState>) -> Router {
             post(publish_permissions_handler),
         )
         .route(
-            "/apps/:app_id/auth/link-external",
-            post(link_external_handler),
-        )
-        .route(
             "/internal/apps",
             post(create_app_handler).get(list_apps_handler),
         )
@@ -2719,8 +2564,6 @@ fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
         jwks_endpoint: row.jwks_endpoint.clone(),
         jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: row.jwks_max_stale_secs,
-        allow_anonymous: row.allow_anonymous,
-        allow_demo: row.allow_demo,
         allow_local_first_auth: row.allow_local_first_auth,
         backend_secret_hash: row.backend_secret_hash.clone(),
         admin_secret_hash: row.admin_secret_hash.clone(),
@@ -2772,13 +2615,6 @@ fn decode_session_header(b64: &str) -> Option<Session> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let json_str = std::str::from_utf8(&bytes).ok()?;
     serde_json::from_str(json_str).ok()
-}
-
-fn derive_local_principal_id(app_id: AppId, mode: LocalAuthMode, token: &str) -> String {
-    let input = format!("{app_id}:{}:{token}", mode.as_str());
-    let digest = Sha256::digest(input.as_bytes());
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    format!("local:{encoded}")
 }
 
 fn derive_external_principal_id(app_id: AppId, issuer: &str, subject: &str) -> String {
@@ -3300,44 +3136,6 @@ async fn extract_session(
         return Ok(Some(session));
     }
 
-    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers
-        .get(LOCAL_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok());
-
-    match (local_mode, local_token) {
-        (Some(mode), Some(token)) => {
-            let mode = LocalAuthMode::from_header(mode)
-                .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
-            if mode == LocalAuthMode::Anonymous && !app_config.allow_anonymous {
-                return Err((StatusCode::FORBIDDEN, "Anonymous auth disabled for app"));
-            }
-            if mode == LocalAuthMode::Demo && !app_config.allow_demo {
-                return Err((StatusCode::FORBIDDEN, "Demo auth disabled for app"));
-            }
-            let token = token.trim();
-            if token.is_empty() {
-                return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
-            }
-
-            let principal_id = derive_local_principal_id(app_id, mode, token);
-            return Ok(Some(Session {
-                user_id: principal_id,
-                claims: serde_json::json!({
-                    "auth_mode": "local",
-                    "local_mode": mode.as_str(),
-                }),
-            }));
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
-            ));
-        }
-        (None, None) => {}
-    }
-
     Ok(None)
 }
 
@@ -3483,8 +3281,6 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         jwks_endpoint: cfg.jwks_endpoint.clone(),
         jwks_cache_ttl_secs: cfg.jwks_cache_ttl_secs,
         jwks_max_stale_secs: cfg.jwks_max_stale_secs,
-        allow_anonymous: cfg.allow_anonymous,
-        allow_demo: cfg.allow_demo,
         allow_local_first_auth: cfg.allow_local_first_auth,
         status: cfg.status,
         worker,
@@ -3581,8 +3377,6 @@ async fn manage_set_status_handler(
             jwks_endpoint: None,
             jwks_cache_ttl_secs: None,
             jwks_max_stale_secs: None,
-            allow_anonymous: None,
-            allow_demo: None,
             allow_local_first_auth: None,
             status: Some(request.status),
             rotate_backend_secret: None,
@@ -3623,8 +3417,6 @@ async fn manage_update_auth_handler(
             jwks_endpoint: request.jwks_endpoint,
             jwks_cache_ttl_secs: request.jwks_cache_ttl_secs,
             jwks_max_stale_secs: request.jwks_max_stale_secs,
-            allow_anonymous: request.allow_anonymous,
-            allow_demo: request.allow_demo,
             allow_local_first_auth: request.allow_local_first_auth,
             status: None,
             rotate_backend_secret: None,
@@ -3708,8 +3500,6 @@ async fn manage_rotate_admin_secret_handler(
             jwks_endpoint: None,
             jwks_cache_ttl_secs: None,
             jwks_max_stale_secs: None,
-            allow_anonymous: None,
-            allow_demo: None,
             allow_local_first_auth: None,
             status: None,
             rotate_backend_secret: None,
@@ -4364,8 +4154,6 @@ async fn create_app_handler(
 
     let backend_secret = request.backend_secret.unwrap_or_else(generate_secret);
     let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
-    let allow_anonymous = request.allow_anonymous.unwrap_or(true);
-    let allow_demo = request.allow_demo.unwrap_or(true);
     let allow_local_first_auth = request.allow_local_first_auth.unwrap_or(true);
 
     let backend_secret_hash = state.meta_store.hash_secret(&backend_secret);
@@ -4387,8 +4175,6 @@ async fn create_app_handler(
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
-            allow_anonymous,
-            allow_demo,
             allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
@@ -4442,8 +4228,6 @@ async fn create_app_handler(
         jwks_endpoint: meta_row.jwks_endpoint,
         jwks_cache_ttl_secs: meta_row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: meta_row.jwks_max_stale_secs,
-        allow_anonymous: meta_row.allow_anonymous,
-        allow_demo: meta_row.allow_demo,
         allow_local_first_auth: meta_row.allow_local_first_auth,
         backend_secret,
         admin_secret,
@@ -4583,12 +4367,6 @@ async fn update_app_handler(
     if let Some(jwks_max_stale_secs) = request.jwks_max_stale_secs {
         row.jwks_max_stale_secs = jwks_max_stale_secs;
     }
-    if let Some(allow_anonymous) = request.allow_anonymous {
-        row.allow_anonymous = allow_anonymous;
-    }
-    if let Some(allow_demo) = request.allow_demo {
-        row.allow_demo = allow_demo;
-    }
     if let Some(allow_local_first_auth) = request.allow_local_first_auth {
         row.allow_local_first_auth = allow_local_first_auth;
     }
@@ -4629,228 +4407,11 @@ async fn update_app_handler(
         jwks_endpoint: row.jwks_endpoint,
         jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: row.jwks_max_stale_secs,
-        allow_anonymous: row.allow_anonymous,
-        allow_demo: row.allow_demo,
         allow_local_first_auth: row.allow_local_first_auth,
         status: row.status,
         worker,
         backend_secret: new_backend_secret,
         admin_secret: new_admin_secret,
-    })
-    .into_response()
-}
-
-async fn link_external_handler(
-    State(state): State<Arc<ServerState>>,
-    AxumPath(path): AxumPath<AppPath>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let app_id = match parse_app_id(&path.app_id) {
-        Ok(id) => id,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
-        }
-    };
-
-    let app = match state.get_app(app_id).await {
-        Some(app) => app,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "unknown app_id: {}",
-                    path.app_id
-                ))),
-            )
-                .into_response();
-        }
-    };
-
-    let cfg = app.config.read().await.clone();
-
-    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers
-        .get(LOCAL_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok());
-    let (mode, token) = match (local_mode, local_token) {
-        (Some(mode), Some(token)) => (mode, token.trim()),
-        (Some(_), None) | (None, Some(_)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
-                )),
-            )
-                .into_response();
-        }
-        (None, None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Local auth headers are required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let mode = match LocalAuthMode::from_header(mode) {
-        Some(mode) => mode,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request("Invalid local auth mode")),
-            )
-                .into_response();
-        }
-    };
-
-    if token.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("Empty local auth token")),
-        )
-            .into_response();
-    }
-
-    if mode == LocalAuthMode::Anonymous && !cfg.allow_anonymous {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized(
-                "Anonymous auth disabled for app",
-            )),
-        )
-            .into_response();
-    }
-    if mode == LocalAuthMode::Demo && !cfg.allow_demo {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized("Demo auth disabled for app")),
-        )
-            .into_response();
-    }
-
-    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Authorization bearer token is required",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let token_bearer = match auth_value.strip_prefix("Bearer ") {
-        Some(token) if !token.trim().is_empty() => token.trim(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Invalid Authorization header format",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let verified = match validate_jwt_with_jwks(&state, app_id, &cfg, token_bearer).await {
-        Ok(verified) => verified,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    let issuer = match verified.issuer.as_deref().map(str::trim) {
-        Some(iss) if !iss.is_empty() => iss.to_string(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "JWT issuer (iss) is required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let subject = verified.subject.trim().to_string();
-    if subject.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
-        )
-            .into_response();
-    }
-
-    let local_principal_id = derive_local_principal_id(app_id, mode, token);
-
-    match verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        Some(claim_principal) if claim_principal != local_principal_id => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(
-                    "JWT jazz_principal_id claim does not match local principal",
-                )),
-            )
-                .into_response();
-        }
-        _ => {}
-    }
-
-    let mut created = false;
-
-    match state
-        .meta_store
-        .get_external_identity(app_id, &issuer, &subject)
-        .await
-    {
-        Ok(Some(row)) => {
-            if row.principal_id != local_principal_id {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::bad_request(
-                        "external identity is already linked to a different principal",
-                    )),
-                )
-                    .into_response();
-            }
-        }
-        Ok(None) => {
-            if let Err(err) = state
-                .meta_store
-                .create_external_identity(app_id, &issuer, &subject, &local_principal_id)
-                .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::internal(err)),
-                )
-                    .into_response();
-            }
-            created = true;
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    }
-
-    Json(LinkExternalResponse {
-        app_id: app_id.to_string(),
-        principal_id: local_principal_id,
-        issuer,
-        subject,
-        created,
     })
     .into_response()
 }
@@ -4918,8 +4479,6 @@ mod tests {
                 45,
                 90,
                 true,
-                false,
-                true,
                 "backend-secret-hash".to_string(),
                 "admin-secret-hash".to_string(),
                 AppStatus::Active,
@@ -4938,8 +4497,6 @@ mod tests {
         assert_eq!(loaded.jwks_endpoint, "https://issuer.example/jwks");
         assert_eq!(loaded.jwks_cache_ttl_secs, 45);
         assert_eq!(loaded.jwks_max_stale_secs, 90);
-        assert!(loaded.allow_anonymous);
-        assert!(!loaded.allow_demo);
         assert_eq!(loaded.backend_secret_hash, "backend-secret-hash");
         assert_eq!(loaded.admin_secret_hash, "admin-secret-hash");
         assert_eq!(loaded.status, AppStatus::Active);

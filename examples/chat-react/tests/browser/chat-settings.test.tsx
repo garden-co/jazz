@@ -52,8 +52,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -288,8 +287,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-alice"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-alice-${Date.now()}`,
+      auth: { localFirstSecret: `settings-alice-${Date.now()}` },
     });
 
     await waitFor(
@@ -312,8 +310,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-bob"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-bob-${Date.now()}`,
+      auth: { localFirstSecret: `settings-bob-${Date.now()}` },
     });
 
     // Wait for Bob to see the chat

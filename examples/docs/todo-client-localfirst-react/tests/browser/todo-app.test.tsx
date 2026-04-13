@@ -47,8 +47,7 @@ describe("React Todo App E2E", () => {
   async function mountApp(config: {
     appId?: string;
     serverUrl?: string;
-    localAuthMode?: "anonymous" | "demo";
-    localAuthToken?: string;
+    auth?: { localFirstSecret: string };
     adminSecret?: string;
     driver?: DbConfig["driver"];
   }): Promise<HTMLDivElement> {
@@ -279,16 +278,14 @@ describe("React Todo App E2E", () => {
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      localAuthMode: "demo",
-      localAuthToken: "react-sync-user-a",
+      auth: { localFirstSecret: "react-sync-user-a" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      localAuthMode: "demo",
-      localAuthToken: "react-sync-user-b",
+      auth: { localFirstSecret: "react-sync-user-b" },
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -330,15 +327,13 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "react-memory-user-a",
+      auth: { localFirstSecret: "react-memory-user-a" },
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "react-memory-user-b",
+      auth: { localFirstSecret: "react-memory-user-b" },
       driver: { type: "memory" },
     });
 

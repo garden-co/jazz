@@ -181,8 +181,6 @@ describe("startLocalJazzServer", () => {
       dataDir,
       backendSecret: "test-backend-secret",
       adminSecret: "test-admin-secret",
-      allowAnonymous: true,
-      allowDemo: true,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);

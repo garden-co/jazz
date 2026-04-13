@@ -12,8 +12,6 @@ export interface JazzServerOptions {
   port?: number;
   adminSecret?: string;
   appId?: string;
-  allowAnonymous?: boolean;
-  allowDemo?: boolean;
   allowLocalFirstAuth?: boolean;
   dataDir?: string;
   inMemory?: boolean;
@@ -115,8 +113,6 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
           appId,
           port,
           adminSecret,
-          allowAnonymous: serverConfig.allowAnonymous,
-          allowDemo: serverConfig.allowDemo,
           allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,
           dataDir: serverConfig.dataDir,
           inMemory: serverConfig.inMemory,

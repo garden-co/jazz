@@ -75,8 +75,7 @@ describe("Send permission — private chat INSERT policy", () => {
     config: {
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -184,8 +183,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-alice-a-${Date.now()}`,
+      auth: { localFirstSecret: `send-perm-alice-a-${Date.now()}` },
     });
 
     // Alice's app auto-creates a public chat first; navigate to a private one
@@ -235,8 +233,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-alice-b-${Date.now()}`,
+      auth: { localFirstSecret: `send-perm-alice-b-${Date.now()}` },
     });
 
     await waitFor(
@@ -297,8 +294,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const bobContainer = await mountApp({
       dbName: uniqueDbName("bob-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `send-perm-bob-b-${Date.now()}`,
+      auth: { localFirstSecret: `send-perm-bob-b-${Date.now()}` },
     });
 
     // InviteHandler should redirect Bob to the chat after inserting chatMember

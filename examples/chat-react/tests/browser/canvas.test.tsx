@@ -46,8 +46,7 @@ describe("Canvas E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -195,8 +194,7 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `canvas-user-a-${Date.now()}`,
+      auth: { localFirstSecret: `canvas-user-a-${Date.now()}` },
     });
 
     await waitFor(
@@ -246,8 +244,7 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `canvas-user-b-${Date.now()}`,
+      auth: { localFirstSecret: `canvas-user-b-${Date.now()}` },
     });
 
     // User B should see the canvas

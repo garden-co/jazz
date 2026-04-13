@@ -263,16 +263,14 @@ describe("Svelte Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "svelte-sync-user-a",
+      auth: { localFirstSecret: "svelte-sync-user-a" },
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "svelte-sync-user-b",
+      auth: { localFirstSecret: "svelte-sync-user-b" },
       adminSecret: ADMIN_SECRET,
     });
 
