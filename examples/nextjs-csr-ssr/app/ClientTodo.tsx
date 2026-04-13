@@ -1,12 +1,18 @@
 "use client";
 
-import { use } from "react";
+import { useState, useEffect } from "react";
 import { app } from "../schema";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
 export default function ClientTodo() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const [secret, setSecret] = useState("");
+
+  useEffect(() => {
+    BrowserAuthSecretStore.getOrCreateSecret().then(setSecret);
+  }, []);
+
+  if (!secret) return null;
 
   return (
     <JazzProvider

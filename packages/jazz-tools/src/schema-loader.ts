@@ -1,9 +1,8 @@
-import { createRequire } from "module";
 import { existsSync } from "fs";
 import { access, rm } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
-import { build, type Plugin } from "esbuild";
+import { build } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
@@ -23,25 +22,6 @@ export interface LoadedSchemaProject {
   wasmSchema: WasmSchema;
 }
 
-function absoluteExternalsPlugin(sourceDir: string): Plugin {
-  const require = createRequire(join(sourceDir, "__virtual__.js"));
-  return {
-    name: "absolute-externals",
-    setup(pluginBuild) {
-      // Mark all bare-specifier (package) imports as external, but rewrite
-      // them to absolute file:// paths so the output works from any location.
-      pluginBuild.onResolve({ filter: /^[^./]/ }, (args) => {
-        try {
-          const resolved = require.resolve(args.path);
-          return { path: pathToFileURL(resolved).href, external: true };
-        } catch {
-          return { path: args.path, external: true };
-        }
-      });
-    },
-  };
-}
-
 async function bundleToTempFile(filePath: string): Promise<string> {
   const sourceDir = dirname(resolve(filePath));
   const outFile = join(sourceDir, `.jazz-schema-${++importCounter}.mjs`);
@@ -52,7 +32,7 @@ async function bundleToTempFile(filePath: string): Promise<string> {
     format: "esm",
     platform: "node",
     outfile: outFile,
-    plugins: [absoluteExternalsPlugin(sourceDir)],
+    packages: "external",
   });
 
   return outFile;

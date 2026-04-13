@@ -10,4 +10,4 @@ export { watchSchema, type SchemaWatcherOptions } from "./schema-watcher.js";
 
 export { jazzPlugin, type JazzPluginOptions, type JazzServerOptions } from "./vite.js";
 export { withJazz } from "./next.js";
-export { withJazzExpo, type ExpoConfigLike } from "./expo.js";
+export { withJazz as withJazzExpo, type ExpoConfigLike } from "./expo.js";

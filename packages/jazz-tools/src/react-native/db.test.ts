@@ -9,7 +9,11 @@ vi.mock("./create-jazz-rn-runtime.js", () => ({
 }));
 
 vi.mock("jazz-rn", () => ({
-  mintLocalFirstToken: vi.fn(),
+  default: {
+    jazz_rn: {
+      mintLocalFirstToken: vi.fn(),
+    },
+  },
 }));
 
 class TestDb extends Db {
@@ -42,8 +46,8 @@ describe("createDb", () => {
   });
 
   it("RNDB-U06 mints a JWT from localFirstSecret and passes it to Db when auth is set", async () => {
-    const { mintLocalFirstToken } = await import("jazz-rn");
-    const mintMock = vi.mocked(mintLocalFirstToken);
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
     mintMock.mockReturnValue("minted-jwt");
 
     const config: DbConfig = {
@@ -57,8 +61,8 @@ describe("createDb", () => {
   });
 
   it("RNDB-U07 skips JWT minting and returns a plain Db when auth is absent", async () => {
-    const { mintLocalFirstToken } = await import("jazz-rn");
-    const mintMock = vi.mocked(mintLocalFirstToken);
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
 
     const config: DbConfig = { appId: "test-app" };
     const db = await createDb(config);

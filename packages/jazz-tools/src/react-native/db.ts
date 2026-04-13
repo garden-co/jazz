@@ -1,4 +1,4 @@
-import { mintLocalFirstToken as rnMintLocalFirstToken } from "jazz-rn";
+import jazzRn from "jazz-rn";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import { Db as RuntimeDb, type DbConfig as RuntimeDbConfig } from "../runtime/db.js";
@@ -78,7 +78,7 @@ export class Db extends RuntimeDb {
 
 export async function createDb(config: DbConfig): Promise<Db> {
   if (config.auth) {
-    const jwtToken = rnMintLocalFirstToken(
+    const jwtToken = jazzRn.jazz_rn.mintLocalFirstToken(
       config.auth.localFirstSecret,
       config.appId,
       BigInt(3600),
