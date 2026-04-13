@@ -415,12 +415,13 @@ describe("packaged docs index", () => {
     const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
 
     expect(txt).toContain("===PAGE:auth/local-first-auth===");
-    expect(txt).toContain("jazz-tools server <APP_ID> --allow-local-first-auth");
+    // <APP_ID> is stripped by the JSX tag stripper (uppercase-initial tag)
+    expect(txt).toContain("jazz-tools server  --allow-local-first-auth");
     expect(txt).toContain(
       'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
     );
     expect(txt).toContain(
-      "jazz-tools server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks",
+      "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
     );
 
     expect(txt).not.toContain("allowSelfSigned");
@@ -444,13 +445,13 @@ describe("packaged docs index", () => {
         .prepare("SELECT body FROM pages WHERE slug = 'recipes/auth-provider-integration'")
         .get() as { body: string } | undefined;
 
-      expect(localFirstPage?.body).toContain("jazz-tools server <APP_ID> --allow-local-first-auth");
+      expect(localFirstPage?.body).toContain("jazz-tools server  --allow-local-first-auth");
       expect(serverSetupPage?.body).toContain("--allow-local-first-auth");
       expect(quickstartPage?.body).toContain(
         'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
       );
       expect(authProviderPage?.body).toContain(
-        "jazz-tools server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks",
+        "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
       );
     } finally {
       db.close();
