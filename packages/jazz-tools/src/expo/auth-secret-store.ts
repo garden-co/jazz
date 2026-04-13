@@ -1,5 +1,6 @@
 import { getItemAsync, setItemAsync, deleteItemAsync } from "expo-secure-store";
-import { type AuthSecretStore, generateAuthSecret } from "../runtime/auth-secret-store.js";
+import { getRandomBytes } from "expo-crypto";
+import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
 const DEFAULT_KEY = "jazz-auth-secret";
 
@@ -57,7 +58,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
   private async _getOrCreate(): Promise<string> {
     const existing = await this.store.getItemAsync(this.key);
     if (existing) return existing;
-    const secret = generateAuthSecret();
+    const secret = generateExpoAuthSecret();
     await this.store.setItemAsync(this.key, secret);
     return secret;
   }
@@ -77,4 +78,13 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
   static getOrCreateSecret(): Promise<string> {
     return ExpoAuthSecretStore.getDefault().getOrCreateSecret();
   }
+}
+
+function generateExpoAuthSecret(): string {
+  const bytes = getRandomBytes(32);
+  let binary = "";
+  for (const b of bytes) {
+    binary += String.fromCharCode(b);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
