@@ -2,11 +2,10 @@
 
 // CLI for jazz-tools schema tooling
 
-import { createRequire } from "module";
 import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
-import { build, type Plugin } from "esbuild";
+import { build } from "esbuild";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -67,23 +66,6 @@ function parseArgs(): { command: string; options: BuildOptions } {
 
 let importCounter = 0;
 
-function absoluteExternalsPlugin(sourceDir: string): Plugin {
-  const require = createRequire(join(sourceDir, "__virtual__.js"));
-  return {
-    name: "absolute-externals",
-    setup(pluginBuild) {
-      pluginBuild.onResolve({ filter: /^[^./]/ }, (args) => {
-        try {
-          const resolved = require.resolve(args.path);
-          return { path: pathToFileURL(resolved).href, external: true };
-        } catch {
-          return { path: args.path, external: true };
-        }
-      });
-    },
-  };
-}
-
 async function bundleToTempFile(filePath: string): Promise<string> {
   const sourceDir = dirname(resolve(filePath));
   const outFile = join(sourceDir, `.jazz-bundle-${++importCounter}.mjs`);
@@ -94,7 +76,7 @@ async function bundleToTempFile(filePath: string): Promise<string> {
     format: "esm",
     platform: "node",
     outfile: outFile,
-    plugins: [absoluteExternalsPlugin(sourceDir)],
+    packages: "external",
   });
 
   return outFile;

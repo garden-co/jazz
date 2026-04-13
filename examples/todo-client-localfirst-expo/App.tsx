@@ -1,44 +1,20 @@
 import * as React from "react";
 import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
 import { ExpoAuthSecretStore } from "jazz-tools/expo/auth-secret-store";
-import {
-  ActivityIndicator,
-  Platform,
-  SafeAreaView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
 import { TodoList } from "./src/TodoList";
 
-const defaultServerUrl = Platform.select({
-  // Android emulator cannot reach host via localhost.
-  android: "http://10.0.2.2:1625",
-  // iOS simulator can use host localhost directly.
-  ios: "http://127.0.0.1:1625",
-  default: "http://127.0.0.1:1625",
-});
-
-const defaultAppId = "019d4349-2434-7753-b91a-21642b0896c7";
-
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
-// They must be accessed as literal process.env.KEY expressions — dynamic
-// lookups like globalThis.process.env[key] won't be replaced.
+// These are injected by withJazzExpo in metro.config.js.
 declare const process: { env: Record<string, string | undefined> };
-const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
-const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
 
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? envAppId ?? defaultAppId;
-
+function buildConfig(secret: string): DbConfig {
   return {
-    appId,
-    env: overrides.env ?? "dev",
-    userBranch: overrides.userBranch ?? "main",
-    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
+    appId: process.env.EXPO_PUBLIC_JAZZ_APP_ID!,
+    serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
+    env: "dev",
+    userBranch: "main",
     auth: { localFirstSecret: secret },
-    ...overrides,
   };
 }
 
@@ -70,7 +46,7 @@ const styles = StyleSheet.create({
   },
 });
 
-const defaultFallback = (
+const fallback = (
   <SafeAreaView style={styles.container}>
     <View style={styles.loadingContainer}>
       <ActivityIndicator size="small" />
@@ -79,18 +55,12 @@ const defaultFallback = (
   </SafeAreaView>
 );
 
-type AppProps = {
-  config?: Partial<DbConfig>;
-  fallback?: React.ReactNode;
-};
-
-export default function App({ config, fallback }: AppProps = {}) {
+export default function App() {
   const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
-  const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
+  const config = React.useMemo(() => buildConfig(secret), [secret]);
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
+    <JazzProvider config={config} fallback={fallback}>
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
