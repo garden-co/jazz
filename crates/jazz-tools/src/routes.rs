@@ -1495,7 +1495,7 @@ mod tests {
 
     fn mint_test_token(audience: &str) -> String {
         let seed = [42u8; 32];
-        jazz_tools::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+        crate::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
     }
 
     /// Spin up the full router backed by an in-process runtime.

@@ -33,7 +33,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (same conventions as chat-app.test.tsx)
@@ -183,7 +183,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-a"),
       serverUrl,
-      auth: { localFirstSecret: `send-perm-alice-a-${Date.now()}` },
+      auth: { localFirstSecret: await testSecret(`send-perm-alice-a-${Date.now()}`) },
     });
 
     // Alice's app auto-creates a public chat first; navigate to a private one
@@ -233,7 +233,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const aliceContainer = await mountApp({
       dbName: uniqueDbName("alice-b"),
       serverUrl,
-      auth: { localFirstSecret: `send-perm-alice-b-${Date.now()}` },
+      auth: { localFirstSecret: await testSecret(`send-perm-alice-b-${Date.now()}`) },
     });
 
     await waitFor(
@@ -294,7 +294,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const bobContainer = await mountApp({
       dbName: uniqueDbName("bob-b"),
       serverUrl,
-      auth: { localFirstSecret: `send-perm-bob-b-${Date.now()}` },
+      auth: { localFirstSecret: await testSecret(`send-perm-bob-b-${Date.now()}`) },
     });
 
     // InviteHandler should redirect Bob to the chat after inserting chatMember
