@@ -67,16 +67,14 @@ The generated `schema.ts` includes a `permissions` export that denies all operat
 
 ### Publishing to a sync server
 
-If you connect your auth context to a sync server (`serverUrl`), you must publish the schema and permissions to that server before the app can start.
+If you connect your auth context to a sync server (`serverUrl`), publish the structural schema
+before the app starts, then publish the generated permissions bundle.
+
+Jazz currently exposes `schema export` in the CLI, not `schema push`, so use the same structural
+schema publication flow you already use for your app schema. Once that schema is available on the
+server, publish the deny-all permissions:
 
 ```bash
-# Publish the structural schema
-npx jazz-tools@alpha schema push \
-  --schema-dir ./schema-better-auth \
-  --server-url $JAZZ_SERVER_URL \
-  --admin-secret $JAZZ_ADMIN_SECRET
-
-# Publish the deny-all permissions
 npx jazz-tools@alpha permissions push \
   --schema-dir ./schema-better-auth \
   --server-url $JAZZ_SERVER_URL \
@@ -95,13 +93,16 @@ npx jazz-tools@alpha permissions status \
 After the initial push, schema changes require a migration edge:
 
 ```bash
-npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
 npx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```
 
 <Callout title="No push needed for local-only setups">
-  If your auth context uses a local persistence driver with no `serverUrl`, the schema and
-  permissions are applied in-process at startup — no CLI push commands are required.
+  If your auth context uses a local persistence driver with no `serverUrl`, no CLI push commands are
+  required. The generated `permissions` export is still tooling-facing, though:
+  `context.asBackend(authSchema)` reads the schema source, not the `permissions` export. If you need
+  those policies in an in-process context, pass them separately when creating the Jazz context.
 </Callout>
 
 ## Compatibility
