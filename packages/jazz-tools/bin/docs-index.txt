@@ -1,221 +1,17 @@
 ===PAGE:auth/authentication===
 TITLE:Authentication
-DESCRIPTION:"How and when to use Jazz's three auth modes, and how to manage JWT auth over the lifetime of a live client."
+DESCRIPTION:"How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
 
-Jazz has three auth modes. `anonymous` and `demo` generate identities locally without an auth provider. Most multi-user apps will need `external` authentication in production.
+Jazz has two auth modes: `local-first` and `external`. Local-first auth derives a stable identity from a device secret — no server needed. Most multi-user apps will also use `external` authentication for production accounts.
 
-| Mode        | What it does                                            | When to use it                                   |
-| ----------- | ------------------------------------------------------- | ------------------------------------------------ |
-| `anonymous` | Generates one device token, persisted in `localStorage` | Prototyping, single-user apps, offline-only apps |
-| `demo`      | Multiple synthetic user profiles per device             | Testing multi-user scenarios locally             |
-| `external`  | Validates a JWT from your auth provider via JWKS        | Production apps with real user accounts          |
+| Mode          | What it does                                           | When to use it                                   |
+| ------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
+| `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
 
-## Local auth for development
+## Local-first auth
 
-### Anonymous
-
-Anonymous auth is the default when no JWT or backend auth is set up. Jazz generates a device token on first load and persists it in `localStorage`.
-
-    ```tsx
-
-  return (
-
-  );
-}
-```
-
-    ```vue
-<script setup lang="ts">
-
-const client = createJazzClient({
-  appId: "my-app",
-  serverUrl: "http://127.0.0.1:4200",
-});
-</script>
-
-<template>
-
-    <slot />
-
-</template>
-
-```
-
-    ```svelte
-
-<script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-
-  const client = createJazzClient({
-    appId: 'my-app',
-    serverUrl: 'http://127.0.0.1:4200',
-  });
-</script>
-
-  {#snippet children({ db })}
-    <slot />
-  {/snippet}
-
-```
-
-    ```ts
-
-  return createDb({
-    appId: "my-app",
-    env: "dev",
-    userBranch: "main",
-  });
-}
-```
-
-If you prefer not to have Jazz generate a token, pass `localAuthToken` explicitly:
-
-    ```tsx
-
-  return (
-
-  );
-}
-```
-
-    ```vue
-<script setup lang="ts">
-
-const client = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
-</script>
-
-<template>
-
-    <slot />
-
-</template>
-
-```
-
-    ```svelte
-
-<script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-
-  const client = createJazzClient({
-    appId: 'my-app',
-    localAuthMode: 'anonymous',
-    localAuthToken: 'device-token-123',
-  });
-</script>
-
-  {#snippet children({ db })}
-    <slot />
-  {/snippet}
-
-```
-
-    ```ts
-
-  return createDb({
-    appId: "my-app",
-    localAuthMode: "anonymous",
-    localAuthToken: "device-token-123",
-  });
-}
-```
-
-  Anonymous tokens stored in `localStorage` cannot be recovered if deleted.
-
-### Demo
-
-Demo auth lets you create multiple users and test multi-user flows. Data persists for each user individually.
-
-    ```tsx
-const demoAuthAppId = "my-app";
-const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-
-  return (
-    <>
-
-    </>
-  );
-}
-```
-
-    ```vue
-<script setup lang="ts">
-
-  createJazzClient,
-  getActiveSyntheticAuth,
-  JazzProvider,
-  SyntheticUserSwitcher,
-} from "jazz-tools/vue";
-
-const appId = "my-app";
-const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-const client = createJazzClient({
-  appId,
-  serverUrl: "http://127.0.0.1:4200",
-  localAuthMode: active.localAuthMode,
-  localAuthToken: active.localAuthToken,
-});
-</script>
-
-<template>
-
-    <slot />
-
-</template>
-
-```
-
-    ```svelte
-
-<script lang="ts">
-  import {
-    createJazzClient,
-    JazzSvelteProvider,
-    SyntheticUserSwitcher,
-    getActiveSyntheticAuth,
-  } from 'jazz-tools/svelte';
-
-  const appId = 'my-app';
-  const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
-
-  const client = createJazzClient({
-    appId,
-    serverUrl: 'http://127.0.0.1:4200',
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
-  });
-</script>
-
-  {#snippet children({ db })}
-    <slot />
-  {/snippet}
-
-```
-
-    ```ts
-
-  const appId = "my-app";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-  createSyntheticUserSwitcher({
-    appId,
-    container,
-    defaultMode: "demo",
-  });
-
-  return createDb({
-    appId,
-    serverUrl: "http://127.0.0.1:4200",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
-  });
-}
-```
+Local-first auth lets users start using your app without signing up. They can later upgrade to an external provider while keeping their identity. See [Local-first auth](/docs/auth/local-first-auth) for the full guide.
 
 ## External auth for production
 
@@ -292,8 +88,8 @@ const client = createJazzClient({
 For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config:
 
 ```tsx
-const localAuth = getActiveSyntheticAuth("my-app", { defaultMode: "anonymous" });
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
+const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
 
 const config = jwtToken
   ? {
@@ -304,7 +100,7 @@ const config = jwtToken
   : {
       appId: "my-app",
       serverUrl: "https://sync.example.com",
-      ...localAuth,
+      auth: { localFirstSecret: secret },
     };
 
 ;
@@ -314,7 +110,7 @@ On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer tok
 the same principal:
 
 - `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
-- Do not use `db.updateAuthToken(null)` for logout or anonymous fallback on a live client.
+- Do not use `db.updateAuthToken(null)` for logout or local-first fallback on a live client.
 - Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
 
@@ -362,7 +158,7 @@ currently authenticated.
 
 ### Server configuration
 
-See [Server Setup](/docs/getting-started/server-setup) for the full list of server flags and storage options. In production (`NODE_ENV=production`), anonymous and demo auth are disabled unless explicitly enabled with `--allow-anonymous` / `--allow-demo`.
+See [Server Setup](/docs/getting-started/server-setup) for the full list of server flags and storage options.
 
 ```bash
 # Start a local server with external auth enabled.
@@ -384,192 +180,250 @@ When the server receives a request, it tries each auth method in priority order 
 
 1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
 2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
-3. **Local auth**&hairsp;—&hairsp;the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
+3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
 4. **No session**&hairsp;—&hairsp;none of the above matched.
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too. Without `jwksUrl`, backend `forRequest()` accepts only Jazz self-signed tokens, and `allowSelfSigned: false` disables that path as well.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too.
 
-### Upgrading from local auth
+### Upgrading to external auth
 
-You might allow anonymous auth in production so users can try your app before signing up. If you do, you can link their local identity to an external one when they sign in, preserving any data they created.
-
-    ```tsx
-const appId = "my-app";
-const jazzServerUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-
-  const [hasJwt, setHasJwt] = useState(false);
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
-  async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    setHasJwt(true);
-  }
-
-  return (
-
-      <button onClick={() => onSignedIn()}>Sign in</button>
-
-  );
-}
-```
-
-    ```vue
-<script setup lang="ts">
-
-const appId = "my-app";
-const serverUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-const hasJwt = ref(false);
-
-const linkExternalIdentity = useLinkExternalIdentity({
-  appId,
-  serverUrl,
-  defaultMode: "anonymous",
-});
-
-const localClient = createJazzClient({
-  appId,
-  serverUrl,
-});
-
-const jwtClient = createJazzClient({
-  appId,
-  serverUrl,
-  jwtToken: providerJwt,
-});
-
-async function onSignedIn() {
-  await linkExternalIdentity({ jwtToken: providerJwt });
-  hasJwt.value = true;
-}
-</script>
-
-<template>
-
-    <button type="button" @click="onSignedIn">Sign in</button>
-    <slot />
-
-</template>
-
-```
-
-    ```svelte
-
-<script lang="ts">
-  import {
-    createJazzClient,
-    JazzSvelteProvider,
-    useLinkExternalIdentity,
-  } from "jazz-tools/svelte";
-
-  const appId = "my-app";
-  const jazzServerUrl = "http://127.0.0.1:4200";
-
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
-  let jwtToken = $state<string | undefined>();
-
-  async function onSignedIn(providerJwt: string) {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    jwtToken = providerJwt;
-  }
-
-  const client = $derived(
-    createJazzClient({
-      appId,
-      serverUrl: jazzServerUrl,
-      jwtToken,
-    }),
-  );
-</script>
-
-{#key jwtToken}
-
-    {#snippet children({ db })}
-      <button onclick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
-      <!-- Your app content here -->
-    {/snippet}
-
-{/key}
-
-```
-
-    ```ts
-
-  client: Pick,
-  providerJwt: string,
-) {
-  return client.linkExternalIdentity({
-    jwtToken: providerJwt,
-    localAuthMode: "anonymous",
-    localAuthToken: "device-token-123",
-  });
-}
-```
-
-Once linked, JWT logins use the same user identity as the original local account.
-
-## Offline-only mode
-
-If you're building an app that never syncs, you can skip server auth entirely. Data will be persisted locally only.
-
-    ```tsx
-
-  return (
-
-  );
-}
-```
-
-    ```vue
-<script setup lang="ts">
-
-const client = createJazzClient({ appId: "my-app" });
-</script>
-
-<template>
-
-    <slot />
-
-</template>
-
-```
-
-    ```svelte
-
-<script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-
-  const client = createJazzClient({ appId: 'my-app' });
-</script>
-
-  {#snippet children({ db })}
-    <slot />
-  {/snippet}
-
-```
-
-    ```ts
-
-  return createDb({ appId: "my-app" });
-}
-```
+Users on local-first auth can sign up with an external provider and keep the same identity. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full walkthrough.
 
 ## Next steps
 
 - [Sessions](/docs/auth/sessions)&hairsp;—&hairsp;read the current user and scope queries to their identity
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies
+
+===PAGE:auth/local-first-auth===
+TITLE:Local-first auth
+DESCRIPTION:"Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
+
+Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Users can later sign up with an external provider like [BetterAuth](https://www.better-auth.com/) and keep the same identity.
+
+| Mode          | Identity source         | Server needed? | Best for                                               |
+| ------------- | ----------------------- | -------------- | ------------------------------------------------------ |
+| `local-first` | Secret stored on device | No             | Production offline-first apps, try-before-signup flows |
+| `external`    | JWT from auth provider  | Yes            | Production apps with real user accounts                |
+
+## Client setup
+
+Use `BrowserAuthSecretStore` to persist the user's secret across sessions. On first load it generates a new identity; on subsequent loads it reuses the stored one.
+
+```tsx
+
+function App() {
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+
+  return (
+
+  );
+}
+```
+
+  The secret is the user's identity. If it's lost (e.g. `localStorage` cleared), the identity is
+  gone and any data owned by that user becomes inaccessible. For durable identity, upgrade to an
+  external provider.
+
+## Server configuration
+
+Local-first auth is enabled by default in development. In production, enable it explicitly:
+
+```bash
+jazz-tools server  --allow-local-first-auth
+```
+
+No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.
+
+## Signing up with BetterAuth
+
+Users can try your app before creating an account. When they sign up later through BetterAuth, all the data they created carries over — same account, nothing lost.
+
+>Client: db.getLocalFirstIdentityProof()
+    Client->>BetterAuth: Sign up (email + proofToken)
+    BetterAuth->>BetterAuth: Verify proof, create user with same ID
+    BetterAuth-->>Client: Session + JWT
+    Note over Client: Same user ID, now with an account
+
+`} />
+
+### Generating the proof token
+
+Before calling your sign-up endpoint, the client generates a short-lived proof that it owns the current Jazz identity:
+
+```tsx
+function SignUpButton() {
+  const db = useDb();
+
+  async function handleSignUp(email: string, password: string) {
+    // Generate proof of ownership of the current Jazz identity
+    const proofToken = await db.getLocalFirstIdentityProof({
+      ttlSeconds: 60,
+      audience: "betterauth-signup",
+    });
+
+    if (!proofToken) {
+      throw new Error("Sign up requires an active Jazz session");
+    }
+
+    const res = await authClient.signUp.email({
+      email,
+      name: email,
+      password,
+      proofToken,
+    } as Parameters<typeof authClient.signUp.email>[0]);
+
+    if (res.error) {
+      throw new Error(res.error.message);
+    }
+  }
+
+  return <button onClick={() => handleSignUp("user@example.com", "password")}>Sign Up</button>;
+}
+```
+
+The `audience` should match what the server expects when verifying. The `ttlSeconds` keeps the window short — 60 seconds is enough for a sign-up round-trip.
+
+### Verifying on sign-up
+
+On the server, a BetterAuth middleware hook intercepts sign-up requests, verifies the proof token, and assigns the proven Jazz user ID to the new BetterAuth user:
+
+```ts
+
+  // ...your database, email, plugins config
+  plugins: [
+    jwt({
+      jwks: { keyPairConfig: { alg: "ES256" } },
+      jwt: {
+        issuer: "https://your-app.example.com",
+        definePayload: ({ user }) => ({
+          claims: { role: (user as { role?: string }).role ?? "" },
+        }),
+      },
+    }),
+  ],
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-up/email") return;
+
+      const { verifyLocalFirstIdentityProof } = await import("jazz-napi");
+      const {
+        ok,
+        error,
+        id: provedUserId,
+      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "betterauth-signup");
+      if (!ok) {
+        throw new APIError("BAD_REQUEST", { message: error });
+      }
+
+      return {
+        context: {
+          ...ctx,
+          body: { ...ctx.body, provedUserId },
+        },
+      };
+    }),
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        before: async (user: any, ctx: any) => {
+          // Assign the proven Jazz user ID to the BetterAuth user
+          const provedUserId = ctx?.body?.provedUserId;
+          if (provedUserId) {
+            return { data: { ...user, id: provedUserId } };
+          }
+        },
+      },
+    },
+  },
+});
+```
+
+`verifyLocalFirstIdentityProof` from `jazz-napi` handles validation — it returns `{ ok, id, error }`. If the token is missing or invalid, `error` contains the reason. The `databaseHooks.user.create.before` hook assigns the proven ID to the new BetterAuth user, so the identity carries over.
+
+### Config resolution
+
+The app switches between local-first auth and external JWT based on whether the user has a BetterAuth session:
+
+```tsx
+function App() {
+  const { data: authSession, isPending } = authClient.useSession();
+  const [config, setConfig] = useState(null);
+
+  useEffect(() => {
+    if (isPending) return;
+
+    async function resolveConfig() {
+      const sharedConfig = {
+        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+      };
+
+      if (authSession?.session) {
+        // User is signed in with BetterAuth — use their JWT
+        const jwtToken = await getJwtFromBetterAuth();
+        setConfig({ ...sharedConfig, jwtToken: jwtToken! });
+      } else {
+        // No external session — use local-first auth
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
+      }
+    }
+
+    void resolveConfig();
+  }, [isPending, authSession?.session]);
+
+  if (isPending || !config) return null;
+
+  return (
+
+  );
+}
+```
+
+## Permissions by auth mode
+
+You can restrict what local-first users can do until they sign up. Define an `isLocalFirstAuthMode` check in your permissions and use it to gate writes:
+
+```ts
+
+  const isLocalFirstAuthMode = session.where({
+    "claims.auth_mode": "local-first",
+  });
+
+  // Everyone can read
+  policy.messages.allowRead.always();
+
+  // Local-first users can only read — block inserts until they sign up
+  policy.messages.allowInsert.where(allOf([{ not: isLocalFirstAuthMode }]));
+});
+```
+
+## Under the hood
+
+Local-first auth uses Ed25519 cryptography to derive a stable identity from a secret:
+
+1. A 32-byte **seed** is hashed with SHA-512 to produce an Ed25519 **signing key**.
+2. The corresponding **public key** (32 bytes) is extracted.
+3. A deterministic **user ID** is derived from the public key using UUIDv5 (namespace `jazz-auth-key-v1`).
+4. The client mints a **self-signed JWT** with:
+   - `alg: "EdDSA"` — Ed25519 signature
+   - `iss: "urn:jazz:local-first"` — identifies the token as local-first
+   - `sub: <user_id>` — the derived user ID
+   - `jazz_pub_key: <base64url>` — the embedded public key
+   - `aud: <app_id>` — scoped to the app
+
+The server verifies the signature using the embedded public key, re-derives the user ID, and confirms it matches `sub`. No external key store is involved — the token is fully self-contained.
+
+Same seed always produces the same user ID, across devices and time.
+
+## Next steps
+
+- [Sessions](/docs/auth/sessions) — read the current user and scope queries to their identity
+- [Permissions](/docs/auth/permissions) — define row-level access policies
+- [Auth provider integration](/docs/recipes/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider
 
 ===PAGE:auth/permissions===
 TITLE:Permissions
@@ -1041,7 +895,10 @@ These differ from `forRequest` / `forSession` in one key way:
 TITLE:Branches
 DESCRIPTION:How Jazz uses branches to isolate data across environments, schema versions, and user-defined contexts.
 
-Every commit in Jazz is written to a **branch**&hairsp;—&hairsp;a named, independent line of history, like a Git branch for your data. Some branches are merged automatically at query time (schema versions), while others are fully isolated (environments and user branches). This makes it easy to keep development data separate from production, or to create parallel lines of history like drafts or staging.
+Every row version in Jazz belongs to a **branch**&hairsp;—&hairsp;a named, independent view of your
+data. Some branches are merged automatically at query time (schema versions), while others are
+fully isolated (environments and user branches). This makes it easy to keep development data
+separate from production, or to create parallel lines of work like drafts or staging.
 
 ## How branches are composed
 
@@ -1113,49 +970,67 @@ At query time, Jazz automatically fetches data from all known schema versions wi
 
 Unlike schema versions, different environments and user branches are never merged. A query on `dev-*-main` does not include data from `prod-*-main`, and a query on `*-*-staging` does not include data from `*-*-main`. This is hard isolation: there is no way to combine data across environments or user branches at query time.
 
-  The [DAG](/docs/concepts/local-first-data-model#the-dag) describes how concurrent edits diverge
-  and merge within a single row's history. The concept is similar, but branches as described on this
-  page are a separate concept.
+  A branch is a named table view such as `prod-a1b2c3d4-main`. A row history is the per-row version
+  graph that records how one row changed over time. They are related, but they are not the same
+  thing.
 
 ===PAGE:concepts/how-sync-works===
 TITLE:How Sync Works
-DESCRIPTION:An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, how Jazz behaves offline, and the eventual consistency model.
+DESCRIPTION:An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, offline behavior, and eventual consistency.
 
 Traditional apps send queries to a remote server, which queries a database and returns data.
 
-This presents a number of difficulties:
+This creates a few familiar problems:
 
-- The data is immediately stale
-- Both the client and the server must be online
-- Your app's performance depends on the speed of each network hop
+- the data is immediately stale
+- both the client and the server must be online
+- your app's performance depends on the speed of each network hop
 
-Techniques like websockets, client-side caching, and optimistic updates alleviate some of these issues, but they add complexity without solving the underlying problem.
+Techniques like websockets, client-side caching, and optimistic updates help, but they add
+complexity without changing the basic request/response shape.
 
-Jazz solves these problems with **query subscriptions**.
+Jazz solves these problems with **query subscriptions** backed by a local replica.
 
 ## Queries drive everything
 
-The underlying problem with the request/response model is that it doesn't match how users experience apps. When you use an app, you want it to show you _the latest data, immediately_.
+When your app [subscribes to a query](/docs/reading/queries) (say, all todos where
+[`done = false`](/docs/reading/filters-and-sorting)), Jazz sends that query subscription upstream.
+The server evaluates the query against its own current relational state, finds the matching rows,
+and sends them back. The client only ever sees rows it has asked for (and
+[has permission to read](/docs/auth/permissions)).
 
-To deliver this, Jazz uses query subscriptions. When your app [subscribes to a query](/docs/reading/queries) (say, all todos where [`done = false`](/docs/reading/filters-and-sorting)), Jazz sends the query to the server. The server evaluates the query against its own data, finds the matching rows, and sends them back. The client only ever sees rows it's asked for (and [has permission to read](/docs/auth/permissions)).
-
-The set of active queries on a client defines the database rows it can see and will receive updates for.
+The set of active queries on a client defines the rows it can see and will keep receiving updates
+for.
 
 ## The server keeps you subscribed
 
-When you register a query subscription with the server, it remembers. Every part of the query is broken down into small components, which allows the server to quickly and efficiently update subscribers when data changes.
+When you register a query subscription with the server, it remembers.
 
-For example, when another client writes a row, or upstream sync delivers new data, the server recognises that you are subscribed to data which has changed and pushes the update to you.
+The server keeps a live query graph for that subscription. When local writes, remote replay, or
+schema/policy changes affect the result, it re-settles only the changed parts of the query and
+pushes the relevant row updates downstream.
 
-If a new row matches your query, it is automatically pushed to you. Conversely, if a previously matching row changes so it no longer fits your query (e.g. you subscribe to `done = false` and someone sets `done = true`), you stop receiving updates.
+That means:
 
-The server watches continuously, efficiently re-evaluating only parts of queries that have changed, and pushing deltas to subscribed clients in real-time. Clients use these deltas to update their local replicas.
+- if a new row matches your query, it is pushed automatically
+- if a matching row changes and no longer fits, it stops appearing in the subscription result
+- clients update their local replicas from deltas instead of from full snapshots every time
 
 ## What happens offline
 
-Reads always come from your local storage. In the browser, Jazz uses a dedicated worker thread reading from data stored locally in OPFS (Origin Private File System). When multiple tabs are open, Jazz automatically elects one tab as the storage leader, and other tabs route through it. In case the leader tab closes, a new leader is elected. Even without a network connection, your app can read data it already has locally (for example, because it has been synced previously, or because the data was written locally).
+Reads always come from local storage.
 
-[Writes](/docs/writing/writing-data) work the same way: they are stored immediately locally so your UI updates without waiting on a round-trip. Jazz automatically queues those writes to be synced upstream. When you reconnect, all queued writes are sent to the sync server, and active query subscriptions are replayed. This means that as soon as you reconnect, your app automatically refreshes with the latest data.
+In the browser, Jazz uses a dedicated worker reading from data stored locally in OPFS (Origin
+Private File System). When multiple tabs are open, Jazz elects one tab as the storage leader and
+routes follower tabs through it. If the leader tab closes, a new leader is elected.
+
+Even without a network connection, your app can still read data it already has locally, whether
+that data was synced earlier or written locally on the device.
+
+[Writes](/docs/writing/writing-data) behave the same way: they are stored locally immediately so the
+UI updates without waiting on a round-trip. Jazz queues the corresponding row-version updates for
+upstream sync. When the client reconnects, queued writes are sent and active query subscriptions are
+replayed automatically.
 
 ## Infrastructure tiers
 
@@ -1168,127 +1043,180 @@ graph TD
     E2 --- W3["Worker"]
 ```
 
-**Worker** runs on the client itself, making it the first tier to respond to queries. The worker keeps a local copy of all the data the client is subscribed to so it can respond immediately while updates from higher tiers stream in. It also immediately persists writes and handles the syncing with the next tier up.
+**Worker** runs on the client itself, making it the first tier to respond to queries. The worker
+keeps the locally durable copy of subscribed data so it can respond immediately while updates from
+higher tiers stream in.
 
-**Edge** is a server node. It's the first hop your data takes after it leaves your client. In cloud configurations, this will normally be a node geographically close to your user. Edge servers only hold data that their connected clients have written or read.
+**Edge** is the first server hop after the client. In cloud configurations it is usually a nearby
+node. Edge servers hold the data needed to serve the queries currently flowing through them.
 
-**Global** is the global core. Edge servers reconcile through global, which is how updates cascade to all clients. An edge server fetches data from global only when a connected client subscribes to data the edge doesn't already have. Two clients on different edge servers will see each other's writes once both edges have reconciled.
+**Global** is the global reconciliation tier. Edge servers reconcile through global, which is how
+updates eventually spread to every subscribed client.
 
 ### How data flows
 
-Writes flow **upward**: your app &rarr; worker &rarr; edge &rarr; global. As your write flows through the network, each tier acknowledges when it is received. You can choose which tier you want to wait for before confirming the write. For example, you may choose to wait only for the local worker to acknowledge before moving on, and allow background sync to take care of propagation. Alternatively, you may want to wait for confirmation that the write has left the user's device, or is available at the global level. You can read more about this mechanism on the [durability tiers page](/docs/reference/durability-tiers).
+Writes flow **upward**:
 
-Data flows **downward on demand**. Whenever you create a query subscription, it is passed up through the tiers. Your worker registers the subscription with the edge server, which registers it with the global core. This allows edge servers and your worker to efficiently replicate only the data they've been asked for. The trade-off is that the initial response from each tier may be stale while further data is requested from the next tier up.
-
-```mermaid
-flowchart BT
-    W1["Worker"] -- "writes ↑" --- E1["Edge\n(sync server)"]
-    W2["Worker"] -- "writes ↑" --- E1
-    E1 -- "writes ↑" --- G["Global\n(global core)"]
-    W3["Worker"] -- "updates ↓" --- E2["Edge\n(sync server)"]
-    E2 -- "updates ↓" --- G
+```text
+app -> worker -> edge -> global
 ```
 
-Lower tiers have lower latency, but the write has further to propagate before others can read it. As a rough guide:
+As a write flows through the network, each tier can confirm that it has durably received it. That
+is what durability tiers are built on.
 
-- waiting for the global core is only necessary if you want strong consistency
-- waiting for the edge tier is useful for ensuring that data has left the user's device
-- the default worker tier is good for most data where eventual consistency is acceptable
+Reads flow **downward on demand**. When you create a query subscription, it is forwarded upward.
+Each tier registers the subscription with the next tier and asks for the rows needed to satisfy it.
+That allows the system to replicate only the data that has actually been requested.
 
-  Sync happens whenever a node is online. Writes automatically propagate up through the network even
-  if the promise resolves at the worker level. Reads similarly propagate down as each tier registers
-  your query subscription with the next tier. If higher tiers have newer data, it streams down to
-  your client automatically.
+Lower tiers have lower latency, but writes have further to travel before every other client can see
+them. As a rough guide:
+
+- waiting for the global core is only necessary if you want the strongest cross-region visibility
+- waiting for edge is useful when you want to know data has left the user's device
+- the default worker tier is right for most local-first interactions
+
+  Sync happens whenever a node is online. Writes keep propagating upward even if your promise
+  resolves at the worker tier. Reads similarly propagate downward as each tier registers the query
+  with the next one up. If higher tiers have newer rows, they stream down automatically.
 
 ## Consistency model
 
-Every write in Jazz produces a **commit**: an immutable, timestamped record of the change. All commits are stored, meaning a full history of every row in your database is saved.
+Every write in Jazz produces a new **row version**. That row version is stored locally, can be
+replicated upward, and contributes to the current visible state for that row.
 
-This commit-based model allows changes to propagate throughout the network in an eventually consistent way, without needing clients to wait for a full round trip. This means that the state of data between tiers can diverge. A client that has just written locally has a different view of the data than the global core until the commit propagates. Another client on a different edge server might have its own unreconciled writes. All of this converges: commits propagate upward, get persisted at a global level, and flow back down to every subscribed client. Under normal circumstances, convergence takes roughly one network round-trip to the global core.
+Because sync is local-first, different tiers can temporarily disagree:
 
-As clients can write concurrently, Jazz uses **last-writer-wins (LWW)** to resolve merge conflicts when they occur. When two clients try to write to the same column of the same row concurrently, the commit with the later timestamp wins. Because Jazz tracks all commits, even commits which lose out in the merge are still stored in the row's history, and no data is ever lost. This allows you to implement your own conflict resolution strategies if LWW is not suitable for your use case.
+- your worker may already have a newer row version than edge
+- one edge may have data another edge has not fetched yet
+- another client may have its own concurrent local write
+
+All of that still converges. Row versions propagate upward, are durably stored at higher tiers, and
+flow back down to every subscribed client that needs them.
+
+When clients write concurrently to the same field of the same row, Jazz uses
+**last-writer-wins (LWW)** to decide the current visible result. Even row versions that lose that
+race remain in row history, so the system keeps enough information to reconcile deterministically
+and to support richer history-aware behavior later.
 
 ## See it in action
 
-[Wequencer](https://github.com/garden-co/jazz2/tree/main/examples/wequencer) is a collaborative real-time music sequencer built with Jazz and Svelte. Multiple users place beats on a shared grid and hear each other's changes immediately&hairsp;—&hairsp;a good example of query subscriptions, real-time sync, and conflict-free collaboration in practice.
+[Wequencer](https://github.com/garden-co/jazz2/tree/main/examples/wequencer) is a collaborative
+real-time music sequencer built with Jazz and Svelte. Multiple users place beats on a shared grid
+and hear each other's changes immediately, which makes it a good example of query subscriptions,
+real-time sync, and conflict-friendly collaboration in practice.
 
 ===PAGE:concepts/local-first-data-model===
 TITLE:Local-First Data Model
-DESCRIPTION:An overview of how Jazz manages versions, history, conflicts, and avoids loading states.
+DESCRIPTION:An overview of how Jazz manages local state, row histories, conflicts, and loading behavior.
 
 Jazz embeds a database on each device and syncs to the server in the background.
 
 ## How Jazz stores data
 
-As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps need to wait for a network round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the database on your users' devices. [Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/writing-data) (`insert`, `update`, `delete`) can also be applied locally immediately, with no network round-trip. The sync layer picks up changes in the background and propagates them over the network whenever a client is online.
+As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps wait on a network
+round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the
+database on your users' devices.
 
-This has a practical consequence: there is no difference between "optimistic" and "real" state. The local write _is_ the state. There is no single source of truth. Instead, every client that has received the same commits converges on the same result.
+[Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/writing-data)
+(`insert`, `update`, `delete`) are also applied locally immediately, with no network round-trip.
+The sync layer picks those changes up in the background and propagates them whenever a client is
+online.
+
+This has a practical consequence: there is no difference between "optimistic" and "real" state.
+The local write _is_ the state. There is no single always-online source of truth. Instead, every
+client that has received the same row-history updates converges on the same current result.
 
 ### The only loading moment
 
-Devices can't show data they don't have. On the very first load from the server, there'll be a loading moment while data starts to populate the local embedded database. From this point on, data for that query will always be available. You never need to wait for the network again: your app reads from what's already on disk, even offline.
+Devices cannot show data they do not have. On the very first load from the server, there will be a
+loading moment while data starts to populate the local embedded database. From that point on, data
+for that query is available locally and can be read again even while offline.
 
-  If you need to ensure data is fully up-to-date before displaying it, you can opt-in to waiting for
+  If you need to ensure data is fully up-to-date before displaying it, you can opt in to waiting for
   a higher [durability tier](/docs/reference/durability-tiers).
 
-## Versioned objects
+## Tables, row versions, and visible state
 
-Under the hood, every row in Jazz is a standalone versioned object. Each row has its own identity (a UUIDv7, which is the `id` column) and can sync independently.
+Jazz stays table-first all the way down.
 
-Every change to a row&hairsp;—&hairsp;an insert, update, or delete&hairsp;—&hairsp;is recorded as a **commit**. Each commit is immutable and produces a new version of the row it affects. Because commits are content-addressed, two clients that independently make the same change will produce identical commits, and sync can deduplicate them automatically.
+Each application table still behaves like a table, but the engine also tracks a little extra
+information for each logical row:
 
-The full history of each row is preserved, so you can view a row as it looked at any point in time, including intermediate or conflicting states.
+- a stable row identity
+- a current visible state used for ordinary reads
+- a retained history of row versions over time
 
-Each version links back to its parent, forming a chain.
+The easiest picture is:
 
-## The DAG
-
-When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain, and it can diverge into multiple states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
-
-The result is a [**directed acyclic graph**](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAG), similar to Git:
-
-```mermaid
-gitGraph
-    commit id: "v1"
-    commit id: "v2"
-    branch "Peer B"
-    commit id: "b3"
-    commit id: "b4"
-    checkout main
-    commit id: "a3"
-    commit id: "a4"
-    merge "Peer B" id: "m5"
+```text
+todos
+  visible: current answer for each row in a branch
+  history: row versions over time for that same row
 ```
 
-Two peers that have never synced will each have their own view of history. Once they sync, their updates are merged, and from that point on, both peers share the same history.
+That is why the app-facing API can stay simple while the runtime still has enough information for
+replay, reconnect, and conflict resolution.
 
-For explicit isolation between independent lines of history, see [Branches](/docs/concepts/branches).
+## Row history
+
+Every write to a row creates a new **row version**.
+
+That version records:
+
+- the new row values
+- which earlier version(s) it came from
+- engine-managed metadata such as branch, delete state, and durability state
+
+Physically, that row version is still one flat stored row: user columns plus reserved `_jazz_*`
+columns in the same binary row format. So the runtime keeps a row-local history graph rather than
+just overwriting the row in place.
+
+### Concurrent edits
+
+When only one device is editing a row, the history is effectively linear. When multiple peers edit
+the same row concurrently, several row versions can exist at once and later be reconciled into a
+single current visible result.
+
+You can think of it like this:
+
+```mermaid
+flowchart LR
+    v1["v1"] --> v2["v2"]
+    v2 --> a3["a3"]
+    v2 --> b3["b3"]
+    a3 --> m4["m4"]
+    b3 --> m4
+```
+
+The important point is not the exact shape of the graph. The important point is that Jazz preserves
+enough row history to converge deterministically after peers reconnect.
 
 ## Conflict resolution
 
-When updates from multiple peers are merged, two or more peers may have changed the same column of the same row. Jazz resolves this with the [last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model) strategy. Each commit has a timestamp, and the most recent write is considered to have won.
+When concurrent writes touch the same field of the same row, Jazz resolves the visible result with
+[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). The later row version
+wins for the conflicting field.
 
-Jazz only uses this strategy when multiple peers have written to the same column of the same row. For example, if Alice changes the `title` of a to-do while Bob changes its `completed` status, even though both have updated the same row, there is no conflict, and both edits can be preserved in full.
+If two peers update different fields, both changes can still be preserved in the resulting visible
+row state. Even row versions that lose out in the current visible result remain in row history, so
+no local-first reconciliation information is discarded.
 
-Conflict resolution is deterministic: every peer that sees the same set of versions will arrive at the same merged result, and even commits that lose out in a merge are still stored in the row's history. No data is ever lost.
-
-  In the example above, Jazz allows Alice to change a `title` and Bob to change the `completed`
-  status. This can lead to unexpected results, where Bob marks a to-do as `completed`, but in the
-  meantime, Alice has completely changed what needed to be done. Jazz resolves structural conflicts,
-  but you must also be cautious when writing your application to avoid conflicts in the **meaning**
-  of the data.
+  Jazz can resolve structural conflicts for you, but it cannot fully understand the meaning of your
+  data. If Alice renames a to-do while Bob marks it complete, both changes may be preserved even if
+  the new title changes what the task means. You still need application-level judgment about what
+  kinds of concurrent editing should be allowed.
 
 ## How this differs from traditional apps
 
-|                        | Traditional                                | Jazz                                                         |
-| ---------------------- | ------------------------------------------ | ------------------------------------------------------------ |
-| **Read path**          | HTTP request, wait for response            | Read from local storage                                      |
-| **Write path**         | HTTP request, wait for confirmation        | Immediate local persistence, background sync                 |
-| **Optimistic updates** | Manually implemented, must handle rollback | Not needed, the local write is authoritative                 |
-| **Offline support**    | Bespoke queueing and retry logic           | Reads and writes continue to work against the local database |
-| **Loading states**     | Every network call                         | Only on first connection                                     |
-| **Source of truth**    | Single authoritative database              | Every client with the same commits sees the same state       |
-| **Conflict handling**  | Server rejects or last-request-wins        | Automatic per-column LWW merge                               |
+|                        | Traditional                                | Jazz                                                               |
+| ---------------------- | ------------------------------------------ | ------------------------------------------------------------------ |
+| **Read path**          | HTTP request, wait for response            | Read from local storage                                            |
+| **Write path**         | HTTP request, wait for confirmation        | Immediate local persistence, background sync                       |
+| **Optimistic updates** | Manually implemented, must handle rollback | Not needed, the local write is authoritative                       |
+| **Offline support**    | Bespoke queueing and retry logic           | Reads and writes continue to work against the local database       |
+| **Loading states**     | Every network call                         | Only on first connection                                           |
+| **Source of truth**    | Single authoritative database              | Every client with the same row-history updates sees the same state |
+| **Conflict handling**  | Server rejects or last-request-wins        | Automatic visible-state reconciliation with retained history       |
 
 ===PAGE:getting-started/client-setup===
 TITLE:Client Setup
@@ -1368,7 +1296,7 @@ const client = createJazzClient({
   });
 ```
 
-Without auth configuration, Jazz creates a local anonymous account automatically. To use Jazz completely offline, don't set a `serverUrl`.
+Without auth configuration, Jazz creates a local-first identity automatically. To use Jazz completely offline, don't set a `serverUrl`.
 
 Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Runtime source overrides](#runtime-source-overrides) below.
 
@@ -1518,22 +1446,18 @@ npx jazz-tools@alpha server "$JAZZ_APP_ID" \
 
 `jazz-tools server ` currently supports:
 
-| Option                              | Purpose                                                                                                                                            | Environment variable   | Default                   |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------------------- |
-| `` (positional)             | App namespace identifier (required)                                                                                                                | -                      | -                         |
-| `-p, --port `                 | Listen port                                                                                                                                        | -                      | `1625`                    |
-| `-d, --data-dir `         | Persistent storage directory                                                                                                                       | -                      | `./data`                  |
-| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                                        | -                      | off                       |
-| `--jwks-url `             | JWKS endpoint for external JWT validation                                                                                                          | `JAZZ_JWKS_URL`        | unset                     |
-| `--allow-anonymous`                 | Allow local anonymous auth (`X-Jazz-Local-Mode: anonymous`)                                                                                        | `JAZZ_ALLOW_ANONYMOUS` | see `NODE_ENV` note below |
-| `--allow-demo`                      | Allow local demo auth (`X-Jazz-Local-Mode: demo`)                                                                                                  | `JAZZ_ALLOW_DEMO`      | see `NODE_ENV` note below |
-| `--backend-secret ` | Enable backend session impersonation                                                                                                               | `JAZZ_BACKEND_SECRET`  | unset                     |
-| `--admin-secret `     | Required for `permissions push`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`    | unset                     |
+| Option                              | Purpose                                                                                                                                            | Environment variable          | Default                   |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
+| `` (positional)             | App namespace identifier (required)                                                                                                                | -                             | -                         |
+| `-p, --port `                 | Listen port                                                                                                                                        | -                             | `1625`                    |
+| `-d, --data-dir `         | Persistent storage directory                                                                                                                       | -                             | `./data`                  |
+| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                                        | -                             | off                       |
+| `--jwks-url `             | JWKS endpoint for external JWT validation                                                                                                          | `JAZZ_JWKS_URL`               | unset                     |
+| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                            | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret ` | Enable backend session impersonation                                                                                                               | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret `     | Required for `permissions push`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
 
-Local auth defaults depend on `NODE_ENV`:
-
-- `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled (`--allow-anonymous` / `--allow-demo`)
-- non-production (`development`, unset, etc.): anonymous/demo are enabled by default
+Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires `--jwks-url`.
 
 ## Backend context setup
 
@@ -1549,7 +1473,7 @@ Every backend needs an app ID, typed schema, and usually a permissions bundle. I
     backendSecret,
     adminSecret,
     jwksUrl,
-    allowSelfSigned,
+    allowLocalFirstAuth,
     env: "dev",
     userBranch: "main",
   });
@@ -1584,7 +1508,7 @@ On the client side, queries automatically run as the logged-in user. On a server
 
 In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `await context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
-`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` on `createJazzContext(...)` if those bearer tokens come from an external IdP. Without `jwksUrl`, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowSelfSigned: false` to disable those too.
+`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` on `createJazzContext(...)` if those bearer tokens come from an external IdP. Without `jwksUrl`, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
 
   For embedded or local-only runtime setups where your backend is not connected to a server, use
   `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
@@ -2251,7 +2175,7 @@ For production deployment and hosting options, see [Server Setup](/docs/getting-
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;anonymous, demo, and external JWT auth
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed
@@ -2346,7 +2270,7 @@ const context = createJazzContext({
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
   jwksUrl: process.env.JAZZ_JWKS_URL,
-  allowSelfSigned: process.env.JAZZ_ALLOW_SELF_SIGNED !== "false",
+  allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false",
 });
 
 const api = new Hono();
@@ -2356,7 +2280,7 @@ const api = new Hono();
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowSelfSigned: false`.
+- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
 - `dataPath` controls where local server state persists.
 
 Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
@@ -2364,7 +2288,9 @@ For server-owned work, use `context.asBackend()`. For embedded or local-only set
 server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/getting-started/server-setup)
 covers those patterns in more detail.
 
-    The `persistent` driver stores data on disk using [Fjall](https://github.com/fjall-rs/fjall), a fast Rust key-value store bundled inside `jazz-napi`. The `dataPath` is the directory where Fjall writes its data.
+    The `persistent` driver stores data on disk through the native `jazz-napi` runtime. In the
+    current Node.js setup that means SQLite-backed local persistence. `dataPath` is the directory
+    where that local database lives.
 
     There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
 
@@ -2464,7 +2390,10 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-  `forRequest` verifies the caller's bearer token inside the backend context. The token above is a Jazz self-signed dev token, which works because `allowSelfSigned` defaults to `true`. If you want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify them via JWKS.
+  `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
+  Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
+  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
+  them via JWKS.
 
 ## Authentication
 
@@ -3185,10 +3114,12 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at your Better Auth JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://your-app.example.com/api/auth/jwks
+    jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks
     ```
 
     For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
+
+      If your users start unauthenticated and sign up later, see [Local-first auth](/docs/auth/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
 
     [WorkOS](https://workos.com/) is a managed auth service&hairsp;—&hairsp;no server-side auth code needed. Wrap your app with `AuthKitProvider`, get the access token, and pass it to Jazz.
 
@@ -3224,12 +3155,12 @@ function JazzWithWorkOS() {
     Point the Jazz server at the WorkOS JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    jazz-tools server  --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
     ```
 
     For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
 
-Anonymous and demo auth are disabled by default in production. See [Server setup](/docs/reference/server-setup) for the full set of server flags.
+See [Server setup](/docs/getting-started/server-setup) for the full set of server flags.
 
 ## Using JWT claims in permissions
 
@@ -3825,9 +3756,9 @@ This is useful when iterating on your schema during development.
 
 `useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
 
-Yes. Skip server auth and omit `serverUrl` — data will be persisted locally only. See [Offline-Only Mode](/docs/auth/authentication#offline-only-mode).
+Yes. Omit `serverUrl` from your config — data will be persisted locally only.
 
-Yes. Link the local identity to an external one when the user signs in. See [Upgrading from local auth](/docs/auth/authentication#upgrading-from-local-auth).
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
 
 No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
 
@@ -3837,7 +3768,7 @@ Jazz may return the following errors when a client's request is rejected by the 
   [permission policy](/docs/auth/permissions). Check that the session has the right to perform
   that operation on the row.
 - **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
-  Make sure the client is using a valid auth mode (anonymous, demo, or external JWT).
+  Make sure the client is using a valid auth mode (local-first or external JWT).
 - **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
   catalogue object without the required admin secret. In production, catalogue writes require
   `--admin-secret`.
@@ -4035,58 +3966,104 @@ const session = useSession(); // ShallowRef<{ user_id: string } | null>
 
 ===PAGE:reference/internals===
 TITLE:Advanced Internals
-DESCRIPTION:"How Jazz works under the hood: the storage engine, sync protocol, query pipeline, and browser architecture."
+DESCRIPTION:"How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
 
-This page describes Jazz's internal architecture. You don't need any of this to use Jazz, but it
-can help if you're debugging, reasoning about performance, or understanding why the system behaves the
-way it does. It's also useful for anyone who may want to contribute to Jazz.
+This page describes Jazz's internal architecture. You do not need any of this to use Jazz, but it
+is helpful if you are debugging, reasoning about performance, or understanding why the system
+behaves the way it does.
 
 ## Data model
 
-### Row = Object
+### Raw tables plus engine-managed fields
 
-Every table row is a standalone Jazz object identified by a UUIDv7. The row's `id` column is its
-ObjectId. This means each row carries its own version history, can sync independently, and has
-content-addressed commits. Two clients creating identical commits independently produce the same
-CommitId, so sync can detect and skip duplicates.
+Jazz stays table-first all the way down.
+
+Your schema defines normal application columns such as `title`, `done`, and `projectId`. Under the
+hood, the engine also tracks a small set of reserved `_jazz_*` columns that explain how each row
+behaves over time, such as:
+
+- a stable row id
+- the branch view the row belongs to
+- the current row-version id
+- ancestry pointers to earlier row versions
+- visibility state
+- confirmed durability tier
+- delete markers
+- engine/user metadata
+
+The important physical fact is that Jazz stores one flat `row_format` row containing both the user
+columns and the reserved engine columns. Some Rust types still expose the user-column slice
+separately for convenience, but that is just a decoded view rather than a different storage model.
+
+### Visible entries and row histories
+
+Each logical row has two important storage shapes behind it:
+
+- a **visible entry** for current reads
+- a **row history** containing every stored row version
+
+Ordinary queries read the visible entry first. History is what makes replay, reconnect, branching,
+and future historical queries possible.
+
+The simplest picture is:
+
+```text
+todos
+  visible: (branch, row_id) -> current winner for that branch view
+  history: (row_id, version_id) -> row versions over time
+```
+
+This is why Jazz can feel like "just tables" at the app layer while still keeping rich local-first
+history underneath.
+
+Both storage shapes are flat rows:
+
+- history rows use reserved `_jazz_*` columns plus the user columns
+- visible rows use a slightly larger `_jazz_*` prefix plus the same user columns
 
 ### Automatic column indexing
 
 Every column in every table gets a single-column index automatically. There is no manual index
-management. The `_id` index for each table doubles as the authoritative row manifest&hairsp;—
-&hairsp;discovering all rows in a table is just an `_id` index scan.
+management.
 
-This is a deliberate trade-off: local-first databases are small enough that index overhead is
-negligible, and it guarantees every `where` filter hits an index rather than scanning rows.
-Custom index configuration is planned as a future feature.
+The `_id` index for each table doubles as the authoritative row manifest, so discovering all rows
+in a table is just an `_id` index scan.
+
+This is a deliberate trade-off: local-first databases are usually small enough that automatic
+indexing is worth the storage overhead, and it guarantees that ordinary `where(...)` filters do not
+fall back to surprise table scans.
 
 ### Deletion
 
-The user-facing `delete` and `deleteDurable` APIs perform a **soft delete**: the row's content is
-preserved but it is hidden from queries. Internally, the row moves from the `_id` index to a
-separate `_id_deleted` index.
+The user-facing `delete` and `deleteDurable` APIs perform a **soft delete**. The row is preserved in
+history, but it disappears from ordinary live queries.
 
-A **hard delete** mode also exists at the storage layer (content emptied, irreversible, always wins
-in conflicts), but it is not currently exposed to application code.
+Internally, the current visible state leaves the live `_id` index and can still be addressed
+through deleted-row paths such as `_id_deleted`.
 
-### History and truncation
+A **hard delete** mode also exists at the storage layer, but it is not currently exposed as the
+normal app-facing API.
 
-Each row's history is an append-only DAG of commits. History grows unboundedly by default. A
-low-level API for branch truncation exists, which removes ancestor commits below a
-specified boundary while preserving the current state, but this is not yet exposed to
-application code. Exposing history truncation is planned as a future feature.
+### Row history and truncation
 
-### Monotonic timestamps
+Row history is append-only by default. Every write creates a new row version and keeps older
+versions available for replay and reconciliation.
 
-Each runtime instance maintains a monotonic timestamp counter. Every commit gets a timestamp that is
-strictly greater than the previous one from the same node. This guarantees causal ordering within a
-single instance, which is what makes last-writer-wins conflict resolution deterministic when commits
-originate from the same device.
+There is a low-level truncation path that can drop older ancestry while preserving the current
+visible state, but it is not a normal application-facing feature yet.
+
+### Monotonic direct-write ordering
+
+Each runtime instance maintains a small monotonic clock for direct writes. New row versions created
+by that runtime get strictly increasing local timestamps, which makes deterministic last-writer-wins
+ordering straightforward within a single device or process.
 
 ### Cold start
 
-On startup, Jazz loads indices first (not all row data), then lazy-loads row objects on demand as
-queries reference them. As a result, startup time is proportional to index size, not total data size.
+On startup, Jazz loads indices first rather than eagerly decoding every row. Row content is then
+loaded on demand as queries reference it.
+
+The result is that cold-start cost is much closer to "index size" than "total stored data size."
 
 ## Browser architecture
 
@@ -4094,31 +4071,32 @@ queries reference them. As a result, startup time is proportional to index size,
 
 In the browser, Jazz runs two runtime instances:
 
-- **Main thread**&hairsp;— &hairsp;an in-memory runtime that serves all reads and writes instantly.
-- **Dedicated worker**&hairsp;— &hairsp;a persistent runtime backed by OPFS (Origin Private File
-  System) that owns durable storage and upstream server sync.
+- **Main thread** — an in-memory runtime that serves UI-facing reads and writes immediately
+- **Dedicated worker** — a persistent runtime backed by OPFS (Origin Private File System) that owns
+  durable storage and upstream server sync
 
-The main thread treats the worker as its upstream server. Writes apply to the in-memory runtime
+The main thread treats the worker as its upstream peer. Writes apply to the in-memory runtime
 immediately, then sync to the worker via `postMessage`. The worker persists them to OPFS and
-forwards them to the edge server. Incoming server updates flow the reverse path: edge &rarr; worker
-&rarr; main thread &rarr; your UI callback.
+forwards them to the next sync tier. Incoming server updates flow the reverse path: server ->
+worker -> main thread -> your UI callback.
 
 ```text
-Main thread (MemoryStorage)
+Main thread (in-memory runtime)
   ↕ postMessage
-Dedicated worker (OPFS via OpfsBTreeStorage)
+Dedicated worker (persistent OPFS runtime)
   ↕ HTTP/SSE
-Edge server (FjallStorage)
+Edge/global server runtime
 ```
 
-With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely&hairsp;— &hairsp;the
-main-thread runtime syncs directly with the server.
+With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely, and the main-thread
+runtime syncs directly with the server.
 
 ### OPFS crash safety
 
 The OPFS storage engine uses checkpoint-based persistence with two superblock slots (A/B). Each
-checkpoint writes dirty pages, flushes, then swaps the active superblock. On reopen after a crash or
-torn write, the highest valid superblock generation wins, recovering to the last complete checkpoint.
+checkpoint writes dirty pages, flushes, then swaps the active superblock. On reopen after a crash
+or torn write, the highest valid superblock generation wins, recovering to the last complete
+checkpoint.
 
 ### Tab coordination
 
@@ -4128,9 +4106,9 @@ lock and the first follower to acquire it becomes the new leader.
 
 ### React Native
 
-React Native uses a separate runtime adapter with no web worker or OPFS path. Local persistence
-works differently from the browser&hairsp;— &hairsp;there is no OPFS equivalent. The sync layer
-connects directly to the server from the main runtime.
+React Native uses a separate native runtime adapter with no web worker or OPFS path. It still uses
+the same table-first runtime model, but local persistence is provided by the native embedded backend
+rather than by browser APIs.
 
 ## Query engine
 
@@ -4144,132 +4122,115 @@ IndexScan → [Union] → Materialize → [PolicyFilter]
   → [Project] → Output
 ```
 
-Index scans are per `(branch, filter-disjunct)` pair. Nodes in brackets are only present when the
-query requires them. The graph processes deltas (added/removed/updated tuples) incrementally, which means that on data changes, only dirty nodes re-evaluate. This is what makes live
-subscriptions efficient: when a single row changes, the engine doesn't re-run the whole query.
+Nodes in brackets are only present when the query requires them. The graph processes deltas
+incrementally, which means that when data changes, only dirty nodes re-evaluate. That is what makes
+live subscriptions efficient: a single row change does not require re-running the whole query.
+
+### Materialization
+
+`Materialize` is where candidate row ids turn back into rows.
+
+It typically:
+
+1. looks up the visible entry for the relevant branch
+2. falls back to row history only when the query needs an older settled winner
+3. decodes or reprojects the flat row, dropping the reserved engine columns before returning app-facing values
+4. emits row-level deltas to the downstream graph
+
+This is why the visible region matters so much: most current reads never need to reconstruct a row
+from full history.
 
 ### One-shot queries
 
-`db.all()` and `db.one()` are implemented as "subscribe, receive first durability-qualified
-snapshot, then auto-unsubscribe." They share the same reactive machinery as live subscriptions,
-which is why both participate in durability-tier gating and lens transforms.
+`db.all()` and `db.one()` are implemented as "create a temporary subscription, wait for the first
+durability-qualified snapshot, then auto-unsubscribe." They share the same reactive machinery as
+live subscriptions, which is why they participate in durability-tier gating and lens transforms.
 
 ### Include performance
 
 Each outer row in an `include()` / array subquery gets its own compiled sub-graph. With 1,000 outer
-rows, that's 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
-correct and simple, but worth knowing if you're including across large result sets&hairsp;—&hairsp;limiting includes can improve performance.
+rows, that is 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
+correct and simple, but worth remembering when including across very large result sets.
 
 ## Sync protocol
 
 ### Transport
 
-Jazz uses HTTP with binary framing&hairsp;— &hairsp;not WebSockets or raw SSE text.
+Jazz uses HTTP with binary framing rather than WebSockets or raw SSE text.
 
-- **Server &rarr; client**: `GET /events?client_id=<uuid>`&hairsp;— &hairsp;a persistent binary
-  stream of length-prefixed JSON frames (`[4-byte u32 BE length][JSON payload]`). Event types:
-  `Connected`, `SyncUpdate`, `Heartbeat` (every 30 seconds).
-- **Client &rarr; server**: `POST /sync`&hairsp;— &hairsp;sends mutations and subscription changes.
-- **Admin**: `GET /schemas`, `GET /schema/:hash`&hairsp;— &hairsp;schema catalogue reads (requires
-  admin secret).
+- **Server -> client**: `GET /events?client_id=<uuid>` — a persistent binary stream of
+  length-prefixed JSON frames (`[4-byte u32 BE length][JSON payload]`). Event types include
+  `Connected`, `SyncUpdate`, and `Heartbeat`.
+- **Client -> server**: `POST /sync` — sends row-version updates, query subscription changes, and
+  related sync payloads.
+- **Admin**: `GET /schemas`, `GET /schema/:hash` — schema catalogue reads (requires admin access).
 - **Health**: `GET /health`.
 
 ### Client identity
 
-Each client generates and persists a UUID `ClientId` (v7 in Rust, v4 in TypeScript). On reconnect with the same ID, the server's
-tip tracking means it only sends data that's new since the last connection.
+Each client generates and persists a stable `ClientId`. On reconnect with the same id, the server
+can treat it as the same logical peer rather than as a brand-new client with no prior state.
 
 ### Reconnection
 
-The TypeScript client uses exponential backoff with jitter (base 300ms, cap 10s, 0–199ms random
-jitter). On reconnect, active query subscriptions are replayed as anti-entropy (meaning any divergence between client and server is repaired): the server re-evaluates them and sends any data the client is missing.
+The TypeScript client uses exponential backoff with jitter. On reconnect, active query
+subscriptions are replayed as anti-entropy: the server re-evaluates them and resends any rows the
+client still needs.
 
 ### Trust model and client roles
 
 Sync is asymmetric:
 
-- **Upward** (client &rarr; server): all objects are pushed. Servers are trusted.
-- **Downward** (server &rarr; client): only objects matching the client's active query subscriptions
-  are sent. Clients are untrusted and never receive data they haven't asked for.
+- **Upward** (client -> server): row versions, row-state changes, and catalogue updates are pushed
+  toward trusted servers
+- **Downward** (server -> client): only rows matching the client's active query subscriptions are
+  sent
 
 Each client connection has a **role** that determines how writes are routed:
 
-| Role    | Write handling                                              |
-| ------- | ----------------------------------------------------------- |
-| `User`  | Writes queued for permission policy evaluation before apply |
-| `Admin` | Writes applied directly, no permission check                |
-| `Peer`  | Writes applied directly, used for server-to-server sync     |
+| Role    | Write handling                                                    |
+| ------- | ----------------------------------------------------------------- |
+| `User`  | Writes queued for permission policy evaluation before apply       |
+| `Admin` | Writes applied directly, no permission check                      |
+| `Peer`  | Writes applied directly, used for trusted runtime-to-runtime sync |
 
-Frontend clients authenticate as `User`. Backend services with a backend secret authenticate as
-`Admin` or `Peer`. The role is invisible to application code&hairsp;— &hairsp;it's determined by the
-auth mechanism used when connecting.
+Frontend clients usually authenticate as `User`. Backend services with a backend secret authenticate
+as `Admin` or `Peer`.
 
 ## Schema evolution
 
 ### Lenses
 
-Migrations in Jazz produce **lenses**&hairsp;— &hairsp;bidirectional transformations between schema
-versions. When `jazz-tools migrations create` diffs two schemas, it generates a lens with
-declarative operations:
+Migrations in Jazz produce **lenses** — bidirectional transformations between schema versions. When
+`jazz-tools migrations create` diffs two schemas, it generates a lens with declarative operations
+such as adding, removing, or renaming columns and tables.
 
-| Operation      | Forward                        | Backward (auto-generated)               |
-| -------------- | ------------------------------ | --------------------------------------- |
-| `AddColumn`    | Adds column with default value | Removes the column                      |
-| `RemoveColumn` | Removes column                 | Adds column back with backwards default |
-| `RenameColumn` | Renames from old to new        | Renames from new to old                 |
-| `AddTable`     | Adds table                     | Removes the table                       |
-| `RemoveTable`  | Removes table                  | Adds table back                         |
-
-The backward transform is always computed automatically from the forward transform.
-
-#### At query time
-
-When a query touches data written under an older schema, the lens chain converts rows transparently.
-Index lookups translate column names through the chain (e.g. v1's `email` becomes v2's
-`email_address`), and row loading applies the lens transform to add default values for new columns
-or reshape the data.
-
-Results from all reachable schema versions are unioned together, with last-writer-wins deduplication
-by ObjectId when the same row appears on multiple schema branches.
-
-#### At write time
-
-Updating a row that lives on an old-schema branch triggers a **copy-on-write**: the row is loaded,
-lens-transformed to the current schema, the update is applied, and the result is written to the
-current schema's branch. The old branch data stays untouched.
-
-### Draft lenses
-
-Auto-generated lenses may contain **draft** operations&hairsp;— &hairsp;uncertain transformations
-like potential renames (same column type, different name) or non-nullable columns without sensible
-defaults. A draft lens in the path to any live schema will fail at startup, forcing you to review
-and resolve the ambiguity before the app can run.
+At query time, Jazz can use lens paths to read older stored data through the current schema. At
+write time, updates to older rows are written back into the current schema branch via copy-on-write.
 
 ### Catalogue sync
 
-Schemas and lenses are themselves Jazz objects. When a client connects, its schema and lens objects
-propagate through normal sync. Servers discover schemas lazily and activate them on demand&hairsp;— &hairsp;no deployment coordination is needed when clients ship new schema versions.
+Schemas and lenses travel through a separate catalogue lane, not through the normal user-row
+history path. Clients publish catalogue entries, servers discover them lazily, and query execution
+uses that catalogue state to resolve schema context on demand.
 
 ## Durability signals
 
-Jazz separates two durability concepts:
+Jazz separates two durability questions:
 
-| Signal           | Gates               | Question it answers                         |
-| ---------------- | ------------------- | ------------------------------------------- |
-| `QuerySettled`   | First read delivery | "Has the query result arrived from tier T?" |
-| `PersistenceAck` | Write completion    | "Is this commit durable at tier T?"         |
+| Signal                  | Gates                    | Question it answers                        |
+| ----------------------- | ------------------------ | ------------------------------------------ |
+| `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
+| Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
 
-Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different questions. A
-query's first callback is held until `QuerySettled` arrives at the requested tier. A durable write's
-promise resolves when `PersistenceAck` arrives at the requested tier.
+Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different
+questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
+durable write promise resolves when the requested tier confirms the write.
 
   The read durability tier only gates the **first** delivery of a subscription. After the initial
-  snapshot arrives at the requested tier, subsequent updates are delivered as they reach the local
-  node, regardless of which tier they've propagated to. This means a subscription with `tier:
-  "global"` guarantees a globally-consistent initial snapshot, but later incremental updates may
-  arrive before reaching the global tier. The `localUpdates: "immediate"` option (the default)
-  additionally allows your own local writes to appear in the subscription before even the first
-  delivery, but only after the subscription has settled at least once.
+  snapshot arrives at the requested tier, later updates are delivered as they reach the local node.
+  That means `tier: "global"` gives you a globally settled first snapshot, not globally gated
+  delivery forever after.
 
 ===PAGE:reference/mcp===
 TITLE:MCP Server

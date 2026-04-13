@@ -93,10 +93,10 @@ test.describe("auth-betterauth-chat", () => {
 
     await page.goto("/");
 
-    // Wait for self-signed session to be active
+    // Wait for local-first session to be active
     await expect(page.getByTestId("auth-status")).toContainText("Anonymous", { timeout: 20_000 });
 
-    // Read the self-signed userId from the UI
+    // Read the local-first userId from the UI
     const preSignupUserId = await page.getByTestId("user-id").textContent();
     expect(preSignupUserId).toBeTruthy();
 
