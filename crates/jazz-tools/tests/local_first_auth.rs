@@ -6,7 +6,7 @@ use jazz_tools::middleware::auth::{AuthConfig, extract_session};
 use jazz_tools::schema_manager::AppId;
 
 fn test_app_id() -> AppId {
-    AppId::from_name("self-signed-integration-test")
+    AppId::from_name("local-first-integration-test")
 }
 
 fn alice_seed() -> [u8; 32] {
@@ -23,9 +23,9 @@ fn bob_seed() -> [u8; 32] {
     seed
 }
 
-fn self_signed_config() -> AuthConfig {
+fn local_first_config() -> AuthConfig {
     AuthConfig {
-        allow_self_signed: true,
+        allow_local_first_auth: true,
         ..Default::default()
     }
 }
@@ -37,13 +37,13 @@ fn bearer_headers(token: &str) -> HeaderMap {
 }
 
 #[tokio::test]
-async fn valid_self_signed_jwt_authenticates() {
+async fn valid_local_first_jwt_authenticates() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
-    let token = identity::mint_self_signed_token(&alice_seed(), &audience, 3600).unwrap();
+    let token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
 
     let headers = bearer_headers(&token);
-    let config = self_signed_config();
+    let config = local_first_config();
 
     let result = extract_session(&headers, app_id, &config, None, None).await;
 
@@ -59,10 +59,10 @@ async fn same_seed_same_identity() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
 
-    let token1 = identity::mint_self_signed_token(&alice_seed(), &audience, 3600).unwrap();
-    let token2 = identity::mint_self_signed_token(&alice_seed(), &audience, 3600).unwrap();
+    let token1 = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
+    let token2 = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
 
-    let config = self_signed_config();
+    let config = local_first_config();
 
     let session1 = extract_session(&bearer_headers(&token1), app_id, &config, None, None)
         .await
@@ -84,10 +84,10 @@ async fn different_seeds_different_identities() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
 
-    let alice_token = identity::mint_self_signed_token(&alice_seed(), &audience, 3600).unwrap();
-    let bob_token = identity::mint_self_signed_token(&bob_seed(), &audience, 3600).unwrap();
+    let alice_token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
+    let bob_token = identity::mint_local_first_token(&bob_seed(), &audience, 3600).unwrap();
 
-    let config = self_signed_config();
+    let config = local_first_config();
 
     let alice_session = extract_session(&bearer_headers(&alice_token), app_id, &config, None, None)
         .await
@@ -107,10 +107,10 @@ async fn different_seeds_different_identities() {
 #[tokio::test]
 async fn wrong_audience_rejected() {
     let token =
-        identity::mint_self_signed_token(&alice_seed(), "wrong-app-audience", 3600).unwrap();
+        identity::mint_local_first_token(&alice_seed(), "wrong-app-audience", 3600).unwrap();
 
     let headers = bearer_headers(&token);
-    let config = self_signed_config();
+    let config = local_first_config();
     let app_id = test_app_id();
 
     let result = extract_session(&headers, app_id, &config, None, None).await;
@@ -122,14 +122,14 @@ async fn wrong_audience_rejected() {
 }
 
 #[tokio::test]
-async fn self_signed_disabled_rejected() {
+async fn local_first_disabled_rejected() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
-    let token = identity::mint_self_signed_token(&alice_seed(), &audience, 3600).unwrap();
+    let token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
 
     let headers = bearer_headers(&token);
     let config = AuthConfig {
-        allow_self_signed: false,
+        allow_local_first_auth: false,
         ..Default::default()
     };
 
@@ -137,7 +137,7 @@ async fn self_signed_disabled_rejected() {
 
     assert!(
         result.is_err(),
-        "self-signed token must be rejected when allow_self_signed is false"
+        "local-first token must be rejected when allow_local_first_auth is false"
     );
 }
 
@@ -146,10 +146,10 @@ async fn expired_token_rejected() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
     // TTL=0 means exp == iat, which is already expired
-    let token = identity::mint_self_signed_token(&alice_seed(), &audience, 0).unwrap();
+    let token = identity::mint_local_first_token(&alice_seed(), &audience, 0).unwrap();
 
     let headers = bearer_headers(&token);
-    let config = self_signed_config();
+    let config = local_first_config();
 
     let result = extract_session(&headers, app_id, &config, None, None).await;
 

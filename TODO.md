@@ -6,14 +6,17 @@
 
 - [**change-user-id-on-live-client**](todo/issues/change-user-id-on-live-client.md) — Changing auth principal on a live Jazz client is currently unsupported. We need a focused follow-up
 - [**forward-inherits-select-bug**](todo/issues/forward-inherits-select-bug.md) — Forward `INHERITS VIA <fk>` select policies fail to expose child rows to sessions that should inherit access from the parent row.
+- [**nextjs-plugin-tsx-not-loading**](todo/issues/nextjs-plugin-tsx-not-loading.md) — The Next.js dev server plugin fails to load `.tsx` files.
 - [**stale-client-cache-after-scope-removal**](todo/issues/stale-client-cache-after-scope-removal.md) — When a row is deleted (or otherwise exits a query's result set) while a client has no active server-side subscription for that query, the client's local object manager retains stale data indefinitely. Subsequent one-shot `query()` calls with `tier: "edge"` return the stale row because the server never sends the deletion to the client — it considers the object "out of scope" and skips it.
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**update-inherits-policy-bug**](todo/issues/update-inherits-policy-bug.md) — UPDATE operations fail with PolicyDenied even when an INHERITS chain should grant access.
 
 ### Medium
 
+- [**deprecate-demo-local-auth**](todo/issues/deprecate-demo-local-auth.md) — Remove the legacy local auth path (`demoAuth`, `localMode`, `X-Jazz-Local-Mode`, `X-Jazz-Local-Token`) and the synthetic users system once local-first Ed25519 JWT auth is stable and adopted.
 - [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
 - [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
+- [**magic-is-local-first-identity-permission**](todo/issues/magic-is-local-first-identity-permission.md) — Add a `$isLocalFirstIdentity: true` magic check in the permissions DSL that resolves to `true` when the current session was established via local-first auth (i.e. `claims.auth_mode === "local-first"`). This gives policy authors a first-class shorthand instead of manually matching on `"claims.auth_mode": "local-first"`.
 - [**policy-error-reasons**](todo/issues/policy-error-reasons.md) — Policy-denied errors (e.g. `WriteError("policy denied INSERT on table todos")`) include
 
 ## Ideas

@@ -11,11 +11,11 @@ const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
 
 const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 
-pub const SELF_SIGNED_ISSUER: &str = "urn:jazz:self-signed";
+pub const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
 const DEFAULT_MAX_TTL_SECONDS: u64 = 3600;
 
 #[derive(serde::Serialize)]
-struct SelfSignedClaims<'a> {
+struct LocalFirstClaims<'a> {
     iss: &'a str,
     sub: &'a str,
     aud: &'a str,
@@ -27,7 +27,7 @@ struct SelfSignedClaims<'a> {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelfSignedClaimsRaw {
+struct LocalFirstClaimsRaw {
     iss: Option<String>,
     sub: Option<String>,
     aud: Option<String>,
@@ -49,14 +49,14 @@ struct JwtHeaderRaw {
 }
 
 #[derive(Debug)]
-pub struct VerifiedSelfSigned {
+pub struct VerifiedLocalFirst {
     pub user_id: String,
     pub public_key_bytes: [u8; 32],
 }
 
-/// Mint a self-signed token using the current system time.
+/// Mint a local-first token using the current system time.
 /// Panics on platforms where `SystemTime` is unavailable (e.g. wasm32).
-pub fn mint_self_signed_token(
+pub fn mint_local_first_token(
     seed: &[u8; 32],
     audience: &str,
     ttl_seconds: u64,
@@ -65,11 +65,11 @@ pub fn mint_self_signed_token(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    mint_self_signed_token_at(seed, audience, ttl_seconds, now)
+    mint_local_first_token_at(seed, audience, ttl_seconds, now)
 }
 
-/// Mint a self-signed token with an explicit timestamp (for WASM or testing).
-pub fn mint_self_signed_token_at(
+/// Mint a local-first token with an explicit timestamp (for WASM or testing).
+pub fn mint_local_first_token_at(
     seed: &[u8; 32],
     audience: &str,
     ttl_seconds: u64,
@@ -99,12 +99,12 @@ pub fn mint_self_signed_token_at(
     let now = now_seconds;
     let exp = now + ttl_seconds;
 
-    let claims = SelfSignedClaims {
-        iss: SELF_SIGNED_ISSUER,
+    let claims = LocalFirstClaims {
+        iss: LOCAL_FIRST_ISSUER,
         sub: &user_id_str,
         aud: &normalized_aud,
         jazz_pub_key: &pub_key_b64,
-        auth_mode: "self-signed",
+        auth_mode: "local-first",
         iat: now,
         exp,
     };
@@ -118,18 +118,22 @@ pub fn mint_self_signed_token_at(
     Ok(format!("{}.{}", signing_input, signature_b64))
 }
 
-pub fn verify_self_signed_token(
+pub fn verify_local_first_identity_proof(
     token: &str,
     expected_audience: &str,
-) -> Result<VerifiedSelfSigned, String> {
-    verify_self_signed_token_with_max_ttl(token, expected_audience, DEFAULT_MAX_TTL_SECONDS)
+) -> Result<VerifiedLocalFirst, String> {
+    verify_local_first_identity_proof_with_max_ttl(
+        token,
+        expected_audience,
+        DEFAULT_MAX_TTL_SECONDS,
+    )
 }
 
-pub fn verify_self_signed_token_with_max_ttl(
+pub fn verify_local_first_identity_proof_with_max_ttl(
     token: &str,
     expected_audience: &str,
     max_ttl_seconds: u64,
-) -> Result<VerifiedSelfSigned, String> {
+) -> Result<VerifiedLocalFirst, String> {
     // Normalize expected audience the same way as minting
     let normalized_expected = match Uuid::parse_str(expected_audience) {
         Ok(uuid) => uuid.to_string(),
@@ -156,10 +160,10 @@ pub fn verify_self_signed_token_with_max_ttl(
     let claims_bytes = URL_SAFE_NO_PAD
         .decode(claims_b64)
         .map_err(|e| format!("claims decode: {e}"))?;
-    let claims: SelfSignedClaimsRaw =
+    let claims: LocalFirstClaimsRaw =
         serde_json::from_slice(&claims_bytes).map_err(|e| format!("claims parse: {e}"))?;
 
-    if claims.iss.as_deref() != Some(SELF_SIGNED_ISSUER) {
+    if claims.iss.as_deref() != Some(LOCAL_FIRST_ISSUER) {
         return Err(format!("invalid issuer: {:?}", claims.iss));
     }
     if claims.aud.as_deref() != Some(normalized_expected.as_str()) {
@@ -168,9 +172,9 @@ pub fn verify_self_signed_token_with_max_ttl(
             claims.aud
         ));
     }
-    if claims.auth_mode.as_deref() != Some("self-signed") {
+    if claims.auth_mode.as_deref() != Some("local-first") {
         return Err(format!(
-            "invalid auth_mode: expected \"self-signed\", got {:?}",
+            "invalid auth_mode: expected \"local-first\", got {:?}",
             claims.auth_mode
         ));
     }
@@ -238,7 +242,7 @@ pub fn verify_self_signed_token_with_max_ttl(
         return Err(format!("token ttl {ttl}s exceeds max {max_ttl_seconds}s"));
     }
 
-    Ok(VerifiedSelfSigned {
+    Ok(VerifiedLocalFirst {
         user_id: derived_user_id.to_string(),
         public_key_bytes: pub_key_bytes,
     })
@@ -314,25 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn mint_and_verify_self_signed_token() {
+    fn mint_and_verify_local_first_identity_proof() {
         let seed = alice_seed();
         let user_id = derive_user_id(&seed);
-        let token = mint_self_signed_token(&seed, "my-app", 3600).unwrap();
-        let verified = verify_self_signed_token(&token, "my-app").unwrap();
+        let token = mint_local_first_token(&seed, "my-app", 3600).unwrap();
+        let verified = verify_local_first_identity_proof(&token, "my-app").unwrap();
         assert_eq!(verified.user_id, user_id.to_string());
     }
 
     #[test]
     fn reject_wrong_audience() {
-        let token = mint_self_signed_token(&alice_seed(), "app-a", 3600).unwrap();
-        let result = verify_self_signed_token(&token, "app-b");
+        let token = mint_local_first_token(&alice_seed(), "app-a", 3600).unwrap();
+        let result = verify_local_first_identity_proof(&token, "app-b");
         assert!(result.is_err());
     }
 
     #[test]
     fn reject_excessive_ttl() {
-        let token = mint_self_signed_token(&alice_seed(), "my-app", 3600).unwrap();
-        let result = verify_self_signed_token_with_max_ttl(&token, "my-app", 1800);
+        let token = mint_local_first_token(&alice_seed(), "my-app", 3600).unwrap();
+        let result = verify_local_first_identity_proof_with_max_ttl(&token, "my-app", 1800);
         assert!(result.is_err());
     }
 
@@ -353,11 +357,11 @@ mod tests {
             .unwrap()
             .as_secs();
         let claims = serde_json::json!({
-            "iss": SELF_SIGNED_ISSUER,
+            "iss": LOCAL_FIRST_ISSUER,
             "sub": user_id.to_string(),
             "aud": "my-app",
             "jazz_pub_key": pub_key_b64,
-            "auth_mode": "self-signed",
+            "auth_mode": "local-first",
             "iat": now,
             "exp": now + 3600,
             "role": "admin",
@@ -369,7 +373,7 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
         let token = format!("{}.{}", signing_input, sig_b64);
 
-        let result = verify_self_signed_token(&token, "my-app");
+        let result = verify_local_first_identity_proof(&token, "my-app");
         assert!(
             result.is_err(),
             "token with extra 'role' claim must be rejected"
@@ -396,7 +400,7 @@ mod tests {
             .unwrap()
             .as_secs();
         let claims = serde_json::json!({
-            "iss": SELF_SIGNED_ISSUER,
+            "iss": LOCAL_FIRST_ISSUER,
             "sub": user_id.to_string(),
             "aud": "my-app",
             "jazz_pub_key": pub_key_b64,
@@ -411,7 +415,7 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
         let token = format!("{}.{}", signing_input, sig_b64);
 
-        let result = verify_self_signed_token(&token, "my-app");
+        let result = verify_local_first_identity_proof(&token, "my-app");
         assert!(
             result.is_err(),
             "token with auth_mode 'external' must be rejected"
@@ -420,10 +424,10 @@ mod tests {
 
     #[test]
     fn different_seeds_produce_different_tokens() {
-        let t1 = mint_self_signed_token(&alice_seed(), "app", 3600).unwrap();
-        let t2 = mint_self_signed_token(&bob_seed(), "app", 3600).unwrap();
-        let v1 = verify_self_signed_token(&t1, "app").unwrap();
-        let v2 = verify_self_signed_token(&t2, "app").unwrap();
+        let t1 = mint_local_first_token(&alice_seed(), "app", 3600).unwrap();
+        let t2 = mint_local_first_token(&bob_seed(), "app", 3600).unwrap();
+        let v1 = verify_local_first_identity_proof(&t1, "app").unwrap();
+        let v2 = verify_local_first_identity_proof(&t2, "app").unwrap();
         assert_ne!(v1.user_id, v2.user_id);
     }
 }

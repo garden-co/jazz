@@ -79,7 +79,7 @@ function AppInner() {
     env: import.meta.env.DEV ? "dev" : "prod",
     userBranch: "main",
     devMode: import.meta.env.DEV,
-    auth: { seed: secret },
+    auth: { localFirstSecret: secret },
     serverUrl,
   };
 

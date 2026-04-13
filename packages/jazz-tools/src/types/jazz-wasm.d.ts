@@ -98,8 +98,8 @@ declare module "jazz-wasm" {
 
     /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
     static deriveUserId(seedB64: string): string;
-    /** Mint a self-signed JWT from a base64url-encoded seed. */
-    static mintSelfSignedToken(
+    /** Mint a local-first JWT from a base64url-encoded seed. */
+    static mintLocalFirstToken(
       seedB64: string,
       audience: string,
       ttlSeconds: bigint,

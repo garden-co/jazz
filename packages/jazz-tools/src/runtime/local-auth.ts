@@ -9,7 +9,7 @@ export interface LocalAuthStorageLike {
 
 type LocalAuthDefaultsInput = {
   appId: string;
-  auth?: { seed: string };
+  auth?: { localFirstSecret: string };
   jwtToken?: string;
   backendSecret?: string;
   localAuthMode?: LocalAuthMode;

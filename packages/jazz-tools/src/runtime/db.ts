@@ -99,8 +99,8 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** Self-signed auth via a local seed. Mutually exclusive with jwtToken. */
-  auth?: { seed: string };
+  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
+  auth?: { localFirstSecret: string };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -369,8 +369,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
-  private _selfSignedSeed: string | null = null;
-  private selfSignedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private _localFirstSecret: string | null = null;
+  private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -407,25 +407,25 @@ export class Db {
     this.authStateStore = createAuthStateStore(config);
   }
 
-  /** @internal Store the seed used for self-signed auth and schedule token refresh. */
-  initSelfSignedAuth(seed: string, ttlSeconds: number): void {
-    this._selfSignedSeed = seed;
-    this.scheduleSelfSignedRefresh(ttlSeconds);
+  /** @internal Store the seed used for local-first auth and schedule token refresh. */
+  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
+    this._localFirstSecret = seed;
+    this.scheduleLocalFirstRefresh(ttlSeconds);
   }
 
-  private scheduleSelfSignedRefresh(ttlSeconds: number): void {
-    if (this.selfSignedRefreshTimer) {
-      clearTimeout(this.selfSignedRefreshTimer);
+  private scheduleLocalFirstRefresh(ttlSeconds: number): void {
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
     }
     // Refresh at 80% of TTL
     const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
-    this.selfSignedRefreshTimer = setTimeout(() => {
-      this.refreshSelfSignedToken();
+    this.localFirstRefreshTimer = setTimeout(() => {
+      this.refreshLocalFirstToken();
     }, refreshMs);
   }
 
-  private refreshSelfSignedToken(): void {
-    if (!this._selfSignedSeed || this.isShuttingDown) return;
+  private refreshLocalFirstToken(): void {
+    if (!this._localFirstSecret || this.isShuttingDown) return;
 
     try {
       const wasmModule = this.wasmModule;
@@ -433,16 +433,16 @@ export class Db {
 
       const ttlSeconds = 3600;
       const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-      const newToken = wasmModule.WasmRuntime.mintSelfSignedToken(
-        this._selfSignedSeed,
+      const newToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+        this._localFirstSecret,
         this.config.appId,
         BigInt(ttlSeconds),
         nowSeconds,
       );
       this.updateAuthToken(newToken);
-      this.scheduleSelfSignedRefresh(ttlSeconds);
+      this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
-      console.error("Failed to refresh self-signed token:", e);
+      console.error("Failed to refresh local-first token:", e);
     }
   }
 
@@ -1082,14 +1082,14 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived self-signed JWT proving possession of the current identity.
-   * Returns `null` if the current session is not self-signed.
+   * Mint a short-lived local-first JWT proving possession of the current identity.
+   * Returns `null` if the current session is not local-first.
    */
-  async getSelfSignedToken(options?: {
+  async getLocalFirstIdentityProof(options?: {
     ttlSeconds?: number;
     audience?: string;
   }): Promise<string | null> {
-    if (!this._selfSignedSeed) {
+    if (!this._localFirstSecret) {
       return null;
     }
 
@@ -1102,8 +1102,8 @@ export class Db {
     const audience = options?.audience ?? this.config.appId;
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
 
-    return wasmModule.WasmRuntime.mintSelfSignedToken(
-      this._selfSignedSeed,
+    return wasmModule.WasmRuntime.mintLocalFirstToken(
+      this._localFirstSecret,
       audience,
       BigInt(ttl),
       nowSeconds,
@@ -1453,9 +1453,9 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
-    if (this.selfSignedRefreshTimer) {
-      clearTimeout(this.selfSignedRefreshTimer);
-      this.selfSignedRefreshTimer = null;
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+      this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
@@ -1768,16 +1768,16 @@ export async function createDb(config: DbConfig): Promise<Db> {
 
   let resolvedConfig = { ...config };
 
-  // Self-signed auth: resolve seed and mint a JWT
-  let selfSignedSeed: string | null = null;
+  // Local-first auth: resolve seed and mint a JWT
+  let localFirstSecret: string | null = null;
   if (config.auth) {
-    const seed = config.auth.seed;
-    selfSignedSeed = seed;
+    const secret = config.auth.localFirstSecret;
+    localFirstSecret = secret;
 
     const wasmModule = await loadWasmModule(config.runtimeSources);
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    const jwtToken = wasmModule.WasmRuntime.mintSelfSignedToken(
-      seed,
+    const jwtToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+      secret,
       config.appId,
       BigInt(3600),
       nowSeconds,
@@ -1799,8 +1799,8 @@ export async function createDb(config: DbConfig): Promise<Db> {
     db = await Db.create(resolvedConfig);
   }
 
-  if (selfSignedSeed) {
-    db.initSelfSignedAuth(selfSignedSeed, 3600);
+  if (localFirstSecret) {
+    db.initLocalFirstAuth(localFirstSecret, 3600);
   }
 
   return db;
