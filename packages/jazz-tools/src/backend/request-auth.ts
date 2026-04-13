@@ -11,7 +11,7 @@ import type { Session } from "../runtime/context.js";
 export interface BackendRequestAuthConfig {
   appId: string;
   jwksUrl?: string;
-  allowLocalFirst?: boolean;
+  allowLocalFirstAuth?: boolean;
 }
 
 type LocalJwksDocument = {
@@ -245,12 +245,12 @@ export async function resolveRequestSession(
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
   const session = requireJwtSession(payload);
-  const allowLocalFirst = config.allowLocalFirst ?? true;
+  const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
-    if (!allowLocalFirst) {
+    if (!allowLocalFirstAuth) {
       throw new Error(
-        "Received local-first JWT, but createJazzContext() has allowLocalFirst disabled.",
+        "Received local-first JWT, but createJazzContext() has allowLocalFirstAuth disabled.",
       );
     }
 

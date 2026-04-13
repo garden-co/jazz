@@ -178,7 +178,7 @@ describe("backend request auth", () => {
     });
   });
 
-  it("rejects local-first JWTs when allowLocalFirst is disabled", async () => {
+  it("rejects local-first JWTs when allowLocalFirstAuth is disabled", async () => {
     const appId = "local-first-disabled-app";
     const token = makeUnsignedJwt({
       iss: "urn:jazz:local-first",
@@ -195,7 +195,7 @@ describe("backend request auth", () => {
         },
         {
           appId,
-          allowLocalFirst: false,
+          allowLocalFirstAuth: false,
         },
       ),
     ).rejects.toThrow(/local-first/i);
