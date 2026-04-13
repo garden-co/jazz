@@ -507,7 +507,7 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
     let server = TestServer::start().await;
     let jwks_endpoint = jwks_server.endpoint();
     let app = server
-        .create_app_with_config(Some(&jwks_endpoint), None, None, None, None, Some(1), None)
+        .create_app_with_config(Some(&jwks_endpoint), None, None, Some(1), None)
         .await;
 
     let token = make_jwt("user-stale", "kid-stale", "secret-stale");
@@ -546,15 +546,7 @@ async fn stale_jwks_refused_after_max_stale_expires() {
     let server = TestServer::start().await;
     let jwks_endpoint = jwks_server.endpoint();
     let app = server
-        .create_app_with_config(
-            Some(&jwks_endpoint),
-            None,
-            None,
-            None,
-            None,
-            Some(1),
-            Some(1),
-        )
+        .create_app_with_config(Some(&jwks_endpoint), None, None, Some(1), Some(1))
         .await;
 
     let token = make_jwt("user-expiry", "kid-expiry", "secret-expiry");

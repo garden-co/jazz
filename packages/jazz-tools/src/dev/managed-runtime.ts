@@ -1,12 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  pushSchemaCatalogue,
-  startLocalJazzServer,
-  type LocalJazzServerHandle,
-} from "./dev-server.js";
-import { watchSchema } from "./schema-watcher.js";
+import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
 const LOG_PREFIX = "[jazz]";
@@ -211,6 +206,7 @@ export class ManagedDevRuntime {
             options.appId ??
             randomUUID();
 
+          const { startLocalJazzServer } = await import("./dev-server.js");
           this.serverHandle = await startLocalJazzServer({
             appId,
             port: serverConfig.port ?? 0,
@@ -236,9 +232,11 @@ export class ManagedDevRuntime {
 
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
 
+        const { pushSchemaCatalogue } = await import("./dev-server.js");
         await pushSchemaCatalogue({ serverUrl, appId, adminSecret, schemaDir });
         console.log(`${LOG_PREFIX} schema published`);
 
+        const { watchSchema } = await import("./schema-watcher.js");
         this.watcher = watchSchema({
           schemaDir,
           serverUrl,
