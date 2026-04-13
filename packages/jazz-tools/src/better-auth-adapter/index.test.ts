@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
 import { pushSchemaCatalogue, TestingServer } from "../testing/index.js";
@@ -936,26 +936,6 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         backendSecret: server.backendSecret,
       });
-
-      const adapter1 = jazzAdapter({
-        db: () => ctx1.asBackend(wasmSchemaExample),
-        schema: wasmSchemaExample,
-        durabilityTier: "edge",
-      })({});
-
-      const user = await adapter1.create({
-        model: "user",
-        data: {
-          name: "memory-user",
-          email: "memory-user@test.com",
-          emailVerified: false,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-
-      expect(user.id).toEqual(expect.any(String));
-
       const ctx2 = createJazzContext({
         appId: server.appId,
         driver: { type: "memory" },
@@ -963,24 +943,58 @@ describe("jazzAdapter", () => {
         backendSecret: server.backendSecret,
       });
 
-      const adapter2 = jazzAdapter({
-        db: () => ctx2.asBackend(wasmSchemaExample),
-        schema: wasmSchemaExample,
-        durabilityTier: "edge",
-      })({});
+      try {
+        const adapter1 = jazzAdapter({
+          db: () => ctx1.asBackend(wasmSchemaExample),
+          schema: wasmSchemaExample,
+          durabilityTier: "edge",
+        })({});
 
-      await expect(
-        adapter2.findOne({
+        const user = await adapter1.create({
           model: "user",
-          where: [
-            { field: "email", operator: "eq", value: "memory-user@test.com", connector: "AND" },
-          ],
-        }),
-      ).resolves.toMatchObject({
-        id: user.id,
-        name: "memory-user",
-        email: "memory-user@test.com",
-      });
+          data: {
+            name: "memory-user",
+            email: "memory-user@test.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        });
+
+        expect(user.id).toEqual(expect.any(String));
+
+        const adapter2 = jazzAdapter({
+          db: () => ctx2.asBackend(wasmSchemaExample),
+          schema: wasmSchemaExample,
+          durabilityTier: "edge",
+        })({});
+
+        await vi.waitFor(
+          async () => {
+            await expect(
+              adapter2.findOne({
+                model: "user",
+                where: [
+                  {
+                    field: "email",
+                    operator: "eq",
+                    value: "memory-user@test.com",
+                    connector: "AND",
+                  },
+                ],
+              }),
+            ).resolves.toMatchObject({
+              id: user.id,
+              name: "memory-user",
+              email: "memory-user@test.com",
+            });
+          },
+          { timeout: 15_000 },
+        );
+      } finally {
+        await ctx1.shutdown();
+        await ctx2.shutdown();
+      }
     });
 
     test("supports email/password sign up and sign in", async () => {
