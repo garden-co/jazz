@@ -95,7 +95,7 @@ The BetterAuth example above uses a framework-specific middleware hook. With any
 1. Accepts `proofToken` alongside the sign-up credentials
 2. Verifies it with `verifyLocalFirstIdentityProof` from `jazz-napi`
 3. Stores the proven Jazz user ID linked to the new user account
-4. Issues JWTs with that ID as the `sub` claim
+4. Issues JWTs with either `sub: jazzId` or `jazz_principal_id: jazzId`
 
 ```ts title="server.ts"
 import { verifyLocalFirstIdentityProof } from "jazz-napi";
@@ -114,7 +114,8 @@ app.post("/signup", async (req, res) => {
   );
   if (!ok) return res.status(400).json({ error });
 
-  // Store jazzUserId so you can include it as `sub` in future JWTs
+  // Store jazzUserId so you can include it in future JWTs as `sub`
+  // or, for managed providers with provider-owned `sub`, as `jazz_principal_id`
   const user = await db.users.create({ email, password, jazzId: jazzUserId });
 
   res.json({ token: issueJwt({ sub: user.jazzId /* ... */ }) });
@@ -123,7 +124,7 @@ app.post("/signup", async (req, res) => {
 
 The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
 
-For managed providers (Auth0, WorkOS, Clerk) that don't let you intercept sign-up directly, call a dedicated `/link-jazz-identity` endpoint immediately after the provider completes sign-up, store the Jazz ID in user metadata, and issue your JWTs with that ID as `sub`.
+If your provider lets you control the JWT subject, you can set `sub` directly to the Jazz ID. Many managed providers keep `sub` fixed to their own user ID. In that case, call a dedicated `/link-jazz-identity` endpoint immediately after sign-up, store the Jazz ID in provider metadata or your own database, and mint or refresh JWTs with `jazz_principal_id: <jazzId>`. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
 
 ## Under the hood
 

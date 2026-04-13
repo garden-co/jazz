@@ -28,7 +28,7 @@ sequenceDiagram
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz derives `session.user_id` from the JWT's `sub` claim and issuer.
+4. On success, Jazz derives `session.user_id` from `jazz_principal_id` when present, otherwise from the JWT's `sub` claim.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -126,6 +126,6 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-The `sub` claim identifies the user. Jazz derives `session.user_id` from it (combined with the JWT issuer when present).
+By default, the `sub` claim identifies the user. If your provider supports custom claims but keeps `sub` fixed to its own user ID, include `jazz_principal_id` in the JWT instead. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
