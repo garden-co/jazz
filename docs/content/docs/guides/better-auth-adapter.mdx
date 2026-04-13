@@ -7,7 +7,7 @@ The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For gene
 
 ## Database Adapter
 
-Create a server-side Jazz context, then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config:
+Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config:
 
 ```ts title="src/lib/auth.ts"
 import { betterAuth } from "better-auth";
@@ -22,14 +22,12 @@ const jazzContext = createJazzContext({
   env: process.env.NODE_ENV === "production" ? "prod" : "dev",
   userBranch: "main",
   backendSecret: process.env.BACKEND_SECRET!,
-  tier: "worker",
 });
 
 export const auth = betterAuth({
   database: jazzAdapter({
     db: () => jazzContext.asBackend(authSchema),
     schema: authSchema,
-    durabilityTier: "worker",
   }),
   // ...your Better Auth config
 });
