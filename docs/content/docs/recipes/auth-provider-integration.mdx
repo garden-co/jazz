@@ -72,7 +72,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at your Better Auth JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://your-app.example.com/api/auth/jwks
+    jazz-tools server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks
     ```
 
     For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
@@ -94,7 +94,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at the WorkOS JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    jazz-tools server <APP_ID> --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
     ```
 
     For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

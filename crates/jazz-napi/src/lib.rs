@@ -1575,21 +1575,34 @@ pub fn mint_local_first_token(
 pub struct VerifyTokenResult {
     pub ok: bool,
     pub id: String,
+    pub error: Option<String>,
 }
 
 #[napi(js_name = "verifyLocalFirstIdentityProof")]
 pub fn verify_local_first_identity_proof_napi(
-    token: String,
+    token: Option<String>,
     expected_audience: String,
 ) -> VerifyTokenResult {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return VerifyTokenResult {
+                ok: false,
+                id: String::new(),
+                error: Some("proofToken is required".to_string()),
+            };
+        }
+    };
     match identity::verify_local_first_identity_proof(&token, &expected_audience) {
         Ok(verified) => VerifyTokenResult {
             ok: true,
             id: verified.user_id,
+            error: None,
         },
-        Err(_) => VerifyTokenResult {
+        Err(e) => VerifyTokenResult {
             ok: false,
             id: String::new(),
+            error: Some(e),
         },
     }
 }
