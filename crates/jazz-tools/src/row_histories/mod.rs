@@ -34,6 +34,7 @@ impl Default for BatchId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowState {
     StagingPending,
+    Superseded,
     Rejected,
     VisibleDirect,
     VisibleTransactional,
@@ -141,6 +142,7 @@ fn row_state_column_type() -> ColumnType {
     ColumnType::Enum {
         variants: vec![
             "staging_pending".to_string(),
+            "superseded".to_string(),
             "rejected".to_string(),
             "visible_direct".to_string(),
             "visible_transactional".to_string(),
@@ -491,6 +493,7 @@ fn row_state_to_value(state: RowState) -> Value {
     Value::Text(
         match state {
             RowState::StagingPending => "staging_pending",
+            RowState::Superseded => "superseded",
             RowState::Rejected => "rejected",
             RowState::VisibleDirect => "visible_direct",
             RowState::VisibleTransactional => "visible_transactional",
@@ -503,6 +506,7 @@ fn row_state_from_value(value: &Value) -> Result<RowState, EncodingError> {
     match value {
         Value::Text(value) => match value.as_str() {
             "staging_pending" => Ok(RowState::StagingPending),
+            "superseded" => Ok(RowState::Superseded),
             "rejected" => Ok(RowState::Rejected),
             "visible_direct" => Ok(RowState::VisibleDirect),
             "visible_transactional" => Ok(RowState::VisibleTransactional),
@@ -1288,6 +1292,41 @@ fn visibility_change_from_applied(
     })
 }
 
+fn supersede_older_staging_rows_for_batch<H: Storage>(
+    io: &mut H,
+    table: &str,
+    object_id: ObjectId,
+    branch_name: &BranchName,
+    batch_id: BatchId,
+) -> Result<(), RowHistoryError> {
+    let branch = SharedString::from(branch_name.as_str().to_string());
+    let history_rows = load_branch_history(io, table, object_id, &branch)?;
+    let mut pending_rows = history_rows
+        .into_iter()
+        .filter(|row| row.batch_id == batch_id && matches!(row.state, RowState::StagingPending))
+        .collect::<Vec<_>>();
+
+    if pending_rows.len() <= 1 {
+        return Ok(());
+    }
+
+    pending_rows.sort_by_key(|row| (row.updated_at, row.version_id()));
+    pending_rows.pop();
+
+    for row in pending_rows {
+        let _ = patch_row_version_state(
+            io,
+            object_id,
+            branch_name,
+            row.version_id(),
+            Some(RowState::Superseded),
+            None,
+        )?;
+    }
+
+    Ok(())
+}
+
 pub fn apply_row_version<H: Storage>(
     io: &mut H,
     object_id: ObjectId,
@@ -1344,6 +1383,10 @@ pub fn apply_row_version<H: Storage>(
         index_mutations,
     )
     .map_err(RowHistoryError::StorageError)?;
+
+    if matches!(row.state, RowState::StagingPending) {
+        supersede_older_staging_rows_for_batch(io, &table, object_id, branch_name, row.batch_id)?;
+    }
 
     let applied = RowVersionApply {
         row_locator: row_locator.clone(),

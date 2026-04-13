@@ -170,10 +170,12 @@ impl SyncManager {
                             })
                         }
                         crate::row_histories::RowState::StagingPending
+                        | crate::row_histories::RowState::Superseded
                         | crate::row_histories::RowState::Rejected => None,
                     }
                 }),
             crate::row_histories::RowState::StagingPending
+            | crate::row_histories::RowState::Superseded
             | crate::row_histories::RowState::Rejected => None,
         }
     }
@@ -281,6 +283,7 @@ impl SyncManager {
                             })
                         }
                         crate::row_histories::RowState::StagingPending
+                        | crate::row_histories::RowState::Superseded
                         | crate::row_histories::RowState::Rejected => None,
                     }
                 }

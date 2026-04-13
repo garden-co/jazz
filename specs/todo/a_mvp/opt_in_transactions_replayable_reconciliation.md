@@ -394,6 +394,12 @@ The normalization intent is:
 - `update -> update` becomes one final update
 - `update -> delete` becomes one final delete
 
+The staging/history consequences are:
+
+- transactional reads and later writes inside the same batch compose on the latest live staged member for that touched object
+- storage may still retain older same-object staged row versions for history/debuggability, but only one such member remains live in the batch write-set
+- older same-object staged row versions in the same batch become non-visible superseded staging history and must not be sealed, replayed to ordinary readers, or treated as accepted output candidates
+
 The exact storage encoding of staged members is an implementation detail. What matters is that the authority validates one final per-object write-set for the batch, not an arbitrary list of intermediate staged edits.
 
 Storage implementations may map branch names to local persisted branch ords for compact manifests and keys. Those ords are storage-local only; wire/API semantics still speak in branch names.

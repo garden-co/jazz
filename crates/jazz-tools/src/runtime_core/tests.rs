@@ -3076,6 +3076,123 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
 }
 
 #[test]
+fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
+    // alice local runtime
+    //   insert one staged transactional row
+    //   update that same row again before sealing
+    //   latest staged member should reflect the update
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    let inserted_user_id = ObjectId::new();
+    let (row_id, _) = core
+        .insert(
+            "users",
+            user_insert_values(inserted_user_id, "Alice"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+
+    core.update(
+        row_id,
+        vec![("name".to_string(), Value::Text("Bob".to_string()))],
+        Some(&write_context),
+    )
+    .expect("transactional update should reuse the row staged earlier in the same batch");
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_versions("users", row_id)
+        .unwrap();
+    let latest_staged = history_rows
+        .iter()
+        .filter(|row| {
+            row.batch_id == batch_id
+                && matches!(row.state, crate::row_histories::RowState::StagingPending)
+        })
+        .max_by_key(|row| (row.updated_at, row.version_id()))
+        .expect("transaction should keep one staged member for the row");
+    let values = decode_row(
+        &test_schema()[&TableName::new("users")].columns,
+        &latest_staged.data,
+    )
+    .expect("latest staged row should decode");
+    assert_eq!(values, user_row_values(inserted_user_id, "Bob"));
+}
+
+#[test]
+fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
+    // todo row visible on main
+    //   tx update #1 changes title
+    //   tx update #2 changes done
+    //   latest staged member should compose both changes
+    //   only one live staged member should remain for that row/batch
+    let mut core = create_runtime_with_schema(defaulted_todos_schema(), "tx-write-set-collapse");
+    let (row_id, _) = core
+        .insert(
+            "todos",
+            HashMap::from([("title".to_string(), Value::Text("Draft".to_string()))]),
+            None,
+        )
+        .expect("seed visible todo");
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.update(
+        row_id,
+        vec![("title".to_string(), Value::Text("Renamed".to_string()))],
+        Some(&write_context),
+    )
+    .expect("first transactional update should stage");
+    core.update(
+        row_id,
+        vec![("done".to_string(), Value::Boolean(true))],
+        Some(&write_context),
+    )
+    .expect("second transactional update should compose on the same staged row");
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_versions("todos", row_id)
+        .unwrap();
+    let live_staged_rows: Vec<_> = history_rows
+        .iter()
+        .filter(|row| {
+            row.batch_id == batch_id
+                && matches!(row.state, crate::row_histories::RowState::StagingPending)
+        })
+        .collect();
+    assert_eq!(
+        live_staged_rows.len(),
+        1,
+        "same-row transactional rewrites should keep one live staged member"
+    );
+    let values = decode_row(
+        &defaulted_todos_schema()[&TableName::new("todos")].columns,
+        &live_staged_rows[0].data,
+    )
+    .expect("collapsed staged todo should decode");
+    assert_eq!(
+        values,
+        vec![Value::Text("Renamed".to_string()), Value::Boolean(true),]
+    );
+}
+
+#[test]
 fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let mut s = create_3tier_rc();
     let open_write_context = WriteContext {
@@ -3960,7 +4077,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
 }
 
 #[test]
-fn rc_restart_rejects_invalid_multibranch_sealed_batch_from_storage() {
+fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     let schema = test_schema();
     let schema_hash = SchemaHash::compute(&schema);
     let batch_id = BatchId::new();
@@ -4004,7 +4121,7 @@ fn rc_restart_rejects_invalid_multibranch_sealed_batch_from_storage() {
         .storage_mut()
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
         .unwrap();
-    old_runtime
+    let error = old_runtime
         .storage_mut()
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
@@ -4023,66 +4140,27 @@ fn rc_restart_rejects_invalid_multibranch_sealed_batch_from_storage() {
             ],
             Vec::new(),
         ))
-        .unwrap();
-
-    let storage = old_runtime.into_storage();
-    let restarted = create_runtime_with_storage_and_sync_manager(
-        schema,
-        "transactional-restart-invalid-seal-recovery-test",
-        storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
-    );
+        .unwrap_err();
 
     assert_eq!(
-        restarted
+        error,
+        crate::storage::StorageError::IoError(
+            "sealed batch member branch draft does not match target branch main".to_string(),
+        )
+    );
+    assert_eq!(
+        old_runtime
             .storage()
             .load_authoritative_batch_settlement(batch_id)
             .unwrap(),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
-            batch_id,
-            code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch members must share a single target branch"
-                .to_string(),
-        })
-    );
-    assert_eq!(
-        restarted
-            .storage()
-            .load_visible_region_row("users", "main", main_row_id)
-            .unwrap(),
         None
     );
     assert_eq!(
-        restarted
-            .storage()
-            .load_visible_region_row("users", "draft", draft_row_id)
-            .unwrap(),
-        None
-    );
-
-    let restarted_main_rows = restarted
-        .storage()
-        .scan_history_row_versions("users", main_row_id)
-        .unwrap();
-    let restarted_draft_rows = restarted
-        .storage()
-        .scan_history_row_versions("users", draft_row_id)
-        .unwrap();
-    assert_eq!(
-        restarted_main_rows[0].state,
-        crate::row_histories::RowState::Rejected
-    );
-    assert_eq!(
-        restarted_draft_rows[0].state,
-        crate::row_histories::RowState::Rejected
-    );
-    assert_eq!(
-        restarted
+        old_runtime
             .storage()
             .load_sealed_batch_submission(batch_id)
             .unwrap(),
-        None,
-        "invalid recovered submission should also be pruned"
+        None
     );
 }
 
@@ -5290,6 +5368,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
         )
         .unwrap();
 
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     s.b.batched_tick();
     s.b.sync_sender().take();
