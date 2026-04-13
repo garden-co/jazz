@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { APP_ORIGIN } from "../../constants";
 
 const authMemoryDb: MemoryDB = {
@@ -20,6 +21,47 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
     database: memoryAdapter(authMemoryDb),
     secret: BETTER_AUTH_SECRET,
     trustedOrigins: [APP_ORIGIN],
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email") return;
+
+        const proofToken = ctx.body?.proofToken;
+        if (!proofToken) {
+          throw new APIError("BAD_REQUEST", {
+            message: "proofToken is required for sign-up",
+          });
+        }
+
+        const { verifySelfSignedToken } = await import(
+          /* turbopackIgnore: true */
+          /* webpackIgnore: true */
+          "jazz-napi"
+        );
+        const { ok, id: provedUserId } = verifySelfSignedToken(proofToken, "betterauth-signup");
+        if (!ok) {
+          throw new APIError("UNAUTHORIZED", { message: "Invalid proof token" });
+        }
+
+        return {
+          context: {
+            ...ctx,
+            body: { ...ctx.body, provedUserId },
+          },
+        };
+      }),
+    },
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user: any, ctx: any) => {
+            const provedUserId = ctx?.body?.provedUserId;
+            if (provedUserId) {
+              return { data: { ...user, id: provedUserId } };
+            }
+          },
+        },
+      },
+    },
     emailAndPassword: {
       enabled: true,
       autoSignIn: true,

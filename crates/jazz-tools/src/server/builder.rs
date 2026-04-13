@@ -70,7 +70,10 @@ impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig::default(),
+            auth_config: AuthConfig {
+                allow_self_signed: true,
+                ..Default::default()
+            },
             catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_mode: ServerStorageMode::Persistent {
@@ -87,6 +90,11 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
+        self
+    }
+
+    pub fn with_self_signed_auth(mut self, enabled: bool) -> Self {
+        self.auth_config.allow_self_signed = enabled;
         self
     }
 
