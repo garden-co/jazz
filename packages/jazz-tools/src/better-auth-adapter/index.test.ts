@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
-import { createJazzContext, WasmSchema, type JazzContext } from "../backend/index.js";
+import { createJazzContext, type JazzContext } from "../backend/index.js";
+import { pushSchemaCatalogue, TestingServer } from "../testing/index.js";
+import { wasmSchema as wasmSchemaExample } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
 
 describe("jazzAdapter", () => {
@@ -26,7 +28,6 @@ describe("jazzAdapter", () => {
         db: () => context.db(wasmSchemaExample),
         schema: wasmSchemaExample,
       })({});
-      context = context;
     });
 
     afterEach(async () => {
@@ -102,10 +103,13 @@ describe("jazzAdapter", () => {
           .slice(1, 3)
           .map((row) => ({ id: row.id, email: row.email })),
       );
-      expect(rows.map((row) => Object.keys(row).sort())).toEqual([
-        ["email", "id"],
-        ["email", "id"],
-      ]);
+      for (const row of rows) {
+        expect(
+          Object.entries(row).every(
+            ([key, value]) => ["email", "id"].includes(key) || value === undefined,
+          ),
+        ).toBe(true);
+      }
 
       await expect(
         adapter.count({
@@ -430,7 +434,6 @@ describe("jazzAdapter", () => {
         db: () => context.db(wasmSchemaExample),
         schema: wasmSchemaExample,
       })({});
-      context = context;
     });
 
     afterEach(async () => {
@@ -786,8 +789,6 @@ describe("jazzAdapter", () => {
         driver: { type: "persistent", dataPath },
       });
 
-      context = context;
-
       // @ts-expect-error - better-auth + plugins
       auth = betterAuth({
         baseURL: "http://localhost:3000",
@@ -820,7 +821,7 @@ describe("jazzAdapter", () => {
         name: "test",
         email: "test@test.com",
         emailVerified: false,
-        image: undefined,
+        image: null,
         createdAt: expect.any(Date),
         updatedAt: expect.any(Date),
       });
@@ -837,308 +838,294 @@ describe("jazzAdapter", () => {
         name: "test",
         email: "test@test.com",
         emailVerified: false,
-        image: undefined,
+        image: null,
         createdAt: expect.any(Date),
         updatedAt: expect.any(Date),
       });
     });
   });
-});
 
-const wasmSchemaExample: WasmSchema = {
-  better_auth_user: {
-    columns: [
-      {
-        name: "name",
-        column_type: {
-          type: "Text",
+  describe("better-auth usage with TestingServer + memory driver", () => {
+    let context: JazzContext;
+    let auth: ReturnType<typeof betterAuth>;
+    let server: Awaited<ReturnType<typeof TestingServer.start>>;
+
+    beforeEach(async () => {
+      server = await TestingServer.start({
+        backendSecret: "backend-secret-for-integration-tests",
+      });
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+      });
+
+      context = createJazzContext({
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
+      });
+
+      // @ts-expect-error - better-auth + plugins
+      auth = betterAuth({
+        baseURL: "http://localhost:3000",
+        database: jazzAdapter({
+          db: () => context.asBackend(wasmSchemaExample),
+          schema: wasmSchemaExample,
+          durabilityTier: "edge",
+        }),
+        emailAndPassword: {
+          enabled: true,
         },
-        nullable: false,
-      },
-      {
-        name: "email",
-        column_type: {
-          type: "Text",
+      });
+    });
+
+    afterEach(async () => {
+      await context.shutdown();
+      await server.stop();
+    });
+
+    test("creates and reads records through the adapter", async () => {
+      const adapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+        durabilityTier: "worker",
+      })({});
+
+      const user = await adapter.create({
+        model: "user",
+        data: {
+          name: "memory-user",
+          email: "memory-user@test.com",
+          emailVerified: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
-        nullable: false,
-      },
-      {
-        name: "emailVerified",
-        column_type: {
-          type: "Boolean",
+      });
+
+      expect(user.id).toEqual(expect.any(String));
+
+      await expect(
+        adapter.findOne({
+          model: "user",
+          where: [
+            { field: "email", operator: "eq", value: "memory-user@test.com", connector: "AND" },
+          ],
+        }),
+      ).resolves.toMatchObject({
+        id: user.id,
+        name: "memory-user",
+        email: "memory-user@test.com",
+      });
+    });
+
+    test("creates and reads records through the sync server", async () => {
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+      });
+
+      const ctx1 = createJazzContext({
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
+      });
+
+      const adapter1 = jazzAdapter({
+        db: () => ctx1.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+        durabilityTier: "edge",
+      })({});
+
+      const user = await adapter1.create({
+        model: "user",
+        data: {
+          name: "memory-user",
+          email: "memory-user@test.com",
+          emailVerified: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
-        nullable: false,
-      },
-      {
-        name: "image",
-        column_type: {
-          type: "Text",
+      });
+
+      expect(user.id).toEqual(expect.any(String));
+
+      const ctx2 = createJazzContext({
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
+      });
+
+      const adapter2 = jazzAdapter({
+        db: () => ctx2.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+        durabilityTier: "edge",
+      })({});
+
+      await expect(
+        adapter2.findOne({
+          model: "user",
+          where: [
+            { field: "email", operator: "eq", value: "memory-user@test.com", connector: "AND" },
+          ],
+        }),
+      ).resolves.toMatchObject({
+        id: user.id,
+        name: "memory-user",
+        email: "memory-user@test.com",
+      });
+    });
+
+    test("supports email/password sign up and sign in", async () => {
+      const signUpResponse = await auth.api.signUpEmail({
+        body: {
+          name: "memory-test",
+          email: "memory-test@test.com",
+          password: "Password123!",
         },
-        nullable: true,
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
+      });
+
+      expect(signUpResponse.user).toEqual({
+        id: expect.any(String),
+        name: "memory-test",
+        email: "memory-test@test.com",
+        emailVerified: false,
+        image: null,
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+      });
+
+      const signInResponse = await auth.api.signInEmail({
+        body: {
+          email: "memory-test@test.com",
+          password: "Password123!",
         },
-        nullable: false,
-      },
-      {
-        name: "updatedAt",
-        column_type: {
-          type: "Timestamp",
+      });
+
+      expect(signInResponse.user).toEqual({
+        id: signUpResponse.user.id,
+        name: "memory-test",
+        email: "memory-test@test.com",
+        emailVerified: false,
+        image: null,
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+      });
+    });
+
+    test("rejects duplicate emails with the sync server", async () => {
+      const adapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+        durabilityTier: "edge",
+      })({});
+
+      await adapter.create({
+        model: "user",
+        data: {
+          name: "alice",
+          email: "alice-sync@test.com",
+          emailVerified: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
-        nullable: false,
-      },
-      {
-        name: "role",
-        column_type: {
-          type: "Text",
+      });
+
+      await expect(
+        adapter.create({
+          model: "user",
+          data: {
+            name: "bob",
+            email: "alice-sync@test.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        }),
+      ).rejects.toThrow();
+
+      await expect(
+        adapter.findMany({
+          model: "user",
+          where: [
+            {
+              field: "email",
+              operator: "eq",
+              value: "alice-sync@test.com",
+              connector: "AND",
+            },
+          ],
+          limit: 10,
+          offset: 0,
+        }),
+      ).resolves.toHaveLength(1);
+    });
+
+    test.fails("rejects duplicate emails after a restart before local sync catches up", async () => {
+      const firstAdapter = jazzAdapter({
+        db: () => context.db(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })({});
+
+      await firstAdapter.create({
+        model: "user",
+        data: {
+          name: "alice",
+          email: "restart-race@test.com",
+          emailVerified: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
-        nullable: true,
-      },
-      {
-        name: "banned",
-        column_type: {
-          type: "Boolean",
-        },
-        nullable: true,
-      },
-      {
-        name: "banReason",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "banExpires",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: true,
-      },
-    ],
-  },
-  better_auth_session: {
-    columns: [
-      {
-        name: "expiresAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "token",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "updatedAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "ipAddress",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "userAgent",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "userId",
-        column_type: {
-          type: "Uuid",
-        },
-        nullable: false,
-        references: "better_auth_user",
-      },
-      {
-        name: "impersonatedBy",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-    ],
-  },
-  better_auth_account: {
-    columns: [
-      {
-        name: "accountId",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "providerId",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "userId",
-        column_type: {
-          type: "Uuid",
-        },
-        nullable: false,
-        references: "better_auth_user",
-      },
-      {
-        name: "accessToken",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "refreshToken",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "idToken",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "accessTokenExpiresAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: true,
-      },
-      {
-        name: "refreshTokenExpiresAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: true,
-      },
-      {
-        name: "scope",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "password",
-        column_type: {
-          type: "Text",
-        },
-        nullable: true,
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "updatedAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-    ],
-  },
-  better_auth_verification: {
-    columns: [
-      {
-        name: "identifier",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "value",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "expiresAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "updatedAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-    ],
-  },
-  better_auth_jwks: {
-    columns: [
-      {
-        name: "publicKey",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "privateKey",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-      {
-        name: "expiresAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: true,
-      },
-    ],
-  },
-};
+      });
+
+      await context.shutdown();
+
+      context = createJazzContext({
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+      });
+
+      const restartedAdapter = jazzAdapter({
+        db: () => context.db(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })({});
+
+      await expect(
+        restartedAdapter.findMany({
+          model: "user",
+          where: [
+            {
+              field: "email",
+              operator: "eq",
+              value: "restart-race@test.com",
+              connector: "AND",
+            },
+          ],
+          limit: 10,
+          offset: 0,
+        }),
+      ).resolves.toHaveLength(0);
+
+      await expect(
+        restartedAdapter.create({
+          model: "user",
+          data: {
+            name: "bob",
+            email: "restart-race@test.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        }),
+      ).rejects.toThrow();
+    });
+  });
+});

@@ -49,6 +49,18 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       const getPrefixedModelName = (model: string) => `${prefix}${getModelName(model)}`;
       const wasmSchema = resolveSchemaSource(config.schema);
 
+      const applySelect = (row: JazzRowRecord | null, select?: string[]): JazzRowRecord | null => {
+        if (row === null || select === undefined) {
+          return row;
+        }
+
+        const selectedEntries = select.flatMap((field) =>
+          Object.prototype.hasOwnProperty.call(row, field) ? [[field, row[field]]] : [],
+        );
+
+        return Object.fromEntries(selectedEntries);
+      };
+
       const getUniqueFields = (model: string): Array<{ storedFieldName: string }> => {
         const defaultModelName = getDefaultModelName(model);
         const modelSchema = schema[defaultModelName];
@@ -177,7 +189,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             limit: 1,
           });
 
-          return first ?? null;
+          return applySelect(first ?? null, select);
         },
 
         async findMany({
@@ -198,7 +210,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             offset,
           });
 
-          return rows;
+          return rows.map((row) => applySelect(row, _select));
         },
 
         async count({ model, where }) {
