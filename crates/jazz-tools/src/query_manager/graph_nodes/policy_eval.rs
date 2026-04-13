@@ -405,6 +405,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.session,
             self.schema,
             self.branch,
+            self.row_policy_mode,
         ) {
             Some(g) => g,
             None => return false,
@@ -439,7 +440,13 @@ impl<'a> PolicyContextEvaluator<'a> {
                 None => return false,
             };
 
-        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, self.schema, self.branch) {
+        let mut graph = match PolicyGraph::for_exists_rel(
+            &bound_rel,
+            self.schema,
+            self.branch,
+            Some(self.session.clone()),
+            self.row_policy_mode,
+        ) {
             Some(g) => g,
             None => return false,
         };

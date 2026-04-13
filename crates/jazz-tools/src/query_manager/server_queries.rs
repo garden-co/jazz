@@ -14,7 +14,7 @@ use crate::sync_manager::{
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
-use super::policy_graph::PolicyGraph;
+use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
@@ -1588,8 +1588,8 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
-                        branch,
-                        1,
+                        PolicyGraphBuildOptions::new(branch, self.row_policy_mode)
+                            .with_initial_depth(1),
                     ) {
                         graphs.push(graph);
                     } else {
@@ -1604,6 +1604,7 @@ impl QueryManager {
                         session,
                         &self.schema,
                         branch,
+                        self.row_policy_mode,
                     ) {
                         graphs.push(graph);
                     } else {
@@ -1611,7 +1612,13 @@ impl QueryManager {
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
-                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, branch) {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(
+                        rel,
+                        &self.schema,
+                        branch,
+                        Some(session.clone()),
+                        self.row_policy_mode,
+                    ) {
                         graphs.push(graph);
                     } else {
                         return None;

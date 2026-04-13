@@ -56,10 +56,29 @@ pub struct PolicyFilterNode {
 }
 
 #[derive(Debug)]
-struct PolicyFilterOptions {
+pub(crate) struct PolicyFilterOptions {
     branch: String,
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
+}
+
+impl PolicyFilterOptions {
+    pub(crate) fn for_branch(branch: impl Into<String>) -> Self {
+        Self {
+            branch: branch.into(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_initial_depth(mut self, initial_depth: usize) -> Self {
+        self.initial_depth = initial_depth;
+        self
+    }
+
+    pub(crate) fn with_row_policy_mode(mut self, row_policy_mode: RowPolicyMode) -> Self {
+        self.row_policy_mode = row_policy_mode;
+        self
+    }
 }
 
 impl Default for PolicyFilterOptions {
@@ -106,10 +125,7 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            PolicyFilterOptions {
-                branch: branch.into(),
-                ..PolicyFilterOptions::default()
-            },
+            PolicyFilterOptions::for_branch(branch),
         )
     }
 
@@ -128,11 +144,7 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            PolicyFilterOptions {
-                branch: branch.into(),
-                row_policy_mode,
-                ..PolicyFilterOptions::default()
-            },
+            PolicyFilterOptions::for_branch(branch).with_row_policy_mode(row_policy_mode),
         )
     }
 
@@ -152,15 +164,11 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            PolicyFilterOptions {
-                branch: branch.into(),
-                initial_depth,
-                ..PolicyFilterOptions::default()
-            },
+            PolicyFilterOptions::for_branch(branch).with_initial_depth(initial_depth),
         )
     }
 
-    fn new_with_options(
+    pub(crate) fn new_with_options(
         descriptor: RowDescriptor,
         policy: PolicyExpr,
         session: Session,
