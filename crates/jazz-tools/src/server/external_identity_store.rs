@@ -23,8 +23,7 @@ pub struct ExternalIdentityRow {
 /// Persistent storage for external identity -> principal mappings.
 pub struct ExternalIdentityStore {
     runtime: TokioRuntime<DynStorage>,
-    insert_descriptor: RowDescriptor,
-    read_descriptor: RowDescriptor,
+    descriptor: RowDescriptor,
 }
 
 impl ExternalIdentityStore {
@@ -41,13 +40,11 @@ impl ExternalIdentityStore {
             )
             .build();
 
-        let insert_descriptor = schema
+        let descriptor = schema
             .get(&TableName::new(EXTERNAL_IDENTITIES_TABLE))
             .ok_or_else(|| "meta schema missing external_identities table".to_string())?
             .columns
             .clone();
-        let mut read_descriptor = insert_descriptor.clone();
-        normalize_row_descriptor(&mut read_descriptor);
 
         let sync_manager = SyncManager::new()
             .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
@@ -63,8 +60,7 @@ impl ExternalIdentityStore {
         let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
         Ok(Self {
             runtime,
-            insert_descriptor,
-            read_descriptor,
+            descriptor,
         })
     }
 
@@ -125,7 +121,7 @@ impl ExternalIdentityStore {
     ) -> Result<(), String> {
         let now = now_timestamp_us();
         let values: HashMap<String, Value> = self
-            .insert_descriptor
+            .descriptor
             .columns
             .iter()
             .map(|column| {
@@ -167,7 +163,7 @@ impl ExternalIdentityStore {
         &self,
         values: &[Value],
     ) -> Result<ExternalIdentityRow, String> {
-        let issuer = match descriptor_value(&self.read_descriptor, values, "issuer") {
+        let issuer = match descriptor_value(&self.descriptor, values, "issuer") {
             Some(Value::Text(s)) => s.clone(),
             other => {
                 return Err(format!(
@@ -176,7 +172,7 @@ impl ExternalIdentityStore {
             }
         };
 
-        let subject = match descriptor_value(&self.read_descriptor, values, "subject") {
+        let subject = match descriptor_value(&self.descriptor, values, "subject") {
             Some(Value::Text(s)) => s.clone(),
             other => {
                 return Err(format!(
@@ -185,7 +181,7 @@ impl ExternalIdentityStore {
             }
         };
 
-        let principal_id = match descriptor_value(&self.read_descriptor, values, "principal_id") {
+        let principal_id = match descriptor_value(&self.descriptor, values, "principal_id") {
             Some(Value::Text(s)) => s.clone(),
             other => {
                 return Err(format!(
@@ -200,12 +196,6 @@ impl ExternalIdentityStore {
             principal_id,
         })
     }
-}
-
-fn normalize_row_descriptor(descriptor: &mut RowDescriptor) {
-    descriptor
-        .columns
-        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 }
 
 fn descriptor_value<'a>(

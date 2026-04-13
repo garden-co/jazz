@@ -32,9 +32,9 @@ use smolset::SmolSet;
 
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
-use crate::metadata::MetadataKey;
+use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
-use crate::query_manager::types::{SchemaHash, SharedString, Value};
+use crate::query_manager::types::{ComposedBranchName, SchemaHash, SharedString, Value};
 use crate::row_histories::{
     HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
 };
@@ -120,6 +120,32 @@ pub enum IndexMutation<'a> {
     },
 }
 
+pub struct HistoryRowBytes<'a> {
+    pub row_id: ObjectId,
+    pub version_id: CommitId,
+    pub bytes: &'a [u8],
+}
+
+pub(crate) struct OwnedHistoryRowBytes {
+    pub row_id: ObjectId,
+    pub version_id: CommitId,
+    pub bytes: Vec<u8>,
+}
+
+pub struct VisibleRowBytes<'a> {
+    pub branch: &'a str,
+    pub row_id: ObjectId,
+    pub current_version_id: CommitId,
+    pub bytes: &'a [u8],
+}
+
+pub(crate) struct OwnedVisibleRowBytes {
+    pub branch: String,
+    pub row_id: ObjectId,
+    pub current_version_id: CommitId,
+    pub bytes: Vec<u8>,
+}
+
 fn metadata_raw_key(id: ObjectId) -> String {
     hex::encode(id.uuid().as_bytes())
 }
@@ -170,6 +196,458 @@ fn encode_row_locator(locator: &RowLocator) -> Result<Vec<u8>, StorageError> {
 fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
     postcard::from_bytes(bytes)
         .map_err(|err| StorageError::IoError(format!("deserialize row locator: {err}")))
+}
+
+fn load_history_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_hint: &str,
+    schema_hash: SchemaHash,
+) -> Result<Option<crate::query_manager::types::RowDescriptor>, StorageError> {
+    let Some(entry) = storage.load_catalogue_entry(schema_hash.to_object_id())? else {
+        return Ok(None);
+    };
+    let schema = crate::schema_manager::encoding::decode_schema(&entry.content)
+        .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?;
+
+    let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
+    Ok(schema
+        .get(&hinted_table_name)
+        .map(|table_schema| table_schema.columns.clone()))
+}
+
+fn all_history_user_descriptors<H: Storage + ?Sized>(
+    storage: &H,
+    table_hint: &str,
+    row_id: ObjectId,
+) -> Result<Vec<crate::query_manager::types::RowDescriptor>, StorageError> {
+    let mut descriptors = Vec::new();
+    let mut push_descriptor = |descriptor: crate::query_manager::types::RowDescriptor| {
+        if !descriptors.iter().any(|existing| existing == &descriptor) {
+            descriptors.push(descriptor);
+        }
+    };
+
+    let row_locator = storage.load_row_locator(row_id)?;
+    let locator_table = row_locator
+        .as_ref()
+        .map(|locator| locator.table.to_string())
+        .unwrap_or_else(|| table_hint.to_string());
+
+    if let Some(origin_schema_hash) = row_locator.and_then(|locator| locator.origin_schema_hash) {
+        if let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+            storage,
+            &locator_table,
+            origin_schema_hash,
+        )? {
+            push_descriptor(descriptor);
+        }
+        if locator_table != table_hint
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
+        {
+            push_descriptor(descriptor);
+        }
+    }
+
+    for entry in storage.scan_catalogue_entries()? {
+        if entry
+            .metadata
+            .get(MetadataKey::Type.as_str())
+            .map(String::as_str)
+            != Some(ObjectType::CatalogueSchema.as_str())
+        {
+            continue;
+        }
+
+        let schema =
+            crate::schema_manager::encoding::decode_schema(&entry.content).map_err(|err| {
+                StorageError::IoError(format!("decode schema for row history: {err}"))
+            })?;
+
+        let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
+        if let Some(table_schema) = schema.get(&hinted_table_name) {
+            push_descriptor(table_schema.columns.clone());
+        }
+
+        if locator_table != table_hint {
+            let locator_table_name = crate::query_manager::types::TableName::new(&locator_table);
+            if let Some(table_schema) = schema.get(&locator_table_name) {
+                push_descriptor(table_schema.columns.clone());
+            }
+        }
+    }
+
+    Ok(descriptors)
+}
+
+fn schema_hash_for_branch<H: Storage + ?Sized>(
+    storage: &H,
+    branch: &str,
+) -> Result<Option<SchemaHash>, StorageError> {
+    let Some(composed) = ComposedBranchName::parse(&crate::object::BranchName::new(branch)) else {
+        return Ok(None);
+    };
+    let short_hash = composed.schema_hash.short();
+
+    let mut matching_hashes = storage
+        .scan_catalogue_entries()?
+        .into_iter()
+        .filter_map(|entry| {
+            (entry
+                .metadata
+                .get(MetadataKey::Type.as_str())
+                .map(String::as_str)
+                == Some(ObjectType::CatalogueSchema.as_str()))
+            .then_some(entry)
+        })
+        .filter_map(|entry| {
+            entry
+                .metadata
+                .get(MetadataKey::SchemaHash.as_str())
+                .cloned()
+        })
+        .filter(|hash| hash.starts_with(&short_hash))
+        .filter_map(|hash| SchemaHash::from_hex(&hash))
+        .collect::<Vec<_>>();
+
+    matching_hashes.sort_by_key(|hash| hash.to_string());
+    matching_hashes.dedup();
+
+    Ok(match matching_hashes.as_slice() {
+        [schema_hash] => Some(*schema_hash),
+        _ => None,
+    })
+}
+
+fn history_user_descriptor_candidates_for_row<H: Storage + ?Sized>(
+    storage: &H,
+    table_hint: &str,
+    row: &StoredRowVersion,
+) -> Result<Vec<crate::query_manager::types::RowDescriptor>, StorageError> {
+    let mut descriptors = Vec::new();
+    let mut push_descriptor = |descriptor: crate::query_manager::types::RowDescriptor| {
+        if !descriptors.iter().any(|existing| existing == &descriptor) {
+            descriptors.push(descriptor);
+        }
+    };
+
+    if let Some(schema_hash) = schema_hash_for_branch(storage, row.branch.as_str())?
+        && let Some(descriptor) =
+            load_history_user_descriptor_for_schema_hash(storage, table_hint, schema_hash)?
+    {
+        push_descriptor(descriptor);
+    }
+
+    if let Some(row_locator) = storage.load_row_locator(row.row_id)?
+        && let Some(origin_schema_hash) = row_locator.origin_schema_hash
+    {
+        if let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+            storage,
+            row_locator.table.as_str(),
+            origin_schema_hash,
+        )? {
+            push_descriptor(descriptor);
+        }
+        if row_locator.table.as_str() != table_hint
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
+        {
+            push_descriptor(descriptor);
+        }
+    }
+
+    for descriptor in all_history_user_descriptors(storage, table_hint, row.row_id)? {
+        push_descriptor(descriptor);
+    }
+
+    Ok(descriptors)
+}
+
+fn required_history_user_descriptor_for_row<H: Storage + ?Sized>(
+    storage: &H,
+    table_hint: &str,
+    row: &StoredRowVersion,
+) -> Result<crate::query_manager::types::RowDescriptor, StorageError> {
+    let row_data_matches = |descriptor: &crate::query_manager::types::RowDescriptor| {
+        row.data.is_empty() || crate::row_format::decode_row(descriptor, &row.data).is_ok()
+    };
+
+    if let Some(schema_hash) = schema_hash_for_branch(storage, row.branch.as_str())?
+        && let Some(descriptor) =
+            load_history_user_descriptor_for_schema_hash(storage, table_hint, schema_hash)?
+        && row_data_matches(&descriptor)
+    {
+        return Ok(descriptor);
+    }
+
+    if let Some(row_locator) = storage.load_row_locator(row.row_id)?
+        && let Some(origin_schema_hash) = row_locator.origin_schema_hash
+    {
+        if let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+            storage,
+            row_locator.table.as_str(),
+            origin_schema_hash,
+        )? && row_data_matches(&descriptor)
+        {
+            return Ok(descriptor);
+        }
+
+        if row_locator.table.as_str() != table_hint
+            && let Some(descriptor) = load_history_user_descriptor_for_schema_hash(
+                storage,
+                table_hint,
+                origin_schema_hash,
+            )?
+            && row_data_matches(&descriptor)
+        {
+            return Ok(descriptor);
+        }
+    }
+
+    let candidates = history_user_descriptor_candidates_for_row(storage, table_hint, row)?;
+    let compatible = candidates
+        .clone()
+        .into_iter()
+        .filter(row_data_matches)
+        .collect::<Vec<_>>();
+
+    match compatible.as_slice() {
+        [descriptor] => Ok(descriptor.clone()),
+        [] => Err(StorageError::IoError(format!(
+            "missing catalogue-backed row descriptor for history row {} in table {} on branch {} (candidates={}, row_locator={:?})",
+            row.row_id,
+            table_hint,
+            row.branch,
+            candidates
+                .iter()
+                .map(|descriptor| descriptor
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            storage.load_row_locator(row.row_id)?
+        ))),
+        _ => Err(StorageError::IoError(format!(
+            "ambiguous catalogue-backed row descriptor for history row {} in table {} on branch {}",
+            row.row_id, table_hint, row.branch
+        ))),
+    }
+}
+
+pub(crate) fn encode_history_row_bytes_for_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    rows: &[StoredRowVersion],
+) -> Result<Vec<OwnedHistoryRowBytes>, StorageError> {
+    rows.iter()
+        .map(|row| {
+            let user_descriptor = required_history_user_descriptor_for_row(storage, table, row)?;
+            let bytes = crate::row_histories::encode_flat_history_row(&user_descriptor, row)
+                .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
+
+            Ok(OwnedHistoryRowBytes {
+                row_id: row.row_id,
+                version_id: row.version_id(),
+                bytes,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn encode_visible_row_bytes_for_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    entries: &[VisibleRowEntry],
+) -> Result<Vec<OwnedVisibleRowBytes>, StorageError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let user_descriptor =
+                required_history_user_descriptor_for_row(storage, table, &entry.current_row)?;
+            let bytes =
+                crate::row_histories::encode_flat_visible_row_entry(&user_descriptor, entry)
+                    .map_err(|err| {
+                        StorageError::IoError(format!("encode flat visible row: {err}"))
+                    })?;
+
+            Ok(OwnedVisibleRowBytes {
+                branch: entry.current_row.branch.to_string(),
+                row_id: entry.current_row.row_id,
+                current_version_id: entry.current_row.version_id(),
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn decode_history_row_bytes_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    row_id: ObjectId,
+    bytes: &[u8],
+) -> Result<StoredRowVersion, StorageError> {
+    if crate::row_histories::is_flat_history_row(bytes) {
+        let mut last_error = None;
+        for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
+            match crate::row_histories::decode_flat_history_row(&user_descriptor, bytes) {
+                Ok(row) => return Ok(row),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        let detail = last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
+        return Err(StorageError::IoError(format!(
+            "decode flat history row: {detail}"
+        )));
+    }
+
+    Err(StorageError::IoError(
+        "decode history row: legacy stored row format is no longer supported".to_string(),
+    ))
+}
+
+fn decode_query_row_bytes_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    row_id: ObjectId,
+    bytes: &[u8],
+) -> Result<QueryRowVersion, StorageError> {
+    decode_history_row_bytes_with_storage(storage, table, row_id, bytes)
+        .map(|row| QueryRowVersion::from(&row))
+}
+
+fn decode_scanned_history_row_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    bytes: &[u8],
+) -> Result<StoredRowVersion, StorageError> {
+    if crate::row_histories::is_flat_history_row(bytes) {
+        let row_id = crate::row_histories::flat_history_row_id(bytes)
+            .map_err(|err| StorageError::IoError(format!("decode flat history row id: {err}")))?;
+        return decode_history_row_bytes_with_storage(storage, table, row_id, bytes);
+    }
+
+    Err(StorageError::IoError(
+        "decode history row: legacy stored row format is no longer supported".to_string(),
+    ))
+}
+
+fn decode_visible_row_entry_bytes_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    row_id: ObjectId,
+    bytes: &[u8],
+) -> Result<VisibleRowEntry, StorageError> {
+    if crate::row_histories::is_flat_visible_row(bytes) {
+        let mut last_error = None;
+        for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
+            match crate::row_histories::decode_flat_visible_row_entry(&user_descriptor, bytes) {
+                Ok(entry) => return Ok(entry),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        let detail = last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
+        return Err(StorageError::IoError(format!(
+            "decode flat visible row: {detail}"
+        )));
+    }
+
+    Err(StorageError::IoError(
+        "decode visible row: legacy visible row format is no longer supported".to_string(),
+    ))
+}
+
+pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
+    storage: &mut H,
+    table: &str,
+    batch_id: crate::row_histories::BatchId,
+    state: Option<RowState>,
+    confirmed_tier: Option<DurabilityTier>,
+) -> Result<(), StorageError> {
+    let history_rows = storage
+        .scan_history_region_bytes(table, HistoryScan::Branch)?
+        .into_iter()
+        .map(|bytes| decode_scanned_history_row_with_storage(storage, table, &bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut patched_history = Vec::new();
+    let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowVersion>>::new();
+    let mut affected_visible_rows = HashSet::<(String, ObjectId)>::new();
+
+    for mut row in history_rows {
+        if row.batch_id == batch_id {
+            if let Some(state) = state {
+                row.state = state;
+            }
+            row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (Some(existing), None) => Some(existing),
+                (None, incoming) => incoming,
+            };
+            affected_visible_rows.insert((row.branch.to_string(), row.row_id));
+            patched_history.push(row.clone());
+        }
+
+        history_by_visible_row
+            .entry((row.branch.to_string(), row.row_id))
+            .or_default()
+            .push(row);
+    }
+
+    if !patched_history.is_empty() {
+        storage.append_history_region_rows(table, &patched_history)?;
+    }
+
+    let mut rebuilt_visible_entries = Vec::new();
+    for (branch, row_id) in affected_visible_rows {
+        let Some(existing_entry) = storage.load_visible_region_entry(table, &branch, row_id)?
+        else {
+            continue;
+        };
+
+        let history_rows = history_by_visible_row
+            .remove(&(branch.clone(), row_id))
+            .unwrap_or_default();
+        let current_row = history_rows
+            .iter()
+            .find(|row| row.version_id() == existing_entry.current_row.version_id())
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut current = existing_entry.current_row.clone();
+                if current.batch_id == batch_id {
+                    if let Some(state) = state {
+                        current.state = state;
+                    }
+                    current.confirmed_tier = match (current.confirmed_tier, confirmed_tier) {
+                        (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                        (Some(existing), None) => Some(existing),
+                        (None, incoming) => incoming,
+                    };
+                }
+                current
+            });
+        rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current_row, &history_rows));
+    }
+
+    if !rebuilt_visible_entries.is_empty() {
+        storage.upsert_visible_region_rows(table, &rebuilt_visible_entries)?;
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -367,24 +845,101 @@ pub trait Storage {
     // Row-history storage
     // ================================================================
 
-    fn append_history_region_rows(
+    fn append_history_region_row_bytes(
         &mut self,
         _table: &str,
-        _rows: &[StoredRowVersion],
+        _rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
-            "row-history appends are not implemented for this backend yet".to_string(),
+            "raw row-history appends are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        _table: &str,
+        _row_id: ObjectId,
+        _version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw row-history lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        _table: &str,
+        _scan: HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw row-history scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
+        let borrowed_rows = encoded_rows
+            .iter()
+            .map(|row| HistoryRowBytes {
+                row_id: row.row_id,
+                version_id: row.version_id,
+                bytes: &row.bytes,
+            })
+            .collect::<Vec<_>>();
+        self.append_history_region_row_bytes(table, &borrowed_rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        _table: &str,
+        _rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "raw visible-row upserts are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn load_visible_region_row_bytes(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw visible-row lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        _table: &str,
+        _branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw visible-row scans are not implemented for this backend yet".to_string(),
         ))
     }
 
     fn upsert_visible_region_rows(
         &mut self,
-        _table: &str,
-        _entries: &[VisibleRowEntry],
+        table: &str,
+        entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        Err(StorageError::IoError(
-            "visible-entry upserts are not implemented for this backend yet".to_string(),
-        ))
+        let encoded_rows = encode_visible_row_bytes_for_storage(self, table, entries)?;
+        let borrowed_rows = encoded_rows
+            .iter()
+            .map(|row| VisibleRowBytes {
+                branch: row.branch.as_str(),
+                row_id: row.row_id,
+                current_version_id: row.current_version_id,
+                bytes: &row.bytes,
+            })
+            .collect::<Vec<_>>();
+        self.upsert_visible_region_row_bytes(table, &borrowed_rows)
     }
 
     fn patch_row_region_rows_by_batch(
@@ -420,23 +975,36 @@ pub trait Storage {
 
     fn scan_visible_region(
         &self,
-        _table: &str,
-        _branch: &str,
+        table: &str,
+        branch: &str,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        Err(StorageError::IoError(
-            "visible-row scans are not implemented for this backend yet".to_string(),
-        ))
+        let mut rows = self
+            .scan_visible_region_bytes(table, branch)?
+            .into_iter()
+            .map(|bytes| {
+                let row_id = crate::row_histories::flat_visible_row_id(&bytes).map_err(|err| {
+                    StorageError::IoError(format!("decode flat visible row id: {err}"))
+                })?;
+                decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes)
+                    .map(|entry| entry.current_row)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.sort_by_key(|row| (row.branch.clone(), row.row_id));
+        Ok(rows)
     }
 
     fn load_visible_region_row(
         &self,
-        _table: &str,
-        _branch: &str,
-        _row_id: ObjectId,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
-        Err(StorageError::IoError(
-            "visible-row lookups are not implemented for this backend yet".to_string(),
-        ))
+        self.load_visible_region_row_bytes(table, branch, row_id)?
+            .map(|bytes| {
+                decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes)
+                    .map(|entry| entry.current_row)
+            })
+            .transpose()
     }
 
     fn load_visible_query_row(
@@ -491,17 +1059,9 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        let Some(current_row) = self.load_visible_region_row(table, branch, row_id)? else {
-            return Ok(None);
-        };
-
-        let history_rows = self
-            .scan_history_row_versions(table, row_id)?
-            .into_iter()
-            .filter(|row| row.branch == branch)
-            .collect::<Vec<_>>();
-
-        Ok(Some(VisibleRowEntry::rebuild(current_row, &history_rows)))
+        self.load_visible_region_row_bytes(table, branch, row_id)?
+            .map(|bytes| decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes))
+            .transpose()
     }
 
     fn load_visible_region_frontier(
@@ -521,10 +1081,9 @@ pub trait Storage {
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
-        Ok(self
-            .scan_history_row_versions(table, row_id)?
-            .into_iter()
-            .find(|row| row.version_id() == version_id))
+        self.load_history_row_version_bytes(table, row_id, version_id)?
+            .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
+            .transpose()
     }
 
     fn load_history_query_row_version(
@@ -533,10 +1092,9 @@ pub trait Storage {
         row_id: ObjectId,
         version_id: CommitId,
     ) -> Result<Option<QueryRowVersion>, StorageError> {
-        Ok(self
-            .load_history_row_version(table, row_id, version_id)?
-            .as_ref()
-            .map(QueryRowVersion::from))
+        self.load_history_row_version_bytes(table, row_id, version_id)?
+            .map(|bytes| decode_query_row_bytes_with_storage(self, table, row_id, &bytes))
+            .transpose()
     }
 
     fn row_version_exists(
@@ -597,23 +1155,55 @@ pub trait Storage {
 
     fn scan_history_row_versions(
         &self,
-        _table: &str,
-        _row_id: ObjectId,
+        table: &str,
+        row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        Err(StorageError::IoError(
-            "row-history row scans are not implemented for this backend yet".to_string(),
-        ))
+        let mut rows: Vec<StoredRowVersion> = self
+            .scan_history_region_bytes(table, HistoryScan::Row { row_id })?
+            .into_iter()
+            .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
+            .collect::<Result<_, _>>()?;
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        Ok(rows)
     }
 
     fn scan_history_region(
         &self,
-        _table: &str,
-        _branch: &str,
-        _scan: HistoryScan,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        Err(StorageError::IoError(
-            "row-history scans are not implemented for this backend yet".to_string(),
-        ))
+        let scanned: Vec<StoredRowVersion> = self
+            .scan_history_region_bytes(table, scan)?
+            .into_iter()
+            .map(|bytes| decode_scanned_history_row_with_storage(self, table, &bytes))
+            .collect::<Result<_, _>>()?;
+
+        let mut rows: Vec<StoredRowVersion> = match scan {
+            HistoryScan::Branch | HistoryScan::Row { .. } => scanned
+                .into_iter()
+                .filter(|row| row.branch == branch)
+                .collect(),
+            HistoryScan::AsOf { ts } => {
+                let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
+                for row in scanned {
+                    if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
+                        continue;
+                    }
+                    match latest_per_row.get(&row.row_id) {
+                        Some(existing)
+                            if (existing.updated_at, existing.version_id())
+                                >= (row.updated_at, row.version_id()) => {}
+                        _ => {
+                            latest_per_row.insert(row.row_id, row);
+                        }
+                    }
+                }
+                latest_per_row.into_values().collect()
+            }
+        };
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        Ok(rows)
     }
 
     // ================================================================
@@ -854,6 +1444,31 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).scan_catalogue_entries()
     }
 
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).append_history_region_row_bytes(table, rows)
+    }
+
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).load_history_row_version_bytes(table, row_id, version_id)
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        (**self).scan_history_region_bytes(table, scan)
+    }
+
     fn append_history_region_rows(
         &mut self,
         table: &str,
@@ -868,6 +1483,31 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
         (**self).upsert_visible_region_rows(table, entries)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn load_visible_region_row_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).load_visible_region_row_bytes(table, branch, row_id)
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        (**self).scan_visible_region_bytes(table, branch)
     }
 
     fn patch_row_region_rows_by_batch(
@@ -1103,6 +1743,8 @@ pub struct MemoryStorage {
     row_locators: HashMap<ObjectId, RowLocator>,
     /// Row-history storage keyed by table.
     row_histories: HashMap<String, TableRowHistories>,
+    /// Raw encoded row-history bytes keyed by table, row id, and version id.
+    row_history_bytes: HashMap<String, BTreeMap<(ObjectId, CommitId), Vec<u8>>>,
 }
 
 impl MemoryStorage {
@@ -1377,11 +2019,28 @@ impl Storage for MemoryStorage {
         table: &str,
         rows: &[StoredRowVersion],
     ) -> Result<(), StorageError> {
+        let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
         let regions = self.row_histories.entry(table.to_string()).or_default();
+        let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in rows {
             regions
                 .history
                 .insert((row.row_id, row.version_id()), row.clone());
+        }
+        for row in encoded_rows {
+            raw_regions.insert((row.row_id, row.version_id), row.bytes);
+        }
+        Ok(())
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        let regions = self.row_history_bytes.entry(table.to_string()).or_default();
+        for row in rows {
+            regions.insert((row.row_id, row.version_id), row.bytes.to_vec());
         }
         Ok(())
     }
@@ -1631,6 +2290,80 @@ impl Storage for MemoryStorage {
         Ok(rows)
     }
 
+    fn load_history_row_version_bytes(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .row_history_bytes
+            .get(table)
+            .and_then(|regions| regions.get(&(row_id, version_id)).cloned()))
+    }
+
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        let Some(regions) = self.row_history_bytes.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(match scan {
+            HistoryScan::Branch | HistoryScan::AsOf { .. } => {
+                regions.values().cloned().collect::<Vec<_>>()
+            }
+            HistoryScan::Row { row_id } => regions
+                .iter()
+                .filter(|((history_row_id, _), _)| *history_row_id == row_id)
+                .map(|(_, bytes)| bytes.clone())
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn load_visible_region_row_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let Some(entry) = self
+            .row_histories
+            .get(table)
+            .and_then(|regions| regions.visible.get(branch))
+            .and_then(|rows| rows.get(&row_id))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+
+        let encoded =
+            encode_visible_row_bytes_for_storage(self, table, std::slice::from_ref(&entry))?;
+        Ok(encoded.into_iter().next().map(|row| row.bytes))
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        let Some(entries) = self
+            .row_histories
+            .get(table)
+            .and_then(|regions| regions.visible.get(branch))
+        else {
+            return Ok(Vec::new());
+        };
+
+        let entries = entries.values().cloned().collect::<Vec<_>>();
+        Ok(encode_visible_row_bytes_for_storage(self, table, &entries)?
+            .into_iter()
+            .map(|row| row.bytes)
+            .collect())
+    }
+
     fn load_history_row_version(
         &self,
         table: &str,
@@ -1719,6 +2452,60 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::RowProvenance;
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema,
+    };
+    use crate::row_format::encode_row;
+    use crate::row_histories::{decode_flat_history_row, encode_flat_history_row};
+    use crate::test_row_history::persist_test_schema;
+
+    fn users_test_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![ColumnDescriptor::new("value", ColumnType::Text)])
+    }
+
+    fn users_test_schema() -> crate::query_manager::types::Schema {
+        SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("value", ColumnType::Text))
+            .build()
+    }
+
+    fn seed_users_schema(storage: &mut MemoryStorage) -> SchemaHash {
+        persist_test_schema(storage, &users_test_schema())
+    }
+
+    fn seed_users_row(storage: &mut MemoryStorage, row_id: ObjectId, schema_hash: SchemaHash) {
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+    }
+
+    fn make_users_row_version(
+        row_id: ObjectId,
+        branch: &str,
+        value: &str,
+        provenance: RowProvenance,
+        state: crate::row_histories::RowState,
+        durability: Option<DurabilityTier>,
+        parents: Vec<crate::commit::CommitId>,
+    ) -> crate::row_histories::StoredRowVersion {
+        crate::row_histories::StoredRowVersion::new(
+            row_id,
+            branch,
+            parents,
+            encode_row(&users_test_descriptor(), &[Value::Text(value.to_string())]).unwrap(),
+            provenance,
+            HashMap::new(),
+            state,
+            durability,
+        )
+    }
 
     #[test]
     fn encode_value_ordering() {
@@ -1933,19 +2720,20 @@ mod tests {
 
     #[test]
     fn memory_storage_row_histories_visible_and_history_round_trip() {
-        use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+        use crate::row_histories::{HistoryScan, RowState, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
+        let schema_hash = seed_users_schema(&mut storage);
         let row_id = ObjectId::new();
-        let version = StoredRowVersion::new(
+        seed_users_row(&mut storage, row_id, schema_hash);
+        let version = make_users_row_version(
             row_id,
             "dev/main",
-            Vec::new(),
-            b"alice".to_vec(),
+            "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
-            HashMap::new(),
             RowState::VisibleDirect,
             Some(DurabilityTier::Worker),
+            Vec::new(),
         );
 
         storage
@@ -1974,35 +2762,35 @@ mod tests {
 
     #[test]
     fn memory_storage_visible_entries_track_older_tier_winners() {
-        use crate::row_histories::{RowState, StoredRowVersion, VisibleRowEntry};
+        use crate::row_histories::{RowState, VisibleRowEntry};
 
         let mut storage = MemoryStorage::new();
+        let schema_hash = seed_users_schema(&mut storage);
         let row_id = ObjectId::new();
+        seed_users_row(&mut storage, row_id, schema_hash);
 
-        let globally_confirmed = StoredRowVersion::new(
+        let globally_confirmed = make_users_row_version(
             row_id,
             "dev/main",
-            Vec::new(),
-            b"v1".to_vec(),
+            "v1",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
-            HashMap::new(),
             RowState::VisibleDirect,
             Some(DurabilityTier::GlobalServer),
+            Vec::new(),
         );
-        let current_worker = StoredRowVersion::new(
+        let current_worker = make_users_row_version(
             row_id,
             "dev/main",
-            vec![globally_confirmed.version_id()],
-            b"v2".to_vec(),
+            "v2",
             crate::metadata::RowProvenance {
                 created_by: "alice".to_string(),
                 created_at: 10,
                 updated_by: "alice".to_string(),
                 updated_at: 20,
             },
-            HashMap::new(),
             RowState::VisibleDirect,
             Some(DurabilityTier::Worker),
+            vec![globally_confirmed.version_id()],
         );
 
         storage
@@ -2039,6 +2827,155 @@ mod tests {
         assert_eq!(
             entry.global_version_id,
             Some(globally_confirmed.version_id())
+        );
+    }
+
+    #[test]
+    fn raw_history_bytes_roundtrip_flat_rows_outside_storage() {
+        let mut storage = MemoryStorage::new();
+        let user_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+        ]);
+        let row_id = ObjectId::new();
+        let row = crate::row_histories::StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("Ship flat rows".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+        let encoded = encode_flat_history_row(&user_descriptor, &row).unwrap();
+
+        storage
+            .append_history_region_row_bytes(
+                "tasks",
+                &[HistoryRowBytes {
+                    row_id,
+                    version_id: row.version_id(),
+                    bytes: &encoded,
+                }],
+            )
+            .unwrap();
+
+        let loaded = storage
+            .load_history_row_version_bytes("tasks", row_id, row.version_id())
+            .unwrap()
+            .expect("history bytes should load");
+        assert_eq!(
+            decode_flat_history_row(&user_descriptor, &loaded).unwrap(),
+            row
+        );
+
+        let scanned = storage
+            .scan_history_region_bytes("tasks", HistoryScan::Row { row_id })
+            .unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(
+            decode_flat_history_row(&user_descriptor, &scanned[0]).unwrap(),
+            row
+        );
+    }
+
+    #[test]
+    fn typed_history_appends_use_flat_rows_when_schema_is_known() {
+        use crate::catalogue::CatalogueEntry;
+        use crate::metadata::{MetadataKey, ObjectType};
+        use crate::query_manager::types::{SchemaBuilder, SchemaHash, TableSchema, Value};
+        use crate::schema_manager::encoding::encode_schema;
+
+        let mut storage = MemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("done", ColumnType::Boolean),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let row_id = ObjectId::new();
+        let row_locator = RowLocator {
+            table: "tasks".into(),
+            origin_schema_hash: Some(schema_hash),
+        };
+
+        storage
+            .upsert_catalogue_entry(&CatalogueEntry {
+                object_id: schema_hash.to_object_id(),
+                metadata: HashMap::from([(
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                )]),
+                content: encode_schema(&schema),
+            })
+            .unwrap();
+        storage.put_row_locator(row_id, Some(&row_locator)).unwrap();
+
+        let row = crate::row_histories::StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("Ship flat rows".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+
+        storage
+            .append_history_region_rows("tasks", std::slice::from_ref(&row))
+            .unwrap();
+
+        let encoded = storage
+            .load_history_row_version_bytes("tasks", row_id, row.version_id())
+            .unwrap()
+            .expect("history bytes should load");
+        assert_eq!(
+            decode_flat_history_row(&user_descriptor, &encoded).unwrap(),
+            row
+        );
+    }
+
+    #[test]
+    fn typed_history_appends_require_catalogue_backed_descriptor() {
+        use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
+
+        let mut storage = MemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+            .build();
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let row_id = ObjectId::new();
+        let row = crate::row_histories::StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(&user_descriptor, &[Value::Text("Needs schema".into())]).unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+
+        let error = storage
+            .append_history_region_rows("tasks", std::slice::from_ref(&row))
+            .expect_err("typed history writes should require a catalogue-backed descriptor");
+
+        assert!(
+            matches!(error, StorageError::IoError(ref message) if message.contains("missing catalogue-backed row descriptor")),
+            "unexpected error: {error:?}"
         );
     }
 

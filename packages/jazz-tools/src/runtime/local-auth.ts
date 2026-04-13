@@ -9,6 +9,7 @@ export interface LocalAuthStorageLike {
 
 type LocalAuthDefaultsInput = {
   appId: string;
+  auth?: { seed: string };
   jwtToken?: string;
   backendSecret?: string;
   localAuthMode?: LocalAuthMode;
@@ -90,6 +91,11 @@ export function resolveLocalAuthDefaults<T extends LocalAuthDefaultsInput>(
   config: T,
   options: ResolveLocalAuthDefaultsOptions = {},
 ): T & { localAuthMode?: LocalAuthMode; localAuthToken?: string } {
+  // Self-signed auth handles its own JWT; skip local auth defaults.
+  if (config.auth) {
+    return config;
+  }
+
   const storage = tryGetStorage(options.storage);
   const explicitJwtToken = trimOptional(config.jwtToken);
   const explicitBackendSecret = trimOptional(config.backendSecret);

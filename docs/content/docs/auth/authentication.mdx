@@ -260,6 +260,8 @@ When the server receives a request, it tries each auth method in priority order 
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too. Without `jwksUrl`, backend `forRequest()` accepts only Jazz self-signed tokens, and `allowSelfSigned: false` disables that path as well.
+
 ### Upgrading from local auth
 
 You might allow anonymous auth in production so users can try your app before signing up. If you do, you can link their local identity to an external one when they sign in, preserving any data they created.

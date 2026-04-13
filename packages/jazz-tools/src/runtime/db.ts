@@ -38,6 +38,7 @@ import {
   type FileWriteOptions,
 } from "./file-storage.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
+
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
@@ -98,6 +99,8 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** Self-signed auth via a local seed. Mutually exclusive with jwtToken. */
+  auth?: { seed: string };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -366,6 +369,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private _selfSignedSeed: string | null = null;
+  private selfSignedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -400,6 +405,45 @@ export class Db {
     this.config = config;
     this.wasmModule = wasmModule;
     this.authStateStore = createAuthStateStore(config);
+  }
+
+  /** @internal Store the seed used for self-signed auth and schedule token refresh. */
+  initSelfSignedAuth(seed: string, ttlSeconds: number): void {
+    this._selfSignedSeed = seed;
+    this.scheduleSelfSignedRefresh(ttlSeconds);
+  }
+
+  private scheduleSelfSignedRefresh(ttlSeconds: number): void {
+    if (this.selfSignedRefreshTimer) {
+      clearTimeout(this.selfSignedRefreshTimer);
+    }
+    // Refresh at 80% of TTL
+    const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
+    this.selfSignedRefreshTimer = setTimeout(() => {
+      this.refreshSelfSignedToken();
+    }, refreshMs);
+  }
+
+  private refreshSelfSignedToken(): void {
+    if (!this._selfSignedSeed || this.isShuttingDown) return;
+
+    try {
+      const wasmModule = this.wasmModule;
+      if (!wasmModule) return;
+
+      const ttlSeconds = 3600;
+      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+      const newToken = wasmModule.WasmRuntime.mintSelfSignedToken(
+        this._selfSignedSeed,
+        this.config.appId,
+        BigInt(ttlSeconds),
+        nowSeconds,
+      );
+      this.updateAuthToken(newToken);
+      this.scheduleSelfSignedRefresh(ttlSeconds);
+    } catch (e) {
+      console.error("Failed to refresh self-signed token:", e);
+    }
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -1037,6 +1081,35 @@ export class Db {
     return this.authStateStore.getState();
   }
 
+  /**
+   * Mint a short-lived self-signed JWT proving possession of the current identity.
+   * Returns `null` if the current session is not self-signed.
+   */
+  async getSelfSignedToken(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    if (!this._selfSignedSeed) {
+      return null;
+    }
+
+    const wasmModule = this.wasmModule;
+    if (!wasmModule) {
+      return null;
+    }
+
+    const ttl = options?.ttlSeconds ?? 60;
+    const audience = options?.audience ?? this.config.appId;
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+
+    return wasmModule.WasmRuntime.mintSelfSignedToken(
+      this._selfSignedSeed,
+      audience,
+      BigInt(ttl),
+      nowSeconds,
+    );
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
     return this.authStateStore.onChange((state) => {
       listener(state);
@@ -1380,6 +1453,10 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    if (this.selfSignedRefreshTimer) {
+      clearTimeout(this.selfSignedRefreshTimer);
+      this.selfSignedRefreshTimer = null;
+    }
     this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
@@ -1685,17 +1762,48 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
+  if (config.auth && config.jwtToken) {
+    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  }
+
+  let resolvedConfig = { ...config };
+
+  // Self-signed auth: resolve seed and mint a JWT
+  let selfSignedSeed: string | null = null;
+  if (config.auth) {
+    const seed = config.auth.seed;
+    selfSignedSeed = seed;
+
+    const wasmModule = await loadWasmModule(config.runtimeSources);
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const jwtToken = wasmModule.WasmRuntime.mintSelfSignedToken(
+      seed,
+      config.appId,
+      BigInt(3600),
+      nowSeconds,
+    );
+    resolvedConfig = { ...resolvedConfig, jwtToken };
+  }
+
+  resolvedConfig = resolveLocalAuthDefaults(resolvedConfig);
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
   if (driver.type === "memory" && !resolvedConfig.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
+  let db: Db;
   if (isBrowser() && driver.type === "persistent") {
-    return Db.createWithWorker(resolvedConfig);
+    db = await Db.createWithWorker(resolvedConfig);
+  } else {
+    db = await Db.create(resolvedConfig);
   }
-  return Db.create(resolvedConfig);
+
+  if (selfSignedSeed) {
+    db.initSelfSignedAuth(selfSignedSeed, 3600);
+  }
+
+  return db;
 }
 
 export function createDbFromClient(

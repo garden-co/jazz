@@ -1,168 +1,128 @@
 # Schema Manager — Status Quo
 
-In a distributed system, different clients will inevitably run different schema versions — a user who hasn't updated their app shouldn't lose data, and a server needs to serve both old and new clients simultaneously. The Schema Manager solves this by making schema evolution a first-class runtime concept, not just a deployment-time migration.
+The Schema Manager lets one Jazz runtime understand more than one schema version at a time.
 
-Every schema version is content-addressed (BLAKE3 hash), so identical schemas are always recognized as identical regardless of where or when they were created. Bidirectional lenses transform data between versions — when a query touches data written under an old schema, the lens chain converts it transparently.
+That matters because local-first systems are rarely perfectly coordinated:
 
-The Schema Manager wraps the [Query Manager](query_manager.md), adding schema versioning on top of the raw query engine. It coordinates with the [Sync Manager](sync_manager.md) for schema discovery: schemas and lenses are themselves objects, synced like any other data. See [Schema Files](schema_files.md) for the developer-facing tooling that produces schemas and lenses.
+- one client may already be running a newer schema
+- another client may reconnect with an older build
+- a server may need to answer queries for both at once
 
-## Content-Addressed Schemas
+The Schema Manager handles that by combining:
 
-Every schema version is identified by a **SchemaHash** — BLAKE3 hash of the canonicalized schema (tables sorted by name, columns sorted within each table). Identical schemas always produce identical hashes.
+- schema hashes
+- lens paths between schema versions
+- branch naming conventions
+- catalogue-backed discovery of schemas and lenses
+- copy-on-write updates into the current schema branch
 
-> `crates/groove/src/query_manager/types.rs:17-68` — `SchemaHash::compute()`, `short()` (12-char hex prefix)
+## The Friendly Mental Model
 
-## Composed Branch Names
+Think of the runtime as keeping several table images alive at once.
 
-Branch names encode environment, schema version, and user branch:
+Each image corresponds to:
 
-```
+- an environment such as `dev` or `prod`
+- a concrete schema hash
+- a user branch such as `main`
+
+The composed branch name is what ties those parts together:
+
+```text
 {env}-{schemaHash8}-{userBranch}
 ```
 
-Example: `dev-a1b2c3d4-main`
+So a query for "todos on main" is really asking for the correct schema-versioned branch view of that table.
 
-This is the key mechanism for schema isolation. Data written under schema v1 lives on branches like `prod-a1b2c3d4-main`; data under schema v2 lives on `prod-e5f6g7h8-main`. They never collide. When a query runs, the Schema Manager knows which branches to target based on the current schema and any live schemas reachable via lenses. A query without explicit `.branch()` gets this automatically.
+## Schema Hashes
 
-> `crates/groove/src/query_manager/types.rs:187-268` — `ComposedBranchName`
+Every schema version gets a deterministic hash.
+
+That gives the runtime a stable name for:
+
+- branch routing
+- catalogue storage
+- lens source/target lookup
+- server-mode query execution for multiple client versions
+
+The exact hash algorithm is an implementation detail. The important architectural point is that schema identity is content-based rather than deployment-order-based.
 
 ## Lenses
 
-Bidirectional transformations between schema versions.
+Lenses describe how data moves between schema versions.
 
-**V1 operations**: `AddColumn`, `RemoveColumn`, `RenameColumn`, `AddTable`, `RemoveTable`.
+They are used in two directions:
 
-All operations are declarative and auto-invertible — the backward transform is computed automatically from the forward transform.
+- read path: older stored rows can be interpreted through a newer schema
+- write path: updates to older rows are written back into the current schema branch
 
-> `crates/groove/src/schema_manager/lens.rs:24-55` (LensOp), `117-168` (LensTransform), `172-338` (Lens)
+That lets the runtime preserve a simple external story:
 
-Key properties:
-
-- `Lens::object_id()` uses UUIDv5(NAMESPACE_DNS, source_hash || target_hash) — deterministic
-- `translate_column()` for index lookups across schema versions
-- `apply()` transforms row values according to lens operations
-
-### Draft Lenses
-
-Auto-generated lenses may contain **draft** operations — uncertain transformations (potential renames, non-nullable columns without sensible defaults). Draft lenses fail fast at startup if found in the path to any live schema.
-
-### Auto-Lens Generation
-
-`generate_lens()` compares schemas and detects added/removed tables/columns. Potential renames (same type, different name) marked as draft. Sensible defaults generated for most types; UUID and non-nullable columns flagged for review.
-
-> `crates/groove/src/schema_manager/auto_lens.rs:18-200`
+- application code queries the schema it knows about
+- the engine takes responsibility for translating older stored data when a valid lens path exists
 
 ## Schema Context
 
-Tracks current schema, environment, user branch, live schemas (reachable via lenses), and pending schemas (awaiting lens paths).
+The Schema Manager maintains a runtime schema context that answers questions like:
 
-Key capabilities:
+- what is the current schema?
+- which other schemas are reachable through live lens paths?
+- which composed branches should this query target?
+- which schemas are known but not yet fully activated?
 
-- `lens_path()` — BFS from source to current, multi-hop support
-- `validate()` — ensures no draft lenses in paths to live schemas
-- `try_activate_pending()` — activates pending schemas when lens paths become available
+This context is what the Query Manager consumes when it compiles a query or materializes a row.
 
-> `crates/groove/src/schema_manager/context.rs:113-286` — 29 tests covering lens paths, multi-hop, validation, pending activation
+## Catalogue Entries
 
-### QuerySchemaContext
+Schemas and lenses replicate through the dedicated `catalogue` lane.
 
-Minimal serializable context for server-mode queries: `(env, schema_hash, user_branch)`. Travels with queries over the wire.
+That means:
 
-> `crates/groove/src/schema_manager/context.rs:15-51`
+- user table rows use row histories + visible entries
+- schema metadata uses catalogue entries
+- both still reuse the same `row_format` machinery underneath
 
-## SchemaManager Coordination
+This separation keeps schema discovery explicit and prevents system metadata from pretending to be user table data.
 
-Top-level integration layer wrapping SchemaContext + QueryManager.
+## Client Mode and Server Mode
 
-### Client Mode
+### Client mode
 
-Fixed current schema (baked into app). Queries use implicit schema context.
+A client usually has one current schema baked into the app bundle. The Schema Manager starts from that schema and keeps any reachable older schemas available for reads.
 
-```
-SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
-```
+### Server mode
 
-> `crates/groove/src/schema_manager/manager.rs:89-123`
+A server may learn schemas gradually from connected clients through catalogue sync. It can then answer queries for several client schema hashes at once without restarting or rebuilding the runtime from scratch.
 
-### Server Mode
+## Copy-on-Write Updates
 
-No fixed current schema. Serves multiple clients with different schema versions.
+If a client updates a row that was originally stored on an older schema branch, the write path is intentionally simple:
 
-```
-SchemaManager::new_server(sync_manager, app_id, env)
-```
+1. load the row through the current schema view
+2. apply the user's update in the current schema
+3. write a new row version on the current schema branch
 
-- `add_known_schema()` — adds schemas without requiring lens path
-- `subscribe_with_schema_context()` — builds temporary context with target as current
-- Lazy branch activation via `set_known_schemas()` sync to QueryManager
+The old stored row history remains intact. The new visible row is written as a fresh flat visible
+record on the current schema branch.
 
-> `crates/groove/src/schema_manager/manager.rs:125-717`
+## Why This Fits the Table-First Engine
 
-### Multi-Schema Queries
+The Schema Manager does not bolt versioning on top of unrelated storage. It works directly with the same pieces the rest of the runtime already uses:
 
-This is how old data becomes visible to new code. When a v2 client queries, the Schema Manager includes branches from both v2 and v1 (if a lens path exists):
+- branch-aware visible rows
+- row histories
+- raw tables
+- catalogue entries
 
-1. **Live branches**: current schema + all schemas reachable via lens chains
-2. **Index access**: column names translated through lens chain per branch (e.g., v1's `email` → v2's `email_address`)
-3. **Row loading**: lens transform applied after loading from storage (adding default values for new columns, etc.)
-4. **Merge**: union all results, LWW handles duplicates by ObjectId
+That is why schema evolution can be described as "which table image should we read and how should we transform it?" rather than as a completely separate subsystem.
 
-> `crates/groove/src/schema_manager/transformer.rs` (726 lines — LensTransformer)
+## Key Files
 
-### Copy-on-Write Updates
-
-Update a row in an old schema branch: load → apply lens to current → apply update → write to current branch. Old data stays in old branch.
-
-> `crates/groove/src/schema_manager/writer.rs` (439 lines — CopyOnWriteWriter)
-
-## App ID & Catalogue Discovery
-
-`AppId` identifies an application's schema family. Uses UUIDv5(NAMESPACE_DNS, app_name).
-
-> `crates/groove/src/schema_manager/types.rs:19-59`
-
-### Schema/Lens Persistence
-
-Schemas and lenses are themselves Jazz objects — they sync between nodes like any other data. When a client connects to a server, its schema and lens objects propagate through the normal sync protocol. The server discovers what schemas exist by observing these catalogue objects, and can then serve queries for any known schema version.
-
-| Type   | ObjectId                   | Content                      | Key Metadata                                                  |
-| ------ | -------------------------- | ---------------------------- | ------------------------------------------------------------- |
-| Schema | UUIDv5(schema_hash)        | Binary-encoded Schema        | `type=catalogue_schema`, `app_id`, `schema_hash`              |
-| Lens   | UUIDv5(source \|\| target) | Binary-encoded LensTransform | `type=catalogue_lens`, `app_id`, `source_hash`, `target_hash` |
-
-> `crates/groove/src/schema_manager/manager.rs:430-479` (persist_schema, persist_lens)
-
-### Catalogue Processing
-
-`process_catalogue_update()` handles incoming schema/lens objects:
-
-- Verifies app_id match
-- Schemas: added to known_schemas, pending if no lens path yet
-- Lenses: registered, triggers pending schema activation
-- Idempotent (handles duplicates)
-
-> `crates/groove/src/schema_manager/manager.rs:481-603`
-
-## Binary Encoding
-
-Deterministic encoding for schemas and lenses with version byte prefix for forward compatibility.
-
-> `crates/groove/src/schema_manager/encoding.rs`
-
-## Error Handling
-
-**SchemaError**: `DraftLensInPath`, `NoLensPath`, `SchemaNotFound`, `LensNotFound`
-
-> `crates/groove/src/schema_manager/context.rs:54-109`
-
-**QueryError**: `UnknownSchema(SchemaHash)` for server-mode queries with unknown schema.
-
-## Test Coverage
-
-29 context tests + E2E integration tests including:
-
-- `e2e_catalogue_sync_with_data_query`
-- `e2e_two_clients_server_schema_sync`
-- `copy_on_write_update`
-
-> `crates/groove/src/schema_manager/integration_tests.rs`
+| File                                                | Purpose                                   |
+| --------------------------------------------------- | ----------------------------------------- |
+| `crates/jazz-tools/src/schema_manager/manager.rs`   | SchemaManager orchestration               |
+| `crates/jazz-tools/src/schema_manager/context.rs`   | Live schema context and branch resolution |
+| `crates/jazz-tools/src/schema_manager/lens.rs`      | Lens definitions and transforms           |
+| `crates/jazz-tools/src/schema_manager/auto_lens.rs` | Auto-generated migration/lens helpers     |
+| `crates/jazz-tools/src/catalogue.rs`                | Catalogue entry model                     |
+| `crates/jazz-tools/src/query_manager/manager.rs`    | Query execution with schema context       |

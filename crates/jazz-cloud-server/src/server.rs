@@ -19,6 +19,7 @@ use axum::{
 use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
+use jazz_tools::identity;
 use jazz_tools::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
     SyncPayloadResult,
@@ -240,6 +241,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           <div class="checkboxes">
             <label><input type="checkbox" id="allow-anonymous" checked /> Allow anonymous local auth</label>
             <label><input type="checkbox" id="allow-demo" checked /> Allow demo local auth</label>
+            <label><input type="checkbox" id="allow-self-signed" checked /> Allow self-signed auth</label>
           </div>
           <div>
             <button type="submit">Create app</button>
@@ -363,7 +365,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           const authCell = document.createElement("td");
           const authSummary = document.createElement("div");
           authSummary.className = "muted";
-          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
+          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ${app.allow_self_signed ? "self-signed:on" : "self-signed:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
           authCell.appendChild(authSummary);
 
           const authEditor = document.createElement("div");
@@ -386,8 +388,16 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           demoLabel.appendChild(demoCheckbox);
           demoLabel.appendChild(document.createTextNode("Allow demo"));
 
+          const selfSignedLabel = document.createElement("label");
+          const selfSignedCheckbox = document.createElement("input");
+          selfSignedCheckbox.type = "checkbox";
+          selfSignedCheckbox.checked = Boolean(app.allow_self_signed);
+          selfSignedLabel.appendChild(selfSignedCheckbox);
+          selfSignedLabel.appendChild(document.createTextNode("Allow self-signed"));
+
           flags.appendChild(anonymousLabel);
           flags.appendChild(demoLabel);
+          flags.appendChild(selfSignedLabel);
 
           const jwksInput = document.createElement("input");
           jwksInput.type = "text";
@@ -418,6 +428,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
               const payload = {
                 allow_anonymous: anonymousCheckbox.checked,
                 allow_demo: demoCheckbox.checked,
+                allow_self_signed: selfSignedCheckbox.checked,
                 jwks_endpoint: jwksInput.value.trim(),
               };
               const jwksCacheTtlSecs = readOptionalSecondsValue(
@@ -585,6 +596,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           jwks_endpoint: document.getElementById("jwks-endpoint").value.trim(),
           allow_anonymous: document.getElementById("allow-anonymous").checked,
           allow_demo: document.getElementById("allow-demo").checked,
+          allow_self_signed: document.getElementById("allow-self-signed").checked,
         };
 
         const backendSecret = document.getElementById("backend-secret").value.trim();
@@ -637,6 +649,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           event.target.reset();
           document.getElementById("allow-anonymous").checked = true;
           document.getElementById("allow-demo").checked = true;
+          document.getElementById("allow-self-signed").checked = true;
           await loadApps();
         } catch (error) {
           setStatus(error.message || String(error), true);
@@ -1350,6 +1363,7 @@ struct AppConfig {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
@@ -1375,6 +1389,7 @@ struct MetaAppRow {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
@@ -1391,16 +1406,8 @@ struct MetaExternalIdentityRow {
 struct MetaStore {
     runtime: TokioRuntime<RocksDBStorage>,
     secret_hash_key: String,
-    apps_insert_descriptor: RowDescriptor,
     apps_descriptor: RowDescriptor,
-    external_identities_insert_descriptor: RowDescriptor,
     external_identities_descriptor: RowDescriptor,
-}
-
-fn normalize_row_descriptor(descriptor: &mut RowDescriptor) {
-    descriptor
-        .columns
-        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 }
 
 fn descriptor_value<'a>(
@@ -1453,6 +1460,7 @@ impl MetaStore {
                     .column("jwks_max_stale_secs", ColumnType::BigInt)
                     .column("allow_anonymous", ColumnType::Boolean)
                     .column("allow_demo", ColumnType::Boolean)
+                    .column("allow_self_signed", ColumnType::Boolean)
                     .column("backend_secret_hash", ColumnType::Text)
                     .column("admin_secret_hash", ColumnType::Text)
                     .column("status", ColumnType::Text)
@@ -1471,21 +1479,17 @@ impl MetaStore {
             )
             .build();
 
-        let apps_insert_descriptor = meta_schema
+        let apps_descriptor = meta_schema
             .get(&TableName::new("apps"))
             .ok_or_else(|| "meta schema missing apps table".to_string())?
             .columns
             .clone();
-        let mut apps_descriptor = apps_insert_descriptor.clone();
-        normalize_row_descriptor(&mut apps_descriptor);
 
-        let external_identities_insert_descriptor = meta_schema
+        let external_identities_descriptor = meta_schema
             .get(&TableName::new("external_identities"))
             .ok_or_else(|| "meta schema missing external_identities table".to_string())?
             .columns
             .clone();
-        let mut external_identities_descriptor = external_identities_insert_descriptor.clone();
-        normalize_row_descriptor(&mut external_identities_descriptor);
 
         let sync_manager = SyncManager::new().with_durability_tiers(vec![
             DurabilityTier::EdgeServer,
@@ -1510,9 +1514,7 @@ impl MetaStore {
         Ok(Self {
             runtime,
             secret_hash_key,
-            apps_insert_descriptor,
             apps_descriptor,
-            external_identities_insert_descriptor,
             external_identities_descriptor,
         })
     }
@@ -1575,14 +1577,15 @@ impl MetaStore {
         jwks_max_stale_secs: u64,
         allow_anonymous: bool,
         allow_demo: bool,
+        allow_self_signed: bool,
         backend_secret_hash: String,
         admin_secret_hash: String,
         status: AppStatus,
         admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
-        let mut values = HashMap::with_capacity(self.apps_insert_descriptor.columns.len());
-        for column in &self.apps_insert_descriptor.columns {
+        let mut values = HashMap::with_capacity(self.apps_descriptor.columns.len());
+        for column in &self.apps_descriptor.columns {
             let value = match column.name.as_str() {
                 "admin_secret" => match &admin_secret {
                     Some(value) => Value::Text(value.clone()),
@@ -1591,6 +1594,7 @@ impl MetaStore {
                 "admin_secret_hash" => Value::Text(admin_secret_hash.clone()),
                 "allow_anonymous" => Value::Boolean(allow_anonymous),
                 "allow_demo" => Value::Boolean(allow_demo),
+                "allow_self_signed" => Value::Boolean(allow_self_signed),
                 "app_id" => Value::Uuid(app_id.as_object_id()),
                 "app_name" => Value::Text(app_name.clone()),
                 "backend_secret_hash" => Value::Text(backend_secret_hash.clone()),
@@ -1627,6 +1631,7 @@ impl MetaStore {
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
+            allow_self_signed,
             backend_secret_hash,
             admin_secret_hash,
             status,
@@ -1648,6 +1653,10 @@ impl MetaStore {
                 Value::Boolean(row.allow_anonymous),
             ),
             ("allow_demo".to_string(), Value::Boolean(row.allow_demo)),
+            (
+                "allow_self_signed".to_string(),
+                Value::Boolean(row.allow_self_signed),
+            ),
             (
                 "backend_secret_hash".to_string(),
                 Value::Text(row.backend_secret_hash.clone()),
@@ -1735,7 +1744,7 @@ impl MetaStore {
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
         let values: HashMap<String, Value> = self
-            .external_identities_insert_descriptor
+            .external_identities_descriptor
             .columns
             .iter()
             .map(|column| {
@@ -1831,6 +1840,18 @@ impl MetaStore {
             None => true,
         };
 
+        let allow_self_signed =
+            match descriptor_value(&self.apps_descriptor, values, "allow_self_signed") {
+                Some(Value::Boolean(v)) => *v,
+                Some(other) => {
+                    return Err(format!(
+                        "meta row field allow_self_signed expected boolean, got {other:?}"
+                    ));
+                }
+                // Default true for existing rows that predate this field
+                None => true,
+            };
+
         let backend_secret_hash =
             match descriptor_value(&self.apps_descriptor, values, "backend_secret_hash") {
                 Some(Value::Text(s)) => s.clone(),
@@ -1903,6 +1924,7 @@ impl MetaStore {
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
+            allow_self_signed,
             backend_secret_hash,
             admin_secret_hash,
             status,
@@ -2386,6 +2408,7 @@ struct CreateAppRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
+    allow_self_signed: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
 }
@@ -2398,6 +2421,7 @@ struct UpdateAppRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
+    allow_self_signed: Option<bool>,
     status: Option<AppStatus>,
     rotate_backend_secret: Option<bool>,
     rotate_admin_secret: Option<bool>,
@@ -2415,6 +2439,7 @@ struct ManageUpdateAuthRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
+    allow_self_signed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2426,6 +2451,7 @@ struct AppSummaryResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     status: AppStatus,
     worker: usize,
 }
@@ -2439,6 +2465,7 @@ struct CreateAppResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     backend_secret: String,
     admin_secret: String,
     status: AppStatus,
@@ -2454,6 +2481,7 @@ struct UpdateAppResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     status: AppStatus,
     worker: usize,
     backend_secret: Option<String>,
@@ -2693,6 +2721,7 @@ fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
         jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
+        allow_self_signed: row.allow_self_signed,
         backend_secret_hash: row.backend_secret_hash.clone(),
         admin_secret_hash: row.admin_secret_hash.clone(),
         status: row.status,
@@ -3124,6 +3153,25 @@ async fn load_jwks_for_app(
     Ok(jwks)
 }
 
+/// Check if a JWT has iss = "urn:jazz:self-signed" by decoding claims without verification.
+fn is_self_signed_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let Ok(claims_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) else {
+        return false;
+    };
+    #[derive(serde::Deserialize)]
+    struct IssOnly {
+        iss: Option<String>,
+    }
+    let Ok(claims) = serde_json::from_slice::<IssOnly>(&claims_bytes) else {
+        return false;
+    };
+    claims.iss.as_deref() == Some(identity::SELF_SIGNED_ISSUER)
+}
+
 async fn validate_jwt_with_jwks(
     state: &ServerState,
     app_id: AppId,
@@ -3227,6 +3275,24 @@ async fn extract_session(
         let token = token.trim();
         if token.is_empty() {
             return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
+        }
+
+        // Self-signed JWT path: check issuer claim before JWKS validation
+        if is_self_signed_token(token) {
+            if !app_config.allow_self_signed {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Self-signed auth is not enabled for this app",
+                ));
+            }
+            let verified = identity::verify_self_signed_token(token, &app_id.to_string())
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid self-signed token"))?;
+            return Ok(Some(Session {
+                user_id: verified.user_id,
+                claims: serde_json::json!({
+                    "auth_mode": "self-signed",
+                }),
+            }));
         }
 
         let verified = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
@@ -3419,6 +3485,7 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         jwks_max_stale_secs: cfg.jwks_max_stale_secs,
         allow_anonymous: cfg.allow_anonymous,
         allow_demo: cfg.allow_demo,
+        allow_self_signed: cfg.allow_self_signed,
         status: cfg.status,
         worker,
     }
@@ -3516,6 +3583,7 @@ async fn manage_set_status_handler(
             jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
+            allow_self_signed: None,
             status: Some(request.status),
             rotate_backend_secret: None,
             rotate_admin_secret: None,
@@ -3557,6 +3625,7 @@ async fn manage_update_auth_handler(
             jwks_max_stale_secs: request.jwks_max_stale_secs,
             allow_anonymous: request.allow_anonymous,
             allow_demo: request.allow_demo,
+            allow_self_signed: request.allow_self_signed,
             status: None,
             rotate_backend_secret: None,
             rotate_admin_secret: None,
@@ -3641,6 +3710,7 @@ async fn manage_rotate_admin_secret_handler(
             jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
+            allow_self_signed: None,
             status: None,
             rotate_backend_secret: None,
             rotate_admin_secret: Some(true),
@@ -4296,6 +4366,7 @@ async fn create_app_handler(
     let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
     let allow_anonymous = request.allow_anonymous.unwrap_or(true);
     let allow_demo = request.allow_demo.unwrap_or(true);
+    let allow_self_signed = request.allow_self_signed.unwrap_or(true);
 
     let backend_secret_hash = state.meta_store.hash_secret(&backend_secret);
     let admin_secret_hash = state.meta_store.hash_secret(&admin_secret);
@@ -4318,6 +4389,7 @@ async fn create_app_handler(
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
+            allow_self_signed,
             backend_secret_hash,
             admin_secret_hash,
             AppStatus::Active,
@@ -4372,6 +4444,7 @@ async fn create_app_handler(
         jwks_max_stale_secs: meta_row.jwks_max_stale_secs,
         allow_anonymous: meta_row.allow_anonymous,
         allow_demo: meta_row.allow_demo,
+        allow_self_signed: meta_row.allow_self_signed,
         backend_secret,
         admin_secret,
         status: meta_row.status,
@@ -4516,6 +4589,9 @@ async fn update_app_handler(
     if let Some(allow_demo) = request.allow_demo {
         row.allow_demo = allow_demo;
     }
+    if let Some(allow_self_signed) = request.allow_self_signed {
+        row.allow_self_signed = allow_self_signed;
+    }
     if let Some(status) = request.status {
         row.status = status;
     }
@@ -4555,6 +4631,7 @@ async fn update_app_handler(
         jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
+        allow_self_signed: row.allow_self_signed,
         status: row.status,
         worker,
         backend_secret: new_backend_secret,
@@ -4842,6 +4919,7 @@ mod tests {
                 90,
                 true,
                 false,
+                true,
                 "backend-secret-hash".to_string(),
                 "admin-secret-hash".to_string(),
                 AppStatus::Active,

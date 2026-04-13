@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.26",
+  "version": "2.0.0-alpha.27",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -92,6 +92,7 @@
     "@standard-schema/spec": "^1.1.0",
     "jazz-rn": "workspace:*",
     "jazz-wasm": "workspace:*",
+    "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
     "tsx": "^4.0.0",

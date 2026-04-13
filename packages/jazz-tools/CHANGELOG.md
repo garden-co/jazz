@@ -1,5 +1,23 @@
 # jazz-tools
 
+## 2.0.0-alpha.27
+
+### Patch Changes
+
+- d872a4d: `allowedTo` now accepts bare relation names (e.g. `"project"`) in addition to full FK column names (`"projectId"`).
+- cfaed19: Fix enum literals in nested policies
+
+  Nested relation-backed permission filters now serialize enum literals as tagged runtime values instead of raw strings, so publishing permissions and loading them into `createJazzContext(...)` works for cases like `grant_role: "viewer"`.
+
+- 1fb1395: Add `From<T>` impls on `Value` for common types and a `row_input!` macro for ergonomic `HashMap<String, Value>` construction.
+- 463098a: Ship the new unified row-history storage engine across Jazz runtimes.
+
+  Relational rows, query visibility, and sync replay now go through the same storage-backed path instead of mixing durable state with older in-memory cache layers. In practice this makes local persistence and sync behavior more consistent across browser, Node, and native runtimes, especially around cold start, reconnect, and large local datasets.
+
+- Updated dependencies [463098a]
+  - jazz-wasm@2.0.0-alpha.27
+  - jazz-rn@2.0.0-alpha.27
+
 ## 2.0.0-alpha.26
 
 ### Patch Changes

@@ -29,6 +29,7 @@ struct AppSummaryResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
+    allow_self_signed: bool,
     status: String,
 }
 

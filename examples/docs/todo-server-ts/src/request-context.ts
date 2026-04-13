@@ -11,9 +11,8 @@ function sendQueryError(res: Response): void {
 // #region backend-request-handler-ts
 export async function listTodosForRequester(req: Request, res: Response): Promise<void> {
   try {
-    const rows = await context
-      .forRequest(req, schemaApp)
-      .all(schemaApp.todos.where({ done: true }));
+    const requester = await context.forRequest(req, schemaApp);
+    const rows = await requester.all(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -24,9 +23,8 @@ export async function listTodosForRequester(req: Request, res: Response): Promis
 // #region permissions-simple-ts
 export async function listTodosWithSimplePolicy(req: Request, res: Response): Promise<void> {
   try {
-    const rows = await context
-      .forRequest(req, schemaApp)
-      .all(schemaApp.todos.where({ done: false }));
+    const requester = await context.forRequest(req, schemaApp);
+    const rows = await requester.all(schemaApp.todos.where({ done: false }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -40,9 +38,8 @@ export async function listTodosWithInheritedPolicy(
   res: Response,
 ): Promise<void> {
   try {
-    const rows = await context
-      .forRequest(req, schemaApp)
-      .all(schemaApp.todos.where({ projectId: req.params.projectId }));
+    const requester = await context.forRequest(req, schemaApp);
+    const rows = await requester.all(schemaApp.todos.where({ projectId: req.params.projectId }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -51,7 +48,7 @@ export async function listTodosWithInheritedPolicy(
 // #endregion permissions-inherits-ts
 
 // #region backend-attribution-ts
-export function createAttributedHandles(req: Request) {
+export async function createAttributedHandles(req: Request) {
   const syntheticSession = {
     user_id: "user_123",
     claims: {},
@@ -61,7 +58,7 @@ export function createAttributedHandles(req: Request) {
     backendDb: context.asBackend(schemaApp),
     attributedDb: context.withAttribution("user_123", schemaApp),
     attributedSessionDb: context.withAttributionForSession(syntheticSession, schemaApp),
-    attributedRequestDb: context.withAttributionForRequest(req, schemaApp),
+    attributedRequestDb: await context.withAttributionForRequest(req, schemaApp),
   };
 }
 // #endregion backend-attribution-ts
