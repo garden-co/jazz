@@ -55,6 +55,14 @@ function DevToolsRegistration() {
 
 // #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
+  return (
+    <React.Suspense fallback={fallback ?? <p>Loading...</p>}>
+      <AppInner config={config} fallback={fallback} />
+    </React.Suspense>
+  );
+}
+
+function AppInner({ config, fallback }: AppProps) {
   const secret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
   const resolvedConfig = defaultConfig(secret, config);
 
