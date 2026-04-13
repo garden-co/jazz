@@ -278,14 +278,14 @@ describe("React Todo App E2E", () => {
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "react-sync-user-a" },
+      auth: { localFirstSecret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "react-sync-user-b" },
+      auth: { localFirstSecret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -327,13 +327,13 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "react-memory-user-a" },
+      auth: { localFirstSecret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "react-memory-user-b" },
+      auth: { localFirstSecret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
       driver: { type: "memory" },
     });
 
