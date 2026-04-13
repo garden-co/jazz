@@ -1388,7 +1388,7 @@ impl QueryManager {
                     visited,
                 )
             })
-            .unwrap_or(false);
+            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
 
         visited.remove(&(table_name, row_id, operation));
         local_allow

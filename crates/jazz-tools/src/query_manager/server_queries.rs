@@ -1578,8 +1578,12 @@ impl QueryManager {
                         Operation::Update => parent_schema.policies.update_using_policy(),
                         Operation::Delete => parent_schema.policies.effective_delete_using(),
                     };
-
-                    let parent_policy = parent_policy?;
+                    let Some(parent_policy) = parent_policy else {
+                        if self.row_policy_mode.denies_missing_explicit_policy() {
+                            return None;
+                        }
+                        continue;
+                    };
 
                     // Create policy graph for INHERITS
                     if let Some(graph) = PolicyGraph::for_inherits(

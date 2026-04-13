@@ -34,8 +34,8 @@ use crate::query_manager::relation_ir::{
 };
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 use crate::row_histories::{RowState, StoredRowVersion};
 
@@ -43,6 +43,16 @@ use crate::row_histories::{RowState, StoredRowVersion};
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
+    qm
+}
+
+fn create_query_manager_with_policy_mode(
+    sync_manager: SyncManager,
+    schema: Schema,
+    row_policy_mode: RowPolicyMode,
+) -> QueryManager {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema_with_policy_mode(schema, "dev", "main", row_policy_mode);
     qm
 }
 
@@ -2902,6 +2912,123 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
             operation: Operation::Insert
         } if table == TableName::new("projects")
     ));
+}
+
+#[test]
+fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
+    let mut schema = Schema::new();
+    let folders_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::new(folders_descriptor.clone()),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::Inherits {
+        operation: Operation::Insert,
+        via_column: "folder_id".into(),
+        max_depth: None,
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm =
+        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice folder".into())],
+        )
+        .expect("seed folder row");
+
+    qm.insert_with_session(
+        &mut storage,
+        "documents",
+        &[Value::Text("draft doc".into()), Value::Uuid(folder.row_id)],
+        Some(&Session::new("alice")),
+    )
+    .expect(
+        "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
+    );
+}
+
+#[test]
+fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
+    let mut schema = Schema::new();
+    let files_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let files_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::InheritsReferencing {
+            operation: Operation::Update,
+            source_table: "todos".into(),
+            via_column: "file_id".into(),
+            max_depth: None,
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("files"),
+        TableSchema::with_policies(files_descriptor, files_policies),
+    );
+
+    let todos_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("file_id", ColumnType::Uuid)
+            .nullable()
+            .references("files"),
+    ]);
+    schema.insert(TableName::new("todos"), TableSchema::new(todos_descriptor));
+
+    let sync_manager = SyncManager::new();
+    let mut qm =
+        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Text("bob".into()), Value::Text("shared-file".into())],
+        )
+        .expect("seed file row");
+    qm.insert(
+        &mut storage,
+        "todos",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("todo referencing file".into()),
+            Value::Uuid(file.row_id),
+        ],
+    )
+    .expect("seed referencing todo row");
+
+    qm.update_with_session(
+        &mut storage,
+        file.row_id,
+        &[
+            Value::Text("bob".into()),
+            Value::Text("updated by alice".into()),
+        ],
+        Some(&Session::new("alice")),
+    )
+    .expect(
+        "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
+    );
 }
 
 #[test]
