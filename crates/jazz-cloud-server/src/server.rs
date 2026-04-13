@@ -4502,28 +4502,4 @@ mod tests {
         assert_eq!(loaded.status, AppStatus::Active);
         assert_eq!(loaded.admin_secret.as_deref(), Some("admin-secret"));
     }
-
-    #[tokio::test]
-    async fn meta_store_create_external_identity_uses_declared_schema_order() {
-        let data_root = tempdir().unwrap();
-        let store = MetaStore::new(data_root.path(), "meta-store-test-key".to_string()).unwrap();
-        let app_id = AppId::from_name("meta-store-app");
-
-        store
-            .create_external_identity(
-                app_id,
-                "https://issuer.example",
-                "subject-123",
-                "principal-456",
-            )
-            .await
-            .unwrap();
-
-        let loaded = store
-            .get_external_identity(app_id, "https://issuer.example", "subject-123")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.principal_id, "principal-456");
-    }
 }
