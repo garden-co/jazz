@@ -124,6 +124,7 @@
   },
   "peerDependencies": {
     "expo": ">=54",
+    "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
     "react": "^18 || ^19",
     "react-native": ">=0.76",
@@ -132,6 +133,9 @@
   },
   "peerDependenciesMeta": {
     "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
       "optional": true
     },
     "expo-secure-store": {
