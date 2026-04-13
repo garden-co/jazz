@@ -13,7 +13,7 @@ export interface JazzServerOptions {
   appId?: string;
   allowAnonymous?: boolean;
   allowDemo?: boolean;
-  allowSelfSigned?: boolean;
+  allowLocalFirstAuth?: boolean;
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
@@ -223,7 +223,7 @@ async function initializeManagedRuntime(options: JazzPluginOptions): Promise<Man
           backendSecret: serverConfig.backendSecret,
           allowAnonymous: serverConfig.allowAnonymous,
           allowDemo: serverConfig.allowDemo,
-          allowSelfSigned: serverConfig.allowSelfSigned,
+          allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,
           dataDir: serverConfig.dataDir,
           inMemory: serverConfig.inMemory,
           jwksUrl: serverConfig.jwksUrl,

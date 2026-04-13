@@ -30,7 +30,7 @@ function ChatShell(): React.JSX.Element {
   }
 
   async function handleSignUp(email: string, password: string) {
-    const proofToken = await db.getSelfSignedToken({
+    const proofToken = await db.getLocalFirstIdentityProof({
       ttlSeconds: 60,
       audience: "betterauth-signup",
     });
@@ -66,7 +66,7 @@ function ChatShell(): React.JSX.Element {
       </span>
       <section className="content-grid">
         <AuthCard
-          loggedIn={authState.status === "authenticated" && authMode !== "self-signed"}
+          loggedIn={authState.status === "authenticated" && authMode !== "local-first"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -146,7 +146,7 @@ export default function Page(): React.JSX.Element {
       } else {
         const secret = await authSecretStore.getOrCreateSecret();
         if (ac.signal.aborted) return;
-        setConfig({ ...sharedConfig, auth: { seed: secret } });
+        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
       }
     }
 

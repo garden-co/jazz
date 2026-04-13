@@ -201,7 +201,7 @@ struct DevServerStartOptions {
     allow_demo: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
-    allow_self_signed: Option<bool>,
+    allow_local_first_auth: Option<bool>,
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
     catalogue_authority_admin_secret: Option<String>,
@@ -1204,14 +1204,14 @@ impl NapiRuntime {
         Ok(identity::derive_user_id(&seed).to_string())
     }
 
-    #[napi(js_name = "mintSelfSignedToken")]
-    pub fn mint_self_signed_token(
+    #[napi(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token(
         seed_b64: String,
         audience: String,
         ttl_seconds: u32,
     ) -> napi::Result<String> {
         let seed = napi_decode_seed(&seed_b64)?;
-        identity::mint_self_signed_token(&seed, &audience, ttl_seconds as u64)
+        identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
             .map_err(napi::Error::from_reason)
     }
 
@@ -1386,7 +1386,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; allowSelfSigned?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1419,7 +1419,7 @@ impl DevServer {
             jwks_url: opts.jwks_url,
             allow_anonymous: opts.allow_anonymous.unwrap_or(false),
             allow_demo: opts.allow_demo.unwrap_or(false),
-            allow_self_signed: opts.allow_self_signed.unwrap_or(true),
+            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
         };
@@ -1560,14 +1560,14 @@ pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
     Ok(identity::derive_user_id(&seed).to_string())
 }
 
-#[napi(js_name = "mintSelfSignedToken")]
-pub fn mint_self_signed_token(
+#[napi(js_name = "mintLocalFirstToken")]
+pub fn mint_local_first_token(
     seed_b64: String,
     audience: String,
     ttl_seconds: u32,
 ) -> napi::Result<String> {
     let seed = decode_seed_napi(&seed_b64)?;
-    identity::mint_self_signed_token(&seed, &audience, ttl_seconds as u64)
+    identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
         .map_err(napi::Error::from_reason)
 }
 
@@ -1577,12 +1577,12 @@ pub struct VerifyTokenResult {
     pub id: String,
 }
 
-#[napi(js_name = "verifySelfSignedToken")]
-pub fn verify_self_signed_token_napi(
+#[napi(js_name = "verifyLocalFirstIdentityProof")]
+pub fn verify_local_first_identity_proof_napi(
     token: String,
     expected_audience: String,
 ) -> VerifyTokenResult {
-    match identity::verify_self_signed_token(&token, &expected_audience) {
+    match identity::verify_local_first_identity_proof(&token, &expected_audience) {
         Ok(verified) => VerifyTokenResult {
             ok: true,
             id: verified.user_id,

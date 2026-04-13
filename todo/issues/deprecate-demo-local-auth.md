@@ -2,7 +2,7 @@
 
 ## What
 
-Remove the legacy local auth path (`demoAuth`, `localMode`, `X-Jazz-Local-Mode`, `X-Jazz-Local-Token`) and the synthetic users system once self-signed Ed25519 JWT auth is stable and adopted.
+Remove the legacy local auth path (`demoAuth`, `localMode`, `X-Jazz-Local-Mode`, `X-Jazz-Local-Token`) and the synthetic users system once local-first Ed25519 JWT auth is stable and adopted.
 
 This is the second phase of the local-first auth redesign (see `docs/superpowers/specs/2026-04-09-local-first-auth-design.md`).
 
@@ -33,11 +33,11 @@ medium
 
 ### Migration path
 
-- Apps using `demoAuth` / `localMode` switch to self-signed seed auth (same zero-friction DX, but with real Ed25519 identity)
-- Apps using synthetic users for dev/testing switch to self-signed seeds with deterministic seed fixtures
+- Apps using `demoAuth` / `localMode` switch to local-first secret auth (same zero-friction DX, but with real Ed25519 identity)
+- Apps using synthetic users for dev/testing switch to local-first secrets with deterministic seed fixtures
 - Existing localStorage tokens become inert; no migration needed since these are ephemeral device identities
 
 ### Sequencing
 
-- Only begin after self-signed auth is fully functional and tested
+- Only begin after local-first auth is fully functional and tested
 - Deprecation warnings first, hard removal in a subsequent release

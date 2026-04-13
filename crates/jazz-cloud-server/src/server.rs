@@ -241,7 +241,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           <div class="checkboxes">
             <label><input type="checkbox" id="allow-anonymous" checked /> Allow anonymous local auth</label>
             <label><input type="checkbox" id="allow-demo" checked /> Allow demo local auth</label>
-            <label><input type="checkbox" id="allow-self-signed" checked /> Allow self-signed auth</label>
+            <label><input type="checkbox" id="allow-local-first-auth" checked /> Allow local-first auth</label>
           </div>
           <div>
             <button type="submit">Create app</button>
@@ -365,7 +365,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           const authCell = document.createElement("td");
           const authSummary = document.createElement("div");
           authSummary.className = "muted";
-          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ${app.allow_self_signed ? "self-signed:on" : "self-signed:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
+          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ${app.allow_local_first_auth ? "local-first:on" : "local-first:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
           authCell.appendChild(authSummary);
 
           const authEditor = document.createElement("div");
@@ -388,16 +388,16 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           demoLabel.appendChild(demoCheckbox);
           demoLabel.appendChild(document.createTextNode("Allow demo"));
 
-          const selfSignedLabel = document.createElement("label");
-          const selfSignedCheckbox = document.createElement("input");
-          selfSignedCheckbox.type = "checkbox";
-          selfSignedCheckbox.checked = Boolean(app.allow_self_signed);
-          selfSignedLabel.appendChild(selfSignedCheckbox);
-          selfSignedLabel.appendChild(document.createTextNode("Allow self-signed"));
+          const localFirstAuthLabel = document.createElement("label");
+          const localFirstAuthCheckbox = document.createElement("input");
+          localFirstAuthCheckbox.type = "checkbox";
+          localFirstAuthCheckbox.checked = Boolean(app.allow_local_first_auth);
+          localFirstAuthLabel.appendChild(localFirstAuthCheckbox);
+          localFirstAuthLabel.appendChild(document.createTextNode("Allow local-first auth"));
 
           flags.appendChild(anonymousLabel);
           flags.appendChild(demoLabel);
-          flags.appendChild(selfSignedLabel);
+          flags.appendChild(localFirstAuthLabel);
 
           const jwksInput = document.createElement("input");
           jwksInput.type = "text";
@@ -428,7 +428,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
               const payload = {
                 allow_anonymous: anonymousCheckbox.checked,
                 allow_demo: demoCheckbox.checked,
-                allow_self_signed: selfSignedCheckbox.checked,
+                allow_local_first_auth: localFirstAuthCheckbox.checked,
                 jwks_endpoint: jwksInput.value.trim(),
               };
               const jwksCacheTtlSecs = readOptionalSecondsValue(
@@ -596,7 +596,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           jwks_endpoint: document.getElementById("jwks-endpoint").value.trim(),
           allow_anonymous: document.getElementById("allow-anonymous").checked,
           allow_demo: document.getElementById("allow-demo").checked,
-          allow_self_signed: document.getElementById("allow-self-signed").checked,
+          allow_local_first_auth: document.getElementById("allow-local-first-auth").checked,
         };
 
         const backendSecret = document.getElementById("backend-secret").value.trim();
@@ -649,7 +649,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           event.target.reset();
           document.getElementById("allow-anonymous").checked = true;
           document.getElementById("allow-demo").checked = true;
-          document.getElementById("allow-self-signed").checked = true;
+          document.getElementById("allow-local-first-auth").checked = true;
           await loadApps();
         } catch (error) {
           setStatus(error.message || String(error), true);
@@ -1363,7 +1363,7 @@ struct AppConfig {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
-    allow_self_signed: bool,
+    allow_local_first_auth: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
@@ -1389,7 +1389,7 @@ struct MetaAppRow {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
-    allow_self_signed: bool,
+    allow_local_first_auth: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
@@ -1460,7 +1460,7 @@ impl MetaStore {
                     .column("jwks_max_stale_secs", ColumnType::BigInt)
                     .column("allow_anonymous", ColumnType::Boolean)
                     .column("allow_demo", ColumnType::Boolean)
-                    .column("allow_self_signed", ColumnType::Boolean)
+                    .column("allow_local_first_auth", ColumnType::Boolean)
                     .column("backend_secret_hash", ColumnType::Text)
                     .column("admin_secret_hash", ColumnType::Text)
                     .column("status", ColumnType::Text)
@@ -1577,7 +1577,7 @@ impl MetaStore {
         jwks_max_stale_secs: u64,
         allow_anonymous: bool,
         allow_demo: bool,
-        allow_self_signed: bool,
+        allow_local_first_auth: bool,
         backend_secret_hash: String,
         admin_secret_hash: String,
         status: AppStatus,
@@ -1594,7 +1594,7 @@ impl MetaStore {
                 "admin_secret_hash" => Value::Text(admin_secret_hash.clone()),
                 "allow_anonymous" => Value::Boolean(allow_anonymous),
                 "allow_demo" => Value::Boolean(allow_demo),
-                "allow_self_signed" => Value::Boolean(allow_self_signed),
+                "allow_local_first_auth" => Value::Boolean(allow_local_first_auth),
                 "app_id" => Value::Uuid(app_id.as_object_id()),
                 "app_name" => Value::Text(app_name.clone()),
                 "backend_secret_hash" => Value::Text(backend_secret_hash.clone()),
@@ -1631,7 +1631,7 @@ impl MetaStore {
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
-            allow_self_signed,
+            allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
             status,
@@ -1654,8 +1654,8 @@ impl MetaStore {
             ),
             ("allow_demo".to_string(), Value::Boolean(row.allow_demo)),
             (
-                "allow_self_signed".to_string(),
-                Value::Boolean(row.allow_self_signed),
+                "allow_local_first_auth".to_string(),
+                Value::Boolean(row.allow_local_first_auth),
             ),
             (
                 "backend_secret_hash".to_string(),
@@ -1840,12 +1840,12 @@ impl MetaStore {
             None => true,
         };
 
-        let allow_self_signed =
-            match descriptor_value(&self.apps_descriptor, values, "allow_self_signed") {
+        let allow_local_first_auth =
+            match descriptor_value(&self.apps_descriptor, values, "allow_local_first_auth") {
                 Some(Value::Boolean(v)) => *v,
                 Some(other) => {
                     return Err(format!(
-                        "meta row field allow_self_signed expected boolean, got {other:?}"
+                        "meta row field allow_local_first_auth expected boolean, got {other:?}"
                     ));
                 }
                 // Default true for existing rows that predate this field
@@ -1924,7 +1924,7 @@ impl MetaStore {
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
-            allow_self_signed,
+            allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
             status,
@@ -2408,7 +2408,7 @@ struct CreateAppRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
-    allow_self_signed: Option<bool>,
+    allow_local_first_auth: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
 }
@@ -2421,7 +2421,7 @@ struct UpdateAppRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
-    allow_self_signed: Option<bool>,
+    allow_local_first_auth: Option<bool>,
     status: Option<AppStatus>,
     rotate_backend_secret: Option<bool>,
     rotate_admin_secret: Option<bool>,
@@ -2439,7 +2439,7 @@ struct ManageUpdateAuthRequest {
     jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
-    allow_self_signed: Option<bool>,
+    allow_local_first_auth: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2451,7 +2451,7 @@ struct AppSummaryResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
-    allow_self_signed: bool,
+    allow_local_first_auth: bool,
     status: AppStatus,
     worker: usize,
 }
@@ -2465,7 +2465,7 @@ struct CreateAppResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
-    allow_self_signed: bool,
+    allow_local_first_auth: bool,
     backend_secret: String,
     admin_secret: String,
     status: AppStatus,
@@ -2481,7 +2481,7 @@ struct UpdateAppResponse {
     jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
-    allow_self_signed: bool,
+    allow_local_first_auth: bool,
     status: AppStatus,
     worker: usize,
     backend_secret: Option<String>,
@@ -2721,7 +2721,7 @@ fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
         jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
-        allow_self_signed: row.allow_self_signed,
+        allow_local_first_auth: row.allow_local_first_auth,
         backend_secret_hash: row.backend_secret_hash.clone(),
         admin_secret_hash: row.admin_secret_hash.clone(),
         status: row.status,
@@ -3153,8 +3153,8 @@ async fn load_jwks_for_app(
     Ok(jwks)
 }
 
-/// Check if a JWT has iss = "urn:jazz:self-signed" by decoding claims without verification.
-fn is_self_signed_token(token: &str) -> bool {
+/// Check if a JWT has iss = "urn:jazz:local-first" by decoding claims without verification.
+fn is_local_first_identity_proof(token: &str) -> bool {
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
         return false;
@@ -3169,7 +3169,7 @@ fn is_self_signed_token(token: &str) -> bool {
     let Ok(claims) = serde_json::from_slice::<IssOnly>(&claims_bytes) else {
         return false;
     };
-    claims.iss.as_deref() == Some(identity::SELF_SIGNED_ISSUER)
+    claims.iss.as_deref() == Some(identity::LOCAL_FIRST_ISSUER)
 }
 
 async fn validate_jwt_with_jwks(
@@ -3278,19 +3278,19 @@ async fn extract_session(
         }
 
         // Self-signed JWT path: check issuer claim before JWKS validation
-        if is_self_signed_token(token) {
-            if !app_config.allow_self_signed {
+        if is_local_first_identity_proof(token) {
+            if !app_config.allow_local_first_auth {
                 return Err((
                     StatusCode::FORBIDDEN,
                     "Self-signed auth is not enabled for this app",
                 ));
             }
-            let verified = identity::verify_self_signed_token(token, &app_id.to_string())
-                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid self-signed token"))?;
+            let verified = identity::verify_local_first_identity_proof(token, &app_id.to_string())
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid local-first token"))?;
             return Ok(Some(Session {
                 user_id: verified.user_id,
                 claims: serde_json::json!({
-                    "auth_mode": "self-signed",
+                    "auth_mode": "local-first",
                 }),
             }));
         }
@@ -3485,7 +3485,7 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         jwks_max_stale_secs: cfg.jwks_max_stale_secs,
         allow_anonymous: cfg.allow_anonymous,
         allow_demo: cfg.allow_demo,
-        allow_self_signed: cfg.allow_self_signed,
+        allow_local_first_auth: cfg.allow_local_first_auth,
         status: cfg.status,
         worker,
     }
@@ -3583,7 +3583,7 @@ async fn manage_set_status_handler(
             jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
-            allow_self_signed: None,
+            allow_local_first_auth: None,
             status: Some(request.status),
             rotate_backend_secret: None,
             rotate_admin_secret: None,
@@ -3625,7 +3625,7 @@ async fn manage_update_auth_handler(
             jwks_max_stale_secs: request.jwks_max_stale_secs,
             allow_anonymous: request.allow_anonymous,
             allow_demo: request.allow_demo,
-            allow_self_signed: request.allow_self_signed,
+            allow_local_first_auth: request.allow_local_first_auth,
             status: None,
             rotate_backend_secret: None,
             rotate_admin_secret: None,
@@ -3710,7 +3710,7 @@ async fn manage_rotate_admin_secret_handler(
             jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
-            allow_self_signed: None,
+            allow_local_first_auth: None,
             status: None,
             rotate_backend_secret: None,
             rotate_admin_secret: Some(true),
@@ -4366,7 +4366,7 @@ async fn create_app_handler(
     let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
     let allow_anonymous = request.allow_anonymous.unwrap_or(true);
     let allow_demo = request.allow_demo.unwrap_or(true);
-    let allow_self_signed = request.allow_self_signed.unwrap_or(true);
+    let allow_local_first_auth = request.allow_local_first_auth.unwrap_or(true);
 
     let backend_secret_hash = state.meta_store.hash_secret(&backend_secret);
     let admin_secret_hash = state.meta_store.hash_secret(&admin_secret);
@@ -4389,7 +4389,7 @@ async fn create_app_handler(
             jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
-            allow_self_signed,
+            allow_local_first_auth,
             backend_secret_hash,
             admin_secret_hash,
             AppStatus::Active,
@@ -4444,7 +4444,7 @@ async fn create_app_handler(
         jwks_max_stale_secs: meta_row.jwks_max_stale_secs,
         allow_anonymous: meta_row.allow_anonymous,
         allow_demo: meta_row.allow_demo,
-        allow_self_signed: meta_row.allow_self_signed,
+        allow_local_first_auth: meta_row.allow_local_first_auth,
         backend_secret,
         admin_secret,
         status: meta_row.status,
@@ -4589,8 +4589,8 @@ async fn update_app_handler(
     if let Some(allow_demo) = request.allow_demo {
         row.allow_demo = allow_demo;
     }
-    if let Some(allow_self_signed) = request.allow_self_signed {
-        row.allow_self_signed = allow_self_signed;
+    if let Some(allow_local_first_auth) = request.allow_local_first_auth {
+        row.allow_local_first_auth = allow_local_first_auth;
     }
     if let Some(status) = request.status {
         row.status = status;
@@ -4631,7 +4631,7 @@ async fn update_app_handler(
         jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
-        allow_self_signed: row.allow_self_signed,
+        allow_local_first_auth: row.allow_local_first_auth,
         status: row.status,
         worker,
         backend_secret: new_backend_secret,

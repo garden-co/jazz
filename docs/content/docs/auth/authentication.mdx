@@ -6,13 +6,18 @@ reviewedAt: "f52c2c62"
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
-Jazz has three auth modes. `anonymous` and `demo` generate identities locally without an auth provider. Most multi-user apps will need `external` authentication in production.
+Jazz has four auth modes. `anonymous` and `demo` generate identities locally without an auth provider. `local-first` derives a stable identity from a device secret. Most multi-user apps will need `external` authentication in production.
 
-| Mode        | What it does                                            | When to use it                                   |
-| ----------- | ------------------------------------------------------- | ------------------------------------------------ |
-| `anonymous` | Generates one device token, persisted in `localStorage` | Prototyping, single-user apps, offline-only apps |
-| `demo`      | Multiple synthetic user profiles per device             | Testing multi-user scenarios locally             |
-| `external`  | Validates a JWT from your auth provider via JWKS        | Production apps with real user accounts          |
+| Mode          | What it does                                            | When to use it                                       |
+| ------------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| `local-first` | Self-signed Ed25519 JWT from a device secret            | Production offline-first apps, try-before-signup      |
+| `anonymous`   | Generates one device token, persisted in `localStorage` | Prototyping, single-user apps, offline-only apps     |
+| `demo`        | Multiple synthetic user profiles per device             | Testing multi-user scenarios locally                 |
+| `external`    | Validates a JWT from your auth provider via JWKS        | Production apps with real user accounts              |
+
+## Local-first auth
+
+Local-first auth lets users authenticate without a server using self-signed tokens derived from a device secret. Users can later upgrade to an external provider while keeping their identity. See [Local-first auth](/docs/auth/local-first-auth) for the full guide.
 
 ## Local auth for development
 
