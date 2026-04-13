@@ -47,6 +47,7 @@ function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
     batchId,
     mode: "direct",
     requestedTier: "global",
+    sealed: true,
     latestSettlement: null,
   };
 }

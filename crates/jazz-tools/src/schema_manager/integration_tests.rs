@@ -8,7 +8,8 @@ mod tests {
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::manager::LocalUpdates;
+    use crate::query_manager::manager::{LocalUpdates, QueryError};
+    use crate::query_manager::session::WriteContext;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -1653,6 +1654,432 @@ mod tests {
         assert!(
             visible_after_delete.is_empty(),
             "soft-deleted row should no longer appear in current-branch people queries"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_uses_frozen_target_branch_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        let inserted = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect("frozen-target insert should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, inserted.row_id);
+        assert!(
+            target_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice@example.com".to_string()))
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(current_branch).build(),
+        );
+        assert!(
+            current_rows.is_empty(),
+            "insert should stay on the frozen target branch rather than drifting to the manager current branch"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_rejects_target_branch_outside_current_family() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = MemoryStorage::new();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name("prod-111111111111-feature");
+
+        let err = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect_err("cross-family target branch should be rejected");
+
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("outside the current schema family")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_uses_frozen_target_branch_renamed_table_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        let inserted = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect("frozen-target insert should use the renamed target table schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(v1_branch.clone())
+                .build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, inserted.row_id);
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people").branch(current_branch).build(),
+        );
+        assert!(
+            current_rows.is_empty(),
+            "insert should stay on the frozen renamed-table target branch"
+        );
+    }
+
+    #[test]
+    fn transactional_update_uses_frozen_target_branch_schema() {
+        // current branch: v2 users(id, email_address)
+        //                  |
+        // tx target:       v1 users(id, email)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+        let row_id = ObjectId::new();
+
+        let v2_table = v2.get(&TableName::new("users")).unwrap();
+        let row_data = encode_row(
+            &v2_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v2_hash,
+            row_id,
+            &current_branch,
+            row_data,
+            1_000,
+        );
+        manager.process(&mut storage);
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        manager
+            .update_with_write_context(
+                &mut storage,
+                row_id,
+                &[(
+                    "email".to_string(),
+                    Value::Text("alice+tx@example.com".to_string()),
+                )],
+                Some(&write_context),
+            )
+            .expect("frozen-target update should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, row_id);
+        assert!(
+            target_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice+tx@example.com".to_string()))
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(current_branch).build(),
+        );
+        assert_eq!(current_rows.len(), 1);
+        assert!(
+            current_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice@example.com".to_string())),
+            "frozen-target update should not rewrite the manager current branch"
+        );
+    }
+
+    #[test]
+    fn transactional_delete_uses_frozen_target_branch_schema() {
+        // current branch: v2 users(id, email_address)
+        //                  |
+        // tx target:       v1 users(id, email)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+        let row_id = ObjectId::new();
+
+        let v2_table = v2.get(&TableName::new("users")).unwrap();
+        let row_data = encode_row(
+            &v2_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v2_hash,
+            row_id,
+            &current_branch,
+            row_data,
+            1_000,
+        );
+        manager.process(&mut storage);
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        manager
+            .delete(&mut storage, row_id, Some(&write_context))
+            .expect("frozen-target delete should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert!(
+            target_rows.is_empty(),
+            "frozen-target delete should create the soft delete on the target branch"
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert_eq!(current_rows.len(), 1);
+        assert!(
+            manager
+                .query_manager()
+                .row_is_deleted_on_branch(&storage, "users", &v1_branch, row_id),
+            "target branch should carry the delete marker"
+        );
+        assert!(
+            !manager.query_manager().row_is_deleted_on_branch(
+                &storage,
+                "users",
+                &current_branch,
+                row_id
+            ),
+            "current branch should remain untouched"
         );
     }
 

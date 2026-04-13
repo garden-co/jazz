@@ -894,6 +894,15 @@ impl<'a> Normalizer<'a> {
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
                 format!("batch_ids:{batch_ids:?}")
             }
+            SyncPayload::SealBatch { submission } => {
+                format!(
+                    "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
+                    submission.batch_id,
+                    submission.target_branch_name,
+                    submission.members,
+                    submission.captured_frontier
+                )
+            }
             SyncPayload::CatalogueEntryUpdated { entry } => {
                 format!(
                     "catalogue obj:{} type:{}",
@@ -1010,6 +1019,15 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::BatchSettlementNeeded { batch_ids } => {
             format!("batch_ids:{batch_ids:?}")
+        }
+        SyncPayload::SealBatch { submission } => {
+            format!(
+                "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
+                submission.batch_id,
+                submission.target_branch_name,
+                submission.members,
+                submission.captured_frontier
+            )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
             format!("query:{}", query_id.0)

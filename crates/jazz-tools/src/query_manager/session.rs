@@ -135,6 +135,8 @@ pub struct WriteContext {
     pub batch_mode: Option<BatchMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<BatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch_name: Option<String>,
 }
 
 impl WriteContext {
@@ -144,6 +146,7 @@ impl WriteContext {
             attribution: None,
             batch_mode: None,
             batch_id: None,
+            target_branch_name: None,
         }
     }
 
@@ -157,6 +160,11 @@ impl WriteContext {
         self
     }
 
+    pub fn with_target_branch_name(mut self, target_branch_name: impl Into<String>) -> Self {
+        self.target_branch_name = Some(target_branch_name.into());
+        self
+    }
+
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
     }
@@ -167,6 +175,10 @@ impl WriteContext {
 
     pub fn batch_id(&self) -> Option<BatchId> {
         self.batch_id
+    }
+
+    pub fn target_branch_name(&self) -> Option<&str> {
+        self.target_branch_name.as_deref()
     }
 
     pub fn author_principal(&self) -> &str {
@@ -251,6 +263,7 @@ mod tests {
             attribution: Some("attributed-user".into()),
             batch_mode: None,
             batch_id: None,
+            target_branch_name: None,
         };
 
         assert_eq!(context.author_principal(), "attributed-user");
@@ -283,5 +296,13 @@ mod tests {
             WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
 
         assert_eq!(context.batch_id(), Some(batch_id));
+    }
+
+    #[test]
+    fn test_write_context_target_branch_name_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_target_branch_name("dev-111111111111-main");
+
+        assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
     }
 }

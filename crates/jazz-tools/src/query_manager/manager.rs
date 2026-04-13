@@ -19,7 +19,7 @@ use crate::schema_manager::{
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    SchemaWarning, SyncManager,
+    RowVersionKey, SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -395,7 +395,7 @@ pub struct QueryManager {
     /// Used to let `local_updates = Immediate` queries fall back to the current
     /// local row version when the requested remote durability tier has not been
     /// reached yet.
-    pub(super) pending_local_row_versions: HashMap<ObjectId, CommitId>,
+    pub(super) pending_local_row_versions: HashMap<ObjectId, RowVersionKey>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
@@ -1224,15 +1224,17 @@ impl QueryManager {
         let descriptor = table_schema.columns.clone();
         let old_row = update.previous_row.as_ref();
         let current_version_id = update.row.version_id();
+        let current_row_key = RowVersionKey::from_row(&update.row);
 
         if local_update {
             self.pending_local_row_versions
-                .insert(update.object_id, current_version_id);
-        } else if let Some(pending_version_id) = self
+                .insert(update.object_id, current_row_key);
+        } else if let Some(pending_row_key) = self
             .pending_local_row_versions
             .get(&update.object_id)
             .copied()
-            && (pending_version_id != current_version_id
+            && (pending_row_key.branch_name.as_str() == update.row.branch.as_str())
+            && (pending_row_key.version_id != current_version_id
                 || update.row.confirmed_tier == Some(DurabilityTier::GlobalServer))
         {
             self.pending_local_row_versions.remove(&update.object_id);
@@ -1607,10 +1609,16 @@ impl QueryManager {
         storage: &dyn Storage,
         primary_table: &str,
         fallback_table: Option<&str>,
-        row_id: ObjectId,
-        version_id: CommitId,
+        row_version_key: RowVersionKey,
     ) -> Option<QueryRowVersion> {
-        let load = |table: &str| storage.load_history_query_row_version(table, row_id, version_id);
+        let load = |table: &str| {
+            storage.load_history_query_row_version(
+                table,
+                row_version_key.branch_name.as_str(),
+                row_version_key.row_id,
+                row_version_key.version_id,
+            )
+        };
 
         load(primary_table).ok().flatten().or_else(|| {
             fallback_table
@@ -1621,20 +1629,22 @@ impl QueryManager {
 
     fn load_local_pending_query_row_with_hint_or_locator(
         storage: &dyn Storage,
-        row_id: ObjectId,
-        version_id: CommitId,
+        row_version_key: RowVersionKey,
         table_hint: Option<&str>,
         schema_context: &SchemaContext,
     ) -> Option<(String, QueryRowVersion)> {
         if let Some(hint) = table_hint
             && let Some(row) = Self::load_local_pending_query_row_from_candidate_tables(
-                storage, hint, None, row_id, version_id,
+                storage,
+                hint,
+                None,
+                row_version_key,
             )
         {
             return Some((hint.to_string(), row));
         }
 
-        let locator = Self::load_row_locator(storage, row_id)?;
+        let locator = Self::load_row_locator(storage, row_version_key.row_id)?;
         let original_table = locator.table.as_str();
         let current_table = locator
             .origin_schema_hash
@@ -1652,8 +1662,7 @@ impl QueryManager {
             storage,
             current_table_name,
             Some(original_table),
-            row_id,
-            version_id,
+            row_version_key,
         )?;
         Some((current_table_name.to_string(), row))
     }
@@ -1826,7 +1835,7 @@ impl QueryManager {
         table_hint: Option<&str>,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
-        local_pending_version: Option<CommitId>,
+        local_pending_version: Option<RowVersionKey>,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -1844,7 +1853,7 @@ impl QueryManager {
             branch_schema_map,
         )
         .or_else(|| {
-            let pending_version_id = local_pending_version?;
+            let pending_version = local_pending_version?;
             let resolved = Self::load_best_visible_row_version_with_hint_or_locator(
                 storage,
                 row_id,
@@ -1855,19 +1864,21 @@ impl QueryManager {
                 branch_schema_map,
             )?;
             let (_, row) = &resolved;
-            (row.version_id() == pending_version_id).then_some(resolved)
+            (row.version_id() == pending_version.version_id
+                && row.branch.as_str() == pending_version.branch_name.as_str())
+            .then_some(resolved)
         })
         .or_else(|| {
-            let pending_version_id = local_pending_version?;
+            let pending_version = local_pending_version?;
             let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
                 storage,
-                row_id,
-                pending_version_id,
+                pending_version,
                 table_hint,
                 schema_context,
             )?;
             let (_, row) = &resolved;
-            (row.version_id() == pending_version_id
+            (row.version_id() == pending_version.version_id
+                && row.branch.as_str() == pending_version.branch_name.as_str()
                 && matches!(row.state, RowState::StagingPending))
             .then_some(resolved)
         })?;

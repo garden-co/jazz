@@ -80,10 +80,12 @@ The intent of this spec is not to make every write transactional. It is to keep 
 ## Terms used here
 
 - **replayable**: a fact is replayable if the client can recover it after a dropped live event, reconnect, or restart from durable protocol state such as ordered replay, snapshot fallback, or persisted local records. In other words, it is not "only true if you happened to catch the live callback"
-- **logical batch**: one user-visible write unit identified by one `BatchId`. A logical batch may touch multiple objects/branches, so it may materialize as multiple per-object batch members
+- **logical batch**: one user-visible write unit identified by one `BatchId`. A logical batch may touch multiple objects, so it may materialize as multiple per-object batch members
 - **visible batch member**: one per-object `(object_id, branch_name, batch_id)` materialization of a logical batch on the visible prefix
 - **visible prefix**: the full user-meaningful branch-prefix namespace introduced by the batch-branch substrate. Concretely, within an `(object_id, branch_name)` lineage, this is the prefix normal reads use, and where direct visible batch members and accepted transactional visible batch members are stored under their shared `BatchId`
 - **staging prefix**: a sibling branch-prefix namespace used only for staging transactional batches before acceptance. Ordinary reads ignore it
+- **target composed prefix**: the one `(env, schema_hash, user_branch)` prefix a transactional batch will publish into if accepted
+- **schema family**: the set of live composed prefixes sharing one `(env, user_branch)` family and connected by the current non-draft schema-lens graph
 - **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted visible-batch-member set
 - **remote visibility**: whether a change is allowed to affect what another runtime, or any non-local subscription result, can see over sync
 - **strict transaction visibility**: an opt-in query mode that waits for accepted transactional results to be complete for the query's current local scope before showing them
@@ -157,32 +159,64 @@ What matters is that the stricter mode is chosen deliberately rather than becomi
 
 The MVP should not make applications pay transaction latency, authority dependency, or stricter visibility costs unless they opt in explicitly.
 
-### 3. `BatchId` is the transaction id for transactional writes
+### 3. Transactional batches bind one target composed prefix
 
 For every write, `BatchId` remains the batch identifier from the batch-branch substrate.
 
-The only extra rule is:
+The extra transactional rule is:
 
-- for **direct visible batches**, `BatchId` is just the batch id
-- for **transactional batches**, that same `BatchId` also acts as the transaction id
+- for **direct visible batches**, the existing visible-prefix rules stay as they are
+- for **transactional batches**, the batch chooses one `target composed prefix`
 
-So for a transactional write, there is no second semantic id beside the batch id.
+A transactional batch may touch multiple objects, but it may publish accepted output only into that one target composed prefix.
 
-- `BatchId` is the logical transaction id
-- the same `BatchId` is reused across every touched prefix/object
+That means:
 
-This means:
+- a transactional batch may touch many objects
+- every accepted output in that batch shares one target `(env, schema_hash, user_branch)`
+- a transactional batch may not publish into both `main` and `draft`
+- a transactional batch may not publish into two schema hashes at once
 
-- every transaction is exactly one logical batch id
-- one transaction may still materialize as multiple per-prefix batch branches
+This restriction is intentional. It keeps transactional publication single-prefix while still allowing multi-object correctness.
 
 Example:
 
 - Alice starts transactional batch `B7`
 - she touches `todo/1` and `project/9`
-- those become separate physical branches that both carry `BatchId = B7`
+- both accepted outputs, if the batch is accepted, publish into the same target composed prefix
 
-### 4. One batch-settlement model folds fate and durability together
+### 4. Transaction validation is schema-family aware and writes are schema-upgrading
+
+Although a transactional batch publishes into one target composed prefix, the authority must validate it against the whole live schema family for that `(env, user_branch)`.
+
+Concretely, for each touched object the authority should:
+
+1. inspect the currently visible family state across all live schema branches in that family
+2. use the same schema-lens graph the query layer uses to reason about compatible older-schema rows
+3. choose the current logical winner for validation purposes from that family-visible state
+4. if the batch is accepted, publish the accepted output only into the transaction's target composed prefix
+
+This means transactional writes are schema-upgrading by default:
+
+- reads may observe older schema branches through the family lens graph
+- writes publish only in the target schema chosen for the transaction
+- touching an older-schema row in a transaction upgrades that row into the transaction's target schema on acceptance
+
+The authority is therefore not choosing winners independently per schema hash. It validates against one family-visible logical state and then publishes one upgraded accepted result into the transaction's target prefix.
+
+### 5. `BatchId` is the transaction id and accepted version id for transactional writes
+
+For transactional batches there is still no second semantic id beside `BatchId`.
+
+- `BatchId` is the logical transaction id
+- the same `BatchId` is reused across every touched object in the batch
+- for accepted transactional publication on the target composed prefix, that same `BatchId` also acts as the published row-version identity
+
+This is viable because the MVP transactional model allows at most one accepted output per touched object on one target composed prefix.
+
+The physical row still keeps explicit provenance fields such as `_jazz_updated_at`. `BatchId` is an identity, not a replacement for semantic timestamps.
+
+### 6. One batch-settlement model folds fate and durability together
 
 The status quo spreads write truth across separate concepts. The MVP should collapse that into one replayable settlement model, while still keeping transaction completeness separate.
 
@@ -230,7 +264,7 @@ This one `BatchSettlement` model replaces three separate ideas:
 - a separate transactional fate type
 - a separate per-commit confirmed-tier stream
 
-### 5. Batch settlement becomes the read-side durability truth
+### 7. Batch settlement becomes the read-side durability truth
 
 `QuerySettled` should no longer mean "this query permanently achieved tier T".
 
@@ -246,7 +280,7 @@ In plain terms:
 - `BatchSettlement.DurableDirect` answers "this direct visible batch exists durably at tier T"
 - `BatchSettlement.AcceptedTransaction` answers "this transaction was accepted and its published visible batch members currently sit at tier T"
 
-### 6. Strict transaction visibility is opt-in and has one optional local overlay
+### 8. Strict transaction visibility is opt-in and has one optional local overlay
 
 Queries and subscriptions keep ordinary behavior by default.
 
@@ -267,7 +301,7 @@ That optional overlay is the narrow replacement for today's broad "local updates
 - only the author's own local pending transaction may bypass acceptance
 - remote edge-only updates must not bypass strict visibility
 
-### 7. Replay first, snapshot fallback
+### 9. Replay first, snapshot fallback
 
 Reconnect should converge from ordered replay when possible, and from compact current truth when replay history is gone.
 
@@ -279,7 +313,7 @@ The protocol should be designed around:
 
 Replay remains the fast path. Snapshot fallback remains the correctness path.
 
-### 8. Rejected outcomes survive restart until acknowledged
+### 10. Rejected outcomes survive restart until acknowledged
 
 For both direct visible batches and transactional batches:
 
@@ -328,34 +362,87 @@ This is the stricter write mode.
 Behavior:
 
 1. the client explicitly starts a transactional batch
-2. all staged row changes land on staging prefixes
-3. ordinary readers do not include staging prefixes
-4. the authority validates the batch against its captured frontier
-5. the authority emits one replayable `BatchSettlement`
-6. if accepted, the authority creates accepted visible batch members
-7. if rejected, the staging batches never become visible and local pending state rolls back
+2. the batch binds one target composed prefix
+3. all staged row changes land on staging prefixes for that target prefix
+4. repeated writes to the same touched object collapse to one final staged write-set member
+5. ordinary readers do not include staging prefixes
+6. the client explicitly seals the batch for authority decision
+7. the authority validates the batch against its captured frontier and the current family-visible state for that `(env, user_branch)`
+8. the authority emits one replayable `BatchSettlement`
+9. if accepted, the authority creates accepted visible batch members on the target composed prefix
+10. if rejected, the staging batches never become visible and local pending state rolls back
 
 Because transactionality is opt-in:
 
 - ordinary writes keep current latency/availability semantics
 - the authority is only on the path for writes that asked for transactional guarantees
 
+#### Write-set semantics inside one transactional batch
+
+The MVP transactional staging model is a write-set, not an append-only sequence of staged row versions.
+
+Within one transactional batch:
+
+- there is at most one final staged member per touched object on the target composed prefix
+- later writes to the same object in the batch overwrite earlier staged intent
+- accepted publication emits at most one visible batch member per touched object
+
+The normalization intent is:
+
+- `insert -> update` becomes one final insert
+- `insert -> delete` disappears from the final write-set
+- `update -> update` becomes one final update
+- `update -> delete` becomes one final delete
+
+The exact storage encoding of staged members is an implementation detail. What matters is that the authority validates one final per-object write-set for the batch, not an arbitrary list of intermediate staged edits.
+
+Storage implementations may map branch names to local persisted branch ords for compact manifests and keys. Those ords are storage-local only; wire/API semantics still speak in branch names.
+
+#### `SealBatch` is the authority-facing finalize signal
+
+This MVP requires an explicit "the transaction is done" signal.
+
+High-level shape:
+
+```text
+SealBatch {
+  batch_id,
+  target_branch_name,
+  members,
+  requested_tier,
+  captured_frontier,
+}
+```
+
+The exact wire encoding is not important yet. The semantic contract is:
+
+- staging rows by themselves do not mean the transaction is complete
+- `SealBatch` says "validate the final staged write-set for this batch"
+- `SealBatch` is the durable boundary that lets the authority decide one accepted or rejected fate
+- `members` is the exact final per-object write-set for the batch, after same-object writes have collapsed
+- `captured_frontier` is the full family-visible frontier for the target `(env, user_branch)` family at seal time
+- retries must resend the exact same sealed submission rather than recapturing a newer frontier
+
+Because transaction acceptance is exclusive at the `(env, user_branch)` family level, the authority must compare the persisted `captured_frontier` against the current family-visible frontier before accepting. If the frontier moved, the batch is rejected with a replayable conflict settlement.
+
 ### Transactional batch lifecycle at a glance
 
 For a successful transactional batch, the end-to-end shape is:
 
 1. create one `BatchId`
-2. stage changes on staging prefixes carrying that `BatchId`
-3. ask the authority to validate and decide that batch
-4. receive `BatchSettlement.AcceptedTransaction { batch_id, confirmed_tier, visible_members }`
-5. wait for the accepted visible batch members in `visible_members` to become locally present and for `confirmed_tier` to satisfy any requested tier
+2. bind one target composed prefix for that batch
+3. stage changes on staging prefixes carrying that `BatchId`
+4. seal the batch for authority decision
+5. receive `BatchSettlement.AcceptedTransaction { batch_id, confirmed_tier, visible_members }`
+6. wait for the accepted visible batch members in `visible_members` to become locally present and for `confirmed_tier` to satisfy any requested tier
 
 For a rejected transactional batch, the shape is shorter:
 
 1. create one `BatchId`
-2. stage local changes on the staging prefix
-3. receive `BatchSettlement.Rejected`
-4. roll back the local pending view and retain the rejection across restart until acknowledged
+2. bind one target composed prefix and stage local changes on the staging prefix
+3. seal the batch
+4. receive `BatchSettlement.Rejected`
+5. roll back the local pending view and retain the rejection across restart until acknowledged
 
 ## Batch settlement semantics
 
@@ -364,7 +451,7 @@ Semantics for the unified `BatchSettlement` model:
 - `Missing`: the authority has no durable record of this batch; the client must retransmit the original direct or transactional submission
 - `Rejected`: the batch was refused before or during authoritative apply
 - `DurableDirect`: a direct visible batch exists durably on the visible prefix and currently has batch `confirmed_tier = T`
-- `AcceptedTransaction`: the authority accepted a transactional batch, published the authoritative visible batch members, and those visible batch members currently have batch `confirmed_tier = T`
+- `AcceptedTransaction`: the authority accepted a transactional batch, published the authoritative visible batch members on that batch's one target composed prefix, and those visible batch members currently have batch `confirmed_tier = T`
 
 `Rejected` covers cases such as:
 
@@ -379,11 +466,14 @@ Every accepted transactional visible batch member should carry enough metadata t
 Minimum metadata:
 
 - `tx_role=accepted_transaction_output`
+- explicit `_jazz_updated_at`
 
 This is needed for two reasons:
 
 1. after restart, the runtime must be able to map a visible batch member back to accepted-transaction semantics rather than treating it like an ordinary direct visible batch member
 2. `BatchSettlement.AcceptedTransaction { visible_members }` and the visible-prefix history must agree about which visible batch members belong to the accepted transaction
+
+In the MVP, every member of one `AcceptedTransaction` shares one `branch_name`, because every transactional batch publishes into exactly one target composed prefix. Keeping `VisibleBatchMember { object_id, branch_name, batch_id }` still makes sense as a uniform settlement shape, but `AcceptedTransaction.visible_members` must all agree on `branch_name`.
 
 `AcceptedTransaction { visible_members }` remains the authoritative replayable settlement. The accepted visible-batch-member metadata exists so the visible-prefix history itself still carries transaction attribution after persistence and reload.
 
@@ -395,10 +485,13 @@ Each runtime with durable local storage should persist one record for each still
 LocalBatchRecord {
   batch_id,
   mode: Direct | Transactional,
+  target_branch_name?,
   requested_tier,
   latest_settlement,
 }
 ```
+
+For transactional batches, `target_branch_name` records the one target composed prefix chosen for that batch. Direct visible batches do not need this extra field.
 
 High-level state machine:
 
@@ -451,6 +544,8 @@ Definition:
 2. intersect that scope with the batch's accepted `visible_members`
 3. the transaction is complete for that query only when every intersecting accepted visible batch member is locally present
 
+The contributing scope should be understood at the schema-family level for the transaction's `(env, user_branch)`, using the same live-schema expansion and lens graph as ordinary read planning. Completeness is therefore judged against the batch's one accepted target prefix but from a query scope that may have been derived from multiple live schema branches in that family.
+
 This is intentionally weaker than exact global query completeness.
 
 It is still strong enough to guarantee:
@@ -477,7 +572,7 @@ To make strict visibility concrete, the query layer needs two pieces of shadow s
 
 This replaces per-visible-commit tracking with per-visible-batch tracking.
 
-Single-table queries can often derive visible batch ids directly from the row version. Joins, array subqueries, and other derived outputs must union the visible batch ids of every contributing tuple element.
+Single-table queries can often derive visible batch ids directly from the row version. For accepted transactional publication in this MVP, that row-version identity is the same `BatchId`. Joins, array subqueries, and other derived outputs must union the visible batch ids of every contributing tuple element.
 
 This shadow provenance is internal delivery state. It does not need to become a public row shape in the MVP.
 
@@ -609,7 +704,7 @@ Later Bob writes batch B2 on Alice's edge only
   -> B2 held back until confirmed at global
 ```
 
-### Scenario 3: opt-in transaction accepted
+### Scenario 3: opt-in transaction accepted and schema-upgrading
 
 **Today on `main`**
 
@@ -625,10 +720,14 @@ Only direct visible optimistic writes exist
 
 ```text
 Alice starts transactional batch B7
-  -> writes stage on staging prefixes for todo/1 and project/9
+  -> target composed prefix is dev/v3/main
+  -> todo/1 currently has a visible winner on older schema dev/v1/main
+  -> writes stage on the dev/v3/main staging prefix for todo/1 and project/9
+  -> B7 is sealed for authority decision
   -> strict mode + local pending overlay lets Alice see her own pending state
 
 Authority validates B7
+  -> checks family-visible state across live dev/main schema branches
   -> BatchSettlement.AcceptedTransaction(
        B7,
        confirmed_tier=edge,
@@ -658,6 +757,8 @@ Alice makes an optimistic multi-object change
 ```text
 Alice starts transactional batch B8
   -> local pending view visible only to Alice via the optional local pending overlay
+  -> repeated edits to the same object collapse in B8's final write-set
+  -> B8 is sealed for authority decision
 
 Authority rejects B8
   -> BatchSettlement.Rejected(B8, code=permission_denied)
@@ -693,6 +794,7 @@ This is why the MVP needs:
 ## Rabbit Holes
 
 - Exact naming and encoding of staging prefixes on top of the batch-branch substrate.
+- Whether persisted branch ords should replace branch names in storage keys more broadly; that remains compatible with this transactional model but is no longer required for transactional bookkeeping if accepted batches stay single-target-prefix.
 - Efficiently computing `complete_for_current_local_scope` for joins, arrays, and recursive query shapes.
 - Re-triggering delivery when tier state changes without row bytes changing.
 - Deciding whether batch confirmed tier should always be emitted live or can sometimes be synthesized only from replay/snapshot state.
@@ -703,6 +805,7 @@ This is why the MVP needs:
 
 - No change that makes all writes transactional by default.
 - No second transaction id beside `BatchId` for transactional writes.
+- No transactional batch that publishes into more than one target composed prefix in the MVP.
 - No subscription-wide durability watermark as the read-side source of truth.
 - No exact global atomic visibility guarantees for every query shape.
 - No distributed authority placement, leases, or multi-owner consensus in the MVP.
@@ -714,8 +817,9 @@ Prefer RuntimeCore and SchemaManager integration tests with realistic actors and
 
 - `alice` writes a direct visible batch with `tier: "global"`, the live tier update is dropped, reconnect happens, and the write resolves from replay or snapshot rather than hanging.
 - `alice` and `carol` subscribe with `tier: "global"` on different edges, `bob` writes one direct visible batch on one edge, and neither sees that batch until its batch settlement reaches global.
-- `alice` starts transactional batch `B7` touching two objects, the authority accepts it, and a strict transaction-visible subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
+- `alice` starts transactional batch `B7` touching two objects on one target composed prefix, one touched object currently has an older schema winner in the same schema family, the authority validates against family-visible state, and a strict transaction-visible subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
 - `alice` starts transactional batch `B8`, the authority rejects it, the local pending view rolls back, and the rejected outcome survives restart until acknowledged.
+- `alice` writes the same object twice inside transactional batch `B9`, seals it, and the authority validates only the final per-object write-set member rather than two staged intermediate edits.
 - a reconnect within the replay window replays missed `ObjectUpdated`, `QueryFrontierSettled`, and `BatchSettlement` events without needing a full snapshot.
 - a reconnect after the replay window expires falls back to a frontier snapshot plus pending-batch reconciliation and still converges.
 - the optional local pending overlay shows Alice her own pending transactional edits locally, while Bob never sees those pending edits and still waits for accepted visible batch members.
@@ -731,6 +835,9 @@ The MVP should be shaped as one design with two write modes over one shared batc
 
 2. **transactional batches are explicit opt-in**
    - `BatchId` also acts as tx id
+   - one target composed prefix per transactional batch
+   - validation is schema-family aware and writes are schema-upgrading
+   - `SealBatch` finalizes the batch with an exact member manifest and captured family frontier
    - authority emits `AcceptedTransaction` or `Rejected` inside `BatchSettlement`
    - accepted visible batch members drive strict query visibility
    - rejected outcomes roll back and survive restart

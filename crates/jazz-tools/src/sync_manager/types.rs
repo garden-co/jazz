@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
@@ -277,6 +277,9 @@ pub enum SyncPayload {
     /// Request current replayable fate for specific batch ids.
     BatchSettlementNeeded { batch_ids: Vec<BatchId> },
 
+    /// Explicitly seal a transactional batch so the authority can validate it.
+    SealBatch { submission: SealedBatchSubmission },
+
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
@@ -402,6 +405,9 @@ impl SyncPayload {
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::SealBatch { submission } => {
+                submission.members.first().map(|member| member.object_id)
+            }
             SyncPayload::QueryScopeSnapshot { scope, .. } => {
                 scope.first().map(|(object_id, _)| *object_id)
             }
@@ -425,6 +431,7 @@ impl SyncPayload {
                 BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::SealBatch { .. } => None,
             SyncPayload::QueryScopeSnapshot { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
             }
@@ -441,6 +448,7 @@ impl SyncPayload {
                 | SyncPayload::RowVersionNeeded { .. }
                 | SyncPayload::RowVersionStateChanged { .. }
                 | SyncPayload::BatchSettlement { .. }
+                | SyncPayload::SealBatch { .. }
         )
     }
 
@@ -481,6 +489,7 @@ impl SyncPayload {
             SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
             SyncPayload::BatchSettlement { .. } => "BatchSettlement",
             SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
+            SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",

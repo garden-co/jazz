@@ -1198,6 +1198,17 @@ impl NapiRuntime {
         })
     }
 
+    #[napi(js_name = "sealBatch")]
+    pub fn seal_batch(&self, batch_id: String) -> napi::Result<()> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.seal_batch(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Seal batch failed: {e}")))
+    }
+
     // =========================================================================
     // Sync Operations
     // =========================================================================

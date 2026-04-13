@@ -711,6 +711,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.acknowledge_rejected_batch(batch_id)?)
     }
 
+    /// Mark a transactional batch as complete so sync can validate and settle
+    /// it as one unit.
+    pub fn seal_batch(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.seal_batch(batch_id)?)
+    }
+
     /// Run a closure with read access to the SyncManager (for testing/inspection).
     #[cfg(test)]
     pub(crate) fn with_sync_manager<R>(

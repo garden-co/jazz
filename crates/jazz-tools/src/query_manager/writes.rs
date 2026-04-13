@@ -8,8 +8,9 @@ use crate::row_histories::{
     BatchId, QueryRowVersion, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
     apply_row_version,
 };
-use crate::schema_manager::resolve_current_table_name;
+use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
+use crate::sync_manager::RowVersionKey;
 
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
@@ -224,6 +225,7 @@ impl QueryManager {
     fn maybe_track_local_pending_transaction_overlay(
         &mut self,
         table: &str,
+        branch_name: &BranchName,
         row_id: ObjectId,
         version_id: CommitId,
         write_context: Option<&WriteContext>,
@@ -239,7 +241,8 @@ impl QueryManager {
             return;
         }
 
-        self.pending_local_row_versions.insert(row_id, version_id);
+        self.pending_local_row_versions
+            .insert(row_id, RowVersionKey::new(row_id, *branch_name, version_id));
         self.mark_subscriptions_dirty_local(table);
         if deleted {
             self.mark_local_row_deleted_in_subscriptions(table, row_id);
@@ -391,6 +394,24 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
         new_provenance: &RowProvenance,
     ) -> Result<PreparedUpdateWrite, QueryError> {
+        let write_schema = self.schema.clone();
+        self.prepare_update_write_for_schema(
+            storage,
+            write,
+            write_schema.as_ref(),
+            write_context,
+            new_provenance,
+        )
+    }
+
+    fn prepare_update_write_for_schema<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+        new_provenance: &RowProvenance,
+    ) -> Result<PreparedUpdateWrite, QueryError> {
         let RowBranchWrite {
             table,
             branch,
@@ -401,8 +422,7 @@ impl QueryManager {
         } = write;
         let table_name = TableName::new(table);
         let (descriptor, using_policy, check_policy) = {
-            let table_schema = self
-                .schema
+            let table_schema = write_schema
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
@@ -568,6 +588,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
+            &branch_name,
             id,
             version_id,
             write_context,
@@ -593,20 +614,31 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let schema_context = self.schema_context.clone();
+        self.load_row_for_schema_update_in_context(storage, id, branches, &schema_context)
+    }
+
+    pub fn load_row_for_schema_update_in_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        id: ObjectId,
+        branches: &[String],
+        schema_context: &SchemaContext,
+    ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
+        let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
         let (table, row) = self.load_best_visible_row_version(
             storage,
             id,
             branches,
             None,
-            &self.schema_context,
+            schema_context,
             &branch_schema_map,
         )?;
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
             branch_schema_map: &branch_schema_map,
-            schema_context: &self.schema_context,
+            schema_context,
             schema_warnings: &mut schema_warnings,
         };
         if row.data.is_empty() {
@@ -768,6 +800,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
+            &branch_name,
             object_id,
             row_version_id,
             write_context,
@@ -926,6 +959,134 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
+            &branch_name,
+            object_id,
+            row_version_id,
+            write_context,
+            false,
+            &visibility_change,
+        );
+
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_version(storage, visibility_change)?;
+        }
+
+        Ok(InsertResult {
+            row_id: object_id,
+            row_version_id,
+            row_values: values.to_vec(),
+        })
+    }
+
+    pub fn insert_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let table_name = TableName::new(table);
+        let table_schema = write_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let descriptor = table_schema.columns.clone();
+        let insert_policy = table_schema.policies.insert.with_check.clone();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+
+        let data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = ObjectId::new();
+        let timestamp = self.reserve_write_timestamp();
+        let provenance = self.row_provenance_for_insert(write_context, timestamp);
+
+        if let Some(session) = write_context.and_then(WriteContext::session) {
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(branch, Some(session))
+            {
+                let allowed = auth_schema
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .map(|policy| {
+                        self.evaluate_current_authorization_policy_for_content(
+                            storage,
+                            object_id,
+                            branch,
+                            table_name,
+                            policy,
+                            &data,
+                            &provenance,
+                            session,
+                            Operation::Insert,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                    })
+                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                if !allowed {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+            } else if let Some(policy) = insert_policy
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    &policy,
+                    &data,
+                    &provenance,
+                    &descriptor,
+                    session,
+                    table,
+                    branch,
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Insert,
+                });
+            }
+        }
+
+        let row_locator = self.row_locator_for_branch(table, branch);
+        self.persist_row_locator(storage, object_id, &row_locator);
+
+        let index_mutations = Self::index_mutations_for_insert_on_branch(
+            table,
+            branch,
+            object_id,
+            &data,
+            &descriptor,
+        );
+        let row = self.authored_row_version(
+            object_id,
+            branch,
+            vec![],
+            data.clone(),
+            self.row_version_authoring(&provenance, None, write_context),
+        );
+        let branch_name = BranchName::new(branch);
+        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            object_id,
+            row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            &branch_name,
             object_id,
             row_version_id,
             write_context,
@@ -1565,6 +1726,22 @@ impl QueryManager {
         write: RowBranchWrite<'_>,
         write_context: Option<&WriteContext>,
     ) -> Result<CommitId, QueryError> {
+        let write_schema = self.schema.clone();
+        self.write_existing_row_on_branch_with_schema_and_write_context(
+            storage,
+            write,
+            write_schema.as_ref(),
+            write_context,
+        )
+    }
+
+    pub fn write_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<CommitId, QueryError> {
         let RowBranchWrite {
             table,
             branch,
@@ -1576,7 +1753,13 @@ impl QueryManager {
         let timestamp = self.reserve_write_timestamp();
         let new_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
-        let prepared = self.prepare_update_write(storage, write, write_context, &new_provenance)?;
+        let prepared = self.prepare_update_write_for_schema(
+            storage,
+            write,
+            write_schema,
+            write_context,
+            &new_provenance,
+        )?;
 
         let existing_branch_data = self
             .load_visible_row_on_branch(storage, id, branch)
@@ -1789,6 +1972,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
+            &branch_name,
             id,
             delete_version_id,
             write_context,
@@ -1823,6 +2007,22 @@ impl QueryManager {
         delete: RowBranchDelete<'_>,
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
+        let write_schema = self.schema.clone();
+        self.delete_existing_row_on_branch_with_schema_and_write_context(
+            storage,
+            delete,
+            write_schema.as_ref(),
+            write_context,
+        )
+    }
+
+    pub fn delete_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        delete: RowBranchDelete<'_>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<DeleteHandle, QueryError> {
         let RowBranchDelete {
             table,
             branch,
@@ -1842,8 +2042,7 @@ impl QueryManager {
         }
 
         let (descriptor, using_policy) = {
-            let table_schema = self
-                .schema
+            let table_schema = write_schema
                 .get(&table_name)
                 .ok_or(QueryError::TableNotFound(table_name))?;
             (
@@ -1941,6 +2140,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
+            &branch_name,
             id,
             delete_version_id,
             write_context,
@@ -2059,6 +2259,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
+            &branch_name,
             id,
             row_version_id,
             None,
@@ -2149,6 +2350,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
+            &branch_name,
             id,
             delete_version_id,
             None,

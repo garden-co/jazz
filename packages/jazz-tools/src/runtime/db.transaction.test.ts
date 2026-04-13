@@ -43,6 +43,7 @@ function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
     batchId,
     mode: "transactional",
     requestedTier: "global",
+    sealed: false,
     latestSettlement: null,
   };
 }
@@ -76,6 +77,7 @@ describe("Db transactions", () => {
       updatePersisted: vi.fn(() => persistedUpdate),
       delete: vi.fn(),
       deletePersisted: vi.fn(() => persistedDelete),
+      commit: vi.fn(() => "batch-tx"),
       localBatchRecord: vi.fn((batchId = "batch-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-tx")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -147,6 +149,8 @@ describe("Db transactions", () => {
     });
     await expect(updated.wait()).resolves.toBeUndefined();
     await expect(deleted.wait()).resolves.toBeUndefined();
+    expect(tx.commit()).toBe("batch-tx");
+    expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
     expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
     expect(tx.acknowledgeRejectedBatch()).toBe(false);
@@ -180,6 +184,7 @@ describe("Db transactions", () => {
       updatePersisted: vi.fn(() => makePendingWrite("batch-session-update", undefined)),
       delete: vi.fn(),
       deletePersisted: vi.fn(() => makePendingWrite("batch-session-delete", undefined)),
+      commit: vi.fn(() => "batch-session-tx"),
       localBatchRecord: vi.fn((batchId = "batch-session-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-session-tx")]),
       acknowledgeRejectedBatch: vi.fn(() => true),
@@ -208,11 +213,52 @@ describe("Db transactions", () => {
       session,
       "alice@writer",
     );
+    expect(tx.commit()).toBe("batch-session-tx");
+    expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(inserted).toEqual({
       id: "todo-2",
       title: "Session transaction",
       done: true,
     });
     expect(persisted.batchId()).toBe("batch-session-persisted");
+  });
+
+  it("rejects db transaction writes after commit", () => {
+    const table = todoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-closed"),
+      create: vi.fn(() => ({
+        id: "todo-closed",
+        values: [
+          { type: "Text", value: "Closed" },
+          { type: "Boolean", value: false },
+        ],
+      })),
+      createPersisted: vi.fn(),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      commit: vi.fn(() => "batch-closed"),
+      localBatchRecord: vi.fn((batchId = "batch-closed") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-closed")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-transaction" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+    expect(tx.commit()).toBe("batch-closed");
+
+    expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
+    expect(runtimeTransaction.create).not.toHaveBeenCalled();
   });
 });
