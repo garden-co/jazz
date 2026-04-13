@@ -21,11 +21,14 @@ const defaultServerUrl = Platform.select({
 });
 
 const defaultAppId = "00000000-0000-0000-0000-000000000002";
-const envVars = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
-  ?.env;
-const envAppId = envVars?.EXPO_PUBLIC_JAZZ_APP_ID;
-const envServerUrl = envVars?.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = envVars?.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
+
+// Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
+// They must be accessed as literal process.env.KEY expressions — dynamic
+// lookups like globalThis.process.env[key] won't be replaced.
+declare const process: { env: Record<string, string | undefined> };
+const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
+const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
+const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
 
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;

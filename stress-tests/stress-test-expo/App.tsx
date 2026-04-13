@@ -14,10 +14,6 @@ import {
 import { TodoList } from "./src/TodoList";
 import { StressTest } from "./src/StressTest";
 
-declare const process: {
-  env: Record<string, string | undefined>;
-};
-
 const defaultServerUrl = Platform.select({
   android: "http://10.0.2.2:1625",
   ios: "http://127.0.0.1:1625",
@@ -25,34 +21,14 @@ const defaultServerUrl = Platform.select({
 });
 
 const defaultAppId = "00000000-0000-0000-0000-000000000002";
-type ExpoPublicEnvKey =
-  | "EXPO_PUBLIC_JAZZ_APP_ID"
-  | "EXPO_PUBLIC_JAZZ_SERVER_URL"
-  | "EXPO_PUBLIC_JAZZ_ADMIN_SECRET";
 
-const runtimeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-  .process?.env;
-
-function readExpoPublicEnv(key: ExpoPublicEnvKey): string | undefined {
-  const bundledValue =
-    key === "EXPO_PUBLIC_JAZZ_APP_ID"
-      ? typeof process !== "undefined"
-        ? process.env.EXPO_PUBLIC_JAZZ_APP_ID
-        : undefined
-      : key === "EXPO_PUBLIC_JAZZ_SERVER_URL"
-        ? typeof process !== "undefined"
-          ? process.env.EXPO_PUBLIC_JAZZ_SERVER_URL
-          : undefined
-        : typeof process !== "undefined"
-          ? process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET
-          : undefined;
-
-  return bundledValue ?? runtimeEnv?.[key];
-}
-
-const envAppId = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_APP_ID");
-const envServerUrl = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_SERVER_URL");
-const envAdminSecret = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_ADMIN_SECRET");
+// Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
+// They must be accessed as literal process.env.KEY expressions — dynamic
+// lookups like globalThis.process.env[key] won't be replaced.
+declare const process: { env: Record<string, string | undefined> };
+const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
+const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
+const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
 
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;
