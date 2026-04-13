@@ -25,21 +25,18 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
       before: createAuthMiddleware(async (ctx) => {
         if (ctx.path !== "/sign-up/email") return;
 
-        const proofToken = ctx.body?.proofToken;
-        if (!proofToken) {
-          throw new APIError("BAD_REQUEST", {
-            message: "proofToken is required for sign-up",
-          });
-        }
-
-        const { verifySelfSignedToken } = await import(
+        const { verifyLocalFirstIdentityProof } = await import(
           /* turbopackIgnore: true */
           /* webpackIgnore: true */
           "jazz-napi"
         );
-        const { ok, id: provedUserId } = verifySelfSignedToken(proofToken, "betterauth-signup");
+        const {
+          ok,
+          error,
+          id: provedUserId,
+        } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "betterauth-signup");
         if (!ok) {
-          throw new APIError("UNAUTHORIZED", { message: "Invalid proof token" });
+          throw new APIError("BAD_REQUEST", { message: error });
         }
 
         return {

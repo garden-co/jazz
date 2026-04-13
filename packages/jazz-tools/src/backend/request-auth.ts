@@ -1,7 +1,7 @@
 import { compactVerify, decodeProtectedHeader, importJWK } from "jose";
 import type { RequestLike } from "../runtime/client.js";
 import {
-  SELF_SIGNED_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   sessionFromJwtPayload,
   type JwtPayload,
@@ -11,7 +11,7 @@ import type { Session } from "../runtime/context.js";
 export interface BackendRequestAuthConfig {
   appId: string;
   jwksUrl?: string;
-  allowSelfSigned?: boolean;
+  allowLocalFirstAuth?: boolean;
 }
 
 type LocalJwksDocument = {
@@ -211,11 +211,11 @@ function ensureJwtNotExpired(payload: JwtPayload): void {
   }
 }
 
-async function verifySelfSignedToken(token: string, appId: string): Promise<string> {
-  const { verifySelfSignedToken: verifyToken } = await import("jazz-napi");
+async function verifyLocalFirstIdentityProof(token: string, appId: string): Promise<string> {
+  const { verifyLocalFirstIdentityProof: verifyToken } = await import("jazz-napi");
   const result = verifyToken(token, appId);
   if (!result.ok) {
-    throw new Error("Invalid self-signed token");
+    throw new Error("Invalid local-first identity proof");
   }
 
   return result.id;
@@ -245,18 +245,18 @@ export async function resolveRequestSession(
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
   const session = requireJwtSession(payload);
-  const allowSelfSigned = config.allowSelfSigned ?? true;
+  const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
 
-  if (payload.iss === SELF_SIGNED_JWT_ISSUER) {
-    if (!allowSelfSigned) {
+  if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
+    if (!allowLocalFirstAuth) {
       throw new Error(
-        "Received self-signed JWT, but createJazzContext() has allowSelfSigned disabled.",
+        "Received local-first JWT, but createJazzContext() has allowLocalFirstAuth disabled.",
       );
     }
 
-    const verifiedUserId = await verifySelfSignedToken(token, config.appId);
+    const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
     if (session.user_id !== verifiedUserId) {
-      throw new Error("Invalid self-signed token");
+      throw new Error("Invalid local-first identity proof");
     }
     return session;
   }

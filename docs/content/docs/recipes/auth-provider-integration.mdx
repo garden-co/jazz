@@ -28,7 +28,7 @@ sequenceDiagram
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz derives `session.user_id` from the JWT's `sub` claim and issuer.
+4. On success, Jazz derives `session.user_id` from `jazz_principal_id` when present, otherwise from the JWT's `sub` claim.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -72,10 +72,14 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at your Better Auth JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://your-app.example.com/api/auth/jwks
+    jazz-tools server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks
     ```
 
     For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
+
+    <Callout type="info">
+      If your users start unauthenticated and sign up later, see [Local-first auth](/docs/auth/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
+    </Callout>
 
   </Tab>
   <Tab value="WorkOS">
@@ -90,7 +94,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at the WorkOS JWKS endpoint:
 
     ```bash
-    jazz-server --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    jazz-tools server <APP_ID> --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
     ```
 
     For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
@@ -98,7 +102,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
   </Tab>
 </Tabs>
 
-Anonymous and demo auth are disabled by default in production. See [Server setup](/docs/reference/server-setup) for the full set of server flags.
+See [Server setup](/docs/getting-started/server-setup) for the full set of server flags.
 
 ## Using JWT claims in permissions
 
@@ -122,6 +126,6 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-The `sub` claim identifies the user. Jazz derives `session.user_id` from it (combined with the JWT issuer when present).
+By default, the `sub` claim identifies the user. If your provider supports custom claims but keeps `sub` fixed to its own user ID, include `jazz_principal_id` in the JWT instead. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

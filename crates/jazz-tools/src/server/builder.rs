@@ -71,7 +71,7 @@ impl ServerBuilder {
         Self {
             app_id,
             auth_config: AuthConfig {
-                allow_self_signed: true,
+                allow_local_first_auth: true,
                 ..Default::default()
             },
             catalogue_authority: CatalogueAuthorityMode::Local,
@@ -93,8 +93,8 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_self_signed_auth(mut self, enabled: bool) -> Self {
-        self.auth_config.allow_self_signed = enabled;
+    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
+        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 

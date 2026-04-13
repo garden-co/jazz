@@ -34,13 +34,13 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="offline-only" title="Can I use Jazz without a server?">
 
-Yes. Skip server auth and omit `serverUrl` — data will be persisted locally only. See [Offline-Only Mode](/docs/auth/authentication#offline-only-mode).
+Yes. Omit `serverUrl` from your config — data will be persisted locally only.
 
 </Accordion>
 
-<Accordion id="anonymous-to-external" title="Can I upgrade from anonymous auth to external auth without losing data?">
+<Accordion id="local-first-to-external" title="Can I upgrade from local-first auth to external auth without losing data?">
 
-Yes. Link the local identity to an external one when the user signs in. See [Upgrading from local auth](/docs/auth/authentication#upgrading-from-local-auth).
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
 
 </Accordion>
 
@@ -58,7 +58,7 @@ Jazz may return the following errors when a client's request is rejected by the 
   [permission policy](/docs/auth/permissions). Check that the session has the right to perform
   that operation on the row.
 - **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
-  Make sure the client is using a valid auth mode (anonymous, demo, or external JWT).
+  Make sure the client is using a valid auth mode (local-first or external JWT).
 - **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
   catalogue object without the required admin secret. In production, catalogue writes require
   `--admin-secret`.

@@ -1442,15 +1442,15 @@ impl WasmRuntime {
         Ok(user_id.to_string())
     }
 
-    #[wasm_bindgen(js_name = "mintSelfSignedToken")]
-    pub fn mint_self_signed_token_static(
+    #[wasm_bindgen(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token_static(
         seed_b64: &str,
         audience: &str,
         ttl_seconds: u64,
         now_seconds: u64,
     ) -> Result<String, JsError> {
         let seed = decode_seed(seed_b64)?;
-        identity::mint_self_signed_token_at(&seed, audience, ttl_seconds, now_seconds)
+        identity::mint_local_first_token_at(&seed, audience, ttl_seconds, now_seconds)
             .map_err(|e| JsError::new(&e))
     }
 

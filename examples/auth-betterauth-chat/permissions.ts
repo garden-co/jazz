@@ -5,7 +5,7 @@ import { app } from "./schema";
 export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
   const isAuthenticated = session.where({
-    "claims.auth_mode": { in: ["self-signed", "external"] },
+    "claims.auth_mode": { in: ["local-first", "external"] },
   });
   const canMutateGenericChat = anyOf([{ $createdBy: session.user_id }, isAdmin]);
 
