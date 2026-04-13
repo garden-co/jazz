@@ -41,6 +41,9 @@ function ChatShell(): React.JSX.Element {
 
   async function handleSignOut() {
     await authClient.signOut();
+    // Changing the principal ID is not supported yet
+    // so we need to reload the page to clear the auth state
+    window.location.reload();
   }
 
   return (
