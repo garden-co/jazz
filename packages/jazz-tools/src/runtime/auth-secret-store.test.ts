@@ -87,4 +87,19 @@ describe("BrowserAuthSecretStore", () => {
     await store.saveSecret("test-secret");
     expect(storage.getItem("jazz-auth-secret")).toBe("test-secret");
   });
+
+  it("saveSecret updates getOrCreateSecret's cache", async () => {
+    const first = await store.getOrCreateSecret();
+    const replacement = generateAuthSecret();
+    expect(replacement).not.toBe(first);
+    await store.saveSecret(replacement);
+    expect(await store.getOrCreateSecret()).toBe(replacement);
+  });
+
+  it("saveSecret updates loadSecret even after getOrCreateSecret was cached", async () => {
+    await store.getOrCreateSecret();
+    const replacement = generateAuthSecret();
+    await store.saveSecret(replacement);
+    expect(await store.loadSecret()).toBe(replacement);
+  });
 });
