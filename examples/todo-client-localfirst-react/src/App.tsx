@@ -7,19 +7,16 @@ import { app } from "../schema.js";
 
 const devToolsAttachedClients = new WeakSet<object>();
 
-function readEnvAppId(): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-    ?.JAZZ_APP_ID;
-}
+const appId = import.meta.env.JAZZ_APP_ID;
+const serverUrl = import.meta.env.JAZZ_SERVER_URL;
 
 // #region context-setup-react
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-23f3-7227-818f-51eb1d178b6b";
-
   return {
     appId,
     env: "dev",
     userBranch: "main",
+    serverUrl,
     auth: { localFirstSecret: secret },
     ...overrides,
   };
