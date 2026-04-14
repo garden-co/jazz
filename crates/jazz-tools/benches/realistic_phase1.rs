@@ -21,7 +21,6 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use jazz_tools::commit::CommitId;
 use jazz_tools::metadata::{MetadataKey, RowProvenance};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
@@ -30,7 +29,7 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
-use jazz_tools::row_histories::{RowState, StoredRowVersion, apply_row_version};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, apply_row_batch};
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::MemoryStorage;
@@ -3488,11 +3487,11 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
         let root_timestamp = next_timestamp;
         next_timestamp += 1;
 
-        let mut head_id = apply_row_version(
+        let mut head_id = apply_row_batch(
             storage,
             object_id,
             &jazz_tools::object::BranchName::new(&branch_name),
-            StoredRowVersion::new(
+            StoredRowBatch::new(
                 object_id,
                 branch_name.clone(),
                 Vec::new(),
@@ -3504,17 +3503,17 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
             ),
             &[],
         )
-        .expect("seed many-branches root row version")
-        .version_id;
+        .expect("seed many-branches root row batch")
+        .batch_id;
 
         for commit_idx in 1..scenario.commits_per_branch {
             let updated_at = next_timestamp;
             next_timestamp += 1;
-            head_id = apply_row_version(
+            head_id = apply_row_batch(
                 storage,
                 object_id,
                 &jazz_tools::object::BranchName::new(&branch_name),
-                StoredRowVersion::new(
+                StoredRowBatch::new(
                     object_id,
                     branch_name.clone(),
                     vec![head_id],
@@ -3531,8 +3530,8 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
                 ),
                 &[],
             )
-            .expect("append linear row version in many-branches benchmark")
-            .version_id;
+            .expect("append linear row batch in many-branches benchmark")
+            .batch_id;
         }
 
         branch_names.push(branch_name);
@@ -3632,9 +3631,9 @@ fn scan_leaf_like_branch_heads(
     scan
 }
 
-fn branch_head_checksum(branch_name: &str, head_id: CommitId) -> u64 {
+fn branch_head_checksum(branch_name: &str, head_id: BatchId) -> u64 {
     let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&head_id.0[..8]);
+    bytes.copy_from_slice(&head_id.as_bytes()[..8]);
     u64::from_le_bytes(bytes) ^ (branch_name.len() as u64)
 }
 
