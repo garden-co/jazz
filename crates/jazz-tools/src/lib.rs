@@ -33,6 +33,8 @@ pub mod transport_protocol;
 #[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
 
+pub mod transport_manager;
+
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
