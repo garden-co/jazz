@@ -9,16 +9,8 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
-  sendSyncPayload,
-  generateClientId,
   buildEndpointUrl,
   applyUserAuthHeaders,
-  createRuntimeSyncStreamController,
-  createSyncOutboxRouter,
-  isExpectedFetchAbortError,
-  SyncAuthError,
-  type SyncStreamController,
-  type SyncAuth,
   type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
@@ -96,7 +88,8 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
-  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
+  /** Route outbox messages to the transport layer. Required for WASM worker-bridge; no-op for NAPI/RN (Rust owns the transport). */
+  onSyncMessageToSend?(callback: RuntimeSyncOutboxCallback): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
@@ -617,61 +610,26 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private streamController: SyncStreamController;
-  private serverClientId: string = generateClientId();
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
-  private useBackendSyncAuth = false;
-  private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
-  private syncStarted = false;
-  private remoteSyncConnected: boolean;
-  private pendingRemoteSyncWaiters: Array<{
-    resolve: () => void;
-    reject: (error: Error) => void;
-  }> = [];
-  private readonly inFlightServerSyncs = new Set<Promise<void>>();
-  private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
 
   private constructor(
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
+    _runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.onAuthFailure = runtimeOptions?.onAuthFailure;
-    this.remoteSyncConnected = !context.serverUrl;
     this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
     }).session;
-    this.streamController = createRuntimeSyncStreamController({
-      getRuntime: () => this.runtime,
-      getAuth: () => this.getSyncAuth(),
-      getSchemaHash: () => this.runtime.getSchemaHash(),
-      getClientId: () => this.serverClientId,
-      setClientId: (clientId) => {
-        this.serverClientId = clientId;
-      },
-      onConnected: () => {
-        this.remoteSyncConnected = true;
-        this.resolvePendingRemoteSyncWaiters();
-      },
-      onDisconnected: () => {
-        this.remoteSyncConnected = false;
-      },
-      onAuthFailure: (reason) => {
-        this.remoteSyncConnected = false;
-        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
-        this.onAuthFailure?.(reason);
-      },
-    });
   }
 
   /**
@@ -704,11 +662,6 @@ export class JazzClient {
       runtimeOptions,
     );
 
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
     return client;
   }
 
@@ -738,19 +691,7 @@ export class JazzClient {
       runtimeOptions?.useBinaryEncoding ?? false,
     );
 
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -768,19 +709,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -840,8 +769,6 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("serverUrl required for backend mode");
     }
-    this.useBackendSyncAuth = true;
-    this.streamController.updateAuth();
     return this;
   }
 
@@ -851,21 +778,6 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken,
     }).session;
-    this.streamController.updateAuth();
-  }
-
-  private getSyncAuth(): SyncAuth {
-    if (this.useBackendSyncAuth) {
-      return {
-        backendSecret: this.context.backendSecret,
-        adminSecret: this.context.adminSecret,
-      };
-    }
-
-    return {
-      jwtToken: this.context.jwtToken,
-      adminSecret: this.context.adminSecret,
-    };
   }
 
   private normalizeQueryExecutionOptions(
@@ -1504,18 +1416,13 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.resolvePendingRemoteSyncWaiters();
     if (this.shutdownPromise) {
       return await this.shutdownPromise;
     }
 
     this.shutdownPromise = (async () => {
-      this.shuttingDown = true;
-
-      // Stop accepting new server-bound outbox work before tearing down sync.
-      this.runtime.onSyncMessageToSend(() => undefined);
-      this.streamController.stop();
-      await this.waitForInFlightServerSyncs();
+      // Disconnect Rust-owned transport if present.
+      this.runtime.disconnect?.();
 
       // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
       if (this.runtime.close) {
@@ -1526,106 +1433,10 @@ export class JazzClient {
     return await this.shutdownPromise;
   }
 
-  private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    this.syncStarted = true;
-    this.runtime.onSyncMessageToSend(
-      createSyncOutboxRouter({
-        logPrefix: "[client] ",
-        retryServerPayloads: true,
-        onServerPayload: (payload, isCatalogue) =>
-          this.sendSyncMessage(payload as string, isCatalogue),
-        onServerPayloadError: (error) => {
-          if (error instanceof SyncAuthError) {
-            this.streamController.notifyAuthFailure(error.reason);
-            return;
-          }
-
-          const isExpectedAbort = isExpectedFetchAbortError(error);
-          if (!isExpectedAbort) {
-            console.error("Sync POST error:", error);
-            this.streamController.notifyTransportFailure();
-          }
-        },
-      }),
-    );
-
-    // Connect to binary stream for incoming messages
-    this.streamController.start(serverUrl, serverPathPrefix);
-  }
-
-  private resolvePendingRemoteSyncWaiters(): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.resolve();
-    }
-  }
-
-  private rejectPendingRemoteSyncWaiters(error: Error): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.reject(error);
-    }
-  }
-
-  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
-    if (
-      !this.syncStarted ||
-      !this.context.serverUrl ||
-      tier === "worker" ||
-      this.remoteSyncConnected
-    ) {
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      this.pendingRemoteSyncWaiters.push({ resolve, reject });
-    });
-  }
-
-  private async waitForInFlightServerSyncs(): Promise<void> {
-    while (this.inFlightServerSyncs.size > 0) {
-      await Promise.allSettled(this.inFlightServerSyncs);
-    }
-  }
-
-  private trackServerSync(pending: Promise<void>): Promise<void> {
-    let tracked: Promise<void>;
-    tracked = pending.finally(() => {
-      this.inFlightServerSyncs.delete(tracked);
-    });
-    this.inFlightServerSyncs.add(tracked);
-    return tracked;
-  }
-
-  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
-    if (this.shuttingDown) {
-      return Promise.resolve();
-    }
-
-    const serverUrl = this.streamController.getServerUrl();
-    if (!serverUrl) return Promise.resolve();
-
-    return this.trackServerSync(
-      sendSyncPayload(
-        serverUrl,
-        payloadJson,
-        isCatalogue,
-        {
-          ...this.getSyncAuth(),
-          clientId: this.serverClientId,
-          pathPrefix: this.streamController.getPathPrefix(),
-        },
-        "[client] ",
-      ),
-    );
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private async waitForRemoteReadAvailability(_tier: DurabilityTier): Promise<void> {
+    // Connection state is managed by the Rust-owned WebSocket transport.
+    // No TS-side wait needed here.
   }
 }
 
