@@ -865,6 +865,7 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
+    #[cfg(feature = "rocksdb")]
     fn seed_rehydrated_client_storage(
         data_dir: &std::path::Path,
         app_id: AppId,
@@ -919,6 +920,7 @@ mod tests {
         (bundled_hash, learned_hash)
     }
 
+    #[cfg(feature = "rocksdb")]
     fn expected_client_catalogue_hash(context: &AppContext) -> String {
         #[cfg(feature = "rocksdb")]
         let storage = {
@@ -1017,6 +1019,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -1054,6 +1057,7 @@ mod tests {
         client.shutdown().await.expect("shutdown client");
     }
 
+    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
