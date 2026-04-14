@@ -3,7 +3,8 @@
  *
  * `Value` is the logical runtime-facing value shape used throughout the TS client.
  * `FFIValue` names that same shape when values are crossing into a specific runtime
- * adapter or native binding, where transport details may differ by platform.
+ * adapter or native binding. These are naming aliases only; runtime adapters can
+ * translate them at transport boundaries without forcing client-side copies.
  */
 
 export type Value =
@@ -21,17 +22,14 @@ export type Value =
 
 export type InsertValues = Record<string, Value>;
 export type FFIValue = Value;
-export type FFIRecord = Record<string, FFIValue>;
+export type FFIRecord = InsertValues;
 
 export interface WasmRow {
   id: string;
   values: Value[];
 }
 
-export interface FFIRow {
-  id: string;
-  values: FFIValue[];
-}
+export type FFIRow = WasmRow;
 
 export type RowAdded = 0;
 export type RowRemoved = 1;

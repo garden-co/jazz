@@ -6,7 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { FFIRecord, InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
@@ -23,7 +23,6 @@ import {
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
-import { toFFIRecord } from "./ffi-value.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
@@ -49,25 +48,25 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: FFIRecord): Row;
-  insertWithSession?(table: string, values: FFIRecord, write_context_json?: string | null): Row;
-  insertDurable(table: string, values: FFIRecord, tier: string): Promise<Row>;
+  insert(table: string, values: InsertValues): Row;
+  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
   insertDurableWithSession?(
     table: string,
-    values: FFIRecord,
+    values: InsertValues,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
-  update(object_id: string, values: FFIRecord): void;
+  update(object_id: string, values: Record<string, Value>): void;
   updateWithSession?(
     object_id: string,
-    values: FFIRecord,
+    values: Record<string, Value>,
     write_context_json?: string | null,
   ): void;
-  updateDurable(object_id: string, values: FFIRecord, tier: string): Promise<void>;
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
-    values: FFIRecord,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
@@ -1095,16 +1094,15 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): Row {
-    const ffiValues = toFFIRecord(values);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
         ? this.requireSessionWriteMethod("insertWithSession")(
             table,
-            ffiValues,
+            values,
             this.encodeWriteContext(effectiveSession, attribution),
           )
-        : this.runtime.insert(table, ffiValues);
+        : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1133,18 +1131,17 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
-    const ffiValues = toFFIRecord(values);
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
         ? await this.requireSessionWriteMethod("insertDurableWithSession")(
             table,
-            ffiValues,
+            values,
             this.encodeWriteContext(effectiveSession, attribution),
             tier,
           )
-        : await this.runtime.insertDurable(table, ffiValues, tier);
+        : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1203,17 +1200,16 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): void {
-    const ffiUpdates = toFFIRecord(updates);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
-        ffiUpdates,
+        updates,
         this.encodeWriteContext(effectiveSession, attribution),
       );
       return;
     }
-    this.runtime.update(objectId, ffiUpdates);
+    this.runtime.update(objectId, updates);
   }
 
   /**
@@ -1238,19 +1234,18 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
-    const ffiUpdates = toFFIRecord(updates);
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
-        ffiUpdates,
+        updates,
         this.encodeWriteContext(effectiveSession, attribution),
         tier,
       );
       return;
     }
-    await this.runtime.updateDurable(objectId, ffiUpdates, tier);
+    await this.runtime.updateDurable(objectId, updates, tier);
   }
 
   /**

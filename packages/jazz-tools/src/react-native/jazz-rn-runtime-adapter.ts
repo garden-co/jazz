@@ -1,4 +1,4 @@
-import type { FFIRecord, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
@@ -219,7 +219,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  insert(table: string, values: FFIRecord): Row {
+  insert(table: string, values: InsertValues): Row {
     try {
       const rowJson = this.binding.insert(table, encodeFFIRecordToJson(values));
       return JSON.parse(rowJson) as Row;
@@ -228,7 +228,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  insertWithSession(table: string, values: FFIRecord, write_context_json?: string | null): Row {
+  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
     try {
       const rowJson = this.requireWriteContextMethod("insertWithSession")(
         table,
@@ -241,7 +241,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: FFIRecord): void {
+  update(object_id: string, values: Record<string, Value>): void {
     try {
       this.binding.update(object_id, encodeFFIRecordToJson(values));
     } catch (error) {
@@ -252,7 +252,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   updateWithSession(
     object_id: string,
-    values: FFIRecord,
+    values: Record<string, Value>,
     write_context_json?: string | null,
   ): void {
     try {
@@ -370,7 +370,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertDurable(table: string, values: FFIRecord, tier: string): Promise<Row> {
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row> {
     assertWorkerTier(tier);
     const row = this.insert(table, values);
     this.binding.flush();
@@ -379,7 +379,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   insertDurableWithSession(
     table: string,
-    values: FFIRecord,
+    values: InsertValues,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row> {
@@ -389,7 +389,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve(row);
   }
 
-  updateDurable(object_id: string, values: FFIRecord, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
@@ -398,7 +398,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   updateDurableWithSession(
     object_id: string,
-    values: FFIRecord,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void> {
