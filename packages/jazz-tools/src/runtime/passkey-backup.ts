@@ -27,3 +27,62 @@ export class PasskeyBackupError extends Error {
     }
   }
 }
+
+export interface BrowserPasskeyBackupOptions {
+  appName: string;
+  /**
+   * Relying-party ID for the passkey credential. Defaults to `location.hostname`.
+   * Must be stable across environments for cross-device recovery to work.
+   */
+  appHostname?: string;
+}
+
+function base64urlToBytes(input: string): Uint8Array {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const remainder = normalized.length % 4;
+  const padded = remainder === 0 ? normalized : normalized + "=".repeat(4 - remainder);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function bytesToBase64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export class BrowserPasskeyBackup {
+  private readonly appName: string;
+  private readonly rpId: string;
+
+  constructor(options: BrowserPasskeyBackupOptions) {
+    this.appName = options.appName;
+    this.rpId = options.appHostname ?? globalThis.location?.hostname ?? "localhost";
+  }
+
+  async backup(secret: string): Promise<void> {
+    if (!globalThis.navigator?.credentials) {
+      throw new PasskeyBackupError("not-supported");
+    }
+
+    let secretBytes: Uint8Array;
+    try {
+      secretBytes = base64urlToBytes(secret);
+    } catch {
+      throw new PasskeyBackupError("invalid-secret");
+    }
+    if (secretBytes.length !== 32) {
+      throw new PasskeyBackupError("invalid-secret");
+    }
+
+    // credentials.create call will be added in Task 3
+  }
+
+  async restore(): Promise<string> {
+    throw new Error("not implemented yet");
+  }
+}
