@@ -1,17 +1,12 @@
 use crate::object::ObjectId;
-use crate::row_histories::BatchId;
-use crate::row_histories::HistoryScan;
+use crate::row_histories::{BatchId, HistoryScan};
 
 use super::key_codec::{
-    history_row_batches_prefix, history_row_key, history_row_prefix, increment_string,
-    raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix, strip_raw_table_key,
-    visible_row_batches_key, visible_row_batches_prefix, visible_row_key, visible_row_prefix,
+    decode_history_row_key, history_row_batches_prefix, history_row_key, history_row_prefix,
+    increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
+    strip_raw_table_key, visible_row_key, visible_row_prefix,
 };
 use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
-
-fn encode_batch_id(batch_id: BatchId) -> [u8; 16] {
-    *batch_id.as_bytes()
-}
 
 pub(super) fn raw_table_put_core(
     table: &str,
@@ -130,9 +125,6 @@ pub(super) fn upsert_visible_region_row_bytes_core(
     for row in rows {
         let key = visible_row_key(table, row.branch, row.row_id);
         set(&key, row.bytes)?;
-        let row_batches_key = visible_row_batches_key(table, row.row_id, row.branch);
-        let batch_id = encode_batch_id(row.current_batch_id);
-        set(&row_batches_key, &batch_id)?;
     }
     Ok(())
 }
@@ -196,11 +188,11 @@ pub(super) fn scan_visible_region_row_batch_branches_core(
     row_id: ObjectId,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Result<Vec<String>, StorageError> {
-    let prefix = visible_row_batches_prefix(table, row_id);
+    let prefix = history_row_batches_prefix(table, row_id);
     let mut branches = scan_prefix_keys(&prefix)?
         .into_iter()
-        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
-        .collect::<Vec<_>>();
+        .map(|key| decode_history_row_key(table, &key).map(|(_, branch, _)| branch))
+        .collect::<Result<Vec<_>, _>>()?;
     branches.sort();
     branches.dedup();
     Ok(branches)

@@ -1165,12 +1165,10 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
                 vec![
                     SealedBatchMember {
                         object_id: first_row_id,
-                        branch_name: BranchName::new("main"),
                         row_digest: first_row.content_digest(),
                     },
                     SealedBatchMember {
                         object_id: second_row_id,
-                        branch_name: BranchName::new("main"),
                         row_digest: second_row.content_digest(),
                     },
                 ],
@@ -1295,7 +1293,6 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
                 "main",
                 vec![SealedBatchMember {
                     object_id: row_id,
-                    branch_name: BranchName::new("main"),
                     row_digest: second_row.content_digest(),
                 }],
                 Vec::new(),
@@ -1428,7 +1425,6 @@ fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
                 "main",
                 vec![SealedBatchMember {
                     object_id: row_id,
-                    branch_name: BranchName::new("main"),
                     row_digest: second_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {
@@ -1501,12 +1497,10 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
                 vec![
                     SealedBatchMember {
                         object_id: first_row_id,
-                        branch_name: BranchName::new("main"),
                         row_digest: first_row_batch_id,
                     },
                     SealedBatchMember {
                         object_id: second_row_id,
-                        branch_name: BranchName::new("main"),
                         row_digest: second_row_batch_id,
                     },
                 ],
@@ -1601,7 +1595,6 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
                 "main",
                 vec![SealedBatchMember {
                     object_id: row_id,
-                    branch_name: BranchName::new("main"),
                     row_digest: second_row.content_digest(),
                 }],
                 Vec::new(),
@@ -1790,12 +1783,10 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
                 vec![
                     SealedBatchMember {
                         object_id: main_row_id,
-                        branch_name: BranchName::new("main"),
                         row_digest: main_row.content_digest(),
                     },
                     SealedBatchMember {
                         object_id: draft_row_id,
-                        branch_name: BranchName::new("draft"),
                         row_digest: draft_row.content_digest(),
                     },
                 ],
@@ -1809,7 +1800,7 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch members must share a single target branch"
+            reason: "sealed transactional batch rows must belong to the declared target branch"
                 .to_string(),
         })
     );
@@ -1876,7 +1867,6 @@ fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
         "main",
         vec![SealedBatchMember {
             object_id: row_id,
-            branch_name: BranchName::new("main"),
             row_digest: staged_row.content_digest(),
         }],
         Vec::new(),
@@ -1969,7 +1959,6 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
                 target_branch,
                 vec![SealedBatchMember {
                     object_id: staged_row_id,
-                    branch_name: BranchName::new(target_branch),
                     row_digest: staged_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {
@@ -2051,7 +2040,6 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
                 target_branch,
                 vec![SealedBatchMember {
                     object_id: staged_row_id,
-                    branch_name: BranchName::new(target_branch),
                     row_digest: staged_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {

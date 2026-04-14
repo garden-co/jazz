@@ -27,19 +27,6 @@ impl SyncManager {
             });
         }
 
-        if submission
-            .members
-            .iter()
-            .any(|member| member.branch_name != submission.target_branch_name)
-        {
-            return Err(BatchSettlement::Rejected {
-                batch_id: submission.batch_id,
-                code: "invalid_batch_submission".to_string(),
-                reason: "sealed transactional batch members must share a single target branch"
-                    .to_string(),
-            });
-        }
-
         if submission.batch_digest
             != SealedBatchSubmission::compute_batch_digest(&submission.members)
         {
@@ -63,6 +50,26 @@ impl SyncManager {
             code: "transaction_conflict".to_string(),
             reason: "family-visible frontier changed since batch was sealed".to_string(),
         }
+    }
+
+    fn validate_batch_rows_target_branch(
+        &self,
+        submission: &SealedBatchSubmission,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> Result<(), BatchSettlement> {
+        if batch_rows.iter().any(|(_, row)| {
+            row.batch_id == submission.batch_id
+                && row.branch.as_str() != submission.target_branch_name.as_str()
+        }) {
+            return Err(BatchSettlement::Rejected {
+                batch_id: submission.batch_id,
+                code: "invalid_batch_submission".to_string(),
+                reason: "sealed transactional batch rows must belong to the declared target branch"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
     }
 
     fn validate_captured_frontier<H: Storage>(
@@ -457,7 +464,7 @@ impl SyncManager {
                     .iter()
                     .find(|(_, row)| {
                         row.row_id == member.object_id
-                            && row.branch.as_str() == member.branch_name.as_str()
+                            && row.branch.as_str() == submission.target_branch_name.as_str()
                             && row.content_digest() == member.row_digest
                     })
                     .cloned()
@@ -477,7 +484,7 @@ impl SyncManager {
                         .iter()
                         .map(|member| VisibleBatchMember {
                             object_id: member.object_id,
-                            branch_name: member.branch_name,
+                            branch_name: submission.target_branch_name,
                             batch_id,
                         })
                         .collect();
@@ -540,10 +547,19 @@ impl SyncManager {
             );
             return;
         }
+        if let Err(rejection) = self.validate_batch_rows_target_branch(&submission, &batch_rows) {
+            self.reject_sealed_transactional_batch(
+                storage,
+                Some(client_id),
+                rejection,
+                &batch_rows,
+            );
+            return;
+        }
         if !submission.members.iter().all(|member| {
             batch_rows.iter().any(|(_, row)| {
                 row.row_id == member.object_id
-                    && row.branch.as_str() == member.branch_name.as_str()
+                    && row.branch.as_str() == submission.target_branch_name.as_str()
                     && row.content_digest() == member.row_digest
             })
         }) {
@@ -586,10 +602,16 @@ impl SyncManager {
                 recovered_any = true;
                 continue;
             }
+            if let Err(rejection) = self.validate_batch_rows_target_branch(&submission, &batch_rows)
+            {
+                self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
+                recovered_any = true;
+                continue;
+            }
             if !submission.members.iter().all(|member| {
                 batch_rows.iter().any(|(_, row)| {
                     row.row_id == member.object_id
-                        && row.branch.as_str() == member.branch_name.as_str()
+                        && row.branch.as_str() == submission.target_branch_name.as_str()
                         && row.content_digest() == member.row_digest
                 })
             }) {

@@ -2,6 +2,14 @@
 
 This spec is written for readers who know the status quo on `main`.
 
+Update for this branch: the shared `BatchId` row identity model, replayable local batch records,
+explicit direct batches, explicit transactional batches, and row/batch digest terminology are now
+part of the current status quo. For the implementation as it exists today, start with
+[Batches — Status Quo](../../status-quo/batches.md).
+
+The remaining purpose of this TODO doc is to describe the stricter visibility/completeness work and
+the broader reconciliation design that still extends beyond the landed batch model.
+
 Today Jazz has one optimistic sync pipeline:
 
 - writes become ordinary object-branch commits
@@ -442,7 +450,7 @@ High-level shape:
 SealBatch {
   batch_id,
   target_branch_name,
-  members: [{ object_id, branch_name, row_digest }],
+  members: [{ object_id, row_digest }],
   batch_digest,
   requested_tier,
   captured_frontier,

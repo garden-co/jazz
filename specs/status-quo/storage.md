@@ -10,9 +10,12 @@ Everything above it assumes reads and writes happen immediately:
 
 That is why the `Storage` trait is synchronous even in the browser. The browser gets there by putting durable storage in a dedicated worker, where OPFS exposes synchronous file access.
 
+For the current direct/transactional batch lifecycle layered on top of that storage, see
+[Batches](batches.md).
+
 ## What Storage Owns
 
-The current storage layer is responsible for five kinds of data:
+The current storage layer is responsible for six kinds of data:
 
 ### 1. Raw tables
 
@@ -44,7 +47,18 @@ Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` 
 table's user columns. Storage exposes them through dedicated helpers such as history scans,
 visible-row loads, and row-state patch operations.
 
-### 5. Catalogue entries
+### 5. Batch bookkeeping
+
+Replayable write state is also durable storage state now. Storage persists:
+
+- local batch records in `__local_batch_record`
+- authoritative settlements in `__authoritative_batch_settlement`
+- sealed transactional submissions in `__sealed_batch_submission`
+
+Those rows are keyed by `batch:<batch_id_hex>` and let reconnect/restart recover batch fate
+without depending on a live ack having been observed.
+
+### 6. Catalogue entries
 
 Schemas and lenses live in a separate `catalogue` table. They do not reuse the user-row history path, but they do reuse the same underlying storage and row encoding machinery.
 
@@ -57,12 +71,15 @@ raw user tables
   -> application rows and index keys
 
 row-history regions
-  -> flat history rows keyed by (row_id, batch_id)
+  -> flat history rows keyed by (row_id, branch, batch_id)
   -> flat visible rows keyed by (branch, row_id)
 
 system tables
   -> __metadata
   -> __row_locator
+  -> __local_batch_record
+  -> __authoritative_batch_settlement
+  -> __sealed_batch_submission
   -> catalogue
 ```
 
@@ -80,6 +97,15 @@ Storage does not invent its own payload format. It relies on `row_format` for:
 
 This shared binary format is what lets user rows, visible rows, history rows, and catalogue rows
 all move through the system without every layer inventing a different shape.
+
+At the key level, the important row-history families are:
+
+```text
+row:<table>:0:<branch>:<row_id_hex>
+row:<table>:1:<row_id_hex>:<branch>:<batch_id_hex>
+```
+
+The full meaning of those families is documented in [Batches](batches.md).
 
 ## Durable Backends
 
@@ -115,7 +141,7 @@ Main thread runtime
 Dedicated worker runtime
   -> OpfsBTreeStorage
   -> upstream /sync and /events ownership
-  -> durable local row histories and visible entries
+  -> durable local row histories, visible entries, and batch records
 ```
 
 The important point is that both runtimes still use the same synchronous `Storage` trait. The browser-specific complexity lives in the worker split, not in two different storage APIs.

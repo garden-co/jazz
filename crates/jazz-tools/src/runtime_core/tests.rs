@@ -4158,7 +4158,6 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
             crate::object::BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id: row_id,
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: staged_row.content_digest(),
             }],
             Vec::new(),
@@ -4257,7 +4256,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         .storage_mut()
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
         .unwrap();
-    let error = old_runtime
+    old_runtime
         .storage_mut()
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
@@ -4265,34 +4264,39 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
             vec![
                 SealedBatchMember {
                     object_id: main_row_id,
-                    branch_name: crate::object::BranchName::new("main"),
                     row_digest: main_row.content_digest(),
                 },
                 SealedBatchMember {
                     object_id: draft_row_id,
-                    branch_name: crate::object::BranchName::new("draft"),
                     row_digest: draft_row.content_digest(),
                 },
             ],
             Vec::new(),
         ))
-        .unwrap_err();
+        .unwrap();
+
+    let storage = old_runtime.into_storage();
+    let restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "transactional-restart-invalid-seal-recovery-test",
+        storage,
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
 
     assert_eq!(
-        error,
-        crate::storage::StorageError::IoError(
-            "sealed batch member branch draft does not match target branch main".to_string(),
-        )
-    );
-    assert_eq!(
-        old_runtime
+        restarted
             .storage()
             .load_authoritative_batch_settlement(batch_id)
             .unwrap(),
-        None
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "invalid_batch_submission".to_string(),
+            reason: "sealed transactional batch rows must belong to the declared target branch"
+                .to_string(),
+        })
     );
     assert_eq!(
-        old_runtime
+        restarted
             .storage()
             .load_sealed_batch_submission(batch_id)
             .unwrap(),
@@ -4405,7 +4409,6 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
             target_branch,
             vec![SealedBatchMember {
                 object_id: staged_row_id,
-                branch_name: target_branch,
                 row_digest: staged_row.content_digest(),
             }],
             vec![CapturedFrontierMember {
@@ -4518,7 +4521,6 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
                 && submission.target_branch_name == branch_name
                 && submission.members == vec![SealedBatchMember {
                     object_id: row_id,
-                    branch_name: branch_name.clone(),
                     row_digest,
                 }]
                 && submission.captured_frontier.is_empty()
@@ -4556,7 +4558,6 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
                 && submission.target_branch_name == branch_name
                 && submission.members == vec![SealedBatchMember {
                     object_id: row_id,
-                    branch_name: branch_name.clone(),
                     row_digest,
                 }]
                 && submission.captured_frontier.is_empty()
@@ -4676,7 +4677,6 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
             && submission.target_branch_name == branch_name
             && submission.members == vec![SealedBatchMember {
                 object_id: row_id,
-                branch_name: branch_name.clone(),
                 row_digest,
             }]
             && submission.captured_frontier.iter().any(|member| member.object_id == later_row_id)
@@ -5891,10 +5891,13 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
         )
         .expect("history bytes should be readable after old-client update");
     assert!(
-        history_bytes
-            .iter()
-            .all(|bytes| crate::row_histories::is_flat_history_row(bytes)),
-        "all row-history versions should be stored as flat physical rows once their schemas are in catalogue"
+        old_runtime
+            .storage()
+            .scan_history_row_batches("users", inserted_id)
+            .expect("row-history bytes should remain decodable with keyed schema context")
+            .len()
+            == history_bytes.len(),
+        "all row-history versions should remain decodable as flat rows once their schemas are in catalogue"
     );
 
     let storage = old_runtime.into_storage();
@@ -5962,19 +5965,25 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
         )
         .expect("history bytes should be readable after insert");
     assert_eq!(history_bytes.len(), 1);
-    assert!(
-        crate::row_histories::is_flat_history_row(&history_bytes[0]),
-        "current-schema inserts should write flat row-history bytes without manual schema seeding"
-    );
 
     let user_descriptor = schema
         .get(&TableName::new("users"))
         .expect("users table should exist")
         .columns
         .clone();
-    let decoded =
-        crate::row_histories::decode_flat_history_row(&user_descriptor, &history_bytes[0])
-            .expect("flat history row should decode with the catalogue-backed descriptor");
+    let decoded = crate::row_histories::decode_flat_history_row(
+        &user_descriptor,
+        inserted_id,
+        "main",
+        core.storage()
+            .scan_history_row_batches("users", inserted_id)
+            .expect("typed history rows should be readable")
+            .first()
+            .expect("one history row should exist")
+            .batch_id(),
+        &history_bytes[0],
+    )
+    .expect("flat history row should decode with the catalogue-backed descriptor");
     assert_eq!(decoded.row_id, inserted_id);
     assert_eq!(decoded.data.len() > 0, true);
 }

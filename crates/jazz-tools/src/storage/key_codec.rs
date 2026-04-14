@@ -50,6 +50,26 @@ fn append_batch_id_hex(dst: &mut String, batch_id: BatchId) {
     append_hex_bytes(dst, batch_id.as_bytes());
 }
 
+fn decode_hex_object_id(raw: &str, context: &str) -> Result<ObjectId, StorageError> {
+    let bytes = hex::decode(raw)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid row id hex: {err}")))?;
+    let uuid = uuid::Uuid::from_slice(&bytes)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid row id uuid: {err}")))?;
+    Ok(ObjectId::from_uuid(uuid))
+}
+
+fn decode_hex_batch_id(raw: &str, context: &str) -> Result<BatchId, StorageError> {
+    let bytes = hex::decode(raw)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid batch id hex: {err}")))?;
+    let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+        StorageError::IoError(format!(
+            "{context}: expected 16 batch id bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+    Ok(BatchId(bytes))
+}
+
 fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
     RAW_TABLE_KEY_PREFIX.len() + table.len() + 1 + key_len
 }
@@ -233,36 +253,29 @@ pub(super) fn visible_row_prefix(table: &str, branch: &str) -> String {
     prefix
 }
 
+pub(super) fn decode_visible_row_key(
+    table: &str,
+    key: &str,
+) -> Result<(String, ObjectId), StorageError> {
+    let prefix = visible_table_prefix(table);
+    let rest = key
+        .strip_prefix(&prefix)
+        .ok_or_else(|| StorageError::IoError(format!("invalid visible row key '{key}'")))?;
+    let (branch, row_hex) = rest.rsplit_once(':').ok_or_else(|| {
+        StorageError::IoError(format!("invalid visible row key '{key}': missing row id"))
+    })?;
+    Ok((
+        branch.to_string(),
+        decode_hex_object_id(row_hex, &format!("decode visible row key '{key}'"))?,
+    ))
+}
+
 #[allow(dead_code)]
 pub(super) fn visible_table_prefix(table: &str) -> String {
     let mut prefix = String::with_capacity(4 + table.len() + 3);
     prefix.push_str("row:");
     prefix.push_str(table);
     prefix.push_str(":0:");
-    prefix
-}
-
-#[allow(dead_code)]
-pub(super) fn visible_row_batches_key(table: &str, row_id: ObjectId, branch: &str) -> String {
-    let mut key =
-        String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + branch.len());
-    key.push_str("row:");
-    key.push_str(table);
-    key.push_str(":2:");
-    append_uuid_hex(&mut key, row_id);
-    key.push(':');
-    key.push_str(branch);
-    key
-}
-
-#[allow(dead_code)]
-pub(super) fn visible_row_batches_prefix(table: &str, row_id: ObjectId) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":2:");
-    append_uuid_hex(&mut prefix, row_id);
-    prefix.push(':');
     prefix
 }
 
@@ -300,6 +313,27 @@ pub(super) fn history_row_prefix(table: &str) -> String {
     prefix.push_str(table);
     prefix.push_str(":1:");
     prefix
+}
+
+pub(super) fn decode_history_row_key(
+    table: &str,
+    key: &str,
+) -> Result<(ObjectId, String, BatchId), StorageError> {
+    let prefix = history_row_prefix(table);
+    let rest = key
+        .strip_prefix(&prefix)
+        .ok_or_else(|| StorageError::IoError(format!("invalid history row key '{key}'")))?;
+    let (row_hex, branch_and_batch) = rest.split_once(':').ok_or_else(|| {
+        StorageError::IoError(format!("invalid history row key '{key}': missing branch"))
+    })?;
+    let (branch, batch_hex) = branch_and_batch.rsplit_once(':').ok_or_else(|| {
+        StorageError::IoError(format!("invalid history row key '{key}': missing batch id"))
+    })?;
+    Ok((
+        decode_hex_object_id(row_hex, &format!("decode history row key '{key}'"))?,
+        branch.to_string(),
+        decode_hex_batch_id(batch_hex, &format!("decode history row key '{key}'"))?,
+    ))
 }
 
 #[allow(dead_code)]

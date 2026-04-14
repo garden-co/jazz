@@ -130,7 +130,6 @@ pub struct SealedBatchSubmission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedBatchMember {
     pub object_id: ObjectId,
-    pub branch_name: BranchName,
     pub row_digest: Digest32,
 }
 
@@ -336,8 +335,6 @@ impl SealedBatchSubmission {
         hasher.update(&(members.len() as u64).to_le_bytes());
         for member in members {
             hasher.update(member.object_id.uuid().as_bytes());
-            hasher.update(&(member.branch_name.as_str().len() as u64).to_le_bytes());
-            hasher.update(member.branch_name.as_str().as_bytes());
             hasher.update(&member.row_digest.0);
         }
         Digest32(*hasher.finalize().as_bytes())
@@ -354,7 +351,6 @@ impl SealedBatchSubmission {
                 .uuid()
                 .as_bytes()
                 .cmp(right.object_id.uuid().as_bytes())
-                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
                 .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
         });
         members.dedup();
@@ -389,7 +385,6 @@ impl SealedBatchSubmission {
                         id: None,
                         values: vec![
                             Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
-                            Value::Text(member.branch_name.as_str().to_string()),
                             Value::Bytea(member.row_digest.0.to_vec()),
                         ],
                     })
@@ -458,10 +453,8 @@ impl SealedBatchSubmission {
                 .iter()
                 .map(|element| match element {
                     Value::Row { values, .. } => {
-                        let [object_id, branch_name, row_digest] = values.as_slice() else {
-                            return Err(
-                                "expected sealed batch member row to have three values".to_string(),
-                            );
+                        let [object_id, row_digest] = values.as_slice() else {
+                            return Err("expected sealed batch member row to have two values".to_string());
                         };
                         let object_id = match object_id {
                             Value::Bytea(bytes) => uuid::Uuid::from_slice(bytes)
@@ -472,14 +465,6 @@ impl SealedBatchSubmission {
                             other => {
                                 return Err(format!(
                                     "expected sealed batch member object id bytes, got {other:?}"
-                                ));
-                            }
-                        };
-                        let branch_name = match branch_name {
-                            Value::Text(raw) => BranchName::new(raw),
-                            other => {
-                                return Err(format!(
-                                    "expected sealed batch member branch text, got {other:?}"
                                 ));
                             }
                         };
@@ -500,7 +485,6 @@ impl SealedBatchSubmission {
                         };
                         Ok(SealedBatchMember {
                             object_id,
-                            branch_name,
                             row_digest,
                         })
                     }
@@ -617,7 +601,6 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
                 element: Box::new(ColumnType::Row {
                     columns: Box::new(RowDescriptor::new(vec![
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
-                        ColumnDescriptor::new("branch_name", ColumnType::Text),
                         ColumnDescriptor::new("row_digest", ColumnType::Bytea),
                     ])),
                 }),
@@ -765,7 +748,6 @@ mod tests {
             BranchName::new("dev-aaaaaaaaaaaa-main"),
             vec![SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(42)),
-                branch_name: BranchName::new("dev-aaaaaaaaaaaa-main"),
                 row_digest: Digest32([4; 32]),
             }],
             vec![CapturedFrontierMember {
@@ -792,12 +774,10 @@ mod tests {
             vec![
                 SealedBatchMember {
                     object_id,
-                    branch_name: BranchName::new("main"),
                     row_digest,
                 },
                 SealedBatchMember {
                     object_id,
-                    branch_name: BranchName::new("main"),
                     row_digest,
                 },
             ],
@@ -822,7 +802,6 @@ mod tests {
                 batch_digest: submission.batch_digest,
                 members: vec![SealedBatchMember {
                     object_id,
-                    branch_name: BranchName::new("main"),
                     row_digest,
                 }],
                 captured_frontier: vec![CapturedFrontierMember {
@@ -842,7 +821,6 @@ mod tests {
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id,
-                branch_name: BranchName::new("main"),
                 row_digest: Digest32([1; 32]),
             }],
             Vec::new(),
@@ -852,7 +830,6 @@ mod tests {
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id,
-                branch_name: BranchName::new("main"),
                 row_digest: Digest32([2; 32]),
             }],
             Vec::new(),

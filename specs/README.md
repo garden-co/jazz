@@ -18,6 +18,8 @@ These docs describe the system as it works today.
 
 **[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row batch entries, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
 
+**[Batches](status-quo/batches.md)** — The current direct/transactional batch model. Covers `BatchId`, physical storage keys, in-memory runtime types, replayable settlements, explicit seal flow, and the Rust/TS batch APIs.
+
 **[Storage](status-quo/storage.md)** — The synchronous storage boundary beneath the runtime. Covers raw tables, indices, row locators, catalogue rows, row-history persistence, and the current durable backends.
 
 ### 2. Querying Current State
@@ -65,7 +67,7 @@ Typed App + Db APIs
      -> Storage
         -> raw tables and indices
         -> row locators and metadata
-        -> visible entries + row histories
+        -> visible entries + row histories + batch records
         -> catalogue entries
 ```
 
@@ -77,7 +79,7 @@ If you want one sentence to hold onto while reading the rest:
 
 Design work that has not landed yet lives in [`specs/todo/`](todo/). Useful entry points:
 
-- **[Opt-In Transactions with Replayable Reconciliation](todo/a_mvp/opt_in_transactions_replayable_reconciliation.md)** — transaction-shaped write semantics on top of the row-history foundation
+- **[Opt-In Transactions with Replayable Reconciliation](todo/a_mvp/opt_in_transactions_replayable_reconciliation.md)** — remaining strict-visibility and reconciliation design work on top of the now-landed batch model
 - **[Protocol and Storage Version Tags](todo/b_launch/protocol_and_storage_version_tags.md)** — explicit format/versioning strategy for on-disk state and wire payloads
 - **[Sharding Design Sketch](todo/b_launch/sharding_design_sketch.md)** — future distribution work
 - **[Built-in File Storage](todo/a_mvp/built_in_file_storage.md)** — first-class file/blob storage using the same relational substrate
