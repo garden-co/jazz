@@ -250,7 +250,11 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  updateWithSession(object_id: string, values: FFIRecord, write_context_json?: string | null): void {
+  updateWithSession(
+    object_id: string,
+    values: FFIRecord,
+    write_context_json?: string | null,
+  ): void {
     try {
       this.requireWriteContextMethod("updateWithSession")(
         object_id,
