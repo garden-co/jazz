@@ -68,6 +68,7 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
 
   async saveSecret(secret: string): Promise<void> {
     this.storage.setItem(this.key, secret);
+    this.cachedPromise = Promise.resolve(secret);
   }
 
   async clearSecret(): Promise<void> {
