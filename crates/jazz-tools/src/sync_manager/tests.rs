@@ -1216,13 +1216,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
     first_row.batch_id = batch_id;
     first_row.state = crate::row_histories::RowState::StagingPending;
 
-    let mut second_row = visible_row(
-        row_id,
-        "main",
-        vec![first_row.version_id()],
-        1_100,
-        b"alice-updated",
-    );
+    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
     second_row.batch_id = batch_id;
     second_row.state = crate::row_histories::RowState::StagingPending;
 
@@ -1281,23 +1275,130 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
         .expect("latest row should become visible after seal");
-    assert_eq!(visible.version_id(), second_row.version_id());
+    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
+    assert!(visible.parents.is_empty());
+    assert_eq!(visible.data, second_row.data);
+    assert_eq!(visible.batch_id, batch_id);
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+
+    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    assert_eq!(history_rows.len(), 3);
+    assert!(history_rows.iter().any(|row| {
+        row.version_id() == first_row.version_id()
+            && row.state == crate::row_histories::RowState::Superseded
+    }));
+    assert!(history_rows.iter().any(|row| {
+        row.version_id() == second_row.version_id()
+            && row.state == crate::row_histories::RowState::Superseded
+    }));
+    assert!(history_rows.iter().any(|row| {
+        row.version_id() == batch_id.accepted_version_id()
+            && row.state == crate::row_histories::RowState::VisibleTransactional
+    }));
 
     let outbox = sm.take_outbox();
-    assert_eq!(
-        outbox
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                OutboxEntry {
-                    destination: Destination::Client(id),
-                    payload: SyncPayload::RowVersionStateChanged { .. },
-                } if *id == client_id
-            ))
-            .count(),
-        1,
-        "only the latest staged row version should receive an accepted visibility update"
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::RowVersionStateChanged {
+                row_id: changed_row_id,
+                branch_name,
+                version_id,
+                state: Some(crate::row_histories::RowState::Superseded),
+                ..
+            },
+        } if *id == client_id
+            && *changed_row_id == row_id
+            && *branch_name == BranchName::new("main")
+            && *version_id == second_row.version_id()
+    )));
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::RowVersionNeeded { row, .. },
+        } if *id == client_id
+            && row.row_id == row_id
+            && row.version_id() == batch_id.accepted_version_id()
+            && row.state == crate::row_histories::RowState::VisibleTransactional
+    )));
+}
+
+#[test]
+fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let base_row = visible_row(row_id, "main", Vec::new(), 900, b"base");
+    seed_visible_row(&mut sm, &mut io, "users", base_row.clone());
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let mut first_row = visible_row(row_id, "main", vec![base_row.version_id()], 1_000, b"alice");
+    first_row.batch_id = batch_id;
+    first_row.state = crate::row_histories::RowState::StagingPending;
+
+    let mut second_row = visible_row(
+        row_id,
+        "main",
+        vec![base_row.version_id()],
+        1_100,
+        b"alice-updated",
     );
+    second_row.batch_id = batch_id;
+    second_row.state = crate::row_histories::RowState::StagingPending;
+
+    for row in [first_row.clone(), second_row.clone()] {
+        sm.process_from_client(
+            &mut io,
+            client_id,
+            SyncPayload::RowVersionCreated {
+                metadata: Some(RowMetadata {
+                    id: row.row_id,
+                    metadata: row_metadata("users"),
+                }),
+                row,
+            },
+        );
+    }
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                "main",
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new("main"),
+                    version_id: second_row.version_id(),
+                }],
+                vec![CapturedFrontierMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new("main"),
+                    version_id: base_row.version_id(),
+                }],
+            ),
+        },
+    );
+
+    let visible = io
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("sealed batch should publish the accepted row");
+    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
+    assert_eq!(visible.parents.as_slice(), [base_row.version_id()]);
+    assert_eq!(visible.data, second_row.data);
 }
 
 #[test]
@@ -1415,13 +1516,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     first_row.batch_id = batch_id;
     first_row.state = crate::row_histories::RowState::StagingPending;
 
-    let mut second_row = visible_row(
-        row_id,
-        "main",
-        vec![first_row.version_id()],
-        1_100,
-        b"alice-updated",
-    );
+    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
     second_row.batch_id = batch_id;
     second_row.state = crate::row_histories::RowState::StagingPending;
 
@@ -1501,7 +1596,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
         .expect("declared final row version should become visible");
-    assert_eq!(visible.version_id(), second_row.version_id());
+    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
 }
 
 #[test]
@@ -1521,13 +1616,7 @@ fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_se
     first_row.batch_id = batch_id;
     first_row.state = crate::row_histories::RowState::StagingPending;
 
-    let mut second_row = visible_row(
-        row_id,
-        "main",
-        vec![first_row.version_id()],
-        1_100,
-        b"alice-updated",
-    );
+    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
     second_row.batch_id = batch_id;
     second_row.state = crate::row_histories::RowState::StagingPending;
 

@@ -267,6 +267,29 @@ impl SyncManager {
         row: StoredRowVersion,
         force_resend: bool,
     ) {
+        self.queue_row_to_client_internal(client_id, object_id, metadata, row, force_resend, true);
+    }
+
+    pub(super) fn queue_row_to_client_unscoped(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+        force_resend: bool,
+    ) {
+        self.queue_row_to_client_internal(client_id, object_id, metadata, row, force_resend, false);
+    }
+
+    fn queue_row_to_client_internal(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+        force_resend: bool,
+        require_scope: bool,
+    ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
@@ -292,7 +315,7 @@ impl SyncManager {
             (in_scope, include_metadata, already_sent)
         };
 
-        if !in_scope {
+        if require_scope && !in_scope {
             return;
         }
 

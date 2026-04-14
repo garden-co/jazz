@@ -369,13 +369,13 @@ impl QueryManager {
         Some(row.row_provenance())
     }
 
-    pub(crate) fn load_latest_transactional_staged_row_on_branch(
+    fn load_latest_transactional_staged_history_row_on_branch(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
         batch_id: BatchId,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, StoredRowVersion)> {
         let table = self.load_row_table_name(storage, row_id)?;
         let row = storage
             .scan_history_row_versions(&table, row_id)
@@ -386,9 +386,62 @@ impl QueryManager {
                     && row.branch.as_str() == branch_name
                     && matches!(row.state, RowState::StagingPending)
             })
-            .max_by_key(|row| (row.updated_at, row.version_id()))
-            .map(|row| QueryRowVersion::from(&row))?;
+            .max_by_key(|row| (row.updated_at, row.version_id()))?;
         Some((table, row))
+    }
+
+    pub(crate) fn load_latest_transactional_staged_row_on_branch(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        batch_id: BatchId,
+    ) -> Option<(String, QueryRowVersion)> {
+        let (table, row) = self.load_latest_transactional_staged_history_row_on_branch(
+            storage,
+            row_id,
+            branch_name,
+            batch_id,
+        )?;
+        Some((table, QueryRowVersion::from(&row)))
+    }
+
+    fn transactional_staged_history_row_for_write(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Option<StoredRowVersion> {
+        let batch_id = write_context
+            .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
+            .and_then(WriteContext::batch_id)?;
+        self.load_latest_transactional_staged_history_row_on_branch(
+            storage,
+            row_id,
+            branch_name,
+            batch_id,
+        )
+        .map(|(_, row)| row)
+    }
+
+    fn parent_ids_for_write(
+        &self,
+        storage: &dyn Storage,
+        table: &str,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Vec<CommitId> {
+        if let Some(staged_row) = self.transactional_staged_history_row_for_write(
+            storage,
+            row_id,
+            branch_name,
+            write_context,
+        ) {
+            return staged_row.parents.iter().copied().collect();
+        }
+        self.load_branch_tip_ids(storage, table, row_id, branch_name)
     }
 
     fn transactional_staged_row_for_write(
@@ -602,7 +655,7 @@ impl QueryManager {
             id,
             index_mutations,
         } = commit;
-        let parents = self.load_branch_tip_ids(storage, table, id, branch);
+        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
         let row = self.authored_row_version(
             id,
@@ -1993,7 +2046,8 @@ impl QueryManager {
 
         // Get parent commit
         let branch = self.current_branch();
-        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
+        let parents =
+            self.parent_ids_for_write(storage, &table, id, branch.as_str(), write_context);
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
@@ -2172,7 +2226,7 @@ impl QueryManager {
                     .map(|(_, row)| row.data)
                     .filter(|data| !data.is_empty())
             });
-        let parents = self.load_branch_tip_ids(storage, table, id, branch);
+        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
