@@ -34,6 +34,8 @@ pub mod transport_protocol;
 pub use transport_protocol as jazz_transport;
 #[cfg(feature = "transport")]
 pub mod transport_manager;
+#[cfg(feature = "transport-websocket")]
+pub mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
