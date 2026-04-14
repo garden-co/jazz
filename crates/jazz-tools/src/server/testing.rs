@@ -35,6 +35,7 @@ pub struct TestingServerBuilder {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+    allow_local_first_auth: Option<bool>,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
@@ -110,6 +111,11 @@ impl TestingServerBuilder {
 
     pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
         self.jwks_url = Some(jwks_url.into());
+        self
+    }
+
+    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
+        self.allow_local_first_auth = Some(enabled);
         self
     }
 
@@ -199,6 +205,7 @@ impl TestingServer {
             admin_secret,
             backend_secret,
             jwks_url,
+            allow_local_first_auth,
             sync_tracer,
         } = builder;
 
@@ -222,7 +229,7 @@ impl TestingServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
-            allow_local_first_auth: true,
+            allow_local_first_auth: allow_local_first_auth.unwrap_or(true),
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
         };
