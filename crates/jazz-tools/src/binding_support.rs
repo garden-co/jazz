@@ -38,6 +38,7 @@ pub struct RuntimeSchemaInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RuntimeSchemaEnvelopeWire {
     #[serde(rename = "__jazzRuntimeSchema")]
     version: u8,
@@ -346,7 +347,8 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, query_rows_can_be_schema_aligned, serialize_outbox_entry,
+        parse_read_durability_options, parse_runtime_schema_input,
+        query_rows_can_be_schema_aligned, serialize_outbox_entry,
     };
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
@@ -455,6 +457,58 @@ mod tests {
             crate::query_manager::manager::LocalUpdates::Immediate
         );
         assert_eq!(propagation, crate::sync_manager::QueryPropagation::Full);
+    }
+
+    #[test]
+    fn runtime_schema_envelope_reads_ts_policy_bundle_flag() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        },
+                        {
+                            "name": "done",
+                            "column_type": { "type": "Boolean" },
+                            "nullable": false
+                        }
+                    ]
+                }
+            },
+            "loadedPolicyBundle": true
+        }"#;
+
+        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+
+        assert!(input.loaded_policy_bundle);
+        assert!(input.schema.contains_key(&TableName::new("todos")));
+    }
+
+    #[test]
+    fn runtime_schema_envelope_defaults_missing_policy_bundle_flag_to_permissive_local() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+
+        assert!(!input.loaded_policy_bundle);
+        assert!(input.schema.contains_key(&TableName::new("todos")));
     }
 
     #[test]

@@ -451,7 +451,7 @@ describe("cli validate", () => {
 
     const warnings = logs.filter((line) => line.includes("has no explicit"));
     expect(warnings).toEqual([
-      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has no explicit delete policy in permissions.ts; deletes can fall back to update.using at runtime, but add delete.using to make the delete rule explicit and silence this warning.',
     ]);
   });
 

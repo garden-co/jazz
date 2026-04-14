@@ -438,6 +438,18 @@ function hasExplicitPolicy(
   }
 }
 
+function missingExplicitPolicyMessage(
+  tableName: string,
+  operation: ExplicitPolicyOperation,
+  tablePolicies: TablePolicies | undefined,
+): string {
+  if (operation === "delete" && tablePolicies?.update?.using) {
+    return `Warning: table "${tableName}" has no explicit delete policy in permissions.ts; deletes can fall back to update.using at runtime, but add delete.using to make the delete rule explicit and silence this warning.`;
+  }
+
+  return `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; enforcing runtimes default to deny.`;
+}
+
 export function validatePermissionsAgainstSchema(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
@@ -452,17 +464,18 @@ export function collectMissingExplicitPolicyDiagnostics(
   const operations: ExplicitPolicyOperation[] = ["read", "insert", "update", "delete"];
 
   return schemaTableNames.flatMap((tableName) =>
-    operations.flatMap((operation) =>
-      hasExplicitPolicy(compiledPermissions?.[tableName], operation)
+    operations.flatMap((operation) => {
+      const tablePolicies = compiledPermissions?.[tableName];
+      return hasExplicitPolicy(tablePolicies, operation)
         ? []
         : [
             {
               tableName,
               operation,
-              message: `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; enforcing runtimes default to deny.`,
+              message: missingExplicitPolicyMessage(tableName, operation, tablePolicies),
             },
-          ],
-    ),
+          ];
+    }),
   );
 }
 
