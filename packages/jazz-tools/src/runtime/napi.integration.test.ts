@@ -357,14 +357,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-function formatDiagnostics(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 function isNestedOutboxCall(call: unknown[]): call is [null, [string, string, string, boolean]] {
   return (
     call[0] === null &&
