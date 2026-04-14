@@ -1490,6 +1490,7 @@ mod tests {
             admin_secret: Some("admin-secret".to_string()),
             allow_local_first_auth: true,
             jwks_url: None,
+            ..Default::default()
         }
     }
 
@@ -1507,6 +1508,7 @@ mod tests {
             admin_secret: None,
             allow_local_first_auth: false,
             jwks_url: None,
+            ..Default::default()
         };
 
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -1749,6 +1751,7 @@ mod tests {
                 admin_secret: Some("admin-secret".to_string()),
                 allow_local_first_auth: false,
                 jwks_url: None,
+                ..Default::default()
             })
             .with_in_memory_storage()
             .build()
