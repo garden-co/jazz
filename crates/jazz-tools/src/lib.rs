@@ -61,6 +61,8 @@ pub use query_manager::types::{
     Value,
 };
 #[cfg(feature = "client")]
+pub use row_histories::BatchId;
+#[cfg(feature = "client")]
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;
@@ -146,6 +148,13 @@ pub enum JazzError {
 
     #[error("Channel closed")]
     ChannelClosed,
+
+    #[error("Persisted batch {batch_id} was rejected ({code}): {reason}")]
+    BatchRejected {
+        batch_id: BatchId,
+        code: String,
+        reason: String,
+    },
 }
 
 /// Result type for Jazz operations.

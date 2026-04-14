@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { JazzClient, type LocalBatchRecord, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
@@ -232,6 +232,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 }
 
 describe("JazzClient mutation durability split", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("rethrows synchronous runtime mutation errors", () => {
     const insertError = new Error("Insert failed: indexed value too large");
     const updateError = new Error("Update failed: indexed value too large");
@@ -514,8 +518,54 @@ describe("JazzClient mutation durability split", () => {
     expect(client.localBatchRecords()).toEqual([localBatchRecord]);
     expect(client.acknowledgeRejectedBatch(localBatchRecord.batchId)).toBe(true);
 
-    expect(localBatchRecordCalls).toEqual([localBatchRecord.batchId]);
+    expect(localBatchRecordCalls).toEqual([localBatchRecord.batchId, localBatchRecord.batchId]);
     expect(localBatchRecordsCalls).toEqual(["scan"]);
     expect(acknowledgeRejectedBatchCalls).toEqual([localBatchRecord.batchId]);
+  });
+
+  it("rejects persisted waits on rejected settlements without polling storage", async () => {
+    let currentLocalBatchRecord: LocalBatchRecord | null = {
+      batchId: "00000000-0000-0000-0000-000000000041",
+      mode: "transactional",
+      requestedTier: "edge",
+      sealed: true,
+      latestSettlement: null,
+    };
+    const runtimeOnSyncMessageReceived = vi.fn(() => {
+      currentLocalBatchRecord = {
+        ...currentLocalBatchRecord!,
+        latestSettlement: {
+          kind: "rejected",
+          batchId: currentLocalBatchRecord!.batchId,
+          code: "permission_denied",
+          reason: "writer lacks publish rights",
+        },
+      };
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const { client } = makeClient({
+      loadLocalBatchRecord: (batchId: string) =>
+        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
+      onSyncMessageReceived: runtimeOnSyncMessageReceived,
+    });
+
+    const persisted = client.createPersisted("todos", {
+      title: { type: "Text" as const, value: "Draft" },
+    });
+    const waitPromise = persisted.wait();
+
+    await Promise.resolve();
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+    client.getRuntime().onSyncMessageReceived("{}");
+
+    await expect(waitPromise).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      batchId: currentLocalBatchRecord!.batchId,
+      code: "permission_denied",
+      reason: "writer lacks publish rights",
+    });
+    expect(runtimeOnSyncMessageReceived).toHaveBeenCalledWith("{}", undefined);
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
 });

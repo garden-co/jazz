@@ -14,6 +14,20 @@ class TestDb extends Db {
   }
 }
 
+class MultiClientDb extends Db {
+  constructor(private readonly clientsBySchema: Map<WasmSchema, JazzClient>) {
+    super({ appId: "transaction-db-test" }, null);
+  }
+
+  protected override getClient(schema: WasmSchema): JazzClient {
+    const client = this.clientsBySchema.get(schema);
+    if (!client) {
+      throw new Error("missing test client for schema");
+    }
+    return client;
+  }
+}
+
 function todoSchema(): WasmSchema {
   return {
     todos: {
@@ -254,6 +268,52 @@ describe("Db transactions", () => {
     expect(runtimeTransaction.create).not.toHaveBeenCalled();
   });
 
+  it("rejects db transaction writes against a different client/schema", () => {
+    const primaryTable = todoTable();
+    const secondaryTable = {
+      ...todoTable(),
+      _schema: todoSchema(),
+    };
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-cross-client"),
+      create: vi.fn(),
+      createPersisted: vi.fn(),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      commit: vi.fn(() => "batch-cross-client"),
+      localBatchRecord: vi.fn((batchId = "batch-cross-client") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-cross-client")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const primaryClient = {
+      getSchema: () => new Map(Object.entries(primaryTable._schema)),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const secondaryClient = {
+      getSchema: () => new Map(Object.entries(secondaryTable._schema)),
+      beginTransactionInternal: vi.fn(),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new MultiClientDb(
+      new Map([
+        [primaryTable._schema, primaryClient],
+        [secondaryTable._schema, secondaryClient],
+      ]),
+    );
+
+    const tx = db.beginTransaction(primaryTable);
+
+    expect(() => tx.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
+      /cannot be used with table "todos" from a different schema\/client/,
+    );
+    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+  });
+
   it("creates a typed db direct batch seeded by a table schema", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
@@ -345,5 +405,52 @@ describe("Db transactions", () => {
     });
     expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
     expect(batch.acknowledgeRejectedBatch()).toBe(false);
+  });
+
+  it("rejects db direct batch writes against a different client/schema", () => {
+    const primaryTable = todoTable();
+    const secondaryTable = {
+      ...todoTable(),
+      _schema: todoSchema(),
+    };
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-cross-client-direct"),
+      create: vi.fn(),
+      createPersisted: vi.fn(),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-cross-client-direct") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-cross-client-direct", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const primaryClient = {
+      getSchema: () => new Map(Object.entries(primaryTable._schema)),
+      beginDirectBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const secondaryClient = {
+      getSchema: () => new Map(Object.entries(secondaryTable._schema)),
+      beginDirectBatchInternal: vi.fn(),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new MultiClientDb(
+      new Map([
+        [primaryTable._schema, primaryClient],
+        [secondaryTable._schema, secondaryClient],
+      ]),
+    );
+
+    const batch = db.beginDirectBatch(primaryTable);
+
+    expect(() => batch.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
+      /cannot be used with table "todos" from a different schema\/client/,
+    );
+    expect(runtimeBatch.create).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@ export {
   type LinkExternalIdentityResult,
   type LocalUpdatesMode,
   PersistedWrite,
+  PersistedWriteRejectedError,
   SessionClient,
   Transaction,
   loadWasmModule,

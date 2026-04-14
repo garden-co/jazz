@@ -531,6 +531,15 @@ function settlementSatisfiesTier(
   return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
 }
 
+function rejectionFromSettlement(
+  settlement: BatchSettlement | null | undefined,
+): PersistedWriteRejectedError | null {
+  if (!settlement || settlement.kind !== "rejected") {
+    return null;
+  }
+  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
+}
+
 function readHeader(request: RequestLike, name: string): string | undefined {
   const lower = name.toLowerCase();
 
@@ -656,13 +665,20 @@ export class PersistedWrite<T> {
   }
 
   async wait(): Promise<T> {
-    for (;;) {
-      const record = this.client.localBatchRecord(this.persistedBatchId);
-      if (settlementSatisfiesTier(record?.latestSettlement, this.requestedTier)) {
-        return this.persistedValue;
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    }
+    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
+    return this.persistedValue;
+  }
+}
+
+export class PersistedWriteRejectedError extends Error {
+  readonly name = "PersistedWriteRejectedError";
+
+  constructor(
+    readonly batchId: string,
+    readonly code: string,
+    readonly reason: string,
+  ) {
+    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
   }
 }
 
@@ -1036,6 +1052,15 @@ export class JazzClient {
     resolve: () => void;
     reject: (error: Error) => void;
   }> = [];
+  private readonly pendingBatchWaiters = new Map<
+    string,
+    Array<{
+      tier: DurabilityTier;
+      resolve: () => void;
+      reject: (error: Error) => void;
+    }>
+  >();
+  private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private readonly inFlightServerSyncs = new Set<Promise<void>>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -1046,7 +1071,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
-    this.runtime = runtime;
+    this.runtime = this.wrapRuntime(runtime);
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
@@ -1076,6 +1101,24 @@ export class JazzClient {
         this.remoteSyncConnected = false;
         this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
         this.onAuthFailure?.(reason);
+      },
+    });
+  }
+
+  private wrapRuntime(runtime: Runtime): Runtime {
+    return new Proxy(runtime, {
+      get: (target, property, receiver) => {
+        const value = Reflect.get(target, property, receiver);
+        if (property === "onSyncMessageReceived" && typeof value === "function") {
+          return (payload: Uint8Array | string, seq?: number | null) => {
+            value.call(target, payload, seq);
+            this.flushPendingBatchWaiters();
+          };
+        }
+        if (typeof value === "function") {
+          return value.bind(target);
+        }
+        return value;
       },
     });
   }
@@ -1289,7 +1332,13 @@ export class JazzClient {
   }
 
   acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
+    const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
+    const acknowledged = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
+    if (acknowledged && rejection) {
+      this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
+    }
+    this.flushPendingBatchWaiters();
+    return acknowledged;
   }
 
   sealBatch(batchId: string): string {
@@ -2205,6 +2254,68 @@ export class JazzClient {
     for (const waiter of waiters) {
       waiter.reject(error);
     }
+  }
+
+  private batchWaitOutcome(
+    batchId: string,
+    tier: DurabilityTier,
+  ): { settled: true; error: Error | null } | { settled: false } {
+    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
+    if (acknowledgedRejection) {
+      return { settled: true, error: acknowledgedRejection };
+    }
+
+    const settlement = this.localBatchRecord(batchId)?.latestSettlement;
+    const rejection = rejectionFromSettlement(settlement);
+    if (rejection) {
+      return { settled: true, error: rejection };
+    }
+    if (settlementSatisfiesTier(settlement, tier)) {
+      return { settled: true, error: null };
+    }
+
+    return { settled: false };
+  }
+
+  private flushPendingBatchWaiters(): void {
+    if (this.pendingBatchWaiters.size === 0) {
+      return;
+    }
+
+    for (const [batchId, waiters] of this.pendingBatchWaiters) {
+      const remaining: typeof waiters = [];
+      for (const waiter of waiters) {
+        const outcome = this.batchWaitOutcome(batchId, waiter.tier);
+        if (!outcome.settled) {
+          remaining.push(waiter);
+          continue;
+        }
+        if (outcome.error) {
+          waiter.reject(outcome.error);
+        } else {
+          waiter.resolve();
+        }
+      }
+      if (remaining.length > 0) {
+        this.pendingBatchWaiters.set(batchId, remaining);
+      } else {
+        this.pendingBatchWaiters.delete(batchId);
+      }
+    }
+  }
+
+  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    const outcome = this.batchWaitOutcome(batchId, tier);
+    if (outcome.settled) {
+      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.pendingBatchWaiters.get(batchId) ?? [];
+      waiters.push({ tier, resolve, reject });
+      this.pendingBatchWaiters.set(batchId, waiters);
+      this.flushPendingBatchWaiters();
+    });
   }
 
   private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {

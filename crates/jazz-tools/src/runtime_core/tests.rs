@@ -2512,7 +2512,8 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
     pump_b_to_a(&mut s);
 
     match receiver.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("Receiver should not reject: {rejection:?}"),
         Ok(None) => panic!("Receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
@@ -2558,7 +2559,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(Some(())),
+        Ok(Some(Ok(()))),
         "row persisted receiver should resolve from row-batch state changes alone"
     );
     assert_eq!(
@@ -2632,7 +2633,8 @@ fn rc_insert_persisted_holds_until_correct_tier() {
     pump_c_to_b_to_a(&mut s);
 
     match receiver.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("Receiver should not reject: {rejection:?}"),
         Ok(None) => panic!("Receiver should be resolved after EdgeServer ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
@@ -2653,7 +2655,8 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
     pump_3tier(&mut s);
 
     match receiver.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("Worker request should not reject: {rejection:?}"),
         Ok(None) => panic!("EdgeServer ack should satisfy Worker request"),
         Err(_) => panic!("Receiver was cancelled"),
     }
@@ -2704,7 +2707,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
     });
     s.a.immediate_tick();
 
-    assert_eq!(receiver.try_recv(), Ok(Some(())));
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
     let settled_record =
         s.a.storage()
@@ -2763,7 +2766,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(Some(())),
+        Ok(Some(Ok(()))),
         "persisted receivers should resolve from replayable batch settlement even when a live row-batch ack was missed"
     );
 }
@@ -2836,8 +2839,8 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
         )
         .unwrap();
 
-    assert_eq!(first_receiver.try_recv(), Ok(Some(())));
-    assert_eq!(second_receiver.try_recv(), Ok(Some(())));
+    assert_eq!(first_receiver.try_recv(), Ok(Some(Ok(()))));
+    assert_eq!(second_receiver.try_recv(), Ok(Some(Ok(()))));
 
     let branch_name = s.b.schema_manager().branch_name();
     let local_record =
@@ -2913,7 +2916,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(Some(())),
+        Ok(Some(Ok(()))),
         "reconnect should reconcile the still-pending batch from the server's current durable truth"
     );
 
@@ -3184,7 +3187,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
     );
 
     pump_b_to_a(&mut s);
-    assert_eq!(receiver.try_recv(), Ok(Some(())));
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 }
 
 #[test]
@@ -3480,7 +3483,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     );
 
     pump_b_to_a(&mut s);
-    assert_eq!(receiver.try_recv(), Ok(Some(())));
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
     let settled_record =
         s.a.storage()
@@ -3552,7 +3555,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(Some(())),
+        Ok(Some(Ok(()))),
         "reconnect should reconcile the accepted transactional batch from the server"
     );
 
@@ -3633,8 +3636,8 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
     assert_eq!(second_receiver.try_recv(), Ok(None));
 
     pump_b_to_a(&mut s);
-    assert_eq!(first_receiver.try_recv(), Ok(Some(())));
-    assert_eq!(second_receiver.try_recv(), Ok(Some(())));
+    assert_eq!(first_receiver.try_recv(), Ok(Some(Ok(()))));
+    assert_eq!(second_receiver.try_recv(), Ok(Some(Ok(()))));
 
     let branch_name = s.a.schema_manager().branch_name();
 
@@ -3800,8 +3803,12 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(None),
-        "rejections should not resolve durability waiters as successful writes"
+        Ok(Some(Err(crate::runtime_core::PersistedWriteRejection {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        }))),
+        "rejections should resolve durability waiters with a terminal rejection"
     );
 }
 
@@ -4704,7 +4711,8 @@ fn rc_update_persisted_resolves_on_ack() {
     pump_b_to_a(&mut s);
 
     match receiver.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("Update receiver should not reject: {rejection:?}"),
         Ok(None) => panic!("Update receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
@@ -4730,7 +4738,8 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_b_to_a(&mut s);
 
     match receiver.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("Delete receiver should not reject: {rejection:?}"),
         Ok(None) => panic!("Delete receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
@@ -4765,12 +4774,14 @@ fn rc_multiple_persisted_inserts_independent() {
     pump_3tier(&mut s);
 
     match receiver1.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("receiver1 should not reject: {rejection:?}"),
         Ok(None) => panic!("receiver1 should be resolved"),
         Err(_) => panic!("receiver1 cancelled"),
     }
     match receiver2.try_recv() {
-        Ok(Some(())) => {}
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(rejection))) => panic!("receiver2 should not reject: {rejection:?}"),
         Ok(None) => panic!("receiver2 should be resolved"),
         Err(_) => panic!("receiver2 cancelled"),
     }

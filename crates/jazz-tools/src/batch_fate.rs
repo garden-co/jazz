@@ -114,6 +114,7 @@ pub struct LocalBatchRecord {
     pub mode: BatchMode,
     pub requested_tier: DurabilityTier,
     pub sealed: bool,
+    pub touched_rows: Vec<ObjectId>,
     pub sealed_submission: Option<SealedBatchSubmission>,
     pub latest_settlement: Option<BatchSettlement>,
 }
@@ -153,9 +154,18 @@ impl LocalBatchRecord {
             mode,
             requested_tier,
             sealed,
+            touched_rows: Vec::new(),
             sealed_submission: None,
             latest_settlement,
         }
+    }
+
+    pub fn track_touched_row(&mut self, row_id: ObjectId) {
+        if self.touched_rows.contains(&row_id) {
+            return;
+        }
+        self.touched_rows.push(row_id);
+        self.touched_rows.sort();
     }
 
     pub fn mark_sealed(&mut self, submission: SealedBatchSubmission) {
@@ -250,6 +260,12 @@ impl LocalBatchRecord {
             Value::Text(self.mode.as_str().to_string()),
             Value::Text(durability_tier_to_str(self.requested_tier).to_string()),
             Value::Boolean(self.sealed),
+            Value::Array(
+                self.touched_rows
+                    .iter()
+                    .map(|row_id| Value::Bytea(row_id.uuid().as_bytes().to_vec()))
+                    .collect(),
+            ),
             sealed_submission.map(Value::Bytea).unwrap_or(Value::Null),
             latest_settlement.map(Value::Bytea).unwrap_or(Value::Null),
         ];
@@ -264,6 +280,7 @@ impl LocalBatchRecord {
             mode,
             requested_tier,
             sealed,
+            touched_rows,
             sealed_submission,
             latest_settlement,
         ] = values.as_slice()
@@ -291,6 +308,21 @@ impl LocalBatchRecord {
         let sealed = match sealed {
             Value::Boolean(value) => *value,
             other => return Err(format!("expected sealed boolean, got {other:?}")),
+        };
+        let touched_rows = match touched_rows {
+            Value::Array(values) => values
+                .iter()
+                .map(|value| match value {
+                    Value::Bytea(bytes) => {
+                        let uuid = uuid::Uuid::from_slice(bytes).map_err(|err| {
+                            format!("decode touched row object id: expected uuid bytes: {err}")
+                        })?;
+                        Ok(ObjectId::from_uuid(uuid))
+                    }
+                    other => Err(format!("expected touched row bytes, got {other:?}")),
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            other => return Err(format!("expected touched row array, got {other:?}")),
         };
         let sealed_submission = match sealed_submission {
             Value::Null => None,
@@ -322,6 +354,7 @@ impl LocalBatchRecord {
             mode,
             requested_tier,
             sealed,
+            touched_rows,
             sealed_submission,
             latest_settlement,
         })
@@ -585,6 +618,12 @@ fn storage_descriptor() -> RowDescriptor {
         ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("requested_tier", ColumnType::Text),
         ColumnDescriptor::new("sealed", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "touched_rows",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
         ColumnDescriptor::new("sealed_submission", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("latest_settlement", ColumnType::Bytea).nullable(),
     ])

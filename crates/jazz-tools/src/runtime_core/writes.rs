@@ -110,6 +110,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 "batch {batch_id:?} reused with conflicting modes"
             )));
         }
+        record.track_touched_row(row_id);
         if requested_tier > record.requested_tier {
             record.requested_tier = requested_tier;
         }
@@ -126,16 +127,28 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &self,
         batch_id: BatchId,
     ) -> Result<(crate::object::BranchName, Vec<SealedBatchMember>), RuntimeError> {
-        let row_locators = self
+        let Some(record) = self
             .storage
-            .scan_row_locators()
-            .map_err(|err| RuntimeError::WriteError(format!("scan row locators: {err}")))?;
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+        else {
+            return Err(RuntimeError::WriteError(format!(
+                "missing local batch record for {batch_id:?}"
+            )));
+        };
 
         let mut latest_by_row = std::collections::HashMap::<
             (ObjectId, String),
             crate::row_histories::StoredRowBatch,
         >::new();
-        for (row_id, row_locator) in row_locators {
+        for row_id in record.touched_rows {
+            let Some(row_locator) = self
+                .storage
+                .load_row_locator(row_id)
+                .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            else {
+                continue;
+            };
             let history_rows = self
                 .storage
                 .scan_history_row_batches(row_locator.table.as_str(), row_id)
@@ -318,7 +331,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         let (result, _batch_id, receiver) =
             self.insert_persisted_with_batch_id(table, values, write_context, tier)?;
         Ok((result, receiver))
@@ -332,7 +345,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         self.ensure_transactional_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
@@ -353,7 +366,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let _ = sender.send(Ok(()));
         } else {
             let row_batch_key = self.ack_watcher_key(row_id, batch_id, write_context);
             self.ack_watchers
@@ -375,7 +388,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
         let (_batch_id, receiver) =
             self.update_persisted_with_batch_id(object_id, values, write_context, tier)?;
         Ok(receiver)
@@ -389,7 +402,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         self.ensure_transactional_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
@@ -407,7 +420,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let _ = sender.send(Ok(()));
         } else {
             let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
             self.ack_watchers
@@ -428,7 +441,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
         let (_batch_id, receiver) =
             self.delete_persisted_with_batch_id(object_id, write_context, tier)?;
         Ok(receiver)
@@ -441,7 +454,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         self.ensure_transactional_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
@@ -460,7 +473,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let _ = sender.send(Ok(()));
         } else {
             let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
             self.ack_watchers
