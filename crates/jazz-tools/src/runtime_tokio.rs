@@ -1,7 +1,7 @@
 //! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
-//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
+//! `RuntimeCore<S, TokioScheduler<S>>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
@@ -37,7 +37,7 @@ use crate::sync_manager::{
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 type PersistedWriteAck = futures::channel::oneshot::Receiver<()>;
 type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteAck);
 
@@ -164,7 +164,7 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Jazz, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
@@ -192,10 +192,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
         let scheduler = TokioScheduler::new();
-        let sync_sender = CallbackSyncSender::new(sync_callback);
+        let _sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let core = RuntimeCore::new(schema_manager, storage, scheduler);
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
