@@ -1043,7 +1043,7 @@ describe("Worker Bridge with OPFS", () => {
       schemaJson: JSON.stringify(schema),
       serverUrl,
       adminSecret,
-      auth: { localFirstSecret: sharedLocalAuthToken },
+      localFirstSecret: sharedLocalAuthToken,
     });
 
     const baselineTitle = `baseline-network-recover-${Date.now()}`;
@@ -1180,7 +1180,7 @@ describe("Worker Bridge with OPFS", () => {
       schemaJson: JSON.stringify(schema),
       serverUrl,
       adminSecret,
-      auth: { localFirstSecret: sharedLocalAuthToken },
+      localFirstSecret: sharedLocalAuthToken,
     });
 
     const baselineTitle = `baseline-before-offline-${Date.now()}`;
