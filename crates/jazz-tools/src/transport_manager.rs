@@ -32,6 +32,8 @@ pub enum TransportInbound {
     Disconnected,
 }
 
+// M-6: derive Debug — all fields implement Debug.
+#[derive(Debug)]
 pub struct TransportHandle {
     pub server_id: ServerId,
     pub client_id: ClientId,
@@ -41,6 +43,7 @@ pub struct TransportHandle {
 }
 
 impl TransportHandle {
+    /// Returns None both when the channel is empty and when it's closed.
     pub fn try_recv_inbound(&mut self) -> Option<TransportInbound> {
         self.inbound_rx.try_recv().ok()
     }
@@ -52,7 +55,8 @@ impl TransportHandle {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+// I-4: hand-written Debug that redacts secret fields.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AuthConfig {
     pub jwt_token: Option<String>,
     pub backend_secret: Option<String>,
@@ -62,6 +66,20 @@ pub struct AuthConfig {
     pub local_mode: Option<String>,
     #[serde(default)]
     pub local_token: Option<String>,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("jwt_token", &self.jwt_token.as_ref().map(|_| "<redacted>"))
+            .field("backend_secret", &self.backend_secret.as_ref().map(|_| "<redacted>"))
+            .field("admin_secret", &self.admin_secret.as_ref().map(|_| "<redacted>"))
+            // backend_session may itself contain secrets; redact presence only.
+            .field("backend_session", &self.backend_session.as_ref().map(|_| "<redacted>"))
+            .field("local_mode", &self.local_mode)
+            .field("local_token", &self.local_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -89,12 +107,15 @@ impl ReconnectState {
     pub fn reset(&mut self) { self.attempt = 0; }
 
     pub async fn backoff(&mut self) {
+        // I-2: cap applied AFTER adding jitter so the 10_000 ceiling is meaningful
+        // at higher attempt counts if the min(5) exponent cap is ever raised.
         let base_ms = 300u64.saturating_mul(1u64 << self.attempt.min(5));
-        let capped = base_ms.min(10_000);
         let jitter = (rand::random::<u8>() as u64 * 200) / 255;
-        let delay_ms = capped + jitter;
+        let delay_ms = (base_ms + jitter).min(10_000);
         #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-tokio"))]
         { tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await; }
+        // M-7: WASM / no-tokio: no real sleep is available. Yield one poll cycle to avoid
+        // a tight spin; outer reconnect loop relies on network I/O awaits for real backpressure.
         #[cfg(any(target_arch = "wasm32", not(feature = "runtime-tokio")))]
         { let _ = delay_ms; futures::future::ready(()).await; }
         self.attempt += 1;
