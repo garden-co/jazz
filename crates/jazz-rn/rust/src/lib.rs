@@ -230,6 +230,10 @@ impl Scheduler for RnScheduler {
     }
 }
 
+/// Bridges outbound sync messages from the Rust runtime to a native callback.
+///
+/// Staging implementation: wired via `on_sync_message_to_send` today; will be
+/// superseded by the Rust-owned transport in Tasks 11/12/13.
 #[derive(Clone, Default)]
 struct RnSyncSender {
     callback: Arc<Mutex<Option<Box<dyn SyncMessageCallback>>>>,
@@ -273,6 +277,13 @@ type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Mutex<RnCoreType>,
+    /// JS/native callback holder for outbound sync messages.
+    ///
+    /// `on_sync_message_to_send` installs the callback here so messages produced
+    /// during ticks can be forwarded to the transport layer.
+    /// Outbox delivery via this sender is not wired through the Rust-owned
+    /// transport yet — that plumbing is deferred to Tasks 11/12/13, which will
+    /// remove `SyncSender` entirely in favour of the `connect()` pathway.
     sync_sender: RnSyncSender,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,

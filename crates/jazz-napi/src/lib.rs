@@ -262,6 +262,10 @@ impl Scheduler for NapiScheduler {
 /// (destinationKind, destinationId, payloadJson, isCatalogue)
 type SyncCallbackParams = (String, String, String, bool);
 
+/// Bridges outbound sync messages from the Rust runtime to a JS callback.
+///
+/// Staging implementation: wired via `on_sync_message_to_send` today; will be
+/// superseded by the Rust-owned transport in Tasks 11/12/13.
 #[derive(Clone)]
 pub struct NapiSyncSender {
     callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
@@ -408,6 +412,13 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
+    /// JS callback holder for outbound sync messages.
+    ///
+    /// `on_sync_message_to_send` installs the JS-side callback here so messages
+    /// produced during ticks can be forwarded to the transport layer.
+    /// Outbox delivery via this sender is not wired through the Rust-owned
+    /// transport yet — that plumbing is deferred to Tasks 11/12/13, which will
+    /// remove `SyncSender` entirely in favour of the `connect()` pathway.
     sync_sender: NapiSyncSender,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,

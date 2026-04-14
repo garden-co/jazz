@@ -365,9 +365,11 @@ impl Scheduler for WasmScheduler {
 // JsSyncSender
 // ============================================================================
 
-/// SyncSender implementation bridging to a JS callback.
+/// Bridges outbound sync messages from the Rust runtime to a JS callback.
 ///
-/// The callback is set lazily via `on_sync_message_to_send()`.
+/// The callback is installed lazily via `on_sync_message_to_send()`.
+/// Staging implementation: wired via that callback today; will be superseded
+/// by the Rust-owned transport in Tasks 11/12/13.
 pub struct JsSyncSender {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
@@ -431,6 +433,13 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    /// JS callback holder for outbound sync messages.
+    ///
+    /// `on_sync_message_to_send` installs the JS-side callback here so messages
+    /// produced during ticks can be forwarded to the transport layer.
+    /// Outbox delivery via this sender is not wired through the Rust-owned
+    /// transport yet — that plumbing is deferred to Tasks 11/12/13, which will
+    /// remove `SyncSender` entirely in favour of the `connect()` pathway.
     sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
