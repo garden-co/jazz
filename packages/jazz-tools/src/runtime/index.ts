@@ -1,5 +1,6 @@
 export {
   JazzClient,
+  type AuthConfig,
   type LocalUpdatesMode,
   SessionClient,
   loadWasmModule,
