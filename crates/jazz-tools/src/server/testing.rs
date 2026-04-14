@@ -222,8 +222,7 @@ impl TestingServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
         };

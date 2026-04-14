@@ -55,6 +55,9 @@ fn wasm_log_level_from_global() -> tracing::Level {
     }
 }
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
@@ -69,7 +72,7 @@ use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, Sy
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::schema_manager::rehydrate_schema_manager_from_manifest;
+use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
@@ -1382,15 +1385,14 @@ impl WasmRuntime {
                 .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
         );
         if let Err(error) =
-            rehydrate_schema_manager_from_manifest(&mut schema_manager, storage.as_ref(), app_id)
+            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
         {
             warn!(
                 %app_id,
                 ?error,
-                "failed to rehydrate schema manager from catalogue manifest"
+                "failed to rehydrate schema manager from catalogue storage"
             );
         }
-        schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new(use_binary_encoding);
@@ -1418,5 +1420,44 @@ impl WasmRuntime {
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
+    }
+}
+
+fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| JsError::new(&format!("seed base64 decode error: {e}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("seed must be exactly 32 bytes"))?;
+    Ok(arr)
+}
+
+#[wasm_bindgen]
+impl WasmRuntime {
+    #[wasm_bindgen(js_name = "deriveUserId")]
+    pub fn derive_user_id_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let user_id = identity::derive_user_id(&seed);
+        Ok(user_id.to_string())
+    }
+
+    #[wasm_bindgen(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token_static(
+        seed_b64: &str,
+        audience: &str,
+        ttl_seconds: u64,
+        now_seconds: u64,
+    ) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        identity::mint_local_first_token_at(&seed, audience, ttl_seconds, now_seconds)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
+    pub fn get_public_key_b64_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let verifying_key = identity::derive_verifying_key(&seed);
+        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 }

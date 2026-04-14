@@ -6,7 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
+use jazz_tools::commit::CommitId;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
+use jazz_tools::transport_protocol::SyncBatchRequest;
+use jazz_tools::{ObjectId, metadata::RowProvenance};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -30,14 +35,6 @@ struct JwtClaims {
 #[derive(Debug, Deserialize)]
 struct CreateAppResponse {
     app_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinkExternalResponse {
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
 }
 
 #[derive(Clone)]
@@ -107,26 +104,31 @@ impl TestServer {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--data-root",
-                data_dir.path().to_str().expect("temp dir path"),
-                "--internal-api-secret",
-                INTERNAL_API_SECRET,
-                "--secret-hash-key",
-                SECRET_HASH_KEY,
-                "--worker-threads",
-                "1",
-            ])
-            .envs(extra_env)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn jazz-cloud-server");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-cloud-server"));
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--data-root",
+            data_dir.path().to_str().expect("temp dir path"),
+            "--internal-api-secret",
+            INTERNAL_API_SECRET,
+            "--secret-hash-key",
+            SECRET_HASH_KEY,
+            "--worker-threads",
+            "1",
+        ])
+        .envs(extra_env)
+        .stdout(Stdio::null());
 
-        let server = Self {
+        if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        }
+
+        let process = cmd.spawn().expect("spawn jazz-cloud-server");
+
+        let mut server = Self {
             process,
             port,
             _data_dir: data_dir,
@@ -141,9 +143,12 @@ impl TestServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -155,7 +160,7 @@ impl TestServer {
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {
-        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None, None, None)
+        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None)
             .await
     }
 
@@ -167,8 +172,6 @@ impl TestServer {
     ) -> CreateAppResponse {
         self.create_app_with_config(
             Some(jwks_endpoint),
-            None,
-            None,
             backend_secret,
             admin_secret,
             None,
@@ -180,8 +183,6 @@ impl TestServer {
     async fn create_app_with_config(
         &self,
         jwks_endpoint: Option<&str>,
-        allow_anonymous: Option<bool>,
-        allow_demo: Option<bool>,
         backend_secret: Option<&str>,
         admin_secret: Option<&str>,
         jwks_cache_ttl_secs: Option<u64>,
@@ -192,12 +193,6 @@ impl TestServer {
         });
         if let Some(endpoint) = jwks_endpoint {
             payload["jwks_endpoint"] = Value::String(endpoint.to_string());
-        }
-        if let Some(flag) = allow_anonymous {
-            payload["allow_anonymous"] = Value::Bool(flag);
-        }
-        if let Some(flag) = allow_demo {
-            payload["allow_demo"] = Value::Bool(flag);
         }
         if let Some(secret) = backend_secret {
             payload["backend_secret"] = Value::String(secret.to_string());
@@ -241,37 +236,6 @@ impl TestServer {
             .expect("sync request")
     }
 
-    async fn sync_with_local(&self, app_id: &str, mode: &str, token: &str) -> reqwest::Response {
-        self.client
-            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
-            .header("X-Jazz-Local-Mode", mode)
-            .header("X-Jazz-Local-Token", token)
-            .json(&sync_body())
-            .send()
-            .await
-            .expect("sync request")
-    }
-
-    async fn link_external(
-        &self,
-        app_id: &str,
-        bearer_token: &str,
-        local_mode: &str,
-        local_token: &str,
-    ) -> reqwest::Response {
-        self.client
-            .post(format!(
-                "{}/apps/{app_id}/auth/link-external",
-                self.base_url()
-            ))
-            .header("Authorization", format!("Bearer {bearer_token}"))
-            .header("X-Jazz-Local-Mode", local_mode)
-            .header("X-Jazz-Local-Token", local_token)
-            .send()
-            .await
-            .expect("link external request")
-    }
-
     async fn sync_with_backend_session(
         &self,
         app_id: &str,
@@ -303,7 +267,7 @@ fn auth_jwks_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock auth_jwks test guard")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
@@ -324,18 +288,26 @@ fn get_free_port() -> u16 {
     listener.local_addr().expect("port local_addr").port()
 }
 
-fn sync_body() -> Value {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }]
-    })
+fn sync_body() -> SyncBatchRequest {
+    let row_id = ObjectId::new();
+    let row = StoredRowVersion::new(
+        row_id,
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        RowProvenance::for_insert(row_id.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    SyncBatchRequest {
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+        client_id: ClientId::new(),
+    }
 }
 
 fn encode_session(user_id: &str) -> String {
@@ -535,7 +507,7 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
     let server = TestServer::start().await;
     let jwks_endpoint = jwks_server.endpoint();
     let app = server
-        .create_app_with_config(Some(&jwks_endpoint), None, None, None, None, Some(1), None)
+        .create_app_with_config(Some(&jwks_endpoint), None, None, Some(1), None)
         .await;
 
     let token = make_jwt("user-stale", "kid-stale", "secret-stale");
@@ -574,15 +546,7 @@ async fn stale_jwks_refused_after_max_stale_expires() {
     let server = TestServer::start().await;
     let jwks_endpoint = jwks_server.endpoint();
     let app = server
-        .create_app_with_config(
-            Some(&jwks_endpoint),
-            None,
-            None,
-            None,
-            None,
-            Some(1),
-            Some(1),
-        )
+        .create_app_with_config(Some(&jwks_endpoint), None, None, Some(1), Some(1))
         .await;
 
     let token = make_jwt("user-expiry", "kid-expiry", "secret-expiry");
@@ -625,74 +589,4 @@ async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
         .sync_with_backend_session(&app.app_id, Some("backend-secret-1"), "backend-user")
         .await;
     assert_ne!(valid_secret.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn local_mode_flags_are_enforced_per_app() {
-    let _guard = auth_jwks_test_guard();
-    let server = TestServer::start().await;
-    let app = server
-        .create_app_with_config(
-            None,
-            Some(false),
-            Some(true),
-            Some("backend-secret-1"),
-            Some("admin-secret-1"),
-            None,
-            None,
-        )
-        .await;
-
-    let anonymous = server
-        .sync_with_local(&app.app_id, "anonymous", "device-a")
-        .await;
-    assert_eq!(anonymous.status(), StatusCode::FORBIDDEN);
-
-    let demo = server
-        .sync_with_local(&app.app_id, "demo", "device-b")
-        .await;
-    assert_ne!(demo.status(), StatusCode::FORBIDDEN);
-    assert_ne!(demo.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn link_external_is_idempotent_and_conflicts_on_relink_to_other_principal() {
-    let _guard = auth_jwks_test_guard();
-    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-link", "secret-link")]).await;
-    let server = TestServer::start().await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
-
-    let bearer = make_jwt_with_options(
-        "external-user-1",
-        "kid-link",
-        "secret-link",
-        Some("https://issuer.link.test"),
-        None,
-    );
-
-    let first = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first_body = first.text().await.expect("first link body");
-    let first_link: LinkExternalResponse =
-        serde_json::from_str(&first_body).expect("first link response");
-    assert!(first_link.created);
-    assert_eq!(first_link.issuer, "https://issuer.link.test");
-    assert_eq!(first_link.subject, "external-user-1");
-
-    let second = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-a")
-        .await;
-    assert_eq!(second.status(), StatusCode::OK);
-    let second_body = second.text().await.expect("second link body");
-    let second_link: LinkExternalResponse =
-        serde_json::from_str(&second_body).expect("second link response");
-    assert!(!second_link.created);
-    assert_eq!(first_link.principal_id, second_link.principal_id);
-
-    let conflict = server
-        .link_external(&app.app_id, &bearer, "anonymous", "device-token-b")
-        .await;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 }

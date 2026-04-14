@@ -1,124 +1,19 @@
 ---
 title: Authentication
-description: "How and when to use Jazz's three auth modes, and how to manage JWT auth over the lifetime of a live client."
+description: "How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
 reviewedAt: "f52c2c62"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+Jazz has two auth modes: `local-first` and `external`. Local-first auth derives a stable identity from a device secret — no server needed. Most multi-user apps will also use `external` authentication for production accounts.
 
-Jazz has three auth modes. `anonymous` and `demo` generate identities locally without an auth provider. Most multi-user apps will need `external` authentication in production.
+| Mode          | What it does                                           | When to use it                                   |
+| ------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
+| `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
 
-| Mode        | What it does                                            | When to use it                                   |
-| ----------- | ------------------------------------------------------- | ------------------------------------------------ |
-| `anonymous` | Generates one device token, persisted in `localStorage` | Prototyping, single-user apps, offline-only apps |
-| `demo`      | Multiple synthetic user profiles per device             | Testing multi-user scenarios locally             |
-| `external`  | Validates a JWT from your auth provider via JWKS        | Production apps with real user accounts          |
+## Local-first auth
 
-## Local auth for development
-
-### Anonymous
-
-Anonymous auth is the default when no JWT or backend auth is set up. Jazz generates a device token on first load and persists it in `localStorage`.
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymous.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymous.svelte#auth-anon-svelte
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-ts
-    </include>
-  </Tab>
-</Tabs>
-
-<Accordions type="single">
-<Accordion title="Using a specific token">
-
-If you prefer not to have Jazz generate a token, pass `localAuthToken` explicitly:
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-token-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymousToken.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymousToken.svelte#auth-anon-token-svelte
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-token-ts
-    </include>
-  </Tab>
-</Tabs>
-
-</Accordion>
-</Accordions>
-
-<Callout type="warn">
-  Anonymous tokens stored in `localStorage` cannot be recovered if deleted.
-</Callout>
-
-### Demo
-
-Demo auth lets you create multiple users and test multi-user flows. Data persists for each user individually.
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-demo-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthDemo.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthDemo.svelte#auth-demo-svelte
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-demo-ts
-    </include>
-  </Tab>
-</Tabs>
+Local-first auth lets users start using your app without signing up. They can later upgrade to an external provider while keeping their identity. See [Local-first auth](/docs/auth/local-first-auth) for the full guide.
 
 ## External auth for production
 
@@ -171,8 +66,8 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config:
 
 ```tsx
-const localAuth = getActiveSyntheticAuth("my-app", { defaultMode: "anonymous" });
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
+const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
 
 const config = jwtToken
   ? {
@@ -183,7 +78,7 @@ const config = jwtToken
   : {
       appId: "my-app",
       serverUrl: "https://sync.example.com",
-      ...localAuth,
+      auth: { localFirstSecret: secret },
     };
 
 <JazzProvider key={jwtToken ? "external" : "local"} config={config} />;
@@ -193,7 +88,7 @@ On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer tok
 the same principal:
 
 - `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
-- Do not use `db.updateAuthToken(null)` for logout or anonymous fallback on a live client.
+- Do not use `db.updateAuthToken(null)` for logout or local-first fallback on a live client.
 - Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
 
@@ -243,7 +138,7 @@ currently authenticated.
 
 ### Server configuration
 
-See [Server Setup](/docs/getting-started/server-setup) for the full list of server flags and storage options. In production (`NODE_ENV=production`), anonymous and demo auth are disabled unless explicitly enabled with `--allow-anonymous` / `--allow-demo`.
+See [Server Setup](/docs/getting-started/server-setup) for the full list of server flags and storage options.
 
 <include cwd lang="bash" meta='title="Terminal"'>
   ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
@@ -255,76 +150,16 @@ When the server receives a request, it tries each auth method in priority order 
 
 1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
 2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
-3. **Local auth**&hairsp;—&hairsp;the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
+3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
 4. **No session**&hairsp;—&hairsp;none of the above matched.
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-### Upgrading from local auth
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too.
 
-You might allow anonymous auth in production so users can try your app before signing up. If you do, you can link their local identity to an external one when they sign in, preserving any data they created.
+### Upgrading to external auth
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-external-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthExternal.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthExternal.svelte#auth-external-svelte
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="auth.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-external-ts
-    </include>
-  </Tab>
-</Tabs>
-
-Once linked, JWT logins use the same user identity as the original local account.
-
-## Offline-only mode
-
-If you're building an app that never syncs, you can skip server auth entirely. Data will be persisted locally only.
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthOffline.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthOffline.svelte#auth-offline-svelte
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-offline-ts
-    </include>
-  </Tab>
-</Tabs>
+Users on local-first auth can sign up with an external provider and keep the same identity. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full walkthrough.
 
 ## Next steps
 

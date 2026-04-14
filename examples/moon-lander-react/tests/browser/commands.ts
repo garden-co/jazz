@@ -38,7 +38,7 @@ interface OpenIsolatedAppOpts {
   playerId?: string;
   physicsSpeed?: number;
   spawnX?: number;
-  localAuthToken?: string;
+  localFirstSecret?: string;
   adminSecret?: string;
 }
 
@@ -73,8 +73,8 @@ export const openIsolatedApp: BrowserCommand<[opts: OpenIsolatedAppOpts]> = asyn
   if (opts.spawnX !== undefined) {
     url.searchParams.set("spawnX", String(opts.spawnX));
   }
-  if (opts.localAuthToken) {
-    url.searchParams.set("localAuthToken", opts.localAuthToken);
+  if (opts.localFirstSecret) {
+    url.searchParams.set("localFirstSecret", opts.localFirstSecret);
   }
   if (opts.adminSecret) {
     url.searchParams.set("adminSecret", opts.adminSecret);

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::commit::CommitId;
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::sync_manager::{ClientId, Destination, QueryId, Source, SyncPayload};
 
 // ============================================================================
@@ -98,14 +98,23 @@ pub struct SyncMessage {
 }
 
 impl SyncMessage {
-    /// True if this is an `ObjectUpdated` payload.
+    /// True if this is an update payload.
     pub fn is_object_updated(&self) -> bool {
-        matches!(self.payload, SyncPayload::ObjectUpdated { .. })
+        matches!(
+            self.payload,
+            SyncPayload::RowVersionCreated { .. } | SyncPayload::RowVersionNeeded { .. }
+        )
     }
 
-    /// True if this is a `PersistenceAck` payload.
+    /// True if this is a durability-state payload.
     pub fn is_persistence_ack(&self) -> bool {
-        matches!(self.payload, SyncPayload::PersistenceAck { .. })
+        matches!(
+            self.payload,
+            SyncPayload::RowVersionStateChanged {
+                confirmed_tier: Some(_),
+                ..
+            }
+        )
     }
 
     /// True if this is a `QuerySubscription` payload.
@@ -126,9 +135,9 @@ impl SyncMessage {
     /// Extract object_id from payloads that carry one.
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
-            SyncPayload::ObjectTruncated { object_id, .. } => Some(*object_id),
-            SyncPayload::PersistenceAck { object_id, .. } => Some(*object_id),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
             _ => None,
         }
     }
@@ -143,17 +152,12 @@ impl SyncMessage {
         }
     }
 
-    /// Extract commit IDs from ObjectUpdated or PersistenceAck.
+    /// Extract commit IDs from update or durability payloads.
     pub fn commit_ids(&self) -> Vec<CommitId> {
         match &self.payload {
-            SyncPayload::ObjectUpdated { commits, .. } => commits.iter().map(|c| c.id()).collect(),
-            SyncPayload::PersistenceAck {
-                confirmed_commits, ..
-            } => {
-                let mut ids: Vec<_> = confirmed_commits.iter().copied().collect();
-                ids.sort();
-                ids
-            }
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => vec![row.version_id()],
+            SyncPayload::RowVersionStateChanged { version_id, .. } => vec![*version_id],
             _ => vec![],
         }
     }
@@ -854,52 +858,41 @@ impl<'a> Normalizer<'a> {
 
     fn format_payload(&mut self, payload: &SyncPayload) -> String {
         match payload {
-            SyncPayload::ObjectUpdated {
-                object_id,
-                branch_name,
-                commits,
-                ..
-            } => {
-                let commit_ids: Vec<String> =
-                    commits.iter().map(|c| self.commit(&c.id())).collect();
+            SyncPayload::RowVersionCreated { row, .. } => {
                 format!(
-                    "obj:{} branch:{} commits:[{}]",
-                    self.object(object_id),
-                    self.branch(branch_name),
-                    commit_ids.join(","),
+                    "created row:{} branch:{} version:{}",
+                    self.object(&row.row_id),
+                    self.branch(&BranchName::new(&row.branch)),
+                    self.commit(&row.version_id()),
                 )
             }
-            SyncPayload::ObjectTruncated {
-                object_id,
-                branch_name,
-                tails,
-            } => {
-                let mut sorted_tails: Vec<_> = tails.iter().collect();
-                sorted_tails.sort();
-                let tail_ids: Vec<String> = sorted_tails.iter().map(|id| self.commit(id)).collect();
+            SyncPayload::RowVersionNeeded { row, .. } => {
                 format!(
-                    "obj:{} branch:{} tails:[{}]",
-                    self.object(object_id),
-                    self.branch(branch_name),
-                    tail_ids.join(","),
+                    "needed row:{} branch:{} version:{}",
+                    self.object(&row.row_id),
+                    self.branch(&BranchName::new(&row.branch)),
+                    self.commit(&row.version_id()),
                 )
             }
-            SyncPayload::PersistenceAck {
-                object_id,
+            SyncPayload::RowVersionStateChanged {
+                row_id,
                 branch_name,
-                confirmed_commits,
-                tier,
+                version_id,
+                state,
+                confirmed_tier,
             } => {
-                let mut sorted_commits: Vec<_> = confirmed_commits.iter().collect();
-                sorted_commits.sort();
-                let commit_ids: Vec<String> =
-                    sorted_commits.iter().map(|id| self.commit(id)).collect();
                 format!(
-                    "obj:{} branch:{} confirmed:[{}] tier:{:?}",
-                    self.object(object_id),
+                    "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                    self.object(row_id),
                     self.branch(branch_name),
-                    commit_ids.join(","),
-                    tier,
+                    self.commit(version_id),
+                )
+            }
+            SyncPayload::CatalogueEntryUpdated { entry } => {
+                format!(
+                    "catalogue obj:{} type:{}",
+                    self.object(&entry.object_id),
+                    entry.object_type().unwrap_or("unknown"),
                 )
             }
             SyncPayload::QuerySubscription { query_id, .. } => {
@@ -910,16 +903,16 @@ impl<'a> Normalizer<'a> {
             }
             SyncPayload::QuerySettled {
                 query_id,
-                tier,
                 through_seq,
+                ..
             } => {
-                format!(
-                    "query:{} tier:{:?} through_seq:{}",
-                    query_id.0, tier, through_seq
-                )
+                format!("query:{} through_seq:{}", query_id.0, through_seq)
             }
             SyncPayload::SchemaWarning(w) => {
                 format!("query:{} table:{}", w.query_id.0, w.table_name)
+            }
+            SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
+                format!("client_schema:{}", diagnostics.client_schema_hash.short())
             }
             SyncPayload::Error(e) => {
                 format!("{:?}", e)
@@ -969,51 +962,41 @@ fn format_message(msg: &SyncMessage, names: &Names<'_>) -> String {
 
 fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     match payload {
-        SyncPayload::ObjectUpdated {
-            object_id,
-            branch_name,
-            commits,
-            ..
-        } => {
-            let commit_ids: Vec<String> = commits.iter().map(|c| names.commit(&c.id())).collect();
+        SyncPayload::RowVersionCreated { row, .. } => {
             format!(
-                "obj:{} branch:{} commits:[{}]",
-                names.object(object_id),
-                branch_name,
-                commit_ids.join(","),
+                "created row:{} branch:{} version:{}",
+                names.object(&row.row_id),
+                row.branch,
+                names.commit(&row.version_id()),
             )
         }
-        SyncPayload::ObjectTruncated {
-            object_id,
-            branch_name,
-            tails,
-        } => {
-            let mut tail_ids: Vec<String> = tails.iter().map(|id| names.commit(id)).collect();
-            tail_ids.sort();
+        SyncPayload::RowVersionNeeded { row, .. } => {
             format!(
-                "obj:{} branch:{} tails:[{}]",
-                names.object(object_id),
-                branch_name,
-                tail_ids.join(","),
+                "needed row:{} branch:{} version:{}",
+                names.object(&row.row_id),
+                row.branch,
+                names.commit(&row.version_id()),
             )
         }
-        SyncPayload::PersistenceAck {
-            object_id,
-            branch_name,
-            confirmed_commits,
-            tier,
-        } => {
-            let mut commit_ids: Vec<String> = confirmed_commits
-                .iter()
-                .map(|id| names.commit(id))
-                .collect();
-            commit_ids.sort();
+        SyncPayload::CatalogueEntryUpdated { entry } => {
             format!(
-                "obj:{} branch:{} confirmed:[{}] tier:{:?}",
-                names.object(object_id),
+                "catalogue obj:{} type:{}",
+                names.object(&entry.object_id),
+                entry.object_type().unwrap_or("unknown"),
+            )
+        }
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id,
+            state,
+            confirmed_tier,
+        } => {
+            format!(
+                "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                names.object(row_id),
                 branch_name,
-                commit_ids.join(","),
-                tier,
+                names.commit(version_id),
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
@@ -1024,16 +1007,16 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::QuerySettled {
             query_id,
-            tier,
             through_seq,
+            ..
         } => {
-            format!(
-                "query:{} tier:{:?} through_seq:{}",
-                query_id.0, tier, through_seq,
-            )
+            format!("query:{} through_seq:{}", query_id.0, through_seq)
         }
         SyncPayload::SchemaWarning(w) => {
             format!("query:{} table:{}", w.query_id.0, w.table_name)
+        }
+        SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
+            format!("client_schema:{}", diagnostics.client_schema_hash.short())
         }
         SyncPayload::Error(e) => {
             format!("{:?}", e)
@@ -1065,21 +1048,22 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::Commit;
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
+    use crate::row_histories::{RowState, StoredRowVersion};
     use crate::sync_manager::ServerId;
-    use smallvec::smallvec;
 
-    fn make_commit(byte: u8) -> Commit {
-        Commit {
-            parents: smallvec![],
-            content: vec![byte],
-            timestamp: 1000,
-            author: ObjectId::new().to_string(),
-            metadata: None,
-            stored_state: Default::default(),
-            ack_state: Default::default(),
-        }
+    fn make_row(byte: u8) -> StoredRowVersion {
+        let row_id = ObjectId::new();
+        StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::new(),
+            vec![byte],
+            RowProvenance::for_insert(row_id.to_string(), 1000),
+            Default::default(),
+            RowState::VisibleDirect,
+            None,
+        )
     }
 
     #[test]
@@ -1087,11 +1071,9 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        let payload = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: make_row(1),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
@@ -1104,8 +1086,8 @@ mod tests {
         assert_eq!(tracer.count(), 2);
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
-        assert_eq!(tracer.of_type("ObjectUpdated").len(), 2);
-        assert_eq!(tracer.of_type("PersistenceAck").len(), 0);
+        assert_eq!(tracer.of_type("RowVersionCreated").len(), 2);
+        assert_eq!(tracer.of_type("RowVersionStateChanged").len(), 0);
     }
 
     #[test]
@@ -1113,18 +1095,17 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let obj_id = ObjectId::new();
-        let outgoing = SyncPayload::ObjectUpdated {
-            object_id: obj_id,
+        let row = make_row(1);
+        let outgoing = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: row.clone(),
         };
-        let incoming = SyncPayload::PersistenceAck {
-            object_id: obj_id,
-            branch_name: BranchName::from("main"),
-            confirmed_commits: std::collections::HashSet::new(),
-            tier: crate::sync_manager::DurabilityTier::EdgeServer,
+        let incoming = SyncPayload::RowVersionStateChanged {
+            row_id: row.row_id,
+            branch_name: "main".into(),
+            version_id: row.version_id(),
+            state: None,
+            confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &outgoing);
@@ -1141,11 +1122,9 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        let payload = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: make_row(1),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
@@ -1153,7 +1132,7 @@ mod tests {
         let dump = tracer.dump();
         assert!(dump.contains("alice"));
         assert!(dump.contains("server"));
-        assert!(dump.contains("ObjectUpdated"));
+        assert!(dump.contains("RowVersionCreated"));
         assert!(dump.contains("branch:main"));
     }
 

@@ -110,7 +110,8 @@ impl std::error::Error for CatalogueEncodingError {}
 /// [version: u8][table_count: u32][table_1]...[table_n]
 /// ```
 ///
-/// Tables are sorted by name for deterministic encoding.
+/// Tables are sorted by name for deterministic encoding. Column order within a
+/// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
     let version = SchemaEncodingVersion::V4;
@@ -205,12 +206,8 @@ fn encode_row_descriptor_with_version(
     desc: &RowDescriptor,
     version: SchemaEncodingVersion,
 ) {
-    // Sort columns by name for deterministic encoding
-    let mut columns: Vec<_> = desc.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    write_u32(buf, columns.len() as u32);
-    for col in columns {
+    write_u32(buf, desc.columns.len() as u32);
+    for col in &desc.columns {
         encode_column_descriptor_with_version(buf, col, version);
     }
 }
@@ -1712,6 +1709,30 @@ mod tests {
         // Check table exists
         let users = decoded.get(&TableName::new("users")).unwrap();
         assert_eq!(users.columns.columns.len(), 2);
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_declared_column_order() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let users = decoded.get(&TableName::new("users")).unwrap();
+        let column_names = users
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["name", "id", "email"]);
     }
 
     #[test]

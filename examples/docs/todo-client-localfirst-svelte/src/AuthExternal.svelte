@@ -3,22 +3,14 @@
   import {
     createJazzClient,
     JazzSvelteProvider,
-    useLinkExternalIdentity,
   } from "jazz-tools/svelte";
 
   const appId = "my-app";
   const jazzServerUrl = "http://127.0.0.1:4200";
 
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
   let jwtToken = $state<string | undefined>();
 
-  async function onSignedIn(providerJwt: string) {
-    await linkExternalIdentity({ jwtToken: providerJwt });
+  function onSignedIn(providerJwt: string) {
     jwtToken = providerJwt;
   }
 

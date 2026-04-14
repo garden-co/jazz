@@ -12,6 +12,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -75,7 +76,7 @@ describe("History & Conflict Management", () => {
    * Both clients must eventually converge to the same title.
    */
   it("concurrent updates converge in browser", async () => {
-    const token = `hc-concurrent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-concurrent", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-concurrent", token);
 
@@ -123,7 +124,7 @@ describe("History & Conflict Management", () => {
   }, 90000);
 
   it("sequential update propagates from A to B", async () => {
-    const token = `hc-seq-update-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-seq-upd", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-seq-upd", token);
 
@@ -174,7 +175,7 @@ describe("History & Conflict Management", () => {
    *            waitForQuery on both → see 2 todos
    */
   it("concurrent creates both visible in browser", async () => {
-    const token = `hc-creates-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-creates", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-creates", token);
 
@@ -228,7 +229,7 @@ describe("History & Conflict Management", () => {
    *   subscription callback fires with delta containing bob's update
    */
   it("subscription fires on remote concurrent update", async () => {
-    const token = `hc-sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-sub", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-sub", token);
 
@@ -295,7 +296,7 @@ describe("History & Conflict Management", () => {
    * Charlie must see the same converged winner.
    */
   it("fresh db sees converged state", async () => {
-    const token = `hc-fresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-fresh", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-fresh", token);
 
@@ -369,7 +370,7 @@ describe("History & Conflict Management", () => {
    *   dbAlice ──update title──► server ◄──update done── dbBob
    */
   it.skip("concurrent edits on different fields", async () => {
-    const token = `hc-fields-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const token = generateAuthSecret();
     const dbAlice = await createSyncedDb(ctx, "hc-alice-fields", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-fields", token);
 

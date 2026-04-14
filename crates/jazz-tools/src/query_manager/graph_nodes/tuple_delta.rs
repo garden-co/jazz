@@ -182,12 +182,12 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
         (
             TupleElement::Row {
                 content: old_content,
-                commit_id: old_commit,
+                version_id: old_commit,
                 ..
             },
             TupleElement::Row {
                 content: new_content,
-                commit_id: new_commit,
+                version_id: new_commit,
                 ..
             },
         ) => old_content != new_content || old_commit != new_commit,
@@ -208,8 +208,8 @@ mod tests {
     fn row_tuple(id: ObjectId, content: &[u8], commit_byte: u8) -> Tuple {
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: content.to_vec(),
-            commit_id: CommitId([commit_byte; 32]),
+            content: content.to_vec().into(),
+            version_id: CommitId([commit_byte; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }

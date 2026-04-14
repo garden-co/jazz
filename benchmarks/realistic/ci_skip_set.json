@@ -1,7 +1,17 @@
 {
   "version": 1,
-  "updated_at": "2026-04-10T14:04:42.557Z",
+  "updated_at": "2026-04-14T08:45:39.791Z",
   "entries": [
+    {
+      "id": "browser:b6",
+      "suite": "browser",
+      "label": "Browser B6 hotspot history",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-10T15:44:43.273Z",
+      "last_observed_at": "2026-04-10T15:44:43.273Z",
+      "observations": 1
+    },
     {
       "id": "native-criterion:r4_fanout_updates",
       "suite": "native",

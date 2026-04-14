@@ -1,17 +1,21 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const tmpBase = join(packageRoot, ".test-tmp");
 
 export function createTempRootTracker() {
   const roots: string[] = [];
 
   return {
     async create(prefix: string): Promise<string> {
-      const rootPath = await mkdtemp(join(tmpdir(), prefix));
+      // Create inside the package so Node's ESM resolver walks up and
+      // finds node_modules for bare-specifier imports in bundled schema files.
+      await mkdir(tmpBase, { recursive: true });
+      const rootPath = await mkdtemp(join(tmpBase, prefix));
       roots.push(rootPath);
       return rootPath;
     },

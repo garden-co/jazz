@@ -197,9 +197,9 @@ impl ProjectNode {
             .collect();
         let projected_content = encode_row(&self.output_descriptor, &values?).ok()?;
         let id = tuple.first_id()?;
-        let commit_id = tuple
+        let version_id = tuple
             .iter()
-            .find_map(TupleElement::commit_id)
+            .find_map(TupleElement::version_id)
             .unwrap_or(CommitId([0; 32]));
         let row_provenance = tuple
             .iter()
@@ -209,8 +209,8 @@ impl ProjectNode {
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id,
-                content: projected_content,
-                commit_id,
+                content: projected_content.into(),
+                version_id,
                 row_provenance,
             }])
             .with_provenance(tuple.provenance().clone()),
@@ -307,8 +307,8 @@ mod tests {
         let data = encode_row(&descriptor, values).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: data,
-            commit_id: CommitId([0; 32]),
+            content: data.into(),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -483,14 +483,14 @@ mod tests {
         let tuple = Tuple::new(vec![
             TupleElement::Row {
                 id: user_id,
-                content: user_row,
-                commit_id: CommitId([1; 32]),
+                content: user_row.into(),
+                version_id: CommitId([1; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: post_id,
-                content: post_row,
-                commit_id: CommitId([2; 32]),
+                content: post_row.into(),
+                version_id: CommitId([2; 32]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ]);

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -16,7 +16,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
-import { loadCompiledSchema } from "../schema-loader.js";
+import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
@@ -109,15 +109,13 @@ const TIMESTAMP_SCHEMA: WasmSchema = {
   },
 };
 
-let todoServerWasmSchemaPromise: Promise<WasmSchema> | null = null;
+let todoServerProjectPromise: Promise<LoadedSchemaProject> | null = null;
 
-async function loadTodoServerWasmSchema(): Promise<WasmSchema> {
-  if (!todoServerWasmSchemaPromise) {
-    todoServerWasmSchemaPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR).then(
-      (compiled) => compiled.wasmSchema,
-    );
+async function loadTodoServerProject(): Promise<LoadedSchemaProject> {
+  if (!todoServerProjectPromise) {
+    todoServerProjectPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR);
   }
-  return await todoServerWasmSchemaPromise;
+  return await todoServerProjectPromise;
 }
 
 const simpleTodosTable: TableProxy<SimpleTodo, SimpleTodoInit> = {
@@ -158,7 +156,10 @@ function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, Policy
   };
 }
 
-function makeAllPolicyTodosQuery(schema: WasmSchema): QueryBuilder<PolicyTodo> {
+function makePolicyTodosByDescriptionQuery(
+  schema: WasmSchema,
+  description: string,
+): QueryBuilder<PolicyTodo> {
   return {
     _table: "todos",
     _schema: schema,
@@ -166,7 +167,7 @@ function makeAllPolicyTodosQuery(schema: WasmSchema): QueryBuilder<PolicyTodo> {
     _build() {
       return JSON.stringify({
         table: "todos",
-        conditions: [],
+        conditions: [{ column: "description", op: "eq", value: description }],
         includes: {},
         orderBy: [],
         offset: 0,
@@ -510,7 +511,6 @@ class JwksServer {
             {
               kty: "oct",
               kid: JWT_KID,
-              alg: "HS256",
               k: base64Url(secret),
             },
           ],
@@ -579,7 +579,15 @@ function toBase64Url(value: unknown): string {
 }
 
 function makeJwt(payload: Record<string, unknown>): string {
-  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
+  const header = toBase64Url({ alg: "HS256", typ: "JWT", kid: JWT_KID });
+  const body = toBase64Url(payload);
+  const signature = createHmac("sha256", JWT_SECRET)
+    .update(`${header}.${body}`, "utf8")
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${header}.${body}.${signature}`;
 }
 
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
@@ -771,7 +779,7 @@ describe("NAPI integration", () => {
               isNestedOutboxCall(call) &&
               call[1][0] === "client" &&
               call[1][1] === clientId &&
-              hasPayloadKind(call[1][2], "ObjectUpdated"),
+              hasPayloadKind(call[1][2], "RowVersionNeeded"),
           ),
         ).toBe(true);
       },
@@ -837,6 +845,70 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
+      await captureServer.stop();
+    }
+  }, 20_000);
+
+  it("posts catalogue sync with admin auth even in backend mode", async () => {
+    const captureServer = await startSyncCaptureServer();
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: `napi-backend-catalogue-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-backend-secret",
+        adminSecret: "napi-admin-secret",
+      });
+
+      const db = context.asBackend();
+      const unsubscribe = db.subscribeAll(allTodosQuery, () => undefined, { tier: "edge" });
+
+      await vi.waitFor(
+        () =>
+          expect(
+            captureServer.syncRequests.some((request) =>
+              request.body.payloads.some(
+                (payload) =>
+                  typeof payload === "object" &&
+                  payload !== null &&
+                  "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+              ),
+            ),
+          ).toBe(true),
+        {
+          timeout: 15_000,
+        },
+      );
+
+      const request = captureServer.syncRequests.find((candidate) =>
+        candidate.body.payloads.some(
+          (payload) =>
+            typeof payload === "object" &&
+            payload !== null &&
+            "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+        ),
+      );
+      if (!request) {
+        throw new Error("expected a CatalogueEntryUpdated sync request");
+      }
+
+      expect(request.headers["x-jazz-admin-secret"]).toBe("napi-admin-secret");
+      expect(request.headers["x-jazz-backend-secret"]).toBeUndefined();
+      expect(request.headers.authorization).toBeUndefined();
+      unsubscribe();
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
       await captureServer.stop();
     }
   }, 20_000);
@@ -928,14 +1000,15 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
-      const todoServerSchema = await loadTodoServerWasmSchema();
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
       runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
+        permissions: todoServerProject.permissions ?? {},
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
@@ -1057,7 +1130,9 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-request-secret";
     const adminSecret = "napi-request-admin-secret";
+    const scopeTag = `request-scope-${randomUUID()}`;
     let runtimeData: TempRuntimeData | null = null;
+    const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
@@ -1065,7 +1140,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1080,25 +1155,27 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
-      const todoServerSchema = await loadTodoServerWasmSchema();
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
+      const scopedPolicyTodosQuery = makePolicyTodosByDescriptionQuery(todoServerSchema, scopeTag);
 
       runtimeData = await createTempRuntimeData("jazz-napi-request-runtime-");
       context = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
+        permissions: todoServerProject.permissions ?? {},
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
         tier: "worker",
       });
 
       const backendDb = context.asBackend();
-      const requestDb = context.forRequest({
+      const requestDb = await context.forRequest({
         headers: {
           authorization: `Bearer ${makeJwt({
             sub: "request-user",
@@ -1113,7 +1190,7 @@ describe("NAPI integration", () => {
           {
             title: "request-created-item",
             done: false,
-            description: "created via forRequest",
+            description: scopeTag,
             owner_id: "request-user",
           },
           { tier: "edge" },
@@ -1126,7 +1203,7 @@ describe("NAPI integration", () => {
         async () => {
           expect(
             await withTimeout(
-              requestDb.all(allPolicyTodosQuery, { tier: "edge" }),
+              requestDb.all(scopedPolicyTodosQuery, { tier: "edge" }),
               10_000,
               "request-scoped read timed out",
             ),
@@ -1179,14 +1256,53 @@ describe("NAPI integration", () => {
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
       await server.stop();
+      await jwks.stop();
     }
   }, 60_000);
+
+  it("rejects external JWT request auth when createJazzContext has no jwksUrl", async () => {
+    const appId = randomUUID();
+    let runtimeData: TempRuntimeData | null = null;
+    let context: {
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      runtimeData = await createTempRuntimeData("jazz-napi-request-no-jwks-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+      });
+
+      await expect(
+        context.forRequest({
+          headers: {
+            authorization: `Bearer ${makeJwt({
+              sub: "request-user",
+              claims: { role: "reviewer", tenant: "beta" },
+            })}`,
+          },
+        }),
+      ).rejects.toThrow(/jwksUrl/i);
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await cleanupTempRuntimeData(runtimeData);
+    }
+  });
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
     const appId = randomUUID();
     const backendSecret = "napi-query-backend-secret";
     const adminSecret = "napi-query-admin-secret";
     const rowTitles = (rows: PolicyTodo[]): string[] => rows.map((row) => row.title).sort();
+    const scopeTag = `session-scope-${randomUUID()}`;
     let writerRuntimeData: TempRuntimeData | null = null;
     let readerRuntimeData: TempRuntimeData | null = null;
 
@@ -1204,7 +1320,7 @@ describe("NAPI integration", () => {
     let readerContext: {
       asBackend(): Db;
       forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
+      forRequest(request: { headers: Record<string, string> }): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const operationTimeoutMs = 20_000;
@@ -1225,16 +1341,17 @@ describe("NAPI integration", () => {
         userBranch: "main",
       });
       mark("schema catalogue pushed");
-      const todoServerSchema = await loadTodoServerWasmSchema();
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
       mark("server schema loaded");
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
+      const scopedPolicyTodosQuery = makePolicyTodosByDescriptionQuery(todoServerSchema, scopeTag);
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-query-writer-");
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
+        permissions: todoServerProject.permissions ?? {},
         driver: { type: "persistent", dataPath: writerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
@@ -1247,10 +1364,11 @@ describe("NAPI integration", () => {
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
+        permissions: todoServerProject.permissions ?? {},
         driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1265,7 +1383,7 @@ describe("NAPI integration", () => {
         writerBackend: {
           state: snapshotDbClientState(writerBackend),
           queryRows: await readerBackend
-            .all(allPolicyTodosQuery, { tier: "worker" })
+            .all(scopedPolicyTodosQuery, { tier: "worker" })
             .then((rows) => rowTitles(rows))
             .catch((error) => [
               `reader-worker-query-failed:${
@@ -1280,8 +1398,8 @@ describe("NAPI integration", () => {
       // Warm the lazy NAPI contexts via real edge reads so the assertions below
       // measure session-scoped sync visibility instead of first-use startup time.
       await Promise.all([
-        waitForQueryRows(writerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
-        waitForQueryRows(readerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(writerBackend, scopedPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(readerBackend, scopedPolicyTodosQuery, (rows) => rows.length === 0),
       ]);
       mark("warm edge reads resolved");
 
@@ -1295,7 +1413,7 @@ describe("NAPI integration", () => {
           {
             title: "bob-item",
             done: false,
-            description: "",
+            description: scopeTag,
             owner_id: "bob",
           },
           { tier: "edge" },
@@ -1312,7 +1430,7 @@ describe("NAPI integration", () => {
           {
             title: "carol-item",
             done: false,
-            description: "",
+            description: scopeTag,
             owner_id: "carol",
           },
           { tier: "edge" },
@@ -1329,7 +1447,7 @@ describe("NAPI integration", () => {
           {
             title: "alice-item",
             done: false,
-            description: "",
+            description: scopeTag,
             owner_id: "alice",
           },
           { tier: "edge" },
@@ -1344,7 +1462,7 @@ describe("NAPI integration", () => {
         user_id: "alice",
         claims: {},
       });
-      const aliceRequestDb = readerContext.forRequest({
+      const aliceRequestDb = await readerContext.forRequest({
         headers: {
           authorization: `Bearer ${makeJwt({ sub: "alice" })}`,
         },
@@ -1355,7 +1473,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeoutDiagnostics(
-                readerBackend.all(allPolicyTodosQuery, { tier: "edge" }),
+                readerBackend.all(scopedPolicyTodosQuery, { tier: "edge" }),
                 operationTimeoutMs,
                 "backend reader query timed out",
                 collectDiagnostics,
@@ -1371,7 +1489,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeoutDiagnostics(
-                aliceSessionDb.all(allPolicyTodosQuery, { tier: "edge" }),
+                aliceSessionDb.all(scopedPolicyTodosQuery, { tier: "edge" }),
                 operationTimeoutMs,
                 "alice session query timed out",
                 collectDiagnostics,
@@ -1387,7 +1505,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeoutDiagnostics(
-                aliceRequestDb.all(allPolicyTodosQuery, { tier: "edge" }),
+                aliceRequestDb.all(scopedPolicyTodosQuery, { tier: "edge" }),
                 operationTimeoutMs,
                 "alice request query timed out",
                 collectDiagnostics,

@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use crate::object::ObjectId;
-use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
+use crate::row_format::decode_row;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
 

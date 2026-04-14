@@ -156,11 +156,8 @@ function signJwt(sub: string, secret: string, options?: { principalId?: string }
 
 function makeSyncPayload() {
   return {
-    ObjectUpdated: {
-      object_id: randomUUID(),
-      metadata: null,
-      branch_name: "main",
-      commits: [],
+    QueryUnsubscription: {
+      query_id: 1,
     },
   };
 }
@@ -429,8 +426,6 @@ async function seedTodosViaSyncBatch(context: AppContext, rowCount: number): Pro
     payloads,
     {
       jwtToken: context.jwtToken,
-      localAuthMode: context.localAuthMode,
-      localAuthToken: context.localAuthToken,
       pathPrefix: context.serverPathPrefix,
       clientId: randomUUID(),
     },
@@ -515,7 +510,6 @@ class JwksServer {
           {
             kty: "oct",
             kid: JWT_KID,
-            alg: "HS256",
             k: base64url(secret),
           },
         ],
@@ -1328,34 +1322,6 @@ describe("cloud-server integration (Jazz TS)", () => {
         ),
       ).rejects.toThrow("401");
     } finally {
-      await stopProcess(server.child);
-      await jwks.stop();
-    }
-  }, 30000);
-
-  it("links local anonymous identity to external JWT via JazzClient call path", async () => {
-    const jwks = await JwksServer.start(JWT_SECRET);
-    const dataRoot = allocTempDir("jazz-ts-cloud-server-link-");
-    const server = await startCloudServer({ dataRoot });
-    let client: JazzClient | null = null;
-
-    try {
-      const app = await createApp(server.baseUrl, jwks.url);
-      client = await connectClient({
-        ...makeContext(app.app_id, server.baseUrl, signJwt("linked-user", JWT_SECRET)),
-        localAuthMode: "anonymous",
-        localAuthToken: "device-token-a",
-      });
-
-      const first = await client.linkExternalIdentity();
-      expect(first.created).toBe(true);
-      expect(first.subject).toBe("linked-user");
-
-      const second = await client.linkExternalIdentity();
-      expect(second.created).toBe(false);
-      expect(second.principal_id).toBe(first.principal_id);
-    } finally {
-      if (client) await client.shutdown();
       await stopProcess(server.child);
       await jwks.stop();
     }

@@ -37,7 +37,6 @@ import {
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
-import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
@@ -77,19 +76,6 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
-  /**
-   * Local auth mode for client-generated identities.
-   *
-   * Browser clients default to `"anonymous"` when no other auth is configured.
-   */
-  localAuthMode?: "anonymous" | "demo";
-  /**
-   * Client-generated auth token for anonymous/demo identity.
-   *
-   * If omitted while local auth is active in browser, Jazz generates and
-   * persists a per-app device token in localStorage.
-   */
-  localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -98,6 +84,8 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
+  auth?: { localFirstSecret: string };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -366,6 +354,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private _localFirstSecret: string | null = null;
+  private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -402,6 +392,45 @@ export class Db {
     this.authStateStore = createAuthStateStore(config);
   }
 
+  /** @internal Store the seed used for local-first auth and schedule token refresh. */
+  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
+    this._localFirstSecret = seed;
+    this.scheduleLocalFirstRefresh(ttlSeconds);
+  }
+
+  private scheduleLocalFirstRefresh(ttlSeconds: number): void {
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+    }
+    // Refresh at 80% of TTL
+    const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
+    this.localFirstRefreshTimer = setTimeout(() => {
+      this.refreshLocalFirstToken();
+    }, refreshMs);
+  }
+
+  private refreshLocalFirstToken(): void {
+    if (!this._localFirstSecret || this.isShuttingDown) return;
+
+    try {
+      const wasmModule = this.wasmModule;
+      if (!wasmModule) return;
+
+      const ttlSeconds = 3600;
+      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+      const newToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+        this._localFirstSecret,
+        this.config.appId,
+        BigInt(ttlSeconds),
+        nowSeconds,
+      );
+      this.updateAuthToken(newToken);
+      this.scheduleLocalFirstRefresh(ttlSeconds);
+    } catch (e) {
+      console.error("Failed to refresh local-first token:", e);
+    }
+  }
+
   protected markUnauthenticated(reason: AuthFailureReason): void {
     this.authStateStore.markUnauthenticated(reason);
   }
@@ -425,8 +454,6 @@ export class Db {
 
     this.workerBridge?.updateAuth({
       jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
     });
 
     return true;
@@ -534,8 +561,6 @@ export class Db {
           env: this.config.env,
           userBranch: this.config.userBranch,
           jwtToken: this.config.jwtToken,
-          localAuthMode: this.config.localAuthMode,
-          localAuthToken: this.config.localAuthToken,
           adminSecret: this.config.adminSecret,
           tier: this.worker ? undefined : "worker",
           // Keep worker-bridged browser clients on worker durability by default.
@@ -626,8 +651,6 @@ export class Db {
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
       runtimeSources: this.config.runtimeSources,
       logLevel: this.config.logLevel,
@@ -1037,6 +1060,35 @@ export class Db {
     return this.authStateStore.getState();
   }
 
+  /**
+   * Mint a short-lived local-first JWT proving possession of the current identity.
+   * Returns `null` if the current session is not local-first.
+   */
+  async getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    if (!this._localFirstSecret) {
+      return null;
+    }
+
+    const wasmModule = this.wasmModule;
+    if (!wasmModule) {
+      return null;
+    }
+
+    const ttl = options?.ttlSeconds ?? 60;
+    const audience = options?.audience ?? this.config.appId;
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+
+    return wasmModule.WasmRuntime.mintLocalFirstToken(
+      this._localFirstSecret,
+      audience,
+      BigInt(ttl),
+      nowSeconds,
+    );
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
     return this.authStateStore.onChange((state) => {
       listener(state);
@@ -1161,7 +1213,7 @@ export class Db {
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
    * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
-   * localStorage-based auth or synthetic-user state.
+   * localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
@@ -1380,6 +1432,10 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+      this.localFirstRefreshTimer = null;
+    }
     this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
@@ -1685,17 +1741,47 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
+  if (config.auth && config.jwtToken) {
+    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  }
+
+  let resolvedConfig = { ...config };
+
+  // Local-first auth: resolve seed and mint a JWT
+  let localFirstSecret: string | null = null;
+  if (config.auth) {
+    const secret = config.auth.localFirstSecret;
+    localFirstSecret = secret;
+
+    const wasmModule = await loadWasmModule(config.runtimeSources);
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const jwtToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+      secret,
+      config.appId,
+      BigInt(3600),
+      nowSeconds,
+    );
+    resolvedConfig = { ...resolvedConfig, jwtToken };
+  }
+
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
   if (driver.type === "memory" && !resolvedConfig.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
+  let db: Db;
   if (isBrowser() && driver.type === "persistent") {
-    return Db.createWithWorker(resolvedConfig);
+    db = await Db.createWithWorker(resolvedConfig);
+  } else {
+    db = await Db.create(resolvedConfig);
   }
-  return Db.create(resolvedConfig);
+
+  if (localFirstSecret) {
+    db.initLocalFirstAuth(localFirstSecret, 3600);
+  }
+
+  return db;
 }
 
 export function createDbFromClient(
@@ -1704,5 +1790,5 @@ export function createDbFromClient(
   session?: Session,
   attribution?: string,
 ): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
+  return new ClientBackedDb(config, client, session, attribution);
 }

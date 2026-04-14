@@ -28,8 +28,6 @@ export interface WorkerBridgeOptions {
   serverUrl?: string;
   serverPathPrefix?: string;
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
@@ -176,8 +174,6 @@ export class WorkerBridge {
       serverUrl: options.serverUrl,
       serverPathPrefix: options.serverPathPrefix,
       jwtToken: options.jwtToken,
-      localAuthMode: options.localAuthMode,
-      localAuthToken: options.localAuthToken,
       adminSecret: options.adminSecret,
       runtimeSources: options.runtimeSources,
       logLevel: options.logLevel,
@@ -237,11 +233,7 @@ export class WorkerBridge {
   /**
    * Update auth credentials in the worker.
    */
-  updateAuth(auth: {
-    jwtToken?: string;
-    localAuthMode?: "anonymous" | "demo";
-    localAuthToken?: string;
-  }): void {
+  updateAuth(auth: { jwtToken?: string }): void {
     if (this.isDisposedLike()) return;
     this.worker.postMessage({ type: "update-auth", ...auth });
   }

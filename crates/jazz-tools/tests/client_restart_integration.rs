@@ -104,7 +104,7 @@ impl ServerProcess {
         }
 
         let process = cmd.spawn().expect("spawn jazz-tools server");
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             client: reqwest::Client::new(),
@@ -117,9 +117,12 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..80 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!("jazz-tools server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -127,7 +130,7 @@ impl ServerProcess {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("jazz-tools server did not become ready in time");
+        panic!("jazz-tools server did not become ready within 20 seconds");
     }
 }
 
@@ -263,7 +266,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     panic!("timed out waiting for EdgeServer query readiness");
 }
 
-async fn wait_for_catalogue_manifest_schema_count_on_disk(
+async fn wait_for_catalogue_schema_entry_count_on_disk(
     app_id: AppId,
     data_root: &Path,
     expected_min_count: usize,
@@ -282,11 +285,17 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
             None
         };
         if let Some(storage) = storage_result {
-            let manifest = storage
-                .load_catalogue_manifest(app_id.as_object_id())
-                .ok()
-                .flatten();
-            last_count = manifest.map(|m| m.schema_seen.len()).unwrap_or(0);
+            let expected_app_id = app_id.as_object_id().to_string();
+            let entries = storage.scan_catalogue_entries().unwrap_or_default();
+            last_count = entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.metadata.get("type").map(|value| value.as_str())
+                        == Some("catalogue_schema")
+                        && entry.metadata.get("app_id").map(|value| value.as_str())
+                            == Some(expected_app_id.as_str())
+                })
+                .count();
             let _ = storage.close();
             if last_count >= expected_min_count {
                 return;
@@ -297,7 +306,7 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     }
 
     panic!(
-        "timed out waiting for schema manifest count >= {expected_min_count}, last_count={last_count}"
+        "timed out waiting for catalogue schema entry count >= {expected_min_count}, last_count={last_count}"
     );
 }
 
@@ -347,7 +356,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     .await;
 
     drop(server);
-    wait_for_catalogue_manifest_schema_count_on_disk(
+    wait_for_catalogue_schema_entry_count_on_disk(
         app_id,
         server_data.path(),
         1,

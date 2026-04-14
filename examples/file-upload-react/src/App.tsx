@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import {
   attachDevTools,
-  getActiveSyntheticAuth,
   JazzProvider,
   useAll,
   useDb,
@@ -9,6 +8,7 @@ import {
   useSession,
 } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import { app, type UploadWithIncludes, type File as JazzFile } from "../schema.js";
 import { Logo } from "./Logo.js";
 
@@ -46,16 +46,14 @@ function readEnvAppId(): string | undefined {
     ?.JAZZ_APP_ID;
 }
 
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
+function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-2473-7006-857e-dd676070304b";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    auth: { localFirstSecret: secret },
     ...overrides,
   };
 }
@@ -283,7 +281,8 @@ type AppProps = {
 };
 
 export function App({ config, fallback }: AppProps = {}) {
-  const resolvedConfig = defaultConfig(config);
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const resolvedConfig = defaultConfig(secret, config);
 
   return (
     <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>

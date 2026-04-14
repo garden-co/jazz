@@ -1,22 +1,17 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, catalogue manifest ops, and indices.
+//! raw tables, row histories, visible entries, and derived indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
 //! ```text
-//! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
-//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
-//! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
+//! "raw:{table}:{local_key}"                               → raw table entry
+//! "row:{table}:0:{branch}:{row_uuid}"                     → encoded VisibleRowEntry
+//! "row:{table}:1:{row_uuid}:{version_id}"                 → encoded StoredRowVersion
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
@@ -26,22 +21,23 @@ use opfs_btree::OpfsFile;
 use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
+use crate::object::ObjectId;
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
+        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        upsert_visible_region_row_bytes_core,
     },
 };
+use crate::commit::CommitId;
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -185,7 +181,15 @@ impl OpfsBTreeStorage {
         self.tree_scan_range_bytes(start, &end)
     }
 
-    fn tree_scan_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+    fn tree_scan_range(
+        &self,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.tree_scan_range_bytes(start.as_bytes(), end.as_bytes())
+    }
+
+    fn tree_scan_prefix_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         Ok(self
             .tree_scan_prefix(prefix)?
             .into_iter()
@@ -193,9 +197,9 @@ impl OpfsBTreeStorage {
             .collect())
     }
 
-    fn tree_scan_key_range(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
+    fn tree_scan_range_keys(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
         Ok(self
-            .tree_scan_range_bytes(start.as_bytes(), end.as_bytes())?
+            .tree_scan_range(start, end)?
             .into_iter()
             .map(|(key, _)| key)
             .collect())
@@ -228,182 +232,145 @@ impl OpfsBTreeStorage {
 }
 
 impl Storage for OpfsBTreeStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        create_object_core(id, metadata, |key, value| self.tree_insert(key, value))
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        raw_table_put_core(table, key, value, |storage_key, bytes| {
+            self.tree_insert(storage_key, bytes)
+        })
     }
 
-    fn load_object_metadata(
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        raw_table_delete_core(table, key, |storage_key| self.tree_delete(storage_key))
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        raw_table_get_core(table, key, |storage_key| self.tree_read(storage_key))
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        load_object_metadata_core(id, |key| self.tree_read(key))
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
+        raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+            self.tree_scan_prefix(storage_prefix)
+        })
     }
 
-    fn load_branch(
+    fn raw_table_scan_prefix_keys(
         &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        load_branch_core(
-            object_id,
-            branch,
-            |key| self.tree_read(key),
-            |prefix| self.tree_scan_prefix(prefix),
-        )
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
+            self.tree_scan_prefix_keys(storage_prefix)
+        })
     }
 
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        append_commit_core(
-            object_id,
-            branch,
-            commit,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        delete_commit_core(
-            object_id,
-            branch,
-            commit_id,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-            |key| self.tree_delete(key),
-        )
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        set_branch_tails_core(
-            object_id,
-            branch,
-            tails,
-            |key, value| self.tree_insert(key, value),
-            |key| self.tree_delete(key),
-        )
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        store_ack_tier_core(
-            commit_id,
-            tier,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        append_catalogue_manifest_op_core(
-            app_id,
-            op,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        append_catalogue_manifest_ops_core(
-            app_id,
-            ops,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn load_catalogue_manifest(
+    fn raw_table_scan_range(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        load_catalogue_manifest_core(app_id, |prefix| self.tree_scan_prefix(prefix))
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
+        raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+            self.tree_scan_range(start_key, end_key)
+        })
     }
 
-    fn index_insert(
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
+            self.tree_scan_range_keys(start_key, end_key)
+        })
+    }
+
+    fn append_history_region_row_bytes(
         &mut self,
         table: &str,
-        column: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        upsert_visible_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        super::patch_row_region_rows_by_batch_with_storage(
+            self,
+            table,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
+    }
+
+    fn load_visible_region_row_bytes(
+        &self,
+        table: &str,
         branch: &str,
-        value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-            self.tree_insert(key, bytes)
-        })
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        load_visible_region_row_bytes_core(table, branch, row_id, |key| self.tree_read(key))
     }
 
-    fn index_remove(
-        &mut self,
+    fn scan_visible_region_bytes(
+        &self,
         table: &str,
-        column: &str,
         branch: &str,
-        value: &Value,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        scan_visible_region_bytes_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
         row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        index_remove_core(table, column, branch, value, row_id, |key| {
-            self.tree_delete(key)
-        })
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let branches = scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
+            self.tree_scan_prefix_keys(prefix)
+        })?;
+
+        let mut rows = Vec::new();
+        for branch in branches {
+            if let Some(row) = self.load_visible_region_row(table, &branch, row_id)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
-    fn index_lookup(
+    fn load_history_row_version_bytes(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        tracing::trace!(table, column, branch, "index_lookup");
-        index_lookup_core(table, column, branch, value, |prefix| {
-            self.tree_scan_keys(prefix)
-        })
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        load_history_row_version_bytes_core(table, row_id, version_id, |key| self.tree_read(key))
     }
 
-    fn index_range(
+    fn scan_history_region_bytes(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        index_range_core(table, column, branch, start, end, |start_key, end_key| {
-            self.tree_scan_key_range(start_key, end_key)
-        })
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
+        scan: HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        scan_history_region_bytes_core(table, scan, |prefix| self.tree_scan_prefix(prefix))
     }
 
     fn flush(&self) {
@@ -426,19 +393,64 @@ fn map_storage_err(error: BTreeError) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use smallvec::smallvec;
+    use std::collections::HashMap;
+    use std::ops::Bound;
 
-    fn make_commit(content: &[u8]) -> Commit {
-        Commit {
-            parents: smallvec![],
-            content: content.to_vec(),
-            timestamp: 12345,
-            author: ObjectId::new().to_string(),
-            metadata: None,
-            stored_state: Default::default(),
-            ack_state: Default::default(),
-        }
+    use super::*;
+    use crate::catalogue::CatalogueEntry;
+    use crate::metadata::RowProvenance;
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
+    use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+    use crate::sync_manager::DurabilityTier;
+    use crate::test_row_history::persist_test_schema;
+
+    fn users_test_schema() -> crate::query_manager::types::Schema {
+        SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("value", ColumnType::Text))
+            .build()
+    }
+
+    fn users_schema_hash() -> SchemaHash {
+        SchemaHash::compute(&users_test_schema())
+    }
+
+    fn seed_users_schema(storage: &mut OpfsBTreeStorage) {
+        persist_test_schema(storage, &users_test_schema());
+    }
+
+    fn seed_users_row(storage: &mut OpfsBTreeStorage, row_id: ObjectId) {
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&crate::storage::RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(users_schema_hash()),
+                }),
+            )
+            .unwrap();
+    }
+
+    fn make_row_version(
+        row_id: ObjectId,
+        branch: &str,
+        updated_at: u64,
+        value: &str,
+    ) -> StoredRowVersion {
+        StoredRowVersion::new(
+            row_id,
+            branch,
+            Vec::new(),
+            encode_row(
+                &users_test_schema()[&"users".into()].columns,
+                &[Value::Text(value.to_string())],
+            )
+            .unwrap(),
+            RowProvenance::for_insert(row_id.to_string(), updated_at),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        )
     }
 
     fn test_storage() -> OpfsBTreeStorage {
@@ -457,48 +469,49 @@ mod tests {
         );
         metadata.insert("app".to_string(), "test".to_string());
 
-        storage.create_object(id, metadata.clone()).unwrap();
+        storage.put_metadata(id, metadata.clone()).unwrap();
 
-        let loaded = storage.load_object_metadata(id).unwrap();
+        let loaded = storage.load_metadata(id).unwrap();
         assert_eq!(loaded, Some(metadata));
 
         let other = ObjectId::new();
-        assert_eq!(storage.load_object_metadata(other).unwrap(), None);
+        assert_eq!(storage.load_metadata(other).unwrap(), None);
     }
 
     #[test]
-    fn opfs_btree_commit_roundtrip() {
+    fn opfs_btree_row_region_roundtrip() {
         let mut storage = test_storage();
+        seed_users_schema(&mut storage);
 
-        let id = ObjectId::new();
-        let branch = BranchName::new("main");
-        storage.create_object(id, HashMap::new()).unwrap();
+        let row_id = ObjectId::new();
+        seed_users_row(&mut storage, row_id);
+        let row = make_row_version(row_id, "main", 12345, "first");
 
-        assert_eq!(storage.load_branch(id, &branch).unwrap(), None);
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
+            .unwrap();
 
-        let commit = make_commit(b"first");
-        let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit).unwrap();
-
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert!(loaded.tails.contains(&commit_id));
-        assert_eq!(loaded.commits[0].content, b"first");
-
-        let mut commit2 = make_commit(b"second");
-        commit2.parents = smallvec![commit_id];
-        let commit2_id = commit2.id();
-        storage.append_commit(id, &branch, commit2).unwrap();
-
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 2);
-        assert!(!loaded.tails.contains(&commit_id));
-        assert!(loaded.tails.contains(&commit2_id));
-
-        storage.delete_commit(id, &branch, commit_id).unwrap();
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert_eq!(loaded.commits[0].content, b"second");
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap(),
+            Some(row.clone())
+        );
+        assert_eq!(
+            storage
+                .scan_history_region("users", "main", HistoryScan::Row { row_id })
+                .unwrap(),
+            vec![row]
+        );
     }
 
     #[test]
@@ -599,23 +612,41 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_ack_tier_roundtrip() {
+    fn opfs_btree_row_region_patch_roundtrip() {
         let mut storage = test_storage();
-
-        let commit_id = CommitId([99u8; 32]);
+        seed_users_schema(&mut storage);
+        let row_id = ObjectId::new();
+        seed_users_row(&mut storage, row_id);
+        let row = make_row_version(row_id, "main", 12345, "first");
 
         storage
-            .store_ack_tier(commit_id, DurabilityTier::Worker)
+            .append_history_region_rows("users", std::slice::from_ref(&row))
             .unwrap();
         storage
-            .store_ack_tier(commit_id, DurabilityTier::EdgeServer)
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
+            .unwrap();
+        storage
+            .patch_row_region_rows_by_batch(
+                "users",
+                row.batch_id,
+                None,
+                Some(DurabilityTier::EdgeServer),
+            )
             .unwrap();
 
-        let key = super::super::key_codec::ack_key(commit_id);
-        let data = storage.tree_read(&key).unwrap().unwrap();
-        let tiers: HashSet<DurabilityTier> = serde_json::from_slice(&data).unwrap();
-        assert!(tiers.contains(&DurabilityTier::Worker));
-        assert!(tiers.contains(&DurabilityTier::EdgeServer));
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap()
+                .and_then(|row| row.confirmed_tier),
+            Some(DurabilityTier::EdgeServer)
+        );
     }
 
     #[test]
@@ -624,21 +655,33 @@ mod tests {
         let db_path = temp_dir.path().join("test.opfsbtree");
 
         let id = ObjectId::new();
+        let row = make_row_version(id, "main", 12345, "persistent data");
         let mut metadata = HashMap::new();
         metadata.insert(
             crate::metadata::MetadataKey::Table.to_string(),
             "users".to_string(),
         );
-
-        let commit_content = b"persistent data";
-        let branch = BranchName::new("main");
+        metadata.insert(
+            crate::metadata::MetadataKey::OriginSchemaHash.to_string(),
+            users_schema_hash().to_string(),
+        );
 
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
-            storage.create_object(id, metadata.clone()).unwrap();
-
-            let commit = make_commit(commit_content);
-            storage.append_commit(id, &branch, commit).unwrap();
+            seed_users_schema(&mut storage);
+            storage.put_metadata(id, metadata.clone()).unwrap();
+            storage
+                .append_history_region_rows("users", std::slice::from_ref(&row))
+                .unwrap();
+            storage
+                .upsert_visible_region_rows(
+                    "users",
+                    std::slice::from_ref(&VisibleRowEntry::rebuild(
+                        row.clone(),
+                        std::slice::from_ref(&row),
+                    )),
+                )
+                .unwrap();
 
             storage
                 .index_insert(
@@ -656,12 +699,14 @@ mod tests {
         {
             let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
 
-            let loaded_meta = storage.load_object_metadata(id).unwrap();
+            let loaded_meta = storage.load_metadata(id).unwrap();
             assert_eq!(loaded_meta, Some(metadata));
-
-            let loaded_branch = storage.load_branch(id, &branch).unwrap().unwrap();
-            assert_eq!(loaded_branch.commits.len(), 1);
-            assert_eq!(loaded_branch.commits[0].content, commit_content);
+            assert_eq!(
+                storage
+                    .load_visible_region_row("users", "main", id)
+                    .unwrap(),
+                Some(row)
+            );
 
             let results =
                 storage.index_lookup("users", "name", "main", &Value::Text("Alice".to_string()));
@@ -671,55 +716,28 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_catalogue_manifest_roundtrip() {
+    fn opfs_btree_catalogue_entry_roundtrip() {
         let mut storage = test_storage();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
-        let lens_object_id = ObjectId::new();
-        let schema_hash = crate::query_manager::types::SchemaHash::from_bytes([0x11; 32]);
-        let source_hash = crate::query_manager::types::SchemaHash::from_bytes([0x22; 32]);
-        let target_hash = crate::query_manager::types::SchemaHash::from_bytes([0x33; 32]);
+        let object_id = ObjectId::new();
+        let metadata = HashMap::from([
+            (
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            ),
+            ("app_id".to_string(), ObjectId::new().to_string()),
+        ]);
+        let entry = CatalogueEntry {
+            object_id,
+            metadata: metadata.clone(),
+            content: b"schema bytes".to_vec(),
+        };
 
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::LensSeen {
-                    object_id: lens_object_id,
-                    source_hash,
-                    target_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
+        storage.upsert_catalogue_entry(&entry).unwrap();
 
-        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-        assert_eq!(
-            manifest.schema_seen.get(&schema_object_id),
-            Some(&schema_hash)
-        );
-        assert_eq!(
-            manifest.lens_seen.get(&lens_object_id),
-            Some(&crate::storage::CatalogueLensSeen {
-                source_hash,
-                target_hash,
-            })
-        );
+        let loaded = storage.load_catalogue_entry(object_id).unwrap();
+        assert_eq!(loaded, Some(entry.clone()));
+
+        let scanned = storage.scan_catalogue_entries().unwrap();
+        assert_eq!(scanned, vec![entry]);
     }
 }

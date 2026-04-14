@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
@@ -27,6 +29,7 @@ use jazz_tools::binding_support::{
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
     serialize_outbox_entry, subscription_delta_to_json,
 };
+use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -158,6 +161,16 @@ fn make_subscription_callback(
     }
 }
 
+fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid base64url seed: {}", e)))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("Seed must be exactly 32 bytes"))?;
+    Ok(arr)
+}
+
 // ============================================================================
 // NapiScheduler
 // ============================================================================
@@ -184,10 +197,9 @@ struct DevServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
+    allow_local_first_auth: Option<bool>,
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
     catalogue_authority_admin_secret: Option<String>,
@@ -1183,6 +1195,30 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
     }
+
+    #[napi(js_name = "deriveUserId")]
+    pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        Ok(identity::derive_user_id(&seed).to_string())
+    }
+
+    #[napi(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token(
+        seed_b64: String,
+        audience: String,
+        ttl_seconds: u32,
+    ) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
+            .map_err(napi::Error::from_reason)
+    }
+
+    #[napi(js_name = "getPublicKeyBase64url")]
+    pub fn get_public_key_base64url(seed_b64: String) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        let verifying_key = identity::derive_verifying_key(&seed);
+        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+    }
 }
 
 // ============================================================================
@@ -1348,7 +1384,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1379,8 +1415,7 @@ impl DevServer {
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
-            allow_anonymous: opts.allow_anonymous.unwrap_or(false),
-            allow_demo: opts.allow_demo.unwrap_or(false),
+            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
         };
@@ -1500,6 +1535,79 @@ pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
     serde_json::to_value(&schema)
         .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
+}
+
+// ============================================================================
+// Identity crypto utilities
+// ============================================================================
+
+fn decode_seed_napi(seed_b64: &str) -> napi::Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| napi::Error::from_reason(format!("seed base64 decode error: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("seed must be exactly 32 bytes"))
+}
+
+#[napi(js_name = "deriveUserId")]
+pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    Ok(identity::derive_user_id(&seed).to_string())
+}
+
+#[napi(js_name = "mintLocalFirstToken")]
+pub fn mint_local_first_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: u32,
+) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
+        .map_err(napi::Error::from_reason)
+}
+
+#[napi(object)]
+pub struct VerifyTokenResult {
+    pub ok: bool,
+    pub id: String,
+    pub error: Option<String>,
+}
+
+#[napi(js_name = "verifyLocalFirstIdentityProof")]
+pub fn verify_local_first_identity_proof_napi(
+    token: Option<String>,
+    expected_audience: String,
+) -> VerifyTokenResult {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return VerifyTokenResult {
+                ok: false,
+                id: String::new(),
+                error: Some("proofToken is required".to_string()),
+            };
+        }
+    };
+    match identity::verify_local_first_identity_proof(&token, &expected_audience) {
+        Ok(verified) => VerifyTokenResult {
+            ok: true,
+            id: verified.user_id,
+            error: None,
+        },
+        Err(e) => VerifyTokenResult {
+            ok: false,
+            id: String::new(),
+            error: Some(e),
+        },
+    }
+}
+
+#[napi(js_name = "getPublicKeyBase64url")]
+pub fn get_public_key_b64(seed_b64: String) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    let verifying_key = identity::derive_verifying_key(&seed);
+    Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
 }
 
 #[cfg(test)]
