@@ -5,7 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output_root="${JAZZ_SWIFT_IOS_ARTIFACTS_DIR:-$repo_root/crates/jazz-swift/artifacts/ios}"
 profile="${JAZZ_SWIFT_PROFILE:-release}"
-targets=(${JAZZ_SWIFT_IOS_TARGETS:-aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios})
+targets=(${JAZZ_SWIFT_IOS_TARGETS:-aarch64-apple-ios aarch64-apple-ios-sim})
 
 mkdir -p "$output_root"
 

@@ -57,6 +57,10 @@ enum Commands {
         #[command(subcommand)]
         resource: CreateResource,
     },
+    /// Operate on the run-agent control-plane store with agent-specific commands
+    AgentInfra(commands::agent_infra::AgentInfraCommand),
+    /// Inspect and query a local Jazz database through a JSON-friendly CLI
+    Db(commands::db::DbCommand),
     /// Run a Jazz server
     Server {
         /// Application ID (from `jazz-tools create app`)
@@ -118,10 +122,12 @@ enum CreateResource {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing with layered subscriber
-    init_tracing();
-
     let cli = Cli::parse();
+    let quiet_tracing = matches!(cli.command, Commands::Db(_) | Commands::AgentInfra(_));
+
+    // Initialize tracing after command parsing so JSON-centric commands can
+    // keep stdout clean by default.
+    init_tracing(quiet_tracing);
 
     match cli.command {
         Commands::Create { resource } => match resource {
@@ -129,6 +135,18 @@ async fn main() {
                 commands::create::app(name);
             }
         },
+        Commands::AgentInfra(command) => {
+            if let Err(e) = commands::agent_infra::run(command) {
+                eprintln!("Agent infra command error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Db(command) => {
+            if let Err(e) = commands::db::run(command) {
+                eprintln!("DB command error: {}", e);
+                std::process::exit(1);
+            }
+        }
         Commands::Server {
             app_id,
             port,
@@ -200,11 +218,21 @@ async fn main() {
     }
 }
 
-fn make_env_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("jazz=info".parse().unwrap())
-        .add_directive("jazz_tools=info".parse().unwrap())
-        .add_directive("tower_http=debug".parse().unwrap())
+fn make_env_filter(quiet_defaults: bool) -> tracing_subscriber::EnvFilter {
+    if std::env::var("RUST_LOG").is_ok() {
+        return tracing_subscriber::EnvFilter::from_default_env();
+    }
+
+    let (jazz_level, jazz_tools_level, tower_http_level) = if quiet_defaults {
+        ("error", "error", "error")
+    } else {
+        ("info", "info", "debug")
+    };
+
+    tracing_subscriber::EnvFilter::default()
+        .add_directive(format!("jazz={jazz_level}").parse().unwrap())
+        .add_directive(format!("jazz_tools={jazz_tools_level}").parse().unwrap())
+        .add_directive(format!("tower_http={tower_http_level}").parse().unwrap())
 }
 
 #[cfg(test)]
@@ -249,7 +277,7 @@ mod tests {
 static OTEL_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing() {
+fn init_tracing(quiet_defaults: bool) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -260,7 +288,7 @@ fn init_tracing() {
             let otel_layer = otel::layer(&provider);
             let _ = OTEL_PROVIDER.set(provider);
             tracing_subscriber::registry()
-                .with(make_env_filter())
+                .with(make_env_filter(quiet_defaults))
                 .with(tracing_subscriber::fmt::layer())
                 .with(otel_layer)
                 .init();
@@ -269,7 +297,7 @@ fn init_tracing() {
     }
 
     tracing_subscriber::registry()
-        .with(make_env_filter())
+        .with(make_env_filter(quiet_defaults))
         .with(tracing_subscriber::fmt::layer())
         .init();
 }

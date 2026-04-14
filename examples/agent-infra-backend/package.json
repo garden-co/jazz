@@ -1,0 +1,23 @@
+{
+  "name": "agent-infra-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cli": "node dist/src/cli.js",
+    "build": "tsc",
+    "build:schema": "node ../../packages/jazz-tools/dist/cli.js build --schema-dir ./schema",
+    "smoke": "tsx src/smoke.ts",
+    "test": "vitest run tests"
+  },
+  "dependencies": {
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
