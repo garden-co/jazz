@@ -10,8 +10,7 @@ export interface RemoteBrowserDbCreateInput {
   schemaJson: string;
   serverUrl?: string;
   adminSecret?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
+  localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
 }
 
@@ -42,6 +41,24 @@ function getRemoteStateStore(): Map<string, RemoteBrowserDbState> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function makeAllRowsQuery(
@@ -76,8 +93,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    localAuthMode: input.localAuthMode,
-    localAuthToken: input.localAuthToken,
+    ...(input.localFirstSecret ? { auth: { localFirstSecret: input.localFirstSecret } } : {}),
     adminSecret: input.adminSecret,
     logLevel: input.logLevel,
   });
@@ -103,7 +119,13 @@ export async function waitForRemoteBrowserDbTitle(
 
   while (Date.now() < deadline) {
     try {
-      const rows = await state.db.all(state.query, { tier: input.tier });
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const queryTimeoutMs = Math.min(5000, remainingMs);
+      const rows = await withTimeout(
+        state.db.all(state.query, { tier: input.tier }),
+        queryTimeoutMs,
+        `Remote browser db "${input.id}" query did not resolve`,
+      );
       if (rows.some((row) => row.title === input.title)) {
         return rows;
       }

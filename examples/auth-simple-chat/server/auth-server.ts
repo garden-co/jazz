@@ -2,8 +2,8 @@ import express from "express";
 import type { Request, Response } from "express";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createServer, type Server as HttpServer } from "node:http";
-import { AUTH_JWT_KID } from "../constants.js";
-import { findUser, createUser } from "./users.js";
+import { AUTH_JWT_KID } from "../constants.ts";
+import { findUser, createUser } from "./users.ts";
 
 export interface AuthServerOptions {
   port?: number;
@@ -51,6 +51,7 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
     return new SignJWT({ username, claims: { role } })
       .setProtectedHeader({ alg: JWA_ALGORITHM, kid })
       .setSubject(userId)
+      .setExpirationTime("10m")
       .setIssuer(issuer)
       .setIssuedAt()
       .sign(privateKey);
@@ -58,7 +59,10 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
 
   // 3a. Sign in — returns a JWT for an existing account.
   app.post("/api/auth/sign-in", async (req: Request, res: Response) => {
-    const { email, password } = req.body as { email?: string; password?: string };
+    const { email, password } = req.body as {
+      email?: string;
+      password?: string;
+    };
 
     if (!email?.trim() || !password) {
       res.status(400).json({ error: "Email and password are required." });
@@ -77,7 +81,10 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
 
   // 3b. Sign up — creates a new account and returns a JWT.
   app.post("/api/auth/sign-up", async (req: Request, res: Response) => {
-    const { email, password } = req.body as { email?: string; password?: string };
+    const { email, password } = req.body as {
+      email?: string;
+      password?: string;
+    };
 
     if (!email?.trim() || !password) {
       res.status(400).json({ error: "Email and password are required." });

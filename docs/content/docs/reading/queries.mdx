@@ -1,8 +1,10 @@
 ---
 title: Queries
 description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
-reviewedAt: "4059cdef"
+reviewedAt: "437c86c7e"
 ---
+
+import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 ## One-shot queries
 
@@ -56,6 +58,53 @@ Queries are immutable and chainable. Each method returns a new query, so you can
 </Tabs>
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
+
+## Read durability
+
+Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+
+<DurabilityTiersTable />
+
+For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+
+### Choosing a tier
+
+Pass a tier when you need the first result to be authoritative at a specific level&hairsp;—&hairsp;for example, when a user has just navigated to a page and a stale local snapshot would mislead them.
+
+- `"worker"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
+- `"edge"`&hairsp;—&hairsp;Wait for the nearest sync server to respond. The default on backends and servers. A good middle ground when you want confirmation that the query has fetched data from the network.
+- `"global"`&hairsp;—&hairsp;Wait for the central server. Use when you need a globally-consistent snapshot, accepting the extra round-trip latency.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+<Callout type="warn" title="Subscriptions only gate the first result">
+  The read tier gates the **first** delivery of a subscription only. After the initial snapshot
+  arrives at the requested tier, subsequent updates are delivered as they reach the local node,
+  regardless of which tier they've propagated to. For example, a subscription with `tier: "global"`
+  guarantees a globally-consistent initial snapshot, but later incremental updates from other
+  clients may arrive through edge tiers before being globally available **even if the durability of
+  the write is set to `"global"`**.
+</Callout>
+
+### Local updates and propagation
+
+Two additional options control how the subscription interacts with local writes and upstream servers:
+
+- `localUpdates` (`"immediate"` \| `"deferred"`, default `"immediate"`)&hairsp;—&hairsp;With `"immediate"`, your own local writes appear in the subscription while it's still waiting for the tier to confirm the initial snapshot (only once the subscription has settled at least once). With `"deferred"`, all delivery is held until the tier confirms.
+- `propagation` (`"full"` \| `"local-only"`, default `"full"`)&hairsp;—&hairsp;With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried and no server communication happens.
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.
 
 ## Magic columns
 
@@ -120,8 +169,8 @@ Each framework has a reactive binding that re-renders when query results change.
 
 <Callout type="info">
   You're unlikely to see `undefined` in practice unless you're awaiting a more [durable
-  tier](/docs/reference/durability-tiers). Local storage reads are effectively instant and resolve
-  to `[]` if no data exists yet.
+  tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
+  data exists yet.
 </Callout>
 
 ### Conditional queries

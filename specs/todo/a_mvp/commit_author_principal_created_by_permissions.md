@@ -59,7 +59,7 @@ MVP reserved system principal:
 
 - `jazz:system`
 
-The low-level object layer may still accept an explicit author parameter, but its meaning changes from "object id" to "principal id".
+The low-level row-history write path may still accept an explicit author parameter, but its meaning changes from "row id" to "principal id".
 
 ### 2. Use the resolved Jazz principal, not raw external ids
 

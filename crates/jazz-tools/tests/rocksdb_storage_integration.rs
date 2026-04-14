@@ -122,14 +122,14 @@ async fn rocksdb_server_storage() {
 
     // --- restart subtests (need their own server lifecycle) ---
     restart_preserves_data().await;
-    catalogue_manifest_survives_restart().await;
+    catalogue_entries_survive_restart().await;
 }
 
 /// Alice creates 200 todos. Bob connects fresh and must see all 200 with
 /// correct, unique titles.
 ///
 /// ```text
-/// alice ──create 200 todos──► server (fjall)
+/// alice ──create 200 todos──► server (rocksdb)
 ///                                 │
 ///                  bob connects and queries
 ///                                 │
@@ -142,7 +142,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
     let alice = make_client(server, schema.clone(), "alice-bulk", "todos").await;
 
     let mut expected_titles: BTreeSet<String> = BTreeSet::new();
-    for i in 0..ROW_COUNT {
+    for i in 0..(ROW_COUNT - 1) {
         let title = format!("todo-{i:03}");
         expected_titles.insert(title.clone());
         alice
@@ -157,11 +157,25 @@ async fn large_dataset_correctness(server: &TestingServer) {
             .expect("create todo");
     }
 
+    let final_title = format!("todo-{:03}", ROW_COUNT - 1);
+    expected_titles.insert(final_title.clone());
+    alice
+        .create_persisted(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text(final_title)),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("create final persisted todo");
+
     wait_for_query(
         &alice,
         QueryBuilder::new("todos").build(),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(120),
+        Duration::from_secs(30),
         format!("alice sees {ROW_COUNT} todos"),
         |rows| (rows.len() == ROW_COUNT).then_some(()),
     )
@@ -173,7 +187,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
         &bob,
         QueryBuilder::new("todos").build(),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(120),
+        Duration::from_secs(30),
         format!("bob sees {ROW_COUNT} todos"),
         |rows| (rows.len() == ROW_COUNT).then_some(rows),
     )
@@ -200,7 +214,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
 /// surviving, updated state.
 ///
 /// ```text
-/// alice ──create 5──► update 3 titles──► delete 2──► server (fjall)
+/// alice ──create 5──► update 3 titles──► delete 2──► server (rocksdb)
 ///                                                        │
 ///                                         bob connects and queries
 ///                                                        │
@@ -309,7 +323,7 @@ async fn update_and_delete(server: &TestingServer) {
 /// latest value.
 ///
 /// ```text
-/// alice ──create + update ×200──► server (fjall)
+/// alice ──create + update ×200──► server (rocksdb)
 ///                                     │
 ///                      bob connects and queries
 ///                                     │
@@ -322,29 +336,35 @@ async fn deep_update_history(server: &TestingServer) {
     let alice = make_client(server, schema.clone(), "alice-deep", "todos").await;
 
     let (todo_id, _) = alice
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
-        .expect("create todo");
+        .expect("create persisted todo");
 
-    let final_title = format!("revision-{UPDATE_COUNT:03}");
+    // This test is about replaying a deep server history for a fresh client,
+    // not about transport reordering. Make each revision edge-durable before
+    // sending the next so Bob observes one causal history.
     for rev in 1..=UPDATE_COUNT {
         alice
-            .update(
+            .update_persisted(
                 todo_id,
                 vec![(
                     "title".to_string(),
                     Value::Text(format!("revision-{rev:03}")),
                 )],
+                DurabilityTier::EdgeServer,
             )
             .await
-            .expect("update todo");
+            .expect("persist todo update");
     }
+
+    let final_title = format!("revision-{UPDATE_COUNT:03}");
 
     wait_for_query(
         &alice,
@@ -390,7 +410,7 @@ async fn deep_update_history(server: &TestingServer) {
 /// into "notes" and vice versa.
 ///
 /// ```text
-/// alice ──create 5 todos + 3 notes──► server (fjall)
+/// alice ──create 5 todos + 3 notes──► server (rocksdb)
 ///                                         │
 ///                          bob queries each table separately
 ///                                         │
@@ -517,7 +537,7 @@ async fn multi_table_isolation(server: &TestingServer) {
 /// filter_eq and filter_gt return correct results through the server.
 ///
 /// ```text
-/// alice ──create 20 products──► server (fjall)
+/// alice ──create 20 products──► server (rocksdb)
 ///                                   │
 ///                    bob queries with filters
 ///                                   │
@@ -632,7 +652,7 @@ async fn index_queries(server: &TestingServer) {
 /// data. Alice then creates more rows and Bob sees the combined set.
 ///
 /// ```text
-/// alice ──create 10──► server₁ (fjall, data_dir)
+/// alice ──create 10──► server₁ (rocksdb, data_dir)
 ///                          │
 ///                      server₁ stops
 ///                          │
@@ -781,12 +801,12 @@ async fn restart_preserves_data() {
     server2.shutdown().await;
 }
 
-/// Verifies that schema metadata (catalogue manifest) persists across a
+/// Verifies that schema metadata (catalogue entries) persists across a
 /// server restart. After restart, a fresh client can query without the
 /// server needing to re-discover the schema.
 ///
 /// ```text
-/// alice ──create + query──► server₁ (fjall, data_dir)
+/// alice ──create + query──► server₁ (rocksdb, data_dir)
 ///                               │
 ///                           server₁ stops
 ///                               │
@@ -796,7 +816,7 @@ async fn restart_preserves_data() {
 ///                               │
 ///                               └──► rows available (schema was persisted)
 /// ```
-async fn catalogue_manifest_survives_restart() {
+async fn catalogue_entries_survive_restart() {
     let data_dir = TempDir::new().expect("temp data dir");
     let jwks = TestingJwksServer::start().await;
     let schema = todos_schema();
@@ -838,7 +858,7 @@ async fn catalogue_manifest_survives_restart() {
     alice.shutdown().await.expect("shutdown alice");
     server1.shutdown().await;
 
-    // Restart with same data_dir — catalogue manifest should be rehydrated.
+    // Restart with same data_dir — catalogue entries should be rehydrated.
     let server2 = TestingServer::builder()
         .with_rocksdb_storage()
         .with_data_dir(data_dir.path())

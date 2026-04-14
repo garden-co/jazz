@@ -4,19 +4,21 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::commit::{Commit, CommitId, StoredState};
+    use crate::commit::CommitId;
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
-    use crate::object::ObjectId;
+    use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::manager::LocalUpdates;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
+    use crate::row_histories::{RowState, StoredRowVersion};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::MemoryStorage;
+    use crate::storage::{MemoryStorage, Storage};
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -26,19 +28,43 @@ mod tests {
         AppId::from_name("integration-test-app")
     }
 
-    fn stored_row_commit(content: Vec<u8>, timestamp: u64, author: impl Into<String>) -> Commit {
-        let author = author.into();
-        Commit {
-            parents: Default::default(),
+    #[derive(Debug, Clone)]
+    struct IncomingRowVersion {
+        content: Vec<u8>,
+        timestamp: u64,
+        author: String,
+    }
+
+    impl IncomingRowVersion {
+        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowVersion {
+            let metadata = row_provenance_metadata(
+                &RowProvenance::for_insert(self.author.clone(), self.timestamp),
+                None,
+            )
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+            StoredRowVersion::new(
+                object_id,
+                branch,
+                Vec::<CommitId>::new(),
+                self.content.clone(),
+                RowProvenance::for_insert(self.author.clone(), self.timestamp),
+                metadata,
+                RowState::VisibleDirect,
+                None,
+            )
+        }
+    }
+
+    fn stored_row_commit(
+        content: Vec<u8>,
+        timestamp: u64,
+        author: impl Into<String>,
+    ) -> IncomingRowVersion {
+        IncomingRowVersion {
             content,
             timestamp,
-            metadata: Some(row_provenance_metadata(
-                &RowProvenance::for_insert(author.clone(), timestamp),
-                None,
-            )),
-            author,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
+            author: author.into(),
         }
     }
 
@@ -339,8 +365,7 @@ mod tests {
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
     use crate::query_manager::query::{Query, QueryBuilder};
-    use crate::sync_manager::SyncManager;
-
+    use crate::test_row_history::put_test_row_metadata;
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
     fn execute_query(
         manager: &mut SchemaManager,
@@ -355,12 +380,13 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row commit on a specific branch through ObjectManager's sync path.
-    /// QueryManager picks this up during `process()` via global object updates.
+    /// Ingest a remote row version on a specific branch through the storage-backed sync path.
+    /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
         table: &str,
+        schema_hash: SchemaHash,
         object_id: ObjectId,
         branch: &str,
         content: Vec<u8>,
@@ -368,35 +394,42 @@ mod tests {
     ) {
         let mut metadata = HashMap::new();
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_object(storage, object_id, metadata);
+        metadata.insert(
+            MetadataKey::OriginSchemaHash.to_string(),
+            schema_hash.to_string(),
+        );
+        put_test_row_metadata(storage, object_id, metadata);
 
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_commit(storage, object_id, branch, commit)
-            .unwrap();
+        let row = commit.to_row(object_id, branch);
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::RowVersionCreated {
+                metadata: None,
+                row,
+            },
+        });
     }
 
     /// Ingest a remote catalogue object on the `main` branch through sync path.
     fn ingest_remote_catalogue_object(
         qm: &mut QueryManager,
-        storage: &mut MemoryStorage,
+        _storage: &mut MemoryStorage,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
-        timestamp: u64,
+        _timestamp: u64,
     ) {
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_object(storage, object_id, metadata);
-
-        let commit = stored_row_commit(content, timestamp, object_id.to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_commit(storage, object_id, "main", commit)
-            .unwrap();
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::CatalogueEntryUpdated {
+                entry: crate::catalogue::CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            },
+        });
     }
 
     /// Test QueryManager with schema context initialization.
@@ -526,7 +559,7 @@ mod tests {
     }
 
     // ========================================================================
-    // End-to-End ObjectManager Integration Tests
+    // End-to-end test-cache integration tests
     // ========================================================================
 
     /// End-to-end test: Insert rows in old schema format, query with new schema,
@@ -577,6 +610,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             old_row_id,
             &v1_branch,
             old_row_data,
@@ -654,6 +688,91 @@ mod tests {
         assert_eq!(bob_row.1[2], Value::Text("bob@example.com".to_string()));
     }
 
+    #[test]
+    fn schema_manager_update_uses_visible_row_after_legacy_commit_history_is_removed() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+
+        let mut writer =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        writer.add_live_schema(v1.clone()).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let original_content = encode_row(
+            &v1_table.columns,
+            &[Value::Uuid(row_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        ingest_remote_row(
+            writer.query_manager_mut(),
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            original_content,
+            1_000,
+        );
+        writer.process(&mut storage);
+
+        let mut reader =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        reader.add_live_schema(v1).unwrap();
+
+        reader
+            .update_with_write_context(
+                &mut storage,
+                row_id,
+                &[
+                    ("name".to_string(), Value::Text("Alice Updated".to_string())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ],
+                None,
+            )
+            .expect(
+                "schema update should succeed from visible row state without legacy object-backed storage",
+            );
+
+        let query = reader
+            .query("users")
+            .select(&["id", "name", "email"])
+            .build();
+        let results = execute_query(&mut reader, &mut storage, query);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1,
+            vec![
+                Value::Uuid(row_id),
+                Value::Text("Alice Updated".to_string()),
+                Value::Text("alice@example.com".to_string()),
+            ]
+        );
+    }
+
     // ========================================================================
     // Multi-Hop Lens Path Integration Tests
     // ========================================================================
@@ -724,6 +843,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row1_id,
             &v1_branch,
             row1_data,
@@ -743,6 +863,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v2_hash,
             row2_id,
             &v2_branch,
             row2_data,
@@ -829,6 +950,118 @@ mod tests {
         assert_eq!(charlie_row.1[3], Value::Text("admin".to_string()));
     }
 
+    #[test]
+    fn removed_table_then_readded_does_not_resurface_old_rows() {
+        // Branch story:
+        //
+        // v1: users(id, name)   <- alice lives here
+        // v2: <users dropped>
+        // v3: users(id, name)   <- bob lives here
+        //
+        // A v3 query for `users` must only see the v3 table. The v1 `users`
+        // rows belong to a removed table lineage and must not be treated as
+        // the same logical table just because the name appears again in v3.
+
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new().build();
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let lens_v1_v2 = generate_lens(&v1, &v2);
+        let lens_v2_v3 = generate_lens(&v2, &v3);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v3.clone(), "dev", "main");
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens_v2_v3);
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens_v1_v2);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v3_branch = format!("dev-{}-main", v3_hash.short());
+
+        let lens_path = qm.schema_context().lens_path(&v1_hash).unwrap();
+        assert_eq!(lens_path.len(), 2, "expected v1 -> v2 -> v3 lens path");
+
+        assert_eq!(
+            crate::schema_manager::translate_table_name_to_schema(
+                qm.schema_context(),
+                "users",
+                &v1_hash,
+            ),
+            None,
+            "the re-added v3 users table must not translate back into the removed v1 table",
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let alice_id = ObjectId::new();
+        let alice_row = vec![Value::Uuid(alice_id), Value::Text("Alice".to_string())];
+        let alice_data = encode_row(&v1_table.columns, &alice_row).unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            alice_id,
+            &v1_branch,
+            alice_data,
+            1_000,
+        );
+
+        let bob_id = ObjectId::new();
+        qm.insert(
+            &mut storage,
+            "users",
+            &[
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let query = QueryBuilder::new("users")
+            .branches(&[&v1_branch, &v2_branch, &v3_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe_with_sync(sub_id);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "v1 rows from the dropped table lineage must not appear under the re-added v3 table",
+        );
+        assert_eq!(
+            results[0].1,
+            vec![
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ]
+        );
+    }
+
     /// Test multi-hop with chained column renames across versions.
     #[test]
     fn end_to_end_multi_hop_chained_renames() {
@@ -912,6 +1145,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -998,6 +1232,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1021,6 +1256,818 @@ mod tests {
         assert_eq!(row.len(), 2);
         assert_eq!(row[0], Value::Uuid(row_id));
         assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
+    }
+
+    /// End-to-end test with table rename: query uses new table name,
+    /// lens translates old-branch scans and row decoding through the rename.
+    #[test]
+    fn end_to_end_table_rename_translation() {
+        // v1 branch: users(id, email)
+        //            |
+        //            | RenameTable users -> people
+        //            v
+        // v2 branch: people(id, email)
+        //
+        // Querying `people` across both branches should still find the v1 row.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0], Value::Uuid(row_id));
+        assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
+    }
+
+    /// Table renames must also keep existing subscriptions reactive when old-schema
+    /// rows arrive after the query graph has already been compiled.
+    #[test]
+    fn table_rename_subscription_reacts_to_old_branch_updates() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
+    /// Existing old-schema subscriptions must recompile when a renamed future branch
+    /// becomes live, so new-table writes remain visible through the old table name.
+    #[test]
+    fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
+        // v1 current: users(id, email) -- subscribe(users on v1 branch)
+        //                                |
+        //                                | add live schema v2 + RenameTable users -> people
+        //                                v
+        // v2 live:    people(id, email) -- ingest people row on v2 branch
+        //
+        // The original `users` subscription should be recompiled to read both branches
+        // and surface the v2 row through the rename lens.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v1.clone(), "dev", "main");
+        let mut storage = MemoryStorage::new();
+
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens);
+
+        let v2_table = v2.get(&TableName::new("people")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v2_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "people",
+            v2_hash,
+            row_id,
+            &v2_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
+    /// Rows from renamed tables are migrated on write (in both updates and deletes).
+    #[test]
+    fn table_rename_update_and_delete_copy_on_write() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_data = encode_row(
+            &v1_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v1_hash,
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+        manager.process(&mut storage);
+
+        manager
+            .update_with_session(
+                &mut storage,
+                row_id,
+                &[(
+                    "email".to_string(),
+                    Value::Text("alice+updated@example.com".to_string()),
+                )],
+                None,
+            )
+            .expect("rename-aware copy-on-write update should succeed");
+
+        assert!(
+            manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "updated row should be indexed on the renamed table in the current branch"
+        );
+        assert!(
+            !manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "users",
+                &current_branch,
+                row_id
+            ),
+            "current-branch indices should use the renamed table name"
+        );
+
+        let current_results = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert_eq!(current_results.len(), 1);
+        assert_eq!(current_results[0].0, row_id);
+        assert!(
+            current_results[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice+updated@example.com".to_string())),
+            "updated row should carry the new email in its current-branch projection"
+        );
+
+        manager
+            .delete(&mut storage, row_id, None)
+            .expect("rename-aware copy-on-write delete should succeed");
+
+        assert!(
+            manager.query_manager().row_is_deleted_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "soft delete should be indexed under the renamed current-branch table"
+        );
+
+        let visible_after_delete = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert!(
+            visible_after_delete.is_empty(),
+            "soft-deleted row should no longer appear in current-branch people queries"
+        );
+    }
+
+    #[test]
+    fn table_rename_join_query_translates_join_target_on_old_branch() {
+        // v1 branch: posts.author_id -> users.id
+        //                            |
+        //                            | RenameTable users -> people
+        //                            v
+        // v2 query: posts JOIN people ON posts.author_id = people.id
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "users")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "people")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let author_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let user_data = encode_row(
+            &v1_users.columns,
+            &[Value::Uuid(author_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            author_id,
+            &v1_branch,
+            user_data,
+            1_000,
+        );
+
+        let post_id = ObjectId::new();
+        let v1_posts = v1.get(&TableName::new("posts")).unwrap();
+        let post_data = encode_row(
+            &v1_posts.columns,
+            &[
+                Value::Uuid(post_id),
+                Value::Uuid(author_id),
+                Value::Text("Hello from v1".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "posts",
+            v1_hash,
+            post_id,
+            &v1_branch,
+            post_data,
+            1_100,
+        );
+
+        let query = QueryBuilder::new("posts")
+            .branches(&[&v1_branch, &v2_branch])
+            .join("people")
+            .on("posts.author_id", "people.id")
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row.len(), 5);
+        assert_eq!(row[0], Value::Uuid(post_id));
+        assert_eq!(row[1], Value::Uuid(author_id));
+        assert_eq!(row[2], Value::Text("Hello from v1".to_string()));
+        assert_eq!(row[3], Value::Uuid(author_id));
+        assert_eq!(row[4], Value::Text("Alice".to_string()));
+    }
+
+    #[test]
+    fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
+        // v1 branch: users <- posts.author_id
+        //            |
+        //            | RenameTable users -> people
+        //            v
+        // v2 query: people.with_array(posts where posts.author_id = people.id)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "users")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("posts")
+                    .column("id", ColumnType::Uuid)
+                    .fk_column("author_id", "people")
+                    .column("title", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let author_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let user_data = encode_row(
+            &v1_users.columns,
+            &[Value::Uuid(author_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            author_id,
+            &v1_branch,
+            user_data,
+            1_000,
+        );
+
+        let post_id = ObjectId::new();
+        let v1_posts = v1.get(&TableName::new("posts")).unwrap();
+        let post_data = encode_row(
+            &v1_posts.columns,
+            &[
+                Value::Uuid(post_id),
+                Value::Uuid(author_id),
+                Value::Text("Alice post".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "posts",
+            v1_hash,
+            post_id,
+            &v1_branch,
+            post_data,
+            1_100,
+        );
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "people.id")
+            })
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row[0], Value::Uuid(author_id));
+        assert_eq!(row[1], Value::Text("Alice".to_string()));
+
+        let posts = row[2]
+            .as_array()
+            .expect("third column should be posts array");
+        assert_eq!(posts.len(), 1);
+        let first_post = posts[0]
+            .as_row()
+            .expect("post array element should be a row");
+        assert_eq!(first_post[0], Value::Uuid(post_id));
+        assert_eq!(first_post[1], Value::Uuid(author_id));
+        assert_eq!(first_post[2], Value::Text("Alice post".to_string()));
+    }
+
+    #[test]
+    fn multi_hop_table_renames_and_column_rename() {
+        // v1: users(id, email)
+        //      |
+        //      | RenameTable users -> people
+        //      v
+        // v2: people(id, email)
+        //      |
+        //      | RenameTable people -> members
+        //      | RenameColumn email -> email_address
+        //      v
+        // v3: members(id, email_address)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("members")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let mut transform_v1_v2 = LensTransform::new();
+        transform_v1_v2.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens_v1_v2 = Lens::new(v1_hash, v2_hash, transform_v1_v2);
+
+        let mut transform_v2_v3 = LensTransform::new();
+        transform_v2_v3.push(
+            LensOp::RenameTable {
+                old_name: "people".to_string(),
+                new_name: "members".to_string(),
+            },
+            false,
+        );
+        transform_v2_v3.push(
+            LensOp::RenameColumn {
+                table: "members".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens_v2_v3 = Lens::new(v2_hash, v3_hash, transform_v2_v3);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v3.clone(), "dev", "main");
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens_v2_v3);
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens_v1_v2);
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v3_branch = format!("dev-{}-main", v3_hash.short());
+        let mut storage = MemoryStorage::new();
+
+        let alice_id = ObjectId::new();
+        let v1_users = v1.get(&TableName::new("users")).unwrap();
+        let alice_data = encode_row(
+            &v1_users.columns,
+            &[
+                Value::Uuid(alice_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            v1_hash,
+            alice_id,
+            &v1_branch,
+            alice_data,
+            1_000,
+        );
+
+        let bob_id = ObjectId::new();
+        let v2_people = v2.get(&TableName::new("people")).unwrap();
+        let bob_data = encode_row(
+            &v2_people.columns,
+            &[
+                Value::Uuid(bob_id),
+                Value::Text("bob@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "people",
+            v2_hash,
+            bob_id,
+            &v2_branch,
+            bob_data,
+            1_100,
+        );
+
+        let carol_id = ObjectId::new();
+        let v3_members = v3.get(&TableName::new("members")).unwrap();
+        let carol_data = encode_row(
+            &v3_members.columns,
+            &[
+                Value::Uuid(carol_id),
+                Value::Text("carol@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "members",
+            v3_hash,
+            carol_id,
+            &v3_branch,
+            carol_data,
+            1_200,
+        );
+
+        let query = QueryBuilder::new("members")
+            .branches(&[&v1_branch, &v2_branch, &v3_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 3);
+
+        for (_, row) in &results {
+            assert_eq!(row.len(), 2);
+        }
+
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(alice_id)
+                && row[1] == Value::Text("alice@example.com".to_string())
+        }));
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(bob_id) && row[1] == Value::Text("bob@example.com".to_string())
+        }));
+        assert!(results.iter().any(|(_, row)| {
+            row[0] == Value::Uuid(carol_id)
+                && row[1] == Value::Text("carol@example.com".to_string())
+        }));
     }
 
     // ========================================================================
@@ -1794,11 +2841,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(upstream_server_id);
+            .add_server_with_storage(upstream_server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(upstream_server_id);
+            .add_server_with_storage(upstream_server_id, false, &io_b);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
@@ -1815,7 +2862,7 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_object_id
+                    SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == schema_object_id
                 )
             })
             .expect("Client A should emit schema catalogue object");
@@ -1824,7 +2871,7 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == lens_object_id
+                    SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == lens_object_id
                 )
             })
             .expect("Client A should emit lens catalogue object");
@@ -1886,10 +2933,10 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_handle.row_id
+                    SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_handle.row_id
                 )
             })
-            .expect("Client A should emit row ObjectUpdated");
+            .expect("Client A should emit RowVersionCreated for the row");
 
         client_b
             .query_manager_mut()
@@ -2080,10 +3127,7 @@ mod tests {
     // Multi-Client Server Schema Sync Tests
     // ========================================================================
 
-    use crate::sync_manager::{
-        ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, QueryId, ServerId, Source,
-        SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, ClientRole, Destination, DurabilityTier};
 
     /// E2E test: Two clients with same schema, server with empty schema.
     ///
@@ -2152,7 +3196,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_server, client_a_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -2160,7 +3204,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_b_id);
+            .add_client_with_storage(&io_server, client_b_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -2170,11 +3214,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_b);
 
         // Process to generate outbox messages
         client_a.process(&mut io_a);
@@ -2193,8 +3237,8 @@ mod tests {
         let schema_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    *object_id == schema_obj_id
+                if let SyncPayload::CatalogueEntryUpdated { entry } = &e.payload {
+                    entry.object_id == schema_obj_id
                 } else {
                     false
                 }
@@ -2242,13 +3286,13 @@ mod tests {
         let row_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    *object_id == doc_id
+                if let SyncPayload::RowVersionCreated { row, .. } = &e.payload {
+                    row.row_id == doc_id
                 } else {
                     false
                 }
             })
-            .expect("Should have row object in outbox");
+            .expect("Should have RowVersionCreated for the row in outbox");
 
         // Push to server inbox
         server
@@ -2300,7 +3344,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
         let doc_update_for_b = server_outbox.iter().find(|e| {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                && matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == doc_id)
+                && matches!(&e.payload, SyncPayload::RowVersionNeeded { row, .. } if row.row_id == doc_id)
         });
         assert!(
             doc_update_for_b.is_some(),
@@ -2311,10 +3355,11 @@ mod tests {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
                 && matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { commits, .. }
-                        if commits
-                            .iter()
-                            .any(|c| c.content.windows("Test Document".len()).any(|w| w == b"Test Document"))
+                    SyncPayload::RowVersionNeeded { row, .. }
+                        if row
+                            .data
+                            .windows("Test Document".len())
+                            .any(|w| w == b"Test Document")
                 )
         });
         assert!(
@@ -2384,6 +3429,10 @@ mod tests {
         )
         .unwrap();
 
+        let mut io_a = MemoryStorage::new();
+        let mut io_b = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
+
         // === Network topology ===
         let client_a_id = ClientId::new();
         let client_b_id = ClientId::new();
@@ -2393,11 +3442,11 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_server, client_a_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_b_id);
+            .add_client_with_storage(&io_server, client_b_id);
 
         // Set sessions for permission checking
         server
@@ -2413,11 +3462,11 @@ mod tests {
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_a);
         client_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_b);
 
         // Clear initial sync
         client_a
@@ -2429,10 +3478,6 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
-
-        let mut io_a = MemoryStorage::new();
-        let mut io_b = MemoryStorage::new();
-        let mut io_server = MemoryStorage::new();
 
         // === Create documents on server through public insert API ===
         let alice_doc_id = server
@@ -2503,12 +3548,12 @@ mod tests {
         // === Server should send Alice's doc to Client A ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        // Find ObjectUpdated messages destined for client A
+        // Find row-version messages destined for client A
         let alice_updates: Vec<_> = server_outbox
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_a_id)
-                    && matches!(e.payload, SyncPayload::ObjectUpdated { .. })
+                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
             })
             .collect();
 
@@ -2517,8 +3562,8 @@ mod tests {
         let received_ids: Vec<ObjectId> = alice_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    Some(*object_id)
+                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                    Some(row.row_id)
                 } else {
                     None
                 }
@@ -2573,15 +3618,15 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                    && matches!(e.payload, SyncPayload::ObjectUpdated { .. })
+                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
             })
             .collect();
 
         let bob_received_ids: Vec<ObjectId> = bob_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    Some(*object_id)
+                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                    Some(row.row_id)
                 } else {
                     None
                 }
@@ -2646,6 +3691,9 @@ mod tests {
         )
         .unwrap();
 
+        let mut io_client = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
+
         // === Network topology ===
         let client_id = ClientId::new();
         let server_id = ServerId::new();
@@ -2653,7 +3701,7 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_id);
+            .add_client_with_storage(&io_server, client_id);
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -2661,14 +3709,11 @@ mod tests {
         client
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_id);
+            .add_server_with_storage(server_id, false, &io_client);
 
         // Clear initial sync
         client.query_manager_mut().sync_manager_mut().take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
-
-        let mut io_client = MemoryStorage::new();
-        let mut io_server = MemoryStorage::new();
 
         // === Client persists schema to catalogue ===
         let schema_obj_id = client.persist_schema(&mut io_client);
@@ -2677,15 +3722,17 @@ mod tests {
         // Transfer to server
         let outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
         for entry in &outbox {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload
-                && *object_id == schema_obj_id
+            if let SyncPayload::CatalogueEntryUpdated { entry } = &entry.payload
+                && entry.object_id == schema_obj_id
             {
                 server
                     .query_manager_mut()
                     .sync_manager_mut()
                     .push_inbox(InboxEntry {
                         source: Source::Client(client_id),
-                        payload: entry.payload.clone(),
+                        payload: SyncPayload::CatalogueEntryUpdated {
+                            entry: entry.clone(),
+                        },
                     });
             }
         }
@@ -2749,8 +3796,8 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
         let note_sent = server_outbox.iter().any(|e| {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                *object_id == note_id
+            if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                row.row_id == note_id
             } else {
                 false
             }
@@ -2771,7 +3818,7 @@ mod tests {
     ///
     /// Scenario:
     /// 1. Client B (v1 schema) receives a row on the v2 branch (unknown schema)
-    /// 2. The row is buffered in pending_row_updates
+    /// 2. The row is buffered in pending_row_visibility_changes
     /// 3. Client B receives schema v2 and lens v1->v2 via catalogue
     /// 4. process() activates v2 and retries pending rows
     /// 5. The row is now queryable with lens transform applied
@@ -2837,6 +3884,7 @@ mod tests {
             client.query_manager_mut(),
             &mut storage,
             "users",
+            v2_hash,
             row_id,
             &v2_branch,
             row_data,
@@ -3052,11 +4100,11 @@ mod tests {
         server_b
             .query_manager_mut()
             .sync_manager_mut()
-            .add_client(client_a_id);
+            .add_client_with_storage(&io_b, client_a_id);
         client_a
             .query_manager_mut()
             .sync_manager_mut()
-            .add_server(server_b_id);
+            .add_server_with_storage(server_b_id, false, &io_a);
 
         // Insert a row on server B
         let row_id = ObjectId::new();
@@ -3212,18 +4260,26 @@ mod tests {
             "Should not deliver — EdgeServer tier not achieved"
         );
 
-        // Simulate receiving QuerySettled(Worker) — insufficient
-        let query_id = QueryId(sub_id.0);
+        let visible_row = io_a
+            .scan_visible_region("items", client_a.branch_name().as_str())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("one visible row");
         let server_b_id = ServerId::new();
+
+        // Simulate per-row Worker settlement — still insufficient for EdgeServer reads.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::Worker),
                 },
             });
         client_a.process(&mut io_a);
@@ -3238,16 +4294,18 @@ mod tests {
             "Worker < EdgeServer — should still not deliver"
         );
 
-        // Simulate receiving QuerySettled(EdgeServer) — sufficient
+        // Simulate per-row EdgeServer settlement — now the row may become visible.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::EdgeServer,
-                    through_seq: 0,
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::EdgeServer),
                 },
             });
         client_a.process(&mut io_a);
@@ -3259,13 +4317,238 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "EdgeServer >= EdgeServer — should deliver now"
+            "EdgeServer settlement should deliver now"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(total_added, 1, "Should deliver the accumulated row");
     }
 
-    /// Test 4: Data accumulates while waiting for tier. First delivery contains all rows.
+    /// Test 4: A subscribes with settled_tier=EdgeServer through B (Worker) to C (EdgeServer).
+    /// C's QuerySettled(EdgeServer) should relay through B back to A.
+    #[test]
+    fn query_settled_relays_edge_tier_through_worker() {
+        use crate::query_manager::manager::LocalUpdates;
+        use crate::sync_manager::{
+            ClientId, ClientRole, Destination, InboxEntry, QueryId, ServerId, Source, SyncPayload,
+        };
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        // A = end client, B = worker tier mid-tier, C = edge tier upstream.
+        let mut client_a = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_a = MemoryStorage::new();
+
+        let mut worker_b = SchemaManager::new(
+            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_b = MemoryStorage::new();
+
+        let mut edge_c = SchemaManager::new(
+            SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_c = MemoryStorage::new();
+
+        let a_id_on_b = ClientId::new();
+        let b_server_id_for_a = ServerId::new();
+        let b_id_on_c = ClientId::new();
+        let c_server_id_for_b = ServerId::new();
+
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_client_with_storage(&io_b, a_id_on_b);
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(a_id_on_b, ClientRole::Peer);
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server_with_storage(b_server_id_for_a, false, &io_a);
+
+        edge_c
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_client_with_storage(&io_c, b_id_on_c);
+        edge_c
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(b_id_on_c, ClientRole::Peer);
+        worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server_with_storage(c_server_id_for_b, false, &io_b);
+
+        let row_id = ObjectId::new();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("edge".into())),
+        ]);
+        edge_c.insert(&mut io_c, "items", values).unwrap();
+        edge_c.process(&mut io_c);
+
+        // Ignore bootstrap traffic from initial connect.
+        let _ = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let _ = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let _ = edge_c.query_manager_mut().sync_manager_mut().take_outbox();
+
+        let query = QueryBuilder::new("items")
+            .branch(client_a.branch_name().to_string())
+            .build();
+        let sub_id = client_a
+            .query_manager_mut()
+            .subscribe_with_sync_with_local_updates(
+                query,
+                None,
+                Some(DurabilityTier::EdgeServer),
+                LocalUpdates::Deferred,
+            )
+            .unwrap();
+        client_a.process(&mut io_a);
+
+        let outbox_a = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        for entry in &outbox_a {
+            if matches!(entry.destination, Destination::Server(id) if id == b_server_id_for_a) {
+                worker_b
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Client(a_id_on_b),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        worker_b.process(&mut io_b);
+
+        let outbox_b = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        for entry in &outbox_b {
+            match entry.destination {
+                Destination::Client(cid) if cid == a_id_on_b => {
+                    client_a
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .push_inbox(InboxEntry {
+                            source: Source::Server(b_server_id_for_a),
+                            payload: entry.payload.clone(),
+                        });
+                }
+                Destination::Server(id) if id == c_server_id_for_b => {
+                    edge_c
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .push_inbox(InboxEntry {
+                            source: Source::Client(b_id_on_c),
+                            payload: entry.payload.clone(),
+                        });
+                }
+                _ => {}
+            }
+        }
+        client_a.process(&mut io_a);
+        edge_c.process(&mut io_c);
+
+        let outbox_c = edge_c.query_manager_mut().sync_manager_mut().take_outbox();
+        for entry in &outbox_c {
+            if matches!(entry.destination, Destination::Client(cid) if cid == b_id_on_c) {
+                worker_b
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Server(c_server_id_for_b),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        worker_b.process(&mut io_b);
+
+        let relayed_from_b = worker_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let edge_settled = relayed_from_b.iter().find(|entry| {
+            matches!(
+                (&entry.destination, &entry.payload),
+                (
+                    Destination::Client(cid),
+                    SyncPayload::QuerySettled {
+                        query_id,
+                        tier: DurabilityTier::EdgeServer,
+                        ..
+                    }
+                ) if *cid == a_id_on_b && *query_id == QueryId(sub_id.0)
+            )
+        });
+        assert!(
+            edge_settled.is_some(),
+            "Worker tier should relay QuerySettled(EdgeServer) from upstream to client"
+        );
+
+        for entry in &relayed_from_b {
+            if matches!(entry.destination, Destination::Client(cid) if cid == a_id_on_b) {
+                client_a
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Server(b_server_id_for_a),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+        client_a.process(&mut io_a);
+        client_a.process(&mut io_a);
+
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Client should deliver after relayed QuerySettled(EdgeServer)"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(
+            total_added, 1,
+            "Expected the upstream edge row to be delivered"
+        );
+    }
+
+    /// Test 5: Data accumulates while waiting for tier. First delivery contains all rows.
     #[test]
     fn query_settled_data_accumulates() {
         let schema = SchemaBuilder::new()
@@ -3323,20 +4606,25 @@ mod tests {
             "Should not deliver before tier is satisfied"
         );
 
-        // Send QuerySettled(Worker)
-        let query_id = QueryId(sub_id.0);
         let server_id = ServerId::new();
-        client
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
-                },
-            });
+        for row in storage
+            .scan_visible_region("items", client.branch_name().as_str())
+            .unwrap()
+        {
+            client
+                .query_manager_mut()
+                .sync_manager_mut()
+                .push_inbox(InboxEntry {
+                    source: Source::Server(server_id),
+                    payload: SyncPayload::RowVersionStateChanged {
+                        row_id: row.row_id,
+                        branch_name: BranchName::new(&row.branch),
+                        version_id: row.version_id(),
+                        state: None,
+                        confirmed_tier: Some(DurabilityTier::Worker),
+                    },
+                });
+        }
         client.process(&mut storage);
 
         let updates = client.query_manager_mut().take_updates();
@@ -3346,7 +4634,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker)"
+            "Should deliver after rows reach Worker"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert_eq!(
@@ -3356,7 +4644,9 @@ mod tests {
     }
 
     /// Test 5: One-shot query() with settled_tier via subscribe_with_sync.
-    /// The subscription should not deliver until the required tier confirms.
+    /// With `local_updates = Immediate`, the subscription should deliver the
+    /// locally pending row once the initial frontier is complete, before the
+    /// requested tier confirms.
     #[test]
     fn query_one_shot_settled_tier() {
         let schema = SchemaBuilder::new()
@@ -3396,34 +4686,8 @@ mod tests {
             .unwrap();
         client.process(&mut storage);
 
-        // First process: no delivery (waiting for Worker tier)
-        let updates = client.query_manager_mut().take_updates();
-        let matching: Vec<_> = updates
-            .iter()
-            .filter(|u| u.subscription_id == sub_id)
-            .collect();
-        assert!(
-            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "One-shot with settled_tier should not resolve on first local settle"
-        );
-
-        // Send QuerySettled(Worker)
-        let query_id = QueryId(sub_id.0);
-        let server_id = ServerId::new();
-        client
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
-                },
-            });
-        client.process(&mut storage);
-
-        // Now should resolve with correct data
+        // First process: local pending row is already visible because one-shot
+        // queries use immediate local updates by default.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
             .iter()
@@ -3431,10 +4695,44 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker)"
+            "One-shot should resolve on first local settle"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
-        assert_eq!(total_added, 1, "Should contain the one row");
+        assert_eq!(total_added, 1, "Should contain the one local row");
+
+        let server_id = ServerId::new();
+        let visible_row = storage
+            .scan_visible_region("items", client.branch_name().as_str())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("one visible row");
+        client
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: SyncPayload::RowVersionStateChanged {
+                    row_id: visible_row.row_id,
+                    branch_name: BranchName::new(&visible_row.branch),
+                    version_id: visible_row.version_id(),
+                    state: None,
+                    confirmed_tier: Some(DurabilityTier::Worker),
+                },
+            });
+        client.process(&mut storage);
+
+        // Worker durability arriving later should not emit another visible
+        // delta because the row is already present.
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Worker promotion should not emit a second visible delta"
+        );
     }
 
     /// Test 6: One-shot query() with settled_tier resolves to empty snapshot after tier settle.
@@ -3468,34 +4766,7 @@ mod tests {
             .unwrap();
         client.process(&mut storage);
 
-        // No delivery before settled tier.
-        let updates = client.query_manager_mut().take_updates();
-        let matching: Vec<_> = updates
-            .iter()
-            .filter(|u| u.subscription_id == sub_id)
-            .collect();
-        assert!(
-            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Should not resolve before QuerySettled"
-        );
-
-        // Send QuerySettled(Worker).
-        let query_id = QueryId(sub_id.0);
-        let server_id = ServerId::new();
-        client
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier: DurabilityTier::Worker,
-                    through_seq: 0,
-                },
-            });
-        client.process(&mut storage);
-
-        // Should resolve with an empty snapshot.
+        // With no upstream server and no rows, the empty snapshot resolves immediately.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
             .iter()
@@ -3503,7 +4774,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver empty snapshot after QuerySettled(Worker)"
+            "Should deliver empty snapshot immediately for a local empty result"
         );
         assert!(
             matching.iter().all(|u| u.delta.is_empty()),

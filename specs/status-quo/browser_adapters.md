@@ -1,302 +1,139 @@
 # Browser Adapters — Status Quo
 
-This document describes the current TypeScript-side browser adapter architecture in `jazz-tools`, focused on how browser apps are wired to the WASM runtime, worker persistence, and sync transport.
+This doc describes how browser apps are wired to the Jazz runtime today.
 
-## Scope
+The browser setup is intentionally split:
 
-Primary code paths covered:
+- the main thread gets a small, immediate, UI-friendly runtime
+- a dedicated worker gets the durable runtime, OPFS access, and upstream sync connection
 
-- `packages/jazz-tools/src/runtime/db.ts`
-- `packages/jazz-tools/src/runtime/client.ts`
-- `packages/jazz-tools/src/runtime/worker-bridge.ts`
-- `packages/jazz-tools/src/worker/jazz-worker.ts`
-- `packages/jazz-tools/src/worker/worker-protocol.ts`
-- `packages/jazz-tools/src/runtime/sync-transport.ts`
-- `packages/jazz-tools/src/runtime/local-auth.ts`
-- `packages/jazz-tools/src/runtime/client-session.ts`
-- `packages/jazz-tools/src/react/provider.tsx`
-- `packages/jazz-tools/src/react/use-all.ts`
-- `packages/jazz-tools/tests/browser/worker-bridge.test.ts`
-
-Related status-quo docs:
-
-- `specs/status-quo/storage.md`
-- `specs/status-quo/http_transport.md`
-- `specs/status-quo/ts_client_codegen.md`
+That arrangement is what lets Jazz keep its synchronous storage/query model in the browser without blocking rendering.
 
 ## High-Level Topology
 
 ```text
-React App
-  -> JazzProvider
+React/Vue/Svelte app
   -> createDb(config)
-  -> Db (main thread facade)
-     -> JazzClient (main thread in-memory WasmRuntime)
-     -> WorkerBridge (postMessage)
-        -> jazz-worker.ts (dedicated worker)
-           -> persistent WasmRuntime.openPersistent(..., "worker")
-           -> OPFS durability
-           -> upstream /sync POST + /events binary stream
+  -> Db
+     -> main-thread JazzClient
+        -> in-memory WasmRuntime
+        -> WorkerBridge
+           -> dedicated worker
+              -> persistent WasmRuntime.openPersistent(...)
+              -> OPFS-backed storage
+              -> upstream /sync + /events
 ```
 
-In browser mode, there are two runtime instances:
+## Two Browser Modes
 
-- Main thread runtime: in-memory, immediate local API surface.
-- Worker runtime: persistent OPFS runtime, also owns upstream server connectivity.
+### Persistent mode
 
-With `driver: { type: "memory" }`, browser apps skip worker/OPFS entirely and run only the
-main-thread in-memory runtime with direct remote sync.
+This is the default browser setup.
 
-## Public Entry Points
+- main thread uses an in-memory runtime
+- worker owns durable OPFS storage
+- worker also owns upstream server connectivity
 
-`createDb(config)` in `packages/jazz-tools/src/runtime/db.ts` is the primary app entry point. It chooses mode with:
+### Memory mode
 
-- `driver: { type: "persistent" }` (default when omitted):
-  - Browser path: `Db.createWithWorker(...)` when both `window` and `Worker` exist.
-  - Non-browser path: `Db.create(...)`.
-- `driver: { type: "memory" }`:
-  - Always `Db.create(...)` (no worker, no OPFS, no tab leader election).
-  - Requires `serverUrl` (validated at `createDb`).
+This skips the worker entirely.
 
-In memory mode, default durability tier is `edge` when `serverUrl` is configured.
+- one in-memory runtime
+- no OPFS persistence
+- direct remote sync when configured
 
-`JazzProvider` in `packages/jazz-tools/src/react/provider.tsx` wraps this and exposes:
+It is useful for tests, demos, and environments that do not want a dedicated worker.
 
-- `useDb()` for imperative mutations/queries.
-- `useAll()` in `packages/jazz-tools/src/react/use-all.ts` for reactive subscriptions via `useSyncExternalStore`.
+## What `Db` Owns
 
-## Current Adapter Surfaces (React + TypeScript)
+`Db` is the app-facing façade. It is responsible for:
 
-### React Adapter (`jazz-tools/react`)
+- translating typed query builders into runtime queries
+- creating or reusing `JazzClient` instances
+- exposing `all`, `one`, `insert`, `update`, `delete`, and subscription APIs
+- waiting for the worker bridge when a call needs worker-backed durability
 
-Export surface is defined in `packages/jazz-tools/src/react/index.ts`:
+From the application's point of view, it is just "the database object". Internally, it is the coordinator for the main-thread runtime plus any worker bridge.
 
-- `JazzProvider`, `useDb`, `useSession`
-- `useAll`
-- `useLinkExternalIdentity`
-- Synthetic user UI/helpers (`SyntheticUserSwitcher`, storage helpers)
+## What `JazzClient` Owns
 
-Current behavior:
+`JazzClient` is the runtime-facing client layer. It:
 
-1. `JazzProvider` (`react/provider.tsx`) resolves local-auth defaults, then runs `Promise.all([createDb(config), resolveClientSession(config)])` on mount.
-2. Provider context stores `{ db, session }`; `useDb()` and `useSession()` read from this context and throw outside provider boundaries.
-3. On unmount, provider calls `db.shutdown()` for clean worker/runtime teardown.
-4. `useAll(query)` (`react/use-all.ts`) wraps `db.subscribeAll(...)` and streams reactive updates.
-5. `useLinkExternalIdentity` (`react/use-link-external-identity.ts`) bridges local synthetic identity to external JWT identity and can fall back to active synthetic profile state.
+- wraps CRUD and query calls
+- manages subscription lifecycles
+- handles stream attachment and reconnect behavior
+- decides when a one-shot remote-tier query must wait for sync attachment before it can return
 
-### TypeScript Adapter (`jazz-tools` / `jazz-tools/backend`)
+This is the piece that makes browser, worker, and native runtimes look uniform from the TypeScript side.
 
-`packages/jazz-tools/src/index.ts` re-exports runtime APIs from `runtime/index.ts`, and `packages/jazz-tools/src/backend/index.ts` currently re-exports the same runtime surface.
+## What the WorkerBridge Owns
 
-Primary TypeScript-facing APIs:
+`WorkerBridge` turns the dedicated worker into the main runtime's upstream peer.
 
-- `createDb`, `Db`, `QueryBuilder`, `TableProxy`
-- `JazzClient`, `SessionClient`, `resolveClientSession`
-- Query/value adapters used internally by `Db` (`translateQuery`, `transformRows`, `toInsertRecord`, `toUpdateRecord`)
+It is responsible for:
 
-Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/src/main.ts`):
+- worker boot/init
+- forwarding sync payloads over `postMessage`
+- updating auth/session state in the worker
+- shutdown and crash-simulation flows
 
-1. Build a `DbConfig` (app/env/branch/auth/tier/server options + optional `driver` mode).
-2. Initialize with `Promise.all([createDb(config), resolveClientSession(config)])`.
-3. Read via `db.all(...)`/`db.one(...)` or `db.subscribeAll(...)`.
-4. Mutate via local-first APIs (`insert`, `update`, `delete`) or durable variants (`insertDurable`, `updateDurable`, `deleteDurable`) when tiered acknowledgement matters.
-5. Tear down with `db.shutdown()`.
+The important architectural point is that the main runtime does not special-case OPFS. It talks to the worker through the same sync-shaped concepts the rest of the stack already uses.
 
-## Runtime Layers and Responsibilities
+## What the Worker Owns
 
-1. `Db` (`runtime/db.ts`)
+The worker is the durable browser runtime host. It owns:
 
-- High-level typed API (`insert`, `update`, `delete`, `insertDurable`, `updateDurable`, `deleteDurable`, `all`, `one`, `subscribeAll`).
-- Creates and memoizes `JazzClient` per schema key.
-- Creates worker + bridge in browser mode.
-- Waits for bridge init before durability-tiered mutations.
+- `WasmRuntime.openPersistent(...)`
+- OPFS-backed storage
+- upstream `/events` connection
+- upstream `/sync` POSTs
+- replay of sync messages to the main thread runtime
 
-2. `JazzClient` (`runtime/client.ts`)
+That is why the browser architecture can stay faithful to the rest of Jazz. The worker is not just a storage helper; it is a real runtime tier.
 
-- Runtime-agnostic client over a `Runtime` interface.
-- Wraps CRUD/query/subscription APIs.
-- Handles upstream sync transport wiring (`onSyncMessageToSend`, binary stream reader, reconnect/backoff).
+## Common Flows
 
-3. `WorkerBridge` (`runtime/worker-bridge.ts`)
+### Startup
 
-- Main-thread bridge adapter between runtime outbox/inbox and worker `postMessage`.
-- Treats worker as the main runtime's "server" by calling `runtime.addServer()`.
+1. `createDb(...)` decides whether to use worker-backed or memory mode.
+2. Browser persistent mode spins up the worker and waits for it to report readiness.
+3. The worker opens its persistent runtime and registers the main thread as a peer.
+4. Normal query/mutation APIs can now use the same `Db` surface.
 
-4. Worker runtime host (`worker/jazz-worker.ts`)
+### Mutation
 
-- Bootstraps `jazz-wasm`.
-- Opens persistent runtime with `WasmRuntime.openPersistent(...)` and tier `"worker"`.
-- Registers main thread as peer client (`addClient`, `setClientRole("peer")`).
-- Routes sync envelopes to either main thread or upstream server.
-- Manages stream reconnect/backoff, shutdown, and crash simulation behavior.
+1. App calls `db.insert(...)` / `db.update(...)` / `db.delete(...)`.
+2. Main-thread runtime applies the local write immediately.
+3. Outbound sync is forwarded to the worker.
+4. Worker persists and, when configured, forwards upstream.
+5. Durable APIs resolve when the requested tier is confirmed.
 
-5. Shared transport (`runtime/sync-transport.ts`)
+### Query
 
-- URL/path-prefix building.
-- Auth header policy.
-- `/sync` POST helper.
-- Binary frame parser for `/events`.
+1. App builds a typed query from `app.todos...`.
+2. `Db` translates it into runtime query JSON.
+3. Main runtime executes the query or subscription.
+4. If the answer depends on worker or remote state, the worker path fills it in.
 
-## Message Protocol Between Main Thread and Worker
+## Framework Bindings
 
-Defined in `packages/jazz-tools/src/worker/worker-protocol.ts`.
+The React/Vue/Svelte wrappers sit on top of the same runtime surface.
 
-Main -> Worker messages:
+They mainly add:
 
-- `init`
-- `sync`
-- `update-auth`
-- `shutdown`
-- `simulate-crash`
+- lifecycle management
+- context/provider wiring
+- ergonomic reactive hooks or stores
 
-Worker -> Main messages:
-
-- `ready`
-- `init-ok`
-- `sync`
-- `error`
-- `shutdown-ok`
-
-Payloads are JSON strings for sync messages (`payload: string`).
-
-## Lifecycle Flows
-
-### 1. Browser Startup
-
-1. `createDb()` detects browser and calls `Db.createWithWorker()`.
-2. Main thread loads WASM module and spawns `jazz-worker`.
-3. Worker sends `ready` after loading WASM.
-4. On first schema use, `Db.getClient(schema)` creates main-thread `JazzClient`.
-5. `WorkerBridge.init(...)` sends `init` with schema/config/auth.
-6. Worker opens persistent runtime (`openPersistent(..., "worker")`), registers main client, sets outbox handler, drains buffered sync messages, then sends `init-ok`.
-
-### 2. Mutation Path
-
-Durability mutation (`insertDurable`, `updateDurable`, `deleteDurable`):
-
-1. `Db` waits for bridge init (`ensureBridgeReady()`).
-2. Call uses the main-thread `JazzClient` durable mutation API.
-3. Local runtime applies the write immediately and emits server-destination sync envelope.
-4. `WorkerBridge` forwards envelope payload as `sync` message to worker.
-5. Worker ingests message as peer-client sync input and may emit upstream server sync and/or client sync updates.
-6. Promise resolves when the requested durability tier (`worker`, `edge`, `global`) is acknowledged.
-
-### 3. Query Path
-
-1. Query builder JSON is produced by generated code.
-2. `translateQuery()` converts builder JSON to runtime query JSON.
-3. `JazzClient.query()` executes query against main runtime.
-4. Rows are converted to typed JS objects with `transformRows()`.
-
-### 4. Subscription Path
-
-1. `Db.subscribeAll()` subscribes on main runtime.
-2. Runtime callback emits row deltas.
-3. `SubscriptionManager` computes `{ all, added, updated, removed }`.
-4. React `useAll()` pushes updates via `useSyncExternalStore`.
-
-### 5. Upstream Sync Path (Worker-Owned in Browser)
-
-Outgoing:
-
-1. Worker runtime emits server-destination sync envelope.
-2. Worker sends `/sync` POST via `sendSyncPayload()` for standard payloads; catalogue payloads are only POSTed when `adminSecret` is configured, otherwise they are dropped client-side.
-3. Auth headers are selected by payload type and auth context.
-
-Incoming:
-
-1. Worker opens `/events?client_id=...` with `fetch`.
-2. `readBinaryFrames()` parses length-prefixed JSON frames.
-3. `Connected` event updates client id and re-attaches server in runtime.
-4. `SyncUpdate` events are applied to worker runtime.
-5. Worker runtime emits client-destination envelopes, forwarded to main thread as `sync`.
-
-Reconnect:
-
-- Exponential backoff with jitter in both main client and worker code paths.
-- Re-attach (`addServer`) is used as subscription replay boundary.
-
-### 6. Shutdown and Crash Simulation
-
-`Db.shutdown()`:
-
-1. Waits for bridge init completion.
-2. Sends worker `shutdown` and awaits `shutdown-ok` (best effort timeout).
-3. Shuts down all memoized clients.
-4. Terminates worker.
-
-Worker `shutdown`:
-
-- Aborts stream/reconnect timers.
-- Detaches server.
-- Flushes runtime and frees runtime handles.
-- Posts `shutdown-ok` and closes worker global scope.
-
-Worker `simulate-crash` (tests):
-
-- Flushes WAL only (`flushWal`), skips clean snapshot flush, frees runtime, emits `shutdown-ok`.
-- Used by browser tests to verify WAL-based recovery after reopen.
-
-## Auth and Session Resolution
-
-### Runtime Transport Auth
-
-From `sync-transport.ts`:
-
-- User auth precedence: JWT bearer first, then local auth headers.
-- Catalogue payloads use `X-Jazz-Admin-Secret` and are skipped entirely when no admin secret is configured.
-- Optional path prefix support for multi-tenant routing.
-
-### Local Auth Defaults
-
-From `local-auth.ts`:
-
-- If no auth is configured and browser storage exists, defaults to local anonymous mode.
-- Per-app token is generated/persisted in `localStorage`.
-
-### Session for Permission Checks
-
-From `client-session.ts`:
-
-- JWT payload is decoded to derive session principal.
-- Otherwise local mode/token derives a deterministic local principal id (`local:<hash>`).
-
-## Platform Split Today
-
-Browser (`runtime/db.ts`):
-
-- Main-thread in-memory runtime + dedicated worker persistent runtime.
-- Worker owns OPFS and upstream sync.
-
-React Native (`react-native/db.ts`, `react-native/jazz-rn-runtime-adapter.ts`):
-
-- Separate runtime adapter (`JazzRnRuntimeAdapter`) over `jazz-rn` binding.
-- No web worker/OPFS path.
-
-Node/non-browser:
-
-- Single in-memory runtime path from `createDb()` fallback.
-
-## Current Architectural Constraints
-
-These are current design facts that matter for a redesign:
-
-1. Browser mode depends on a dual-runtime bridge model.
-2. Worker bridge is initialized once and bound to first client/runtime instance; `Db` memoizes clients per schema.
-3. Worker protocol is JSON-string payload based with `any` runtime types in worker host.
-4. Auth refresh plumbing exists (`update-auth`) but is not currently invoked by `Db`/React surfaces.
-5. `createDb()` browser detection is environment-heuristic (`window` + `Worker`).
-6. Transport logic is duplicated conceptually across main-thread client and worker runtime host (both own reconnect/stream attach semantics).
-7. The `StorageDriver` hook is effectively minimal in this stack (mostly lifecycle close path).
-
-## Test-Validated Behavior
-
-Browser integration tests (`packages/jazz-tools/tests/browser/worker-bridge.test.ts`) currently validate:
-
-- Browser worker initialization.
-- Sync local CRUD and query semantics.
-- OPFS persistence across shutdown/reopen.
-- WAL recovery after simulated crash.
-- Worker-tier ack behavior.
-- Subscription updates through bridge.
-- End-to-end server sync via worker path.
+The browser architecture itself stays the same underneath.
+
+## Key Files
+
+| File                                                | Purpose                            |
+| --------------------------------------------------- | ---------------------------------- |
+| `packages/jazz-tools/src/runtime/db.ts`             | App-facing `Db` entry point        |
+| `packages/jazz-tools/src/runtime/client.ts`         | `JazzClient` implementation        |
+| `packages/jazz-tools/src/runtime/worker-bridge.ts`  | Main-thread to worker coordination |
+| `packages/jazz-tools/src/worker/jazz-worker.ts`     | Dedicated worker runtime host      |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | Shared transport utilities         |
+| `crates/jazz-wasm/src/runtime.rs`                   | WASM runtime bindings              |

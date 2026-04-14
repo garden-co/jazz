@@ -1,5 +1,21 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.27
+
+### Patch Changes
+
+- 463098a: Ship the new unified row-history storage engine across Jazz runtimes.
+
+  Relational rows, query visibility, and sync replay now go through the same storage-backed path instead of mixing durable state with older in-memory cache layers. In practice this makes local persistence and sync behavior more consistent across browser, Node, and native runtimes, especially around cold start, reconnect, and large local datasets.
+
+## 2.0.0-alpha.26
+
+### Patch Changes
+
+- a1cb9d5: Switch the mobile persistent storage engine to SQLite.
+
+  **WARNING:** Existing local data stored with the previous Fjall-based engine is not compatible with SQLite. On-device data will be lost on upgrade — users will need to re-sync from the server.
+
 ## 2.0.0-alpha.25
 
 ## 2.0.0-alpha.24

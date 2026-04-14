@@ -1,29 +1,189 @@
+use std::ops::Deref;
+use std::sync::Arc;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_bytes::ByteBuf;
+
 use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
 use crate::object::ObjectId;
 use std::collections::HashMap;
 
-/// A row with its object ID, binary data, and commit reference.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RowBytes(Arc<[u8]>);
+
+impl RowBytes {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.as_ref().to_vec()
+    }
+}
+
+impl From<Vec<u8>> for RowBytes {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Arc::from(value.into_boxed_slice()))
+    }
+}
+
+impl From<&[u8]> for RowBytes {
+    fn from(value: &[u8]) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl Deref for RowBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl AsRef<[u8]> for RowBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq<Vec<u8>> for RowBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.0.as_ref() == other.as_slice()
+    }
+}
+
+impl PartialEq<RowBytes> for Vec<u8> {
+    fn eq(&self, other: &RowBytes) -> bool {
+        self.as_slice() == other.0.as_ref()
+    }
+}
+
+impl Serialize for RowBytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for RowBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(ByteBuf::deserialize(deserializer)?.into_vec()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct SharedString(Arc<str>);
+
+impl SharedString {
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl From<String> for SharedString {
+    fn from(value: String) -> Self {
+        Self(Arc::from(value.into_boxed_str()))
+    }
+}
+
+impl From<&str> for SharedString {
+    fn from(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl From<SharedString> for String {
+    fn from(value: SharedString) -> Self {
+        value.0.as_ref().to_owned()
+    }
+}
+
+impl From<&SharedString> for String {
+    fn from(value: &SharedString) -> Self {
+        value.0.as_ref().to_owned()
+    }
+}
+
+impl Deref for SharedString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl AsRef<str> for SharedString {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl std::borrow::Borrow<str> for SharedString {
+    fn borrow(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq<&str> for SharedString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_ref() == *other
+    }
+}
+
+impl PartialEq<SharedString> for &str {
+    fn eq(&self, other: &SharedString) -> bool {
+        *self == other.0.as_ref()
+    }
+}
+
+impl PartialEq<String> for SharedString {
+    fn eq(&self, other: &String) -> bool {
+        self.0.as_ref() == other.as_str()
+    }
+}
+
+impl PartialEq<SharedString> for String {
+    fn eq(&self, other: &SharedString) -> bool {
+        self.as_str() == other.0.as_ref()
+    }
+}
+
+impl std::fmt::Display for SharedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_ref())
+    }
+}
+
+impl Serialize for SharedString {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+/// A row with its object ID, binary data, and version reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub id: ObjectId,
     /// Binary encoded row data.
-    pub data: Vec<u8>,
-    pub commit_id: CommitId,
+    pub data: RowBytes,
+    pub version_id: CommitId,
     pub provenance: RowProvenance,
 }
 
 impl Row {
     pub fn new(
         id: ObjectId,
-        data: Vec<u8>,
-        commit_id: CommitId,
+        data: impl Into<RowBytes>,
+        version_id: CommitId,
         provenance: RowProvenance,
     ) -> Self {
         Self {
             id,
-            data,
-            commit_id,
+            data: data.into(),
+            version_id,
             provenance,
         }
     }
@@ -150,7 +310,7 @@ pub fn build_ordered_delta_with_post_ids(
     for (old, new) in &delta.updated {
         let old_index = pre_index_by_id.get(&old.id).copied().unwrap_or(0);
         let new_index = post_index_by_id.get(&new.id).copied().unwrap_or(0);
-        let row_changed = old.data != new.data || old.commit_id != new.commit_id;
+        let row_changed = old.data != new.data || old.version_id != new.version_id;
 
         if row_changed {
             updated.push(OrderedUpdated {

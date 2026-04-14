@@ -30,6 +30,7 @@ export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const [title, setTitle] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const trimmedFilterTitle = normalizeText(filterTitle).trim();
   let todosQuery = app.todos;
@@ -48,6 +49,7 @@ export function TodoList() {
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();
     if (!trimmed || !sessionUserId) return;
+    setErrorMessage(null);
     db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
     setTitle("");
   };
@@ -61,7 +63,14 @@ export function TodoList() {
         <Switch
           testID={`todo-toggle-${titleId}`}
           value={item.done}
-          onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
+          onValueChange={() => {
+            try {
+              db.update(app.todos, item.id, { done: !item.done });
+              setErrorMessage(null);
+            } catch {
+              setErrorMessage("You don't have permission to update this task");
+            }
+          }}
         />
         <View style={styles.todoTextWrap}>
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{displayTitle}</Text>
@@ -69,7 +78,14 @@ export function TodoList() {
         </View>
         <Pressable
           testID={`todo-delete-${titleId}`}
-          onPress={() => db.delete(app.todos, item.id)}
+          onPress={() => {
+            try {
+              db.delete(app.todos, item.id);
+              setErrorMessage(null);
+            } catch {
+              setErrorMessage("You don't have permission to delete this task");
+            }
+          }}
           style={styles.deleteButton}
         >
           <Text style={styles.deleteButtonText}>Delete</Text>
@@ -116,6 +132,8 @@ export function TodoList() {
           />
         </View>
       </View>
+
+      {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
 
       <FlatList
         data={todos}
@@ -179,6 +197,11 @@ const styles = StyleSheet.create({
   doneOnlyLabel: {
     color: "#374151",
     fontSize: 14,
+  },
+  errorText: {
+    color: "#b91c1c",
+    fontSize: 14,
+    fontWeight: "600",
   },
   separator: {
     height: 8,

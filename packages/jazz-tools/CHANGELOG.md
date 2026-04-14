@@ -1,5 +1,43 @@
 # jazz-tools
 
+## 2.0.0-alpha.27
+
+### Patch Changes
+
+- d872a4d: `allowedTo` now accepts bare relation names (e.g. `"project"`) in addition to full FK column names (`"projectId"`).
+- cfaed19: Fix enum literals in nested policies
+
+  Nested relation-backed permission filters now serialize enum literals as tagged runtime values instead of raw strings, so publishing permissions and loading them into `createJazzContext(...)` works for cases like `grant_role: "viewer"`.
+
+- 1fb1395: Add `From<T>` impls on `Value` for common types and a `row_input!` macro for ergonomic `HashMap<String, Value>` construction.
+- 463098a: Ship the new unified row-history storage engine across Jazz runtimes.
+
+  Relational rows, query visibility, and sync replay now go through the same storage-backed path instead of mixing durable state with older in-memory cache layers. In practice this makes local persistence and sync behavior more consistent across browser, Node, and native runtimes, especially around cold start, reconnect, and large local datasets.
+
+- Updated dependencies [463098a]
+  - jazz-wasm@2.0.0-alpha.27
+  - jazz-rn@2.0.0-alpha.27
+
+## 2.0.0-alpha.26
+
+### Patch Changes
+
+- 15ce77e: Fix large global query and subscription snapshots dropping rows by sequencing sync delivery and delaying `QuerySettled` tier unlocks until earlier sync updates have been applied.
+- 5a2adfd: Fix `state_referenced_locally` compiler warnings in Svelte components by moving prop reads into reactive contexts.
+- 8be5761: Add `AddTable`, `RemoveTable` and `RenameTable` migrations
+- 75b30a9: feat: enhance inspector with inline editings, resizeable panels and a shiny new grid
+- 75b30a9: Fix the inspector data grid freezing the browser tab when paging or sorting, and improve diagnostics around pending query transitions.
+- 9968d2f: Fix `createPolicyTestApp(...)` so policy test helpers no longer hard-code Vitest's `expect`.
+
+  Callers now pass the `expect` function explicitly, which keeps `jazz-tools/testing` policy assertions working when the test harness provides its own assertion context.
+
+- 6bb5d9f: Add a `runtimeSources` client config API for explicit Wasm and worker bootstrap across browser and edge-style runtimes, including `baseUrl`, `wasmUrl`, `workerUrl`, `wasmSource`, and `wasmModule` overrides exported from the runtime and framework entrypoints.
+- d302911: Allow `QuerySubscription` (Svelte) and `useAll` (Vue) to accept `undefined` queries, matching the React `useAll` behaviour. When `undefined` is passed, the subscription returns `undefined` without subscribing.
+- 4d57125: Fix schema comparison in `permissions push` CLI command
+- Updated dependencies [a1cb9d5]
+  - jazz-rn@2.0.0-alpha.26
+  - jazz-wasm@2.0.0-alpha.26
+
 ## 2.0.0-alpha.25
 
 ### Patch Changes

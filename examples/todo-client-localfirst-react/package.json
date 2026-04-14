@@ -12,7 +12,8 @@
   "dependencies": {
     "jazz-tools": "workspace:*",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "sonner": "^2.0.7"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

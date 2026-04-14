@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Navigate, useParams } from "react-router";
+import { Link, Navigate, useParams } from "react-router";
 import type { WasmSchema } from "jazz-tools";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./TableSchemaSql.module.css";
@@ -30,6 +30,13 @@ export function TableSchemaDefinition() {
   return (
     <section className={styles.container}>
       <header className={styles.header}>
+        <Link
+          to={`/data-explorer/${table}/data`}
+          className={styles.backLink}
+          aria-label="Back to data"
+        >
+          &larr;
+        </Link>
         <h2 className={styles.title}>{table} schema</h2>
       </header>
       <pre className={styles.codeBlock}>

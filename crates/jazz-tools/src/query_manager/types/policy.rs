@@ -1,6 +1,19 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RowPolicyMode {
+    #[default]
+    PermissiveLocal,
+    Enforcing,
+}
+
+impl RowPolicyMode {
+    pub fn denies_missing_explicit_policy(self) -> bool {
+        matches!(self, Self::Enforcing)
+    }
+}
+
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -52,7 +65,10 @@ pub struct TablePolicies {
 }
 
 impl TablePolicies {
-    /// Create empty policies (allow all by default).
+    /// Create empty policies.
+    ///
+    /// Runtimes without a loaded policy bundle stay permissive locally; runtimes
+    /// with a loaded bundle treat missing clauses as deny-by-default.
     pub fn new() -> Self {
         Self::default()
     }
@@ -89,5 +105,33 @@ impl TablePolicies {
     /// Falls back to UPDATE's USING if DELETE has none.
     pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
         self.delete.using.as_ref().or(self.update.using.as_ref())
+    }
+
+    pub fn has_any_explicit_policy(&self) -> bool {
+        self.select.using.is_some()
+            || self.insert.with_check.is_some()
+            || self.update.using.is_some()
+            || self.update.with_check.is_some()
+            || self.delete.using.is_some()
+    }
+
+    pub fn select_policy(&self) -> Option<&PolicyExpr> {
+        self.select.using.as_ref()
+    }
+
+    pub fn insert_policy(&self) -> Option<&PolicyExpr> {
+        self.insert.with_check.as_ref()
+    }
+
+    pub fn update_using_policy(&self) -> Option<&PolicyExpr> {
+        self.update.using.as_ref()
+    }
+
+    pub fn update_check_policy(&self) -> Option<&PolicyExpr> {
+        self.update.with_check.as_ref()
+    }
+
+    pub fn has_explicit_update_policy(&self) -> bool {
+        self.update.using.is_some() || self.update.with_check.is_some()
     }
 }

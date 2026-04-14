@@ -23,15 +23,11 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-        Value::Boolean(archived),
-    ]
+    vec![owner_id.into(), title.into(), archived.into()]
 }
 
 fn boolean_policy_document_input(
@@ -39,18 +35,7 @@ fn boolean_policy_document_input(
     title: &str,
     archived: bool,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("title".to_string(), Value::Text(title.to_string())),
-        ("archived".to_string(), Value::Boolean(archived)),
-    ])
-}
-
-fn row_input<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
-    pairs
-        .into_iter()
-        .map(|(column, value)| (column.to_string(), value))
-        .collect()
+    row_input!("owner_id" => owner_id, "title" => title, "archived" => archived)
 }
 
 fn row_changes<const N: usize>(pairs: [(&str, Value); N]) -> Vec<(String, Value)> {
@@ -91,20 +76,14 @@ async fn create_row(
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(
-            document_id,
-            vec![("title".to_string(), Value::Text(title.to_string()))],
-        )
+        .update(document_id, vec![("title".to_string(), title.into())])
         .await
         .expect("update document title");
 }
 
 async fn update_document_archived(client: &JazzClient, document_id: ObjectId, archived: bool) {
     client
-        .update(
-            document_id,
-            vec![("archived".to_string(), Value::Boolean(archived))],
-        )
+        .update(document_id, vec![("archived".to_string(), archived.into())])
         .await
         .expect("update document archived");
 }
@@ -121,26 +100,24 @@ fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchem
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .column("priority", ColumnType::Integer)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn priority_values(title: &str, priority: i32) -> Vec<Value> {
-    vec![Value::Text(title.to_string()), Value::Integer(priority)]
+    vec![title.into(), priority.into()]
 }
 
 fn make_review_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .nullable_column("reviewer_id", ColumnType::Text)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn review_values(title: &str, reviewer_id: Option<&str>) -> Vec<Value> {
     vec![
-        Value::Text(title.to_string()),
-        reviewer_id
-            .map(|value| Value::Text(value.to_string()))
-            .unwrap_or(Value::Null),
+        title.into(),
+        reviewer_id.map(|value| value.into()).unwrap_or(Value::Null),
     ]
 }
 
@@ -153,11 +130,7 @@ fn make_status_schema(table_name: &str, policies: TablePolicies) -> TableSchemaB
 }
 
 fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
-    vec![
-        Value::Text(title.to_string()),
-        Value::Text(status.to_string()),
-        Value::Boolean(archived),
-    ]
+    vec![title.into(), status.into(), archived.into()]
 }
 
 async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
@@ -343,7 +316,7 @@ async fn select_policies_filter_out_archived_rows() {
             table_name,
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false))),
+                .with_select(PolicyExpr::eq_literal("archived", false.into())),
         ))
         .build();
 
@@ -578,8 +551,8 @@ async fn delete_policies_boolean() {
 /// ```
 #[tokio::test]
 async fn archived_state_policies_gate_insert_update_and_delete() {
-    let incomplete_policy = PolicyExpr::eq_literal("archived", Value::Boolean(false));
-    let archived_policy = PolicyExpr::eq_literal("archived", Value::Boolean(true));
+    let incomplete_policy = PolicyExpr::eq_literal("archived", false.into());
+    let archived_policy = PolicyExpr::eq_literal("archived", true.into());
     let table_name = "documents_archived_lifecycle";
 
     let schema = SchemaBuilder::new()
@@ -710,7 +683,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Ne,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -720,7 +693,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Gt,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -730,7 +703,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Ge,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -740,7 +713,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Lt,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .table(make_priority_schema(
@@ -750,7 +723,7 @@ async fn select_policies_scalar_comparators_filter_rows() {
                 .with_select(PolicyExpr::Cmp {
                     column: "priority".into(),
                     op: CmpOp::Le,
-                    value: PolicyValue::Literal(Value::Integer(3)),
+                    value: PolicyValue::Literal(3i32.into()),
                 }),
         ))
         .build();
@@ -760,113 +733,77 @@ async fn select_policies_scalar_comparators_filter_rows() {
     let ne_match = create_row(
         &alice,
         "documents_select_ne",
-        row_input([
-            ("title", Value::Text("different".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "different", "priority" => 5i32),
     )
     .await;
     let ne_hidden = create_row(
         &alice,
         "documents_select_ne",
-        row_input([
-            ("title", Value::Text("exact".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "exact", "priority" => 3i32),
     )
     .await;
 
     let gt_match = create_row(
         &alice,
         "documents_select_gt",
-        row_input([
-            ("title", Value::Text("higher".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "higher", "priority" => 5i32),
     )
     .await;
     let gt_hidden = create_row(
         &alice,
         "documents_select_gt",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
 
     let gte_low = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("low".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "low", "priority" => 1i32),
     )
     .await;
     let gte_equal = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
     let gte_high = create_row(
         &alice,
         "documents_select_gte",
-        row_input([
-            ("title", Value::Text("high".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "high", "priority" => 5i32),
     )
     .await;
 
     let lt_match = create_row(
         &alice,
         "documents_select_lt",
-        row_input([
-            ("title", Value::Text("lower".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "lower", "priority" => 1i32),
     )
     .await;
     let lt_hidden = create_row(
         &alice,
         "documents_select_lt",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
 
     let lte_low = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("low".into())),
-            ("priority", Value::Integer(1)),
-        ]),
+        row_input!("title" => "low", "priority" => 1i32),
     )
     .await;
     let lte_equal = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("equal".into())),
-            ("priority", Value::Integer(3)),
-        ]),
+        row_input!("title" => "equal", "priority" => 3i32),
     )
     .await;
     let lte_hidden = create_row(
         &alice,
         "documents_select_lte",
-        row_input([
-            ("title", Value::Text("high".into())),
-            ("priority", Value::Integer(5)),
-        ]),
+        row_input!("title" => "high", "priority" => 5i32),
     )
     .await;
 
@@ -1037,114 +974,78 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     let select_eq_null_visible = create_row(
         &alice,
         "documents_select_eq_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_eq_null_hidden = create_row(
         &alice,
         "documents_select_eq_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let select_ne_null_hidden = create_row(
         &alice,
         "documents_select_ne_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_ne_null_visible = create_row(
         &alice,
         "documents_select_ne_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let select_is_null_visible = create_row(
         &alice,
         "documents_select_is_null",
-        row_input([
-            ("title", Value::Text("unassigned".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "unassigned", "reviewer_id" => Value::Null),
     )
     .await;
     let select_is_null_hidden = create_row(
         &alice,
         "documents_select_is_null",
-        row_input([
-            ("title", Value::Text("assigned".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "assigned", "reviewer_id" => "alice"),
     )
     .await;
 
     let insert_eq_null_visible = create_row(
         &alice,
         "documents_insert_eq_null",
-        row_input([
-            ("title", Value::Text("allowed null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "allowed null", "reviewer_id" => Value::Null),
     )
     .await;
     let insert_eq_null_hidden = create_row(
         &alice,
         "documents_insert_eq_null",
-        row_input([
-            ("title", Value::Text("rejected non-null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "rejected non-null", "reviewer_id" => "alice"),
     )
     .await;
 
     let insert_ne_null_hidden = create_row(
         &alice,
         "documents_insert_ne_null",
-        row_input([
-            ("title", Value::Text("rejected null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "rejected null", "reviewer_id" => Value::Null),
     )
     .await;
     let insert_ne_null_visible = create_row(
         &alice,
         "documents_insert_ne_null",
-        row_input([
-            ("title", Value::Text("allowed non-null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "allowed non-null", "reviewer_id" => "alice"),
     )
     .await;
 
     let update_is_null_allowed = create_row(
         &alice,
         "documents_update_is_null",
-        row_input([
-            ("title", Value::Text("becomes null".into())),
-            ("reviewer_id", Value::Text("alice".into())),
-        ]),
+        row_input!("title" => "becomes null", "reviewer_id" => "alice"),
     )
     .await;
     let update_is_null_rejected = create_row(
         &alice,
         "documents_update_is_null",
-        row_input([
-            ("title", Value::Text("stays null".into())),
-            ("reviewer_id", Value::Null),
-        ]),
+        row_input!("title" => "stays null", "reviewer_id" => Value::Null),
     )
     .await;
 
@@ -1232,7 +1133,7 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     update_row(
         &alice,
         update_is_null_rejected,
-        row_changes([("reviewer_id", Value::Text("bob".into()))]),
+        row_changes([("reviewer_id", "bob".into())]),
     )
     .await;
 
@@ -1277,7 +1178,7 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
                 .with_insert(PolicyExpr::True)
                 .with_select(PolicyExpr::Contains {
                     column: "title".into(),
-                    value: PolicyValue::Literal(Value::Text("Launch".into())),
+                    value: PolicyValue::Literal("Launch".into()),
                 }),
         ))
         .table(make_status_schema(
@@ -1287,8 +1188,8 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
                 .with_select(PolicyExpr::InList {
                     column: "status".into(),
                     values: vec![
-                        PolicyValue::Literal(Value::Text("active".into())),
-                        PolicyValue::Literal(Value::Text("trial".into())),
+                        PolicyValue::Literal("active".into()),
+                        PolicyValue::Literal("trial".into()),
                     ],
                 }),
         ))
@@ -1308,63 +1209,39 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
     let contains_match = create_row(
         &alice,
         "documents_select_contains",
-        row_input([
-            ("title", Value::Text("Launch Checklist".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Launch Checklist", "status" => "active", "archived" => false),
     )
     .await;
     let contains_hidden = create_row(
         &alice,
         "documents_select_contains",
-        row_input([
-            ("title", Value::Text("Backlog".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Backlog", "status" => "active", "archived" => false),
     )
     .await;
 
     let in_active = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Active".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Active", "status" => "active", "archived" => false),
     )
     .await;
     let in_trial = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Trial".into())),
-            ("status", Value::Text("trial".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Trial", "status" => "trial", "archived" => false),
     )
     .await;
     let in_hidden = create_row(
         &alice,
         "documents_select_in_list",
-        row_input([
-            ("title", Value::Text("Archived".into())),
-            ("status", Value::Text("archived".into())),
-            ("archived", Value::Boolean(true)),
-        ]),
+        row_input!("title" => "Archived", "status" => "archived", "archived" => true),
     )
     .await;
 
     let empty_hidden = create_row(
         &alice,
         "documents_select_empty_in_list",
-        row_input([
-            ("title", Value::Text("Should stay hidden".into())),
-            ("status", Value::Text("active".into())),
-            ("archived", Value::Boolean(false)),
-        ]),
+        row_input!("title" => "Should stay hidden", "status" => "active", "archived" => false),
     )
     .await;
 
@@ -1449,7 +1326,7 @@ async fn read_and_write_policies_remain_independent() {
             "documents_write_only",
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false)))
+                .with_select(PolicyExpr::eq_literal("archived", false.into()))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True),
         ))
         .build();
@@ -1600,7 +1477,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
             table_name,
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", Value::Boolean(false)))
+                .with_select(PolicyExpr::eq_literal("archived", false.into()))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True),
         ))
         .build();

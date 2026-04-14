@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/jazz-cloud-server",
   "crates/jazz-tools",
   "crates/jazz-wasm",
   "crates/jazz-napi",
@@ -12,5 +11,7 @@ members = [
   "crates/opfs-btree",
 ]
 [patch.crates-io]
-fjall = { git = "https://github.com/garden-co/fjall.git", branch = "fjall-android-support" }
 rocksdb = { git = "https://github.com/garden-co/rust-rocksdb.git", branch = "feat/tdb-flush" }
+
+[patch."https://github.com/garden-co/rust-rocksdb.git"]
+librocksdb-sys = { path = "vendor/librocksdb-sys" }

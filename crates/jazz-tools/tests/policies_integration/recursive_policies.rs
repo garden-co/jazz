@@ -169,7 +169,7 @@ fn recursive_relation_document_select_policy() -> PolicyExpr {
                 PredicateExpr::Cmp {
                     left: ColumnRef::scoped("resource_access_edges", "grant_role"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Text("viewer".to_string())),
+                    right: ValueRef::Literal("viewer".into()),
                 },
             ]),
         },
@@ -208,11 +208,7 @@ fn recursive_relation_policy_schema() -> Schema {
 // -- Value constructors --
 
 fn recursive_folder_values(owner_id: &str, name: &str, parent_id: Option<ObjectId>) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(name.to_string()),
-        parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-    ]
+    vec![owner_id.into(), name.into(), parent_id.into()]
 }
 
 fn recursive_folder_input(
@@ -220,18 +216,11 @@ fn recursive_folder_input(
     name: &str,
     parent_id: Option<ObjectId>,
 ) -> HashMap<String, Value> {
-    HashMap::from([
-        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
-        ("name".to_string(), Value::Text(name.to_string())),
-        (
-            "parent_id".to_string(),
-            parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
-    ])
+    row_input!("owner_id" => owner_id, "name" => name, "parent_id" => parent_id)
 }
 
 fn title_document_values(title: &str) -> Vec<Value> {
-    vec![Value::Text(title.to_string())]
+    vec![title.into()]
 }
 
 // -- Seed / mutation helpers --
@@ -259,23 +248,14 @@ async fn update_recursive_folder_parent(
     parent_id: Option<ObjectId>,
 ) {
     client
-        .update(
-            folder_id,
-            vec![(
-                "parent_id".to_string(),
-                parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-            )],
-        )
+        .update(folder_id, vec![("parent_id".to_string(), parent_id.into())])
         .await
         .expect("update recursive folder parent");
 }
 
 async fn create_team(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create(
-            "teams",
-            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
-        )
+        .create("teams", row_input!("name" => name))
         .await
         .expect("create team")
         .0
@@ -285,10 +265,7 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
     client
         .create(
             "team_edges",
-            HashMap::from([
-                ("child_team".to_string(), Value::Uuid(child_team)),
-                ("parent_team".to_string(), Value::Uuid(parent_team)),
-            ]),
+            row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)),
         )
         .await
         .expect("create team edge");
@@ -298,10 +275,7 @@ async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: Obj
     client
         .create(
             "team_memberships",
-            HashMap::from([
-                ("user_id".to_string(), Value::Text(user_id.to_string())),
-                ("team_id".to_string(), Value::Uuid(team_id)),
-            ]),
+            row_input!("user_id" => user_id, "team_id" => Value::Uuid(team_id)),
         )
         .await
         .expect("create team membership");
@@ -316,14 +290,7 @@ async fn create_resource_access_edge(
     client
         .create(
             "resource_access_edges",
-            HashMap::from([
-                ("team_id".to_string(), Value::Uuid(team_id)),
-                ("resource_id".to_string(), Value::Uuid(resource_id)),
-                (
-                    "grant_role".to_string(),
-                    Value::Text(grant_role.to_string()),
-                ),
-            ]),
+            row_input!("team_id" => Value::Uuid(team_id), "resource_id" => Value::Uuid(resource_id), "grant_role" => grant_role),
         )
         .await
         .expect("create resource access edge");
@@ -331,10 +298,7 @@ async fn create_resource_access_edge(
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create(
-            "documents",
-            HashMap::from([("title".to_string(), Value::Text(title.to_string()))]),
-        )
+        .create("documents", row_input!("title" => title))
         .await
         .expect("create title document")
         .0

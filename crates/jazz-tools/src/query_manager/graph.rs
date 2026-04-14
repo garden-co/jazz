@@ -7,7 +7,9 @@ use bitvec::prelude::*;
 use smallvec::SmallVec;
 
 use crate::object::{BranchName, ObjectId};
-use crate::schema_manager::{SchemaContext, translate_column_for_index};
+use crate::schema_manager::{
+    SchemaContext, translate_column_for_index, translate_table_name_to_schema,
+};
 
 use crate::storage::Storage;
 
@@ -33,13 +35,15 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, Tuple, TupleDelta,
+    TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +64,26 @@ impl fmt::Display for QueryCompileError {
 }
 
 impl std::error::Error for QueryCompileError {}
+
+fn resolve_branch_schema_hash(schema_context: &SchemaContext, branch: &str) -> Option<SchemaHash> {
+    let branch_name = BranchName::new(branch);
+    let composed = ComposedBranchName::parse(&branch_name)?;
+    schema_context
+        .all_live_hashes()
+        .into_iter()
+        .find(|hash| hash.short() == composed.schema_hash.short())
+}
+
+fn effective_select_policy(
+    table_schema: &crate::query_manager::types::TableSchema,
+    row_policy_mode: RowPolicyMode,
+) -> Option<PolicyExpr> {
+    table_schema.policies.select_policy().cloned().or_else(|| {
+        row_policy_mode
+            .denies_missing_explicit_policy()
+            .then_some(PolicyExpr::False)
+    })
+}
 
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
@@ -178,6 +202,24 @@ fn natural_row_projection_element_index(
     None
 }
 
+fn translate_scan_table_name(
+    schema_context: &SchemaContext,
+    table: &str,
+    branch_schema_hash: Option<SchemaHash>,
+) -> Option<TableName> {
+    let translated_table = if let Some(target_hash) = branch_schema_hash {
+        if target_hash != schema_context.current_hash {
+            translate_table_name_to_schema(schema_context, table, &target_hash)
+        } else {
+            Some(table.to_string())
+        }
+    } else {
+        Some(table.to_string())
+    };
+
+    translated_table.map(|name| TableName::new(&name))
+}
+
 fn push_unique_magic_ref(
     refs: &mut Vec<(Option<String>, MagicColumnKind)>,
     scope: Option<&str>,
@@ -260,12 +302,8 @@ fn resolve_magic_column_requests(
             let element_index = (tuple_descriptor.element_count() > 0).then_some(0);
             let table_name = tuple_descriptor
                 .element(0)
-                .and_then(|element| scope_table_map.get(&element.table).copied())
-                .or_else(|| {
-                    tuple_descriptor
-                        .element(0)
-                        .map(|element| TableName::new(&element.table))
-                });
+                .and_then(|element| scope_table_map.get(element.table.as_str()).copied())
+                .or_else(|| tuple_descriptor.element(0).map(|element| element.table));
             element_index.zip(table_name)
         };
 
@@ -289,7 +327,7 @@ fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> V
     let single_unscoped = tuple_descriptor.element_count() == 1
         && tuple_descriptor
             .element(0)
-            .is_some_and(|element| element.table.is_empty());
+            .is_some_and(|element| element.table.as_str().is_empty());
 
     tuple_descriptor
         .iter()
@@ -445,6 +483,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
         .ok()
     }
@@ -461,6 +500,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -482,6 +522,12 @@ impl QueryGraph {
             branches,
             session,
             RelationCompileFeatures::default(),
+            if crate::query_manager::manager::QueryManager::schema_has_any_explicit_policies(schema)
+            {
+                RowPolicyMode::Enforcing
+            } else {
+                RowPolicyMode::PermissiveLocal
+            },
         )
     }
 
@@ -491,6 +537,7 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let default_branches = vec!["main".to_string()];
         let branches: &[String] = if branches.is_empty() {
@@ -507,7 +554,13 @@ impl QueryGraph {
         )?;
         validate_execution_plan(&plan, schema).ok()?;
         let schema_context = Self::default_schema_context(schema);
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            &schema_context,
+            row_policy_mode,
+        )
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -525,6 +578,7 @@ impl QueryGraph {
             session,
             schema_context,
             RelationCompileFeatures::default(),
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -535,6 +589,7 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let plan = lower_relation_to_execution_plan(
             relation,
@@ -544,7 +599,13 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
     }
 
     fn compile_execution_plan_with_schema_context(
@@ -552,6 +613,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
         // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
@@ -585,12 +647,13 @@ impl QueryGraph {
                 &branches,
                 session.clone(),
                 schema_context,
+                row_policy_mode,
             );
         }
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = table_schema.policies.select.using.clone();
+        let select_policy = effective_select_policy(table_schema, row_policy_mode);
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -602,7 +665,15 @@ impl QueryGraph {
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map.get(branch).copied();
+            let branch_schema_hash = branch_schema_map
+                .get(branch)
+                .copied()
+                .or_else(|| resolve_branch_schema_hash(schema_context, branch));
+            let Some(scan_table_name) =
+                translate_scan_table_name(schema_context, table_str, branch_schema_hash)
+            else {
+                continue;
+            };
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
@@ -638,7 +709,7 @@ impl QueryGraph {
                 let scan_column_name = ColumnName::new(&translated_column);
 
                 let scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
+                    scan_table_name,
                     scan_column_name,
                     branch,
                     scan_condition,
@@ -647,7 +718,7 @@ impl QueryGraph {
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
                 graph
                     .index_scan_nodes
-                    .push((scan_id, plan.table, scan_column_name));
+                    .push((scan_id, scan_table_name, scan_column_name));
                 phase1_outputs.push(scan_id);
             }
 
@@ -655,7 +726,7 @@ impl QueryGraph {
             if plan.include_deleted {
                 let deleted_column = ColumnName::new("_id_deleted");
                 let deleted_scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
+                    scan_table_name,
                     deleted_column,
                     branch,
                     ScanCondition::All,
@@ -664,7 +735,7 @@ impl QueryGraph {
                 let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
                 graph
                     .index_scan_nodes
-                    .push((deleted_scan_id, plan.table, deleted_column));
+                    .push((deleted_scan_id, scan_table_name, deleted_column));
                 phase1_outputs.push(deleted_scan_id);
             }
         }
@@ -705,13 +776,14 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
+            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
                 branch_for_policy,
+                row_policy_mode,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -778,7 +850,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor = Some(current_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -787,6 +859,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -848,7 +921,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -857,6 +930,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -938,7 +1012,14 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        Self::try_compile_with_schema_context(query, schema, session, schema_context).ok()
+        Self::try_compile_with_schema_context(
+            query,
+            schema,
+            session,
+            schema_context,
+            RowPolicyMode::PermissiveLocal,
+        )
+        .ok()
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -949,6 +1030,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
@@ -976,13 +1058,18 @@ impl QueryGraph {
 
         validate_execution_plan(&plan, schema)?;
 
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
-            .ok_or_else(|| {
-                QueryCompileError::InvalidPlan(
-                    "unsupported relation_ir shape for schema-context query compilation"
-                        .to_string(),
-                )
-            })
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -1287,7 +1374,19 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
+        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
+        for schema_hash in schema_context.all_live_hashes() {
+            let branch_name = ComposedBranchName::new(
+                &schema_context.env,
+                schema_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
+        }
+
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
@@ -1307,9 +1406,15 @@ impl QueryGraph {
         // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
         let mut base_scan_ids = Vec::new();
         for branch in &join_branches {
+            let branch_schema_hash = branch_schema_map.get(*branch).copied();
+            let Some(base_scan_table) =
+                translate_scan_table_name(schema_context, plan.table.as_str(), branch_schema_hash)
+            else {
+                continue;
+            };
             let id_column = ColumnName::new("_id");
             let base_scan = IndexScanNode::new_with_branch(
-                plan.table,
+                base_scan_table,
                 id_column,
                 *branch,
                 ScanCondition::All,
@@ -1318,7 +1423,7 @@ impl QueryGraph {
             let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
             graph
                 .index_scan_nodes
-                .push((base_scan_id, plan.table, id_column));
+                .push((base_scan_id, base_scan_table, id_column));
             base_scan_ids.push(base_scan_id);
         }
         let base_scan_output = if base_scan_ids.len() > 1 {
@@ -1343,20 +1448,22 @@ impl QueryGraph {
 
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
-        if let (Some(session), Some(policy)) =
-            (&session, base_table_schema.policies.select.using.clone())
-        {
+        if let (Some(session), Some(policy)) = (
+            &session,
+            effective_select_policy(base_table_schema, row_policy_mode),
+        ) {
             let branch_for_policy = branches
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
+            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                 base_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
                 branch_for_policy,
+                row_policy_mode,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1406,9 +1513,17 @@ impl QueryGraph {
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
             for branch in &join_branches {
+                let branch_schema_hash = branch_schema_map.get(*branch).copied();
+                let Some(right_scan_table) = translate_scan_table_name(
+                    schema_context,
+                    join_spec.table.as_str(),
+                    branch_schema_hash,
+                ) else {
+                    continue;
+                };
                 let id_column = ColumnName::new("_id");
                 let right_scan = IndexScanNode::new_with_branch(
-                    join_spec.table,
+                    right_scan_table,
                     id_column,
                     *branch,
                     ScanCondition::All,
@@ -1417,7 +1532,7 @@ impl QueryGraph {
                 let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
                 graph
                     .index_scan_nodes
-                    .push((right_scan_id, join_spec.table, id_column));
+                    .push((right_scan_id, right_scan_table, id_column));
                 right_scan_ids.push(right_scan_id);
             }
             let right_scan_output = if right_scan_ids.len() > 1 {
@@ -1440,20 +1555,22 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) =
-                (&session, right_table_schema.policies.select.using.clone())
-            {
+            if let (Some(session), Some(policy)) = (
+                &session,
+                effective_select_policy(right_table_schema, row_policy_mode),
+            ) {
                 let branch_for_policy = branches
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch(
+                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
                     branch_for_policy,
+                    row_policy_mode,
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1557,7 +1674,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor_after_magic = Some(output_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1566,6 +1683,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1624,7 +1742,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1633,6 +1751,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1983,7 +2102,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -2148,7 +2267,7 @@ impl QueryGraph {
                         let delta = recursive_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut row_loader,
+                            &mut |id, hint| row_loader(id, hint),
                         );
                         tracing::debug!(
                             node_id = node_id.0,
@@ -2174,8 +2293,10 @@ impl QueryGraph {
 
                         let mut merged = TupleDelta::new();
                         merged.added.extend(new_delta.added);
+                        merged.added.extend(update_delta.added);
                         merged.removed.extend(deleted_delta.removed);
                         merged.removed.extend(new_delta.removed);
+                        merged.removed.extend(update_delta.removed);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
 
@@ -2197,10 +2318,11 @@ impl QueryGraph {
                         .unwrap_or_default();
 
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
-                        let delta =
-                            magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            });
+                        let delta = magic_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut |id, hint| row_loader(id, hint),
+                        );
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2240,9 +2362,11 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            })
+                            policy_node.process_with_context(
+                                input_delta,
+                                storage,
+                                &mut |id, hint| row_loader(id, hint),
+                            )
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -2315,7 +2439,8 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id))
+                            subquery_node
+                                .reevaluate_all(storage, &mut |id, hint| row_loader(id, hint))
                         } else {
                             TupleDelta::new()
                         };
@@ -2324,7 +2449,7 @@ impl QueryGraph {
                         let outer_delta = subquery_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut row_loader,
+                            &mut |id, hint| row_loader(id, hint),
                         );
 
                         // Merge outer delta into combined delta
@@ -3536,6 +3661,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3574,6 +3700,7 @@ mod tests {
                 array_subqueries: query_with_arrays.array_subqueries,
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3602,6 +3729,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: Some(vec!["name".to_string()]),
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 

@@ -55,6 +55,9 @@ fn wasm_log_level_from_global() -> tracing::Level {
     }
 }
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
@@ -64,12 +67,12 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::schema_manager::rehydrate_schema_manager_from_manifest;
+use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
@@ -473,10 +476,9 @@ impl WasmRuntime {
         info!("creating in-memory runtime");
 
         // Parse schema
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-
-        let schema: Schema = wasm_schema;
+        let schema = runtime_schema.schema;
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -489,8 +491,19 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
-            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new_with_policy_mode(
+            sync_manager,
+            schema,
+            app_id,
+            env,
+            user_branch,
+            if runtime_schema.loaded_policy_bundle {
+                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+            } else {
+                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+            },
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
@@ -528,16 +541,37 @@ impl WasmRuntime {
     /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
     ///   or JSON-encoded SyncPayload (`string`)
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
+    pub fn on_sync_message_received(
+        &self,
+        payload: JsValue,
+        sequence: Option<f64>,
+    ) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload = self.parse_sync_payload(payload)?;
+        let mut payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
+        let server_id = (*self.upstream_server_id.borrow()).ok_or_else(|| {
+            JsError::new("No upstream server registered; call addServer() before sync delivery")
+        })?;
 
         let entry = InboxEntry {
-            source: Source::Server(ServerId::new()),
+            source: Source::Server(server_id),
             payload,
         };
 
-        self.core.borrow_mut().park_sync_message(entry);
+        let mut core = self.core.borrow_mut();
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
         Ok(())
     }
 
@@ -586,6 +620,23 @@ impl WasmRuntime {
                 "Invalid sync payload type: expected Uint8Array or JSON string",
             ))
         }
+    }
+
+    fn parse_optional_sequence(sequence: Option<f64>) -> Result<Option<u64>, JsError> {
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
+            return Err(JsError::new(
+                "Invalid stream sequence: expected a non-negative integer",
+            ));
+        }
+        if sequence > u64::MAX as f64 {
+            return Err(JsError::new(
+                "Invalid stream sequence: value exceeds u64 range",
+            ));
+        }
+        Ok(Some(sequence as u64))
     }
 
     /// Register a callback for outgoing sync messages.
@@ -1094,7 +1145,11 @@ impl WasmRuntime {
     /// catalogue sync messages (from queue_full_sync_to_server) are sent
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) {
+    pub fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> Result<(), JsError> {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
@@ -1114,7 +1169,11 @@ impl WasmRuntime {
             server_id,
             server_catalogue_state_hash.as_deref(),
         );
+        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
         core.batched_tick();
+        Ok(())
     }
 
     /// Remove the current upstream server connection.
@@ -1249,9 +1308,9 @@ impl WasmRuntime {
     /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
     #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
     pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema: Schema = wasm_schema;
+        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
+            .schema;
 
         let mut core = self.core.borrow_mut();
         core.add_live_schema_and_persist_catalogue(schema)
@@ -1310,10 +1369,9 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-
-        let schema: Schema = wasm_schema;
+        let schema = runtime_schema.schema;
         // Parse optional node durability tiers
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -1326,8 +1384,19 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let mut schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
-            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let mut schema_manager = SchemaManager::new_with_policy_mode(
+            sync_manager,
+            schema,
+            app_id,
+            env,
+            user_branch,
+            if runtime_schema.loaded_policy_bundle {
+                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+            } else {
+                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+            },
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
         let mut storage: Box<dyn Storage> = Box::new(
@@ -1336,15 +1405,14 @@ impl WasmRuntime {
                 .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
         );
         if let Err(error) =
-            rehydrate_schema_manager_from_manifest(&mut schema_manager, storage.as_ref(), app_id)
+            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
         {
             warn!(
                 %app_id,
                 ?error,
-                "failed to rehydrate schema manager from catalogue manifest"
+                "failed to rehydrate schema manager from catalogue storage"
             );
         }
-        schema_manager.materialize_catalogue_objects(&mut storage);
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new(use_binary_encoding);
@@ -1372,5 +1440,44 @@ impl WasmRuntime {
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
+    }
+}
+
+fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| JsError::new(&format!("seed base64 decode error: {e}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("seed must be exactly 32 bytes"))?;
+    Ok(arr)
+}
+
+#[wasm_bindgen]
+impl WasmRuntime {
+    #[wasm_bindgen(js_name = "deriveUserId")]
+    pub fn derive_user_id_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let user_id = identity::derive_user_id(&seed);
+        Ok(user_id.to_string())
+    }
+
+    #[wasm_bindgen(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token_static(
+        seed_b64: &str,
+        audience: &str,
+        ttl_seconds: u64,
+        now_seconds: u64,
+    ) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        identity::mint_local_first_token_at(&seed, audience, ttl_seconds, now_seconds)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
+    pub fn get_public_key_b64_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        let verifying_key = identity::derive_verifying_key(&seed);
+        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 }

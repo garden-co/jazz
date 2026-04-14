@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient } from "../runtime/client.js";
-import { Db, type DbConfig } from "./db.js";
+import { Db, type DbConfig, createDb } from "./db.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
 
 vi.mock("./create-jazz-rn-runtime.js", () => ({
   createJazzRnRuntime: vi.fn(),
+}));
+
+vi.mock("jazz-rn", () => ({
+  default: {
+    jazz_rn: {
+      mintLocalFirstToken: vi.fn(),
+    },
+  },
 }));
 
 class TestDb extends Db {
@@ -24,11 +32,45 @@ function makeSchema(tableName: string): WasmSchema {
 
 function makeClientStub() {
   const shutdown = vi.fn(async () => undefined);
+  const updateAuthToken = vi.fn();
   return {
-    client: { shutdown } as unknown as JazzClient,
+    client: { shutdown, updateAuthToken } as unknown as JazzClient,
     shutdown,
+    updateAuthToken,
   };
 }
+
+describe("createDb", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("RNDB-U06 mints a JWT from localFirstSecret and passes it to Db when auth is set", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+    mintMock.mockReturnValue("minted-jwt");
+
+    const config: DbConfig = {
+      appId: "test-app",
+      auth: { localFirstSecret: "base64url-seed-32bytes" },
+    };
+    const db = await createDb(config);
+
+    expect(mintMock).toHaveBeenCalledWith("base64url-seed-32bytes", "test-app", BigInt(3600));
+    expect(db).toBeInstanceOf(Db);
+  });
+
+  it("RNDB-U07 skips JWT minting and returns a plain Db when auth is absent", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+
+    const config: DbConfig = { appId: "test-app" };
+    const db = await createDb(config);
+
+    expect(mintMock).not.toHaveBeenCalled();
+    expect(db).toBeInstanceOf(Db);
+  });
+});
 
 describe("react-native Db", () => {
   const createJazzRnRuntimeMock = vi.mocked(createJazzRnRuntime);
@@ -53,8 +95,6 @@ describe("react-native Db", () => {
       env: "prod",
       userBranch: "user-branch",
       jwtToken: "jwt-token",
-      localAuthMode: "demo",
-      localAuthToken: "local-token",
       adminSecret: "admin-secret",
       tier: "worker",
       dataPath: "/tmp/rn-data",
@@ -75,20 +115,24 @@ describe("react-native Db", () => {
       tier: config.tier,
       dataPath: config.dataPath,
     });
-    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(runtime, {
-      appId: config.appId,
-      schema,
-      serverUrl: config.serverUrl,
-      serverPathPrefix: config.serverPathPrefix,
-      env: config.env,
-      userBranch: config.userBranch,
-      jwtToken: config.jwtToken,
-      localAuthMode: config.localAuthMode,
-      localAuthToken: config.localAuthToken,
-      adminSecret: config.adminSecret,
-      tier: config.tier,
-      defaultDurabilityTier: config.tier,
-    });
+    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(
+      runtime,
+      {
+        appId: config.appId,
+        schema,
+        serverUrl: config.serverUrl,
+        serverPathPrefix: config.serverPathPrefix,
+        env: config.env,
+        userBranch: config.userBranch,
+        jwtToken: config.jwtToken,
+        adminSecret: config.adminSecret,
+        tier: config.tier,
+        defaultDurabilityTier: config.tier,
+      },
+      {
+        onAuthFailure: expect.any(Function),
+      },
+    );
   });
 
   it("RNDB-U02 reuses cached clients for same schema key and creates new clients for distinct schemas", () => {
@@ -174,5 +218,27 @@ describe("react-native Db", () => {
     });
 
     expect(() => db.exposeGetClient(schema)).toThrow(clientError);
+  });
+
+  it("RNDB-U05 forwards updateAuthToken to cached native clients", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const schemaA = makeSchema("todos");
+    const schemaB = makeSchema("projects");
+    const clientA = makeClientStub();
+    const clientB = makeClientStub();
+
+    createJazzRnRuntimeMock
+      .mockReturnValueOnce({ id: "runtime-a" } as never)
+      .mockReturnValueOnce({ id: "runtime-b" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client).mockReturnValueOnce(clientB.client);
+
+    const db = new TestDb({ appId: "rn-app", jwtToken: "stale-jwt" });
+    db.exposeGetClient(schemaA);
+    db.exposeGetClient(schemaB);
+
+    db.updateAuthToken("fresh-jwt");
+
+    expect(clientA.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
+    expect(clientB.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
   });
 });

@@ -303,7 +303,7 @@ impl RowDescriptor {
         Self { columns }
     }
 
-    /// Compute a content hash of this descriptor (column-order-independent).
+    /// Compute a content hash of this descriptor, preserving declared column order.
     pub fn content_hash(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         super::branch::hash_row_descriptor(&mut hasher, self);
@@ -326,7 +326,9 @@ fn table_policies_are_default(policies: &TablePolicies) -> bool {
 }
 
 impl TableSchema {
-    /// Create a new table schema with no policies (allow all).
+    /// Create a new table schema with no explicit policies.
+    ///
+    /// Runtime behavior depends on whether a compiled policy bundle is loaded.
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,

@@ -1,7 +1,17 @@
 {
   "version": 1,
-  "updated_at": "2026-04-05T05:52:17.330Z",
+  "updated_at": "2026-04-14T14:45:49.399Z",
   "entries": [
+    {
+      "id": "browser:b6",
+      "suite": "browser",
+      "label": "Browser B6 hotspot history",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-10T15:44:43.273Z",
+      "last_observed_at": "2026-04-10T15:44:43.273Z",
+      "observations": 1
+    },
     {
       "id": "native-criterion:r4_fanout_updates",
       "suite": "native",
@@ -10,6 +20,156 @@
       "timeout_seconds": 60,
       "first_observed_at": "2026-03-29T14:42:07.952Z",
       "last_observed_at": "2026-03-29T14:42:07.952Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:r5_permission_recursive",
+      "suite": "native",
+      "label": "Criterion R5 permission recursive",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-07T21:51:42.094Z",
+      "last_observed_at": "2026-04-07T21:51:42.094Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r1_crud_sustained",
+      "suite": "native",
+      "label": "Criterion R1 CRUD sustained (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r1_crud_sustained_single_hop",
+      "suite": "native",
+      "label": "Criterion R1 CRUD single-hop (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r2_reads_sustained",
+      "suite": "native",
+      "label": "Criterion R2 reads sustained (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r2_reads_sustained_single_hop",
+      "suite": "native",
+      "label": "Criterion R2 reads single-hop (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r4_fanout_updates",
+      "suite": "native",
+      "label": "Criterion R4 fanout updates (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r5_permission_recursive",
+      "suite": "native",
+      "label": "Criterion R5 permission recursive (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r7_hotspot_history",
+      "suite": "native",
+      "label": "Criterion R7 hotspot history (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:rocksdb:r9_subscribed_write_path",
+      "suite": "native",
+      "label": "Criterion R9 subscribed write path (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r2_reads_sustained_single_hop",
+      "suite": "native",
+      "label": "Criterion R2 reads single-hop (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r4_fanout_updates",
+      "suite": "native",
+      "label": "Criterion R4 fanout updates (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r5_permission_recursive",
+      "suite": "native",
+      "label": "Criterion R5 permission recursive (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r9_subscribed_write_path",
+      "suite": "native",
+      "label": "Criterion R9 subscribed write path (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "observations": 1
+    },
+    {
+      "id": "native:rocksdb:w1_interactive",
+      "suite": "native",
+      "label": "W1 (interactive) (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "observations": 1
+    },
+    {
+      "id": "native:sqlite:w1_interactive",
+      "suite": "native",
+      "label": "W1 (interactive) (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-08T22:36:17.190Z",
       "observations": 1
     },
     {

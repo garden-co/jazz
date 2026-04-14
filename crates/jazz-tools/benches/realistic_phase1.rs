@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -15,7 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -23,38 +21,39 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use jazz_tools::commit::{Commit, CommitId, StoredState};
-use jazz_tools::object::{BranchName, Object, ObjectId};
-use jazz_tools::object_manager::ObjectManager;
+use jazz_tools::commit::CommitId;
+use jazz_tools::metadata::{MetadataKey, RowProvenance};
+use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
+use jazz_tools::row_histories::{RowState, StoredRowVersion, apply_row_version};
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-use jazz_tools::storage::FjallStorage;
 use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use jazz_tools::storage::RocksDBStorage;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 use jazz_tools::storage::SqliteStorage;
-use jazz_tools::storage::Storage;
+use jazz_tools::storage::{RowLocator, Storage};
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 use tempfile::TempDir;
 
-type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
 const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+const STORAGE_BENCH_CACHE_SIZE_BYTES: usize = 32 * 1024 * 1024;
+const MANY_BRANCHES_TABLE: &str = "__bench_many_branches";
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs
@@ -102,7 +101,6 @@ struct R2ScenarioConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -152,7 +150,6 @@ struct R8ScenarioConfig {
     merge_fanin: usize,
     payload_bytes: usize,
     #[cfg(any(
-        all(feature = "fjall", not(target_arch = "wasm32")),
         all(feature = "rocksdb", not(target_arch = "wasm32")),
         all(feature = "sqlite", not(target_arch = "wasm32"))
     ))]
@@ -205,7 +202,6 @@ struct R2Scenario {
 
 #[derive(Debug, Clone)]
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -213,6 +209,7 @@ struct R3Scenario {
     id: String,
     seed: u64,
     profile_path: String,
+    #[allow(dead_code)]
     cache_size_bytes: usize,
     target_project_index: usize,
 }
@@ -263,10 +260,10 @@ struct R8Scenario {
     merge_fanin: usize,
     payload_bytes: usize,
     #[cfg(any(
-        all(feature = "fjall", not(target_arch = "wasm32")),
         all(feature = "rocksdb", not(target_arch = "wasm32")),
         all(feature = "sqlite", not(target_arch = "wasm32"))
     ))]
+    #[allow(dead_code)]
     cache_size_bytes: usize,
 }
 
@@ -294,7 +291,6 @@ struct BranchHeadScan {
 }
 
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -363,26 +359,26 @@ struct R1State<S: Storage = MemoryStorage> {
     min_task_floor: usize,
 }
 
-struct SingleHopR1State {
-    client: R1State,
-    server: BenchRuntime,
+struct SingleHopR1State<S: Storage = MemoryStorage> {
+    client: R1State<S>,
+    server: BenchRuntime<S>,
     client_id_on_server: ClientId,
     server_id_on_client: ServerId,
     total_routed_messages: usize,
 }
 
-struct FanoutReader {
-    runtime: BenchRuntime,
+struct FanoutReader<S: Storage = MemoryStorage> {
+    runtime: BenchRuntime<S>,
     client_id_on_server: ClientId,
     server_id_on_client: ServerId,
 }
 
-struct FanoutR4State {
-    writer: R1State,
-    server: BenchRuntime,
+struct FanoutR4State<S: Storage = MemoryStorage> {
+    writer: R1State<S>,
+    server: BenchRuntime<S>,
     writer_client_id_on_server: ClientId,
     writer_server_id_on_client: ServerId,
-    readers: Vec<FanoutReader>,
+    readers: Vec<FanoutReader<S>>,
     hot_task_ids: Vec<ObjectId>,
     hot_task_cursor: usize,
     total_routed_messages: usize,
@@ -395,8 +391,8 @@ struct PermissionBatchResult {
     denied_updates: usize,
 }
 
-struct PermissionR5State {
-    runtime: BenchRuntime,
+struct PermissionR5State<S: Storage = MemoryStorage> {
+    runtime: BenchRuntime<S>,
     rng: Lcg,
     session_alice: Session,
     allowed_doc_ids: Vec<ObjectId>,
@@ -405,7 +401,6 @@ struct PermissionR5State {
 }
 
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -415,7 +410,6 @@ struct SeededProjectBoard {
 }
 
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -423,6 +417,7 @@ struct ColdLoadSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
     target_project_id: ObjectId,
+    #[allow(dead_code)]
     cache_size_bytes: usize,
 }
 
@@ -823,7 +818,6 @@ impl<S: Storage> R1State<S> {
 }
 
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -1000,37 +994,6 @@ fn seed_project_board_dataset<S: Storage>(
     }
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-impl ColdLoadSeededDb {
-    fn new_fjall(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
-        let db_path = tempdir.path().join("r3_cold_load.fjall");
-
-        let seeded = {
-            let mut runtime =
-                create_fjall_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
-            let seeded =
-                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
-            runtime.flush_storage();
-            runtime.storage().close().expect("close seeded fjall");
-            seeded
-        };
-
-        assert!(
-            !seeded.active_tasks.is_empty(),
-            "cold-load dataset must contain tasks"
-        );
-        let target_project_id =
-            seeded.projects[scenario.target_project_index % seeded.projects.len()];
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            target_project_id,
-            cache_size_bytes: scenario.cache_size_bytes,
-        }
-    }
-}
-
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 impl ColdLoadSeededDb {
     fn new_rocksdb(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
@@ -1092,10 +1055,23 @@ impl ColdLoadSeededDb {
     }
 }
 
-impl SingleHopR1State {
+impl SingleHopR1State<MemoryStorage> {
     fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
-        let mut client_runtime = create_runtime(project_board_schema());
-        let mut server_runtime = create_runtime(project_board_schema());
+        Self::with_runtime_factory(profile, scenario, || create_runtime(project_board_schema()))
+    }
+}
+
+impl<S: Storage> SingleHopR1State<S> {
+    fn with_runtime_factory<F>(
+        profile: &ProfileConfig,
+        scenario: &R1Scenario,
+        mut make_runtime: F,
+    ) -> Self
+    where
+        F: FnMut() -> BenchRuntime<S>,
+    {
+        let mut client_runtime = make_runtime();
+        let mut server_runtime = make_runtime();
         let client_id_on_server = ClientId::new();
         let server_id_on_client = ServerId::new();
 
@@ -1171,15 +1147,32 @@ impl SingleHopR1State {
     }
 }
 
-impl FanoutR4State {
+impl FanoutR4State<MemoryStorage> {
     fn new(
         profile: &ProfileConfig,
         seed: u64,
         target_project_index: usize,
         fanout_clients: usize,
     ) -> Self {
-        let mut writer_runtime = create_runtime(project_board_schema());
-        let mut server_runtime = create_runtime(project_board_schema());
+        Self::with_runtime_factory(profile, seed, target_project_index, fanout_clients, || {
+            create_runtime(project_board_schema())
+        })
+    }
+}
+
+impl<S: Storage> FanoutR4State<S> {
+    fn with_runtime_factory<F>(
+        profile: &ProfileConfig,
+        seed: u64,
+        target_project_index: usize,
+        fanout_clients: usize,
+        mut make_runtime: F,
+    ) -> Self
+    where
+        F: FnMut() -> BenchRuntime<S>,
+    {
+        let mut writer_runtime = make_runtime();
+        let mut server_runtime = make_runtime();
         let writer_client_id_on_server = ClientId::new();
         let writer_server_id_on_client = ServerId::new();
 
@@ -1210,7 +1203,7 @@ impl FanoutR4State {
         }
 
         for _ in 0..fanout_clients {
-            let mut reader_runtime = create_runtime(project_board_schema());
+            let mut reader_runtime = make_runtime();
             let reader_client_id_on_server = ClientId::new();
             let reader_server_id_on_client = ServerId::new();
 
@@ -1354,9 +1347,19 @@ impl FanoutR4State {
     }
 }
 
-impl PermissionR5State {
+impl PermissionR5State<MemoryStorage> {
     fn new(scenario: &R5Scenario, recursive_depth: usize) -> Self {
         let runtime = create_runtime(permission_recursive_schema(recursive_depth));
+        Self::with_runtime(scenario, recursive_depth, runtime)
+    }
+}
+
+impl<S: Storage> PermissionR5State<S> {
+    fn with_runtime(
+        scenario: &R5Scenario,
+        recursive_depth: usize,
+        runtime: BenchRuntime<S>,
+    ) -> Self {
         let session_alice = Session::new("alice");
         let mut state = Self {
             runtime,
@@ -1546,8 +1549,8 @@ impl PermissionR5State {
 }
 
 fn realistic_r1_crud(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}",
         scenario.id.to_lowercase(),
@@ -1574,8 +1577,8 @@ fn realistic_r1_crud(c: &mut Criterion) {
 }
 
 fn realistic_r1_crud_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop",
         scenario.id.to_lowercase(),
@@ -1603,8 +1606,8 @@ fn realistic_r1_crud_single_hop(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}",
         scenario.id.to_lowercase(),
@@ -1631,9 +1634,9 @@ fn realistic_r2_reads(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
-    let seed_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_single_hop",
         scenario.id.to_lowercase(),
@@ -1661,9 +1664,9 @@ fn realistic_r2_reads_single_hop(c: &mut Criterion) {
 }
 
 fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let read_scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_with_churn.json");
-    let write_scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_with_churn",
         read_scenario.id.to_lowercase(),
@@ -1689,48 +1692,272 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn realistic_r1_crud_fjall(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r1_crud_single_hop_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
-        "{}_{}_fjall",
+        "{}_{}_single_hop_rocksdb",
         scenario.id.to_lowercase(),
         profile.id.to_lowercase()
     );
 
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_fjall");
+    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop_rocksdb");
     configure_group(&mut group, 20, 10);
     group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for fjall crud benchmark");
-    let db_path = tempdir.path().join("r1_crud.fjall");
 
     group.bench_with_input(
         BenchmarkId::from_parameter(benchmark_name),
         &scenario,
         |b, scenario| {
-            let runtime = create_fjall_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb single-hop benchmark");
+            let mut runtime_idx = 0usize;
+            let mut state = SingleHopR1State::with_runtime_factory(&profile, scenario, || {
+                let db_path = tempdir
+                    .path()
+                    .join(format!("single_hop_{runtime_idx}.rocksdb"));
+                runtime_idx += 1;
+                create_rocksdb_runtime(
+                    project_board_schema(),
+                    &db_path,
+                    STORAGE_BENCH_CACHE_SIZE_BYTES,
+                )
+            });
             b.iter(|| {
                 let executed = state.run_crud_batch(scenario);
                 black_box(executed);
+                black_box(state.total_routed_messages);
             });
-            state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close fjall");
+            flush_and_close_runtime(&mut state.client.runtime);
+            flush_and_close_runtime(&mut state.server);
         },
     );
 
     group.finish();
 }
 
-#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
-fn realistic_r1_crud_fjall(_c: &mut Criterion) {}
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r1_crud_single_hop_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r1_crud_single_hop_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_single_hop_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop_sqlite");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite single-hop benchmark");
+            let mut runtime_idx = 0usize;
+            let mut state = SingleHopR1State::with_runtime_factory(&profile, scenario, || {
+                let db_path = tempdir
+                    .path()
+                    .join(format!("single_hop_{runtime_idx}.sqlite"));
+                runtime_idx += 1;
+                create_sqlite_runtime(project_board_schema(), &db_path)
+            });
+            b.iter(|| {
+                let executed = state.run_crud_batch(scenario);
+                black_box(executed);
+                black_box(state.total_routed_messages);
+            });
+            flush_and_close_runtime(&mut state.client.runtime);
+            flush_and_close_runtime(&mut state.server);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r1_crud_single_hop_sqlite(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_single_hop_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_single_hop_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop_rocksdb");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb single-hop reads");
+            let mut runtime_idx = 0usize;
+            let mut state =
+                SingleHopR1State::with_runtime_factory(&profile, &seed_scenario, || {
+                    let db_path = tempdir
+                        .path()
+                        .join(format!("reads_single_hop_{runtime_idx}.rocksdb"));
+                    runtime_idx += 1;
+                    create_rocksdb_runtime(
+                        project_board_schema(),
+                        &db_path,
+                        STORAGE_BENCH_CACHE_SIZE_BYTES,
+                    )
+                });
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+                black_box(state.total_routed_messages);
+            });
+            flush_and_close_runtime(&mut state.client.runtime);
+            flush_and_close_runtime(&mut state.server);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_single_hop_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_single_hop_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
+    let seed_scenario = load_r1_scenario(r1_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_single_hop_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop_sqlite");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite single-hop reads");
+            let mut runtime_idx = 0usize;
+            let mut state =
+                SingleHopR1State::with_runtime_factory(&profile, &seed_scenario, || {
+                    let db_path = tempdir
+                        .path()
+                        .join(format!("reads_single_hop_{runtime_idx}.sqlite"));
+                    runtime_idx += 1;
+                    create_sqlite_runtime(project_board_schema(), &db_path)
+                });
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+                black_box(state.total_routed_messages);
+            });
+            flush_and_close_runtime(&mut state.client.runtime);
+            flush_and_close_runtime(&mut state.server);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_single_hop_sqlite(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_with_write_churn_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_with_churn_rocksdb",
+        read_scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn_rocksdb");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &read_scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb read churn benchmark");
+            let db_path = tempdir.path().join("reads_with_churn.rocksdb");
+            let runtime = create_rocksdb_runtime(
+                project_board_schema(),
+                &db_path,
+                STORAGE_BENCH_CACHE_SIZE_BYTES,
+            );
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
+                black_box(total_rows);
+            });
+            flush_and_close_runtime(&mut state.runtime);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_with_write_churn_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_with_write_churn_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
+    let write_scenario = load_r1_scenario(r1_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_with_churn_sqlite",
+        read_scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn_sqlite");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &read_scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite read churn benchmark");
+            let db_path = tempdir.path().join("reads_with_churn.sqlite");
+            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
+                black_box(total_rows);
+            });
+            flush_and_close_runtime(&mut state.runtime);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_with_write_churn_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_rocksdb",
         scenario.id.to_lowercase(),
@@ -1768,8 +1995,8 @@ fn realistic_r1_crud_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r1_crud_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r1_scenario(r1_scenario_path());
     let benchmark_name = format!(
         "{}_{}_sqlite",
         scenario.id.to_lowercase(),
@@ -1804,48 +2031,10 @@ fn realistic_r1_crud_sqlite(c: &mut Criterion) {
 #[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
 fn realistic_r1_crud_sqlite(_c: &mut Criterion) {}
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_fjall(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
-    let benchmark_name = format!(
-        "{}_{}_fjall",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_fjall");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for fjall reads benchmark");
-    let db_path = tempdir.path().join("r2_reads.fjall");
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let runtime = create_fjall_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-            });
-            state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close fjall");
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_fjall(_c: &mut Criterion) {}
-
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}_rocksdb",
         scenario.id.to_lowercase(),
@@ -1883,8 +2072,8 @@ fn realistic_r2_reads_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r2_reads_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r2_scenario(r2_sustained_scenario_path());
     let benchmark_name = format!(
         "{}_{}_sqlite",
         scenario.id.to_lowercase(),
@@ -1919,64 +2108,9 @@ fn realistic_r2_reads_sqlite(c: &mut Criterion) {
 #[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
 fn realistic_r2_reads_sqlite(_c: &mut Criterion) {}
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
-    let profile: ProfileConfig = load_json(&scenario.profile_path);
-    let seeded = ColdLoadSeededDb::new_fjall(&profile, &scenario);
-    let benchmark_name = format!(
-        "{}_{}_fjall",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/cold_load_fjall");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, _scenario| {
-            b.iter(|| {
-                let open_start = Instant::now();
-                let mut runtime = create_fjall_runtime(
-                    project_board_schema(),
-                    &seeded.db_path,
-                    seeded.cache_size_bytes,
-                );
-                let open_elapsed = open_start.elapsed();
-
-                let query = QueryBuilder::new("tasks")
-                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
-                    .filter_ne("status", Value::Text("done".to_string()))
-                    .order_by_desc("updated_at")
-                    .limit(200)
-                    .build();
-
-                let query_start = Instant::now();
-                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
-                let query_elapsed = query_start.elapsed();
-
-                runtime.flush_storage();
-                runtime.storage().close().expect("close cold-load fjall");
-
-                black_box(open_elapsed);
-                black_box(query_elapsed);
-                black_box(rows.len());
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
-fn realistic_r3_cold_load_fjall(_c: &mut Criterion) {}
-
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new_rocksdb(&profile, &scenario);
     let benchmark_name = format!(
@@ -2031,7 +2165,7 @@ fn realistic_r3_cold_load_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new_sqlite(&profile, &scenario);
     let benchmark_name = format!(
@@ -2081,7 +2215,7 @@ fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
 fn realistic_r3_cold_load_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r4_fanout_updates.json",
         "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
@@ -2124,6 +2258,130 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r4_fanout_updates_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r4_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+    ));
+
+    let mut group = c.benchmark_group("realistic_phase1/fanout_updates_rocksdb");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    for fanout_clients in &scenario.fanout_clients {
+        let bench_id = format!(
+            "{}_{}_n{}_rocksdb",
+            scenario.id.to_lowercase(),
+            profile.id.to_lowercase(),
+            fanout_clients
+        );
+        let scenario_seed = scenario.seed;
+        let target_project_index = scenario.target_project_index;
+        let operation_count = scenario.operation_count;
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bench_id),
+            fanout_clients,
+            |b, fanout_clients| {
+                let tempdir = TempDir::new().expect("create tempdir for rocksdb fanout benchmark");
+                let mut runtime_idx = 0usize;
+                let mut state = FanoutR4State::with_runtime_factory(
+                    &profile,
+                    scenario_seed,
+                    target_project_index,
+                    *fanout_clients,
+                    || {
+                        let db_path = tempdir.path().join(format!("fanout_{runtime_idx}.rocksdb"));
+                        runtime_idx += 1;
+                        create_rocksdb_runtime(
+                            project_board_schema(),
+                            &db_path,
+                            STORAGE_BENCH_CACHE_SIZE_BYTES,
+                        )
+                    },
+                );
+                b.iter(|| {
+                    let (updates, notifications) = state.run_update_batch(operation_count);
+                    black_box(updates);
+                    black_box(notifications);
+                    black_box(state.total_routed_messages);
+                });
+                flush_and_close_runtime(&mut state.writer.runtime);
+                for reader in &mut state.readers {
+                    flush_and_close_runtime(&mut reader.runtime);
+                }
+                flush_and_close_runtime(&mut state.server);
+            },
+        );
+    }
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r4_fanout_updates_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r4_fanout_updates_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r4_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+    ));
+
+    let mut group = c.benchmark_group("realistic_phase1/fanout_updates_sqlite");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    for fanout_clients in &scenario.fanout_clients {
+        let bench_id = format!(
+            "{}_{}_n{}_sqlite",
+            scenario.id.to_lowercase(),
+            profile.id.to_lowercase(),
+            fanout_clients
+        );
+        let scenario_seed = scenario.seed;
+        let target_project_index = scenario.target_project_index;
+        let operation_count = scenario.operation_count;
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bench_id),
+            fanout_clients,
+            |b, fanout_clients| {
+                let tempdir = TempDir::new().expect("create tempdir for sqlite fanout benchmark");
+                let mut runtime_idx = 0usize;
+                let mut state = FanoutR4State::with_runtime_factory(
+                    &profile,
+                    scenario_seed,
+                    target_project_index,
+                    *fanout_clients,
+                    || {
+                        let db_path = tempdir.path().join(format!("fanout_{runtime_idx}.sqlite"));
+                        runtime_idx += 1;
+                        create_sqlite_runtime(project_board_schema(), &db_path)
+                    },
+                );
+                b.iter(|| {
+                    let (updates, notifications) = state.run_update_batch(operation_count);
+                    black_box(updates);
+                    black_box(notifications);
+                    black_box(state.total_routed_messages);
+                });
+                flush_and_close_runtime(&mut state.writer.runtime);
+                for reader in &mut state.readers {
+                    flush_and_close_runtime(&mut reader.runtime);
+                }
+                flush_and_close_runtime(&mut state.server);
+            },
+        );
+    }
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r4_fanout_updates_sqlite(_c: &mut Criterion) {}
+
 fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &str) {
     let scenario = load_r5_scenario(scenario_path);
     let mut group = c.benchmark_group(group_name);
@@ -2150,11 +2408,47 @@ fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &
     group.finish();
 }
 
+fn run_storage_permission_scenario<S: Storage, F: Copy + Fn(usize) -> BenchRuntime<S>>(
+    c: &mut Criterion,
+    group_name: &str,
+    scenario_path: &str,
+    make_runtime: F,
+) {
+    let scenario = load_r5_scenario(scenario_path);
+    let mut group = c.benchmark_group(group_name);
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    for recursive_depth in &scenario.recursive_depths {
+        let bench_id = format!("{}_depth{recursive_depth}", scenario.id.to_lowercase());
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bench_id),
+            recursive_depth,
+            |b, recursive_depth| {
+                let mut state = PermissionR5State::with_runtime(
+                    &scenario,
+                    *recursive_depth,
+                    make_runtime(*recursive_depth),
+                );
+                b.iter(|| {
+                    let result = state.run_batch(&scenario);
+                    black_box(result.total_rows);
+                    black_box(result.allowed_updates);
+                    black_box(result.denied_updates);
+                });
+                flush_and_close_runtime(&mut state.runtime);
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn realistic_r5_permission_recursive(c: &mut Criterion) {
     run_permission_scenario(
         c,
         "realistic_phase1/permission_recursive",
-        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        r5_permission_recursive_scenario_path(),
     );
 }
 
@@ -2169,9 +2463,104 @@ fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
     );
 }
 
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r5_permission_recursive_rocksdb(c: &mut Criterion) {
+    run_storage_permission_scenario(
+        c,
+        "realistic_phase1/permission_recursive_rocksdb",
+        r5_permission_recursive_scenario_path(),
+        |recursive_depth| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb permission benchmark");
+            let db_path = tempdir.path().join(format!(
+                "permission_recursive_depth_{recursive_depth}.rocksdb"
+            ));
+            std::mem::forget(tempdir);
+            create_rocksdb_runtime(
+                permission_recursive_schema(recursive_depth),
+                &db_path,
+                STORAGE_BENCH_CACHE_SIZE_BYTES,
+            )
+        },
+    );
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r5_permission_recursive_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r5_permission_recursive_sqlite(c: &mut Criterion) {
+    run_storage_permission_scenario(
+        c,
+        "realistic_phase1/permission_recursive_sqlite",
+        r5_permission_recursive_scenario_path(),
+        |recursive_depth| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite permission benchmark");
+            let db_path = tempdir.path().join(format!(
+                "permission_recursive_depth_{recursive_depth}.sqlite"
+            ));
+            std::mem::forget(tempdir);
+            create_sqlite_runtime(permission_recursive_schema(recursive_depth), &db_path)
+        },
+    );
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r5_permission_recursive_sqlite(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r6_permission_write_heavy_rocksdb(c: &mut Criterion) {
+    run_storage_permission_scenario(
+        c,
+        "realistic_phase1/permission_write_heavy_rocksdb",
+        select_ci_path(
+            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+        ),
+        |recursive_depth| {
+            let tempdir =
+                TempDir::new().expect("create tempdir for rocksdb permission write-heavy");
+            let db_path = tempdir.path().join(format!(
+                "permission_write_heavy_depth_{recursive_depth}.rocksdb"
+            ));
+            std::mem::forget(tempdir);
+            create_rocksdb_runtime(
+                permission_recursive_schema(recursive_depth),
+                &db_path,
+                STORAGE_BENCH_CACHE_SIZE_BYTES,
+            )
+        },
+    );
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r6_permission_write_heavy_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r6_permission_write_heavy_sqlite(c: &mut Criterion) {
+    run_storage_permission_scenario(
+        c,
+        "realistic_phase1/permission_write_heavy_sqlite",
+        select_ci_path(
+            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+        ),
+        |recursive_depth| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite permission write-heavy");
+            let db_path = tempdir.path().join(format!(
+                "permission_write_heavy_depth_{recursive_depth}.sqlite"
+            ));
+            std::mem::forget(tempdir);
+            create_sqlite_runtime(permission_recursive_schema(recursive_depth), &db_path)
+        },
+    );
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r6_permission_write_heavy_sqlite(_c: &mut Criterion) {}
+
 fn realistic_r7_hotspot_history(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r7_scenario("benchmarks/realistic/scenarios/r7_hotspot_history.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
     let benchmark_name = format!(
         "{}_{}_hot{}",
         scenario.id.to_lowercase(),
@@ -2201,8 +2590,92 @@ fn realistic_r7_hotspot_history(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r7_hotspot_history_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_hot{}_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.hot_task_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/hotspot_history_rocksdb");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb hotspot benchmark");
+            let db_path = tempdir.path().join("hotspot_history.rocksdb");
+            let runtime = create_rocksdb_runtime(
+                project_board_schema(),
+                &db_path,
+                STORAGE_BENCH_CACHE_SIZE_BYTES,
+            );
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
+            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
+            b.iter(|| {
+                let updates =
+                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
+                black_box(updates);
+            });
+            flush_and_close_runtime(&mut state.runtime);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r7_hotspot_history_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r7_hotspot_history_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
+    let benchmark_name = format!(
+        "{}_{}_hot{}_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.hot_task_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/hotspot_history_sqlite");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite hotspot benchmark");
+            let db_path = tempdir.path().join("hotspot_history.sqlite");
+            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
+            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
+            b.iter(|| {
+                let updates =
+                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
+                black_box(updates);
+            });
+            flush_and_close_runtime(&mut state.runtime);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r7_hotspot_history_sqlite(_c: &mut Criterion) {}
+
 fn realistic_r8_many_branches_write(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2219,8 +2692,7 @@ fn realistic_r8_many_branches_write(c: &mut Criterion) {
         |b, scenario| {
             b.iter(|| {
                 let mut storage = MemoryStorage::new();
-                let mut manager = ObjectManager::new();
-                let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+                let dataset = build_many_branches_dataset(&mut storage, scenario);
                 black_box(dataset.object_id);
                 black_box(dataset.branch_names.len());
                 black_box(dataset.leaf_branch_names.len());
@@ -2233,7 +2705,7 @@ fn realistic_r8_many_branches_write(c: &mut Criterion) {
 }
 
 fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2241,8 +2713,7 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_all_heads");
 
     let mut storage = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
-    let dataset = build_many_branches_dataset(&mut manager, &mut storage, &scenario);
+    let dataset = build_many_branches_dataset(&mut storage, &scenario);
 
     let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_heads");
     configure_group(&mut group, 10, 5);
@@ -2252,11 +2723,13 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
         BenchmarkId::from_parameter(benchmark_name),
         &dataset,
         |b, dataset| {
-            let object = manager
-                .get(dataset.object_id)
-                .expect("many-branches object should be loaded");
             b.iter(|| {
-                let scan = scan_branch_heads(object, &dataset.prefix);
+                let scan = scan_branch_heads(
+                    &storage,
+                    dataset.object_id,
+                    &dataset.branch_names,
+                    &dataset.prefix,
+                );
                 black_box(scan);
             });
         },
@@ -2266,7 +2739,7 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
 }
 
 fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2274,8 +2747,7 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_leaf_heads");
 
     let mut storage = MemoryStorage::new();
-    let mut manager = ObjectManager::new();
-    let dataset = build_many_branches_dataset(&mut manager, &mut storage, &scenario);
+    let dataset = build_many_branches_dataset(&mut storage, &scenario);
 
     let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_leaf_heads");
     configure_group(&mut group, 10, 5);
@@ -2285,12 +2757,11 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
         BenchmarkId::from_parameter(benchmark_name),
         &dataset,
         |b, dataset| {
-            let object = manager
-                .get(dataset.object_id)
-                .expect("many-branches object should be loaded");
             b.iter(|| {
                 let scan = scan_leaf_like_branch_heads(
-                    object,
+                    &storage,
+                    dataset.object_id,
+                    &dataset.branch_names,
                     &dataset.prefix,
                     &dataset.leaf_branch_names,
                 );
@@ -2301,49 +2772,9 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
 
     group.finish();
 }
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
-    let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "fjall_cold_load");
-    let seeded = ManyBranchesSeededDb::new_fjall(&scenario);
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_fjall");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.branch_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let storage = FjallStorage::open(&seeded.db_path, seeded.cache_size_bytes)
-                    .expect("open fjall for many-branches cold-load benchmark");
-                let mut manager = ObjectManager::new();
-                let object = manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
-                let scan = scan_branch_heads(object, &seeded.prefix);
-                storage.flush();
-                storage.close().expect("close many-branches fjall storage");
-                black_box(scan);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
-fn realistic_r8_many_branches_cold_load_fjall(_c: &mut Criterion) {}
-
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2362,11 +2793,18 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
             b.iter(|| {
                 let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
                     .expect("open rocksdb for many-branches cold-load benchmark");
-                let mut manager = ObjectManager::new();
-                let object = manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
-                let scan = scan_branch_heads(object, &seeded.prefix);
+                black_box(
+                    storage
+                        .load_metadata(seeded.object_id)
+                        .expect("load metadata for many-branches cold-load benchmark")
+                        .expect("cold-load many-branches object"),
+                );
+                let scan = scan_branch_heads(
+                    &storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
                 storage.flush();
                 storage
                     .close()
@@ -2384,7 +2822,7 @@ fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r8_many_branches.json",
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
@@ -2403,11 +2841,18 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
             b.iter(|| {
                 let storage = SqliteStorage::open(&seeded.db_path)
                     .expect("open sqlite for many-branches cold-load benchmark");
-                let mut manager = ObjectManager::new();
-                let object = manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
-                let scan = scan_branch_heads(object, &seeded.prefix);
+                black_box(
+                    storage
+                        .load_metadata(seeded.object_id)
+                        .expect("load metadata for many-branches cold-load benchmark")
+                        .expect("cold-load many-branches object"),
+                );
+                let scan = scan_branch_heads(
+                    &storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
                 storage.flush();
                 storage.close().expect("close many-branches sqlite storage");
                 black_box(scan);
@@ -2422,7 +2867,7 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
 fn realistic_r8_many_branches_cold_load_sqlite(_c: &mut Criterion) {}
 
 fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
         "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
         "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
@@ -2497,8 +2942,435 @@ fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+
+    let mut write_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_write");
+    configure_group(&mut write_group, 10, 5);
+    write_group.throughput(Throughput::Elements(scenario.total_commits() as u64));
+    write_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "rocksdb_write",
+        )),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb many-branches write");
+            let mut dataset_idx = 0usize;
+            b.iter(|| {
+                let db_path = tempdir
+                    .path()
+                    .join(format!("many_branches_write_{dataset_idx}.rocksdb"));
+                dataset_idx += 1;
+                let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
+                    .expect("open rocksdb for many-branches write benchmark");
+                let dataset = build_many_branches_dataset(&mut storage, scenario);
+                storage.flush();
+                storage.close().expect("close many-branches rocksdb write");
+                black_box(dataset.object_id);
+                black_box(dataset.branch_names.len());
+                black_box(dataset.leaf_branch_names.len());
+                black_box(dataset.total_commits);
+            });
+        },
+    );
+    write_group.finish();
+
+    let seeded = ManyBranchesSeededDb::new_rocksdb(&scenario);
+    let loaded_storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
+        .expect("open rocksdb for many-branches scan");
+
+    let mut scan_heads_group =
+        c.benchmark_group("realistic_phase1/many_branches_rocksdb_scan_heads");
+    configure_group(&mut scan_heads_group, 10, 5);
+    scan_heads_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    scan_heads_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "rocksdb_scan_heads",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let scan = scan_branch_heads(
+                    &loaded_storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
+                black_box(scan);
+            });
+        },
+    );
+    scan_heads_group.finish();
+
+    let mut scan_leaf_group =
+        c.benchmark_group("realistic_phase1/many_branches_rocksdb_scan_leaf_heads");
+    configure_group(&mut scan_leaf_group, 10, 5);
+    scan_leaf_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    scan_leaf_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "rocksdb_scan_leaf_heads",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let scan = scan_leaf_like_branch_heads(
+                    &loaded_storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                    &seeded.leaf_branch_names,
+                );
+                black_box(scan);
+            });
+        },
+    );
+    scan_leaf_group.finish();
+
+    let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_cold_load");
+    configure_group(&mut cold_load_group, 10, 5);
+    cold_load_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    cold_load_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "rocksdb_cold_load",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
+                    .expect("open rocksdb for many-branches cold-load benchmark");
+                let scan = scan_branch_heads(
+                    &storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
+                storage.flush();
+                storage
+                    .close()
+                    .expect("close many-branches rocksdb cold-load");
+                black_box(scan);
+            });
+        },
+    );
+    cold_load_group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r8_many_branches_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+
+    let mut write_group = c.benchmark_group("realistic_phase1/many_branches_sqlite_write");
+    configure_group(&mut write_group, 10, 5);
+    write_group.throughput(Throughput::Elements(scenario.total_commits() as u64));
+    write_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "sqlite_write",
+        )),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite many-branches write");
+            let mut dataset_idx = 0usize;
+            b.iter(|| {
+                let db_path = tempdir
+                    .path()
+                    .join(format!("many_branches_write_{dataset_idx}.sqlite"));
+                dataset_idx += 1;
+                let mut storage = SqliteStorage::open(&db_path)
+                    .expect("open sqlite for many-branches write benchmark");
+                let dataset = build_many_branches_dataset(&mut storage, scenario);
+                storage.flush();
+                storage.close().expect("close many-branches sqlite write");
+                black_box(dataset.object_id);
+                black_box(dataset.branch_names.len());
+                black_box(dataset.leaf_branch_names.len());
+                black_box(dataset.total_commits);
+            });
+        },
+    );
+    write_group.finish();
+
+    let seeded = ManyBranchesSeededDb::new_sqlite(&scenario);
+    let loaded_storage =
+        SqliteStorage::open(&seeded.db_path).expect("open sqlite for many-branches scan");
+
+    let mut scan_heads_group =
+        c.benchmark_group("realistic_phase1/many_branches_sqlite_scan_heads");
+    configure_group(&mut scan_heads_group, 10, 5);
+    scan_heads_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    scan_heads_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "sqlite_scan_heads",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let scan = scan_branch_heads(
+                    &loaded_storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
+                black_box(scan);
+            });
+        },
+    );
+    scan_heads_group.finish();
+
+    let mut scan_leaf_group =
+        c.benchmark_group("realistic_phase1/many_branches_sqlite_scan_leaf_heads");
+    configure_group(&mut scan_leaf_group, 10, 5);
+    scan_leaf_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    scan_leaf_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "sqlite_scan_leaf_heads",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let scan = scan_leaf_like_branch_heads(
+                    &loaded_storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                    &seeded.leaf_branch_names,
+                );
+                black_box(scan);
+            });
+        },
+    );
+    scan_leaf_group.finish();
+
+    let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_sqlite_cold_load");
+    configure_group(&mut cold_load_group, 10, 5);
+    cold_load_group.throughput(Throughput::Elements(scenario.branch_count as u64));
+    cold_load_group.bench_with_input(
+        BenchmarkId::from_parameter(many_branches_benchmark_name(
+            &scenario,
+            &profile,
+            "sqlite_cold_load",
+        )),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let storage = SqliteStorage::open(&seeded.db_path)
+                    .expect("open sqlite for many-branches cold-load benchmark");
+                let scan = scan_branch_heads(
+                    &storage,
+                    seeded.object_id,
+                    &seeded.branch_names,
+                    &seeded.prefix,
+                );
+                storage.flush();
+                storage
+                    .close()
+                    .expect("close many-branches sqlite cold-load");
+                black_box(scan);
+            });
+        },
+    );
+    cold_load_group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r8_many_branches_sqlite(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r9_subscribed_write_path_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r9_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+    ));
+    let benchmark_name = format!(
+        "{}_{}_docs{}_subs{}_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.scale,
+        scenario.subscription_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path_rocksdb");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for rocksdb subscribed write path");
+            let db_path = tempdir.path().join("subscribed_write_path.rocksdb");
+            let storage = RocksDBStorage::open(&db_path, STORAGE_BENCH_CACHE_SIZE_BYTES)
+                .expect("open rocksdb for subscribed write path benchmark");
+            let mut core = permission_bench_common::create_runtime_with_storage(storage);
+            let data = permission_bench_common::setup_data(
+                &mut core,
+                scenario.scale,
+                OBSERVER_BENCH_USER_ID,
+            );
+            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
+            let mut handles = Vec::with_capacity(scenario.subscription_count);
+
+            for _ in 0..scenario.subscription_count {
+                let handle = core
+                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
+                    .expect("subscribe observe_all");
+                handles.push(handle);
+            }
+            core.immediate_tick();
+            core.batched_tick();
+
+            let doc_ids = data.owned_documents;
+            let mut doc_idx = 0usize;
+            let mut update_counter = 0u64;
+            let write_context = WriteContext::from_session(session.clone());
+
+            b.iter(|| {
+                update_counter += 1;
+                let doc_id = doc_ids[doc_idx % doc_ids.len()];
+                doc_idx += 1;
+
+                core.update(
+                    doc_id,
+                    vec![
+                        (
+                            "content".to_string(),
+                            Value::Text(format!("Observed updated content {}", update_counter)),
+                        ),
+                        (
+                            "created_at".to_string(),
+                            Value::Timestamp(
+                                permission_bench_common::current_timestamp() + update_counter,
+                            ),
+                        ),
+                    ],
+                    Some(&write_context),
+                )
+                .expect("update with observer should succeed");
+            });
+
+            black_box(handles.len());
+            flush_and_close_runtime(&mut core);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r9_subscribed_write_path_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r9_subscribed_write_path_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json(profile_config_path());
+    let scenario = load_r9_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+    ));
+    let benchmark_name = format!(
+        "{}_{}_docs{}_subs{}_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.scale,
+        scenario.subscription_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path_sqlite");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let tempdir = TempDir::new().expect("create tempdir for sqlite subscribed write path");
+            let db_path = tempdir.path().join("subscribed_write_path.sqlite");
+            let storage = SqliteStorage::open(&db_path)
+                .expect("open sqlite for subscribed write path benchmark");
+            let mut core = permission_bench_common::create_runtime_with_storage(storage);
+            let data = permission_bench_common::setup_data(
+                &mut core,
+                scenario.scale,
+                OBSERVER_BENCH_USER_ID,
+            );
+            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
+            let mut handles = Vec::with_capacity(scenario.subscription_count);
+
+            for _ in 0..scenario.subscription_count {
+                let handle = core
+                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
+                    .expect("subscribe observe_all");
+                handles.push(handle);
+            }
+            core.immediate_tick();
+            core.batched_tick();
+
+            let doc_ids = data.owned_documents;
+            let mut doc_idx = 0usize;
+            let mut update_counter = 0u64;
+            let write_context = WriteContext::from_session(session.clone());
+
+            b.iter(|| {
+                update_counter += 1;
+                let doc_id = doc_ids[doc_idx % doc_ids.len()];
+                doc_idx += 1;
+
+                core.update(
+                    doc_id,
+                    vec![
+                        (
+                            "content".to_string(),
+                            Value::Text(format!("Observed updated content {}", update_counter)),
+                        ),
+                        (
+                            "created_at".to_string(),
+                            Value::Timestamp(
+                                permission_bench_common::current_timestamp() + update_counter,
+                            ),
+                        ),
+                    ],
+                    Some(&write_context),
+                )
+                .expect("update with observer should succeed");
+            });
+
+            black_box(handles.len());
+            flush_and_close_runtime(&mut core);
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r9_subscribed_write_path_sqlite(_c: &mut Criterion) {}
+
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -2507,32 +3379,10 @@ struct ManyBranchesSeededDb {
     db_path: PathBuf,
     object_id: ObjectId,
     branch_names: Vec<String>,
+    leaf_branch_names: HashSet<String>,
     prefix: String,
+    #[allow(dead_code)]
     cache_size_bytes: usize,
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-impl ManyBranchesSeededDb {
-    fn new_fjall(scenario: &R8Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
-        let db_path = tempdir.path().join("many_branches_fjall");
-        let mut storage = FjallStorage::open(&db_path, scenario.cache_size_bytes)
-            .expect("open fjall for many-branches seed");
-        let mut manager = ObjectManager::new();
-        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
-        storage.flush();
-        storage
-            .close()
-            .expect("close seeded many-branches fjall storage");
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            prefix: dataset.prefix,
-            cache_size_bytes: scenario.cache_size_bytes,
-        }
-    }
 }
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
@@ -2542,8 +3392,7 @@ impl ManyBranchesSeededDb {
         let db_path = tempdir.path().join("many_branches_rocksdb");
         let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
             .expect("open rocksdb for many-branches seed");
-        let mut manager = ObjectManager::new();
-        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+        let dataset = build_many_branches_dataset(&mut storage, scenario);
         storage.flush();
         storage
             .close()
@@ -2553,6 +3402,7 @@ impl ManyBranchesSeededDb {
             db_path,
             object_id: dataset.object_id,
             branch_names: dataset.branch_names,
+            leaf_branch_names: dataset.leaf_branch_names,
             prefix: dataset.prefix,
             cache_size_bytes: scenario.cache_size_bytes,
         }
@@ -2566,8 +3416,7 @@ impl ManyBranchesSeededDb {
         let db_path = tempdir.path().join("many_branches_sqlite");
         let mut storage =
             SqliteStorage::open(&db_path).expect("open sqlite for many-branches seed");
-        let mut manager = ObjectManager::new();
-        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+        let dataset = build_many_branches_dataset(&mut storage, scenario);
         storage.flush();
         storage
             .close()
@@ -2577,6 +3426,7 @@ impl ManyBranchesSeededDb {
             db_path,
             object_id: dataset.object_id,
             branch_names: dataset.branch_names,
+            leaf_branch_names: dataset.leaf_branch_names,
             prefix: dataset.prefix,
             cache_size_bytes: 0,
         }
@@ -2599,52 +3449,90 @@ fn many_branches_benchmark_name(
     )
 }
 
+fn many_branches_row_metadata() -> HashMap<String, String> {
+    HashMap::from([(
+        MetadataKey::Table.to_string(),
+        MANY_BRANCHES_TABLE.to_string(),
+    )])
+}
+
 fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
-    manager: &mut ObjectManager,
     storage: &mut H,
     scenario: &R8Scenario,
 ) -> ManyBranchesDataset {
-    let object_id = manager.create(storage, None);
+    let object_id = ObjectId::new();
+    storage
+        .put_metadata(object_id, many_branches_row_metadata())
+        .expect("seed many-branches metadata");
+    storage
+        .put_row_locator(
+            object_id,
+            Some(&RowLocator {
+                table: MANY_BRANCHES_TABLE.into(),
+                origin_schema_hash: None,
+            }),
+        )
+        .expect("seed many-branches row locator");
     let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
     let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
     let mut head_ids = Vec::with_capacity(scenario.branch_count);
     let mut used_as_parent = vec![false; scenario.branch_count];
-    let mut root_timestamps = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
+    let mut next_timestamp = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
 
     for branch_idx in 0..scenario.branch_count {
         let branch_name = format!("{prefix}b{branch_idx:08}");
         let parent_start = branch_idx.saturating_sub(scenario.merge_fanin);
-        let parent_ids: Vec<CommitId> = head_ids[parent_start..branch_idx].to_vec();
         used_as_parent[parent_start..branch_idx].fill(true);
 
-        let root_commit = Commit {
-            parents: parent_ids.into(),
-            content: many_branches_payload(scenario, branch_idx, 0),
-            timestamp: root_timestamps,
-            author: author.clone(),
-            metadata: None,
-            stored_state: StoredState::default(),
-            ack_state: Default::default(),
-        };
-        root_timestamps += 1;
+        let root_timestamp = next_timestamp;
+        next_timestamp += 1;
 
-        let mut head_id = manager
-            .receive_commit(storage, object_id, &branch_name, root_commit)
-            .expect("seed many-branches root commit");
+        let mut head_id = apply_row_version(
+            storage,
+            object_id,
+            &jazz_tools::object::BranchName::new(&branch_name),
+            StoredRowVersion::new(
+                object_id,
+                branch_name.clone(),
+                Vec::new(),
+                many_branches_payload(scenario, branch_idx, 0),
+                RowProvenance::for_insert(author.clone(), root_timestamp),
+                HashMap::new(),
+                RowState::VisibleDirect,
+                None,
+            ),
+            &[],
+        )
+        .expect("seed many-branches root row version")
+        .version_id;
 
         for commit_idx in 1..scenario.commits_per_branch {
-            head_id = manager
-                .add_commit(
-                    storage,
+            let updated_at = next_timestamp;
+            next_timestamp += 1;
+            head_id = apply_row_version(
+                storage,
+                object_id,
+                &jazz_tools::object::BranchName::new(&branch_name),
+                StoredRowVersion::new(
                     object_id,
-                    &branch_name,
+                    branch_name.clone(),
                     vec![head_id],
                     many_branches_payload(scenario, branch_idx, commit_idx),
-                    author.clone(),
+                    RowProvenance {
+                        created_by: author.clone(),
+                        created_at: root_timestamp,
+                        updated_by: author.clone(),
+                        updated_at,
+                    },
+                    HashMap::new(),
+                    RowState::VisibleDirect,
                     None,
-                )
-                .expect("append linear commit in many-branches benchmark");
+                ),
+                &[],
+            )
+            .expect("append linear row version in many-branches benchmark")
+            .version_id;
         }
 
         branch_names.push(branch_name);
@@ -2682,19 +3570,27 @@ fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: u
     payload
 }
 
-fn scan_branch_heads(object: &Object, prefix: &str) -> BranchHeadScan {
+fn scan_branch_heads(
+    storage: &impl Storage,
+    object_id: ObjectId,
+    branch_names: &[String],
+    prefix: &str,
+) -> BranchHeadScan {
     let mut scan = BranchHeadScan {
         branches_scanned: 0,
         heads_found: 0,
         checksum: 0,
     };
 
-    for (branch_name, branch) in &object.branches {
-        if !branch_name.as_str().starts_with(prefix) {
+    for branch_name in branch_names {
+        if !branch_name.starts_with(prefix) {
             continue;
         }
         scan.branches_scanned += 1;
-        for head_id in &branch.tips {
+        let tips = storage
+            .scan_row_branch_tip_ids(MANY_BRANCHES_TABLE, branch_name.as_str(), object_id)
+            .expect("branch tips should be present for seeded benchmark data");
+        for head_id in &tips {
             scan.heads_found += 1;
             scan.checksum ^= branch_head_checksum(branch_name, *head_id);
         }
@@ -2704,7 +3600,9 @@ fn scan_branch_heads(object: &Object, prefix: &str) -> BranchHeadScan {
 }
 
 fn scan_leaf_like_branch_heads(
-    object: &Object,
+    storage: &impl Storage,
+    object_id: ObjectId,
+    branch_names: &[String],
     prefix: &str,
     leaf_branch_names: &HashSet<String>,
 ) -> BranchHeadScan {
@@ -2714,15 +3612,18 @@ fn scan_leaf_like_branch_heads(
         checksum: 0,
     };
 
-    for (branch_name, branch) in &object.branches {
-        if !branch_name.as_str().starts_with(prefix) {
+    for branch_name in branch_names {
+        if !branch_name.starts_with(prefix) {
             continue;
         }
         scan.branches_scanned += 1;
         if !leaf_branch_names.contains(branch_name.as_str()) {
             continue;
         }
-        for head_id in &branch.tips {
+        let tips = storage
+            .scan_row_branch_tip_ids(MANY_BRANCHES_TABLE, branch_name.as_str(), object_id)
+            .expect("branch tips should be present for seeded benchmark data");
+        for head_id in &tips {
             scan.heads_found += 1;
             scan.checksum ^= branch_head_checksum(branch_name, *head_id);
         }
@@ -2731,10 +3632,10 @@ fn scan_leaf_like_branch_heads(
     scan
 }
 
-fn branch_head_checksum(branch_name: &BranchName, head_id: CommitId) -> u64 {
+fn branch_head_checksum(branch_name: &str, head_id: CommitId) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&head_id.0[..8]);
-    u64::from_le_bytes(bytes) ^ (branch_name.as_str().len() as u64)
+    u64::from_le_bytes(bytes) ^ (branch_name.len() as u64)
 }
 
 fn load_r1_scenario(path: &str) -> R1Scenario {
@@ -2788,7 +3689,6 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
 }
 
 #[cfg(any(
-    all(feature = "fjall", not(target_arch = "wasm32")),
     all(feature = "rocksdb", not(target_arch = "wasm32")),
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
@@ -2862,7 +3762,6 @@ fn load_r8_scenario(path: &str) -> R8Scenario {
         merge_fanin: raw.merge_fanin,
         payload_bytes: raw.payload_bytes.max(32),
         #[cfg(any(
-            all(feature = "fjall", not(target_arch = "wasm32")),
             all(feature = "rocksdb", not(target_arch = "wasm32")),
             all(feature = "sqlite", not(target_arch = "wasm32"))
         ))]
@@ -2892,6 +3791,48 @@ fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
     } else {
         default_path
     }
+}
+
+fn r1_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r1_crud_sustained.json",
+        "benchmarks/realistic/ci/scenarios/r1_crud_sustained.json",
+    )
+}
+
+fn r2_sustained_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r2_reads_sustained.json",
+        "benchmarks/realistic/ci/scenarios/r2_reads_sustained.json",
+    )
+}
+
+fn r2_reads_with_churn_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r2_reads_with_churn.json",
+        "benchmarks/realistic/ci/scenarios/r2_reads_with_churn.json",
+    )
+}
+
+fn r5_permission_recursive_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        "benchmarks/realistic/ci/scenarios/r5_permission_recursive.json",
+    )
+}
+
+fn r7_hotspot_history_scenario_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/scenarios/r7_hotspot_history.json",
+        "benchmarks/realistic/ci/scenarios/r7_hotspot_history.json",
+    )
+}
+
+fn profile_config_path() -> &'static str {
+    select_ci_path(
+        "benchmarks/realistic/profiles/s.json",
+        "benchmarks/realistic/ci/profiles/s.json",
+    )
 }
 
 fn configured_sample_size(default_size: usize) -> usize {
@@ -2944,31 +3885,12 @@ fn workspace_path(path: &str) -> PathBuf {
         .join(path)
 }
 
-fn create_runtime(schema: Schema) -> BenchRuntime {
-    let sync_manager = SyncManager::new();
-    let schema_manager = SchemaManager::new(
-        sync_manager,
-        schema,
-        AppId::from_name("realistic-phase1-bench"),
-        "dev",
-        "main",
-    )
-    .expect("create schema manager");
-
-    RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    )
+fn flush_and_close_runtime<S: Storage>(runtime: &mut BenchRuntime<S>) {
+    runtime.flush_storage();
+    runtime.storage().close().expect("close benchmark storage");
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-fn create_fjall_runtime(
-    schema: Schema,
-    db_path: &Path,
-    cache_size_bytes: usize,
-) -> RuntimeCore<FjallStorage, NoopScheduler, VecSyncSender> {
+fn create_runtime_with_storage<S: Storage>(schema: Schema, storage: S) -> BenchRuntime<S> {
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(
         sync_manager,
@@ -2979,12 +3901,11 @@ fn create_fjall_runtime(
     )
     .expect("create schema manager");
 
-    RuntimeCore::new(
-        schema_manager,
-        FjallStorage::open(db_path, cache_size_bytes).expect("open fjall for benchmark"),
-        NoopScheduler,
-        VecSyncSender::new(),
-    )
+    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+}
+
+fn create_runtime(schema: Schema) -> BenchRuntime {
+    create_runtime_with_storage(schema, MemoryStorage::new())
 }
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
@@ -2993,21 +3914,9 @@ fn create_rocksdb_runtime(
     db_path: &Path,
     cache_size_bytes: usize,
 ) -> RuntimeCore<RocksDBStorage, NoopScheduler, VecSyncSender> {
-    let sync_manager = SyncManager::new();
-    let schema_manager = SchemaManager::new(
-        sync_manager,
+    create_runtime_with_storage(
         schema,
-        AppId::from_name("realistic-phase1-bench"),
-        "dev",
-        "main",
-    )
-    .expect("create schema manager");
-
-    RuntimeCore::new(
-        schema_manager,
         RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
-        NoopScheduler,
-        VecSyncSender::new(),
     )
 }
 
@@ -3016,21 +3925,9 @@ fn create_sqlite_runtime(
     schema: Schema,
     db_path: &Path,
 ) -> RuntimeCore<SqliteStorage, NoopScheduler, VecSyncSender> {
-    let sync_manager = SyncManager::new();
-    let schema_manager = SchemaManager::new(
-        sync_manager,
+    create_runtime_with_storage(
         schema,
-        AppId::from_name("realistic-phase1-bench"),
-        "dev",
-        "main",
-    )
-    .expect("create schema manager");
-
-    RuntimeCore::new(
-        schema_manager,
         SqliteStorage::open(db_path).expect("open sqlite for benchmark"),
-        NoopScheduler,
-        VecSyncSender::new(),
     )
 }
 
@@ -3144,29 +4041,43 @@ fn project_board_schema() -> Schema {
 criterion_group!(
     benches,
     realistic_r1_crud,
-    realistic_r1_crud_fjall,
     realistic_r1_crud_rocksdb,
     realistic_r1_crud_sqlite,
     realistic_r1_crud_single_hop,
+    realistic_r1_crud_single_hop_rocksdb,
+    realistic_r1_crud_single_hop_sqlite,
     realistic_r2_reads,
-    realistic_r2_reads_fjall,
     realistic_r2_reads_rocksdb,
     realistic_r2_reads_sqlite,
     realistic_r2_reads_single_hop,
+    realistic_r2_reads_single_hop_rocksdb,
+    realistic_r2_reads_single_hop_sqlite,
     realistic_r2_reads_with_write_churn,
-    realistic_r3_cold_load_fjall,
+    realistic_r2_reads_with_write_churn_rocksdb,
+    realistic_r2_reads_with_write_churn_sqlite,
     realistic_r3_cold_load_rocksdb,
     realistic_r3_cold_load_sqlite,
     realistic_r4_fanout_updates,
+    realistic_r4_fanout_updates_rocksdb,
+    realistic_r4_fanout_updates_sqlite,
     realistic_r5_permission_recursive,
+    realistic_r5_permission_recursive_rocksdb,
+    realistic_r5_permission_recursive_sqlite,
     realistic_r6_permission_write_heavy,
+    realistic_r6_permission_write_heavy_rocksdb,
+    realistic_r6_permission_write_heavy_sqlite,
     realistic_r7_hotspot_history,
+    realistic_r7_hotspot_history_rocksdb,
+    realistic_r7_hotspot_history_sqlite,
     realistic_r8_many_branches_write,
     realistic_r8_many_branches_scan_heads,
     realistic_r8_many_branches_scan_leaf_heads,
-    realistic_r8_many_branches_cold_load_fjall,
     realistic_r8_many_branches_cold_load_rocksdb,
     realistic_r8_many_branches_cold_load_sqlite,
-    realistic_r9_subscribed_write_path
+    realistic_r8_many_branches_rocksdb,
+    realistic_r8_many_branches_sqlite,
+    realistic_r9_subscribed_write_path,
+    realistic_r9_subscribed_write_path_rocksdb,
+    realistic_r9_subscribed_write_path_sqlite
 );
 criterion_main!(benches);

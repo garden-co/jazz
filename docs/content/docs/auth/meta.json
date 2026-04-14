@@ -1,4 +1,4 @@
 {
   "title": "Auth & Permissions",
-  "pages": ["authentication", "sessions", "permissions"]
+  "pages": ["authentication", "local-first-auth", "sessions", "permissions"]
 }

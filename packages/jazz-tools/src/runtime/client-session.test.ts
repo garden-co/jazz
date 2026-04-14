@@ -1,11 +1,5 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  deriveLocalPrincipalId,
-  deriveLocalPrincipalIdSync,
-  resolveClientSession,
-  resolveClientSessionSync,
-} from "./client-session.js";
+import { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
@@ -21,7 +15,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("client session resolution", () => {
-  it("prefers jazz_principal_id from JWT when present", async () => {
+  it("prefers jazz_principal_id from JWT when present", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       jazz_principal_id: "principal-123",
@@ -29,11 +23,9 @@ describe("client session resolution", () => {
       claims: { role: "editor" },
     });
 
-    const session = await resolveClientSession({
+    const session = resolveClientSessionSync({
       appId: "app-jwt-principal",
       jwtToken: jwt,
-      localAuthMode: "demo",
-      localAuthToken: "device-a",
     });
 
     expect(session).toEqual({
@@ -47,13 +39,13 @@ describe("client session resolution", () => {
     });
   });
 
-  it("falls back to JWT sub when principal claim is absent", async () => {
+  it("falls back to JWT sub when principal claim is absent", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       claims: { team: "eng" },
     });
 
-    const session = await resolveClientSession({
+    const session = resolveClientSessionSync({
       appId: "app-jwt-sub",
       jwtToken: jwt,
     });
@@ -68,48 +60,11 @@ describe("client session resolution", () => {
     });
   });
 
-  it("derives local principal id with the server-compatible hash format", async () => {
-    const appId = "app-local";
-    const mode = "anonymous";
-    const token = "device-token";
-    const digest = createHash("sha256")
-      .update(`${appId}:${mode}:${token}`, "utf8")
-      .digest("base64");
-    const expected = `local:${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
-
-    expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
-    expect(deriveLocalPrincipalIdSync(appId, mode, token)).toBe(expected);
-
-    const session = await resolveClientSession({
-      appId,
-      localAuthMode: mode,
-      localAuthToken: token,
-    });
-    expect(session).toEqual({
-      user_id: expected,
-      claims: {
-        auth_mode: "local",
-        local_mode: mode,
-      },
-    });
-    expect(
-      resolveClientSessionSync({
-        appId,
-        localAuthMode: mode,
-        localAuthToken: token,
-      }),
-    ).toEqual({
-      user_id: expected,
-      claims: {
-        auth_mode: "local",
-        local_mode: mode,
-      },
-    });
-  });
-
-  it("returns null when no auth is configured", async () => {
-    const session = await resolveClientSession({ appId: "no-auth" });
-    expect(session).toBeNull();
+  it("returns null when no auth is configured", () => {
     expect(resolveClientSessionSync({ appId: "no-auth" })).toBeNull();
+    expect(resolveClientSessionStateSync({ appId: "no-auth" })).toEqual({
+      transport: null,
+      session: null,
+    });
   });
 });

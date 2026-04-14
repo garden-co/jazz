@@ -4,6 +4,9 @@
  * Pure type definitions — no runtime code.
  */
 
+import type { RuntimeSourcesConfig } from "../runtime/context.js";
+import type { AuthFailureReason } from "../runtime/sync-transport.js";
+
 // ============================================================================
 // Main Thread → Worker Messages
 // ============================================================================
@@ -20,9 +23,8 @@ export interface InitMessage {
   serverUrl?: string;
   serverPathPrefix?: string;
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   adminSecret?: string;
+  runtimeSources?: RuntimeSourcesConfig;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
@@ -76,8 +78,6 @@ export interface PeerCloseMessage {
 export interface UpdateAuthMessage {
   type: "update-auth";
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
 }
 
 /** Request graceful shutdown. */
@@ -122,7 +122,7 @@ export type MainToWorkerMessage =
 // Worker → Main Thread Messages
 // ============================================================================
 
-/** Worker has loaded WASM and is ready to receive init. */
+/** Worker entry point is ready to receive init. */
 export interface ReadyMessage {
   type: "ready";
 }
@@ -131,6 +131,16 @@ export interface ReadyMessage {
 export interface InitOkMessage {
   type: "init-ok";
   clientId: string;
+}
+
+/** Worker runtime attached or re-attached its upstream server connection. */
+export interface UpstreamConnectedMessage {
+  type: "upstream-connected";
+}
+
+/** Worker runtime detached its upstream server connection. */
+export interface UpstreamDisconnectedMessage {
+  type: "upstream-disconnected";
 }
 
 /** Forward a sync payload from worker to main thread. */
@@ -151,6 +161,12 @@ export interface PeerSyncToMainMessage {
 export interface ErrorMessage {
   type: "error";
   message: string;
+}
+
+/** Worker encountered an auth failure and paused upstream reconnects. */
+export interface WorkerAuthFailedMessage {
+  type: "auth-failed";
+  reason: AuthFailureReason;
 }
 
 /** Worker has completed shutdown (OPFS handles released). */
@@ -185,9 +201,12 @@ export interface DebugSeedLiveSchemaOkMessage {
 export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
+  | UpstreamConnectedMessage
+  | UpstreamDisconnectedMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
   | ErrorMessage
+  | WorkerAuthFailedMessage
   | ShutdownOkMessage
   | DebugSchemaStateOkMessage
   | DebugSeedLiveSchemaOkMessage;

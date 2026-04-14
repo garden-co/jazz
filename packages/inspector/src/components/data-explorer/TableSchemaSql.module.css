@@ -1,32 +1,49 @@
 .container {
   height: 100%;
-  border: 1px solid #2a3341;
-  border-radius: 8px;
-  background: #151a24;
-  padding: 12px;
+  background: transparent;
+  padding: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
 }
 
 .header {
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+}
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: #9ca8b9;
+  text-decoration: none;
+  font-size: 16px;
+}
+
+.backLink:hover {
+  background: #1b2430;
+  color: #d4dae3;
 }
 
 .title {
   margin: 0;
   text-transform: capitalize;
   font-size: 18px;
-  color: #e4e9f3;
+  color: #eff3f8;
 }
 
 .codeBlock {
   margin: 0;
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
-  background: #101723;
+  background: #0b1017;
   color: #d3deef;
   padding: 12px;
   overflow: auto;
+  border-top: 1px solid #232c3a;
+  font-size: 12px;
+  line-height: 1.5;
 }

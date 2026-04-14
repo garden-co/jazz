@@ -2,7 +2,6 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   messages: s.table({
-    author_id: s.string(),
     author_name: s.string(),
     chat_id: s.string(),
     text: s.string(),

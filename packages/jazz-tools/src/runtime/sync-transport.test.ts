@@ -6,7 +6,6 @@ import {
   createSyncOutboxRouter,
   generateClientId,
   isExpectedFetchAbortError,
-  linkExternalIdentity,
   normalizePathPrefix,
   readBinaryFrames,
   sendSyncPayload,
@@ -94,6 +93,20 @@ describe("sync-transport", () => {
       status: 200,
       statusText: "OK",
       body,
+    } as Response;
+  }
+
+  function unauthenticatedResponse(code: "expired" | "missing" | "invalid" | "disabled"): Response {
+    return {
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({
+        error: "unauthenticated",
+        code,
+        message: `auth failed: ${code}`,
+      }),
     } as Response;
   }
 
@@ -189,8 +202,6 @@ describe("sync-transport", () => {
       "X-Jazz-Backend-Secret": "backend-secret",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("posts schema catalogue payloads with user auth when admin secret is missing", async () => {
@@ -200,8 +211,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_schema",
             },
@@ -227,8 +238,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_lens",
             },
@@ -249,8 +260,8 @@ describe("sync-transport", () => {
     await sendSyncPayload(
       "http://localhost:3000",
       JSON.stringify({
-        ObjectUpdated: {
-          metadata: {
+        CatalogueEntryUpdated: {
+          entry: {
             metadata: {
               type: "catalogue_lens",
             },
@@ -267,41 +278,33 @@ describe("sync-transport", () => {
       "X-Jazz-Admin-Secret": "admin-secret",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
-  it("posts link-external with bearer and local auth headers", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        principal_id: "local:abc",
-        issuer: "https://issuer.example",
-        subject: "user-1",
-        created: true,
-      }),
-    });
+  it("detects mis-tagged catalogue payloads from their JSON shape", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-    const result = await linkExternalIdentity("http://localhost:3000/", {
-      jwtToken: "jwt-token",
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-      pathPrefix: "apps/app-123/",
-    });
-
-    expect(result.created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:3000/apps/app-123/auth/link-external",
+    await sendSyncPayload(
+      "http://localhost:3000",
+      JSON.stringify({
+        CatalogueEntryUpdated: {
+          entry: {
+            metadata: {
+              type: "catalogue_permissions_head",
+            },
+          },
+        },
+      }),
+      false,
+      { adminSecret: "admin-secret", backendSecret: "backend-secret" },
     );
-    expect(fetchMock.mock.calls[0]![1].method).toBe("POST");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
-      Authorization: "Bearer jwt-token",
-      "X-Jazz-Local-Mode": "anonymous",
-      "X-Jazz-Local-Token": "device-token",
+      "Content-Type": "application/json",
+      "X-Jazz-Admin-Secret": "admin-secret",
     });
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Backend-Secret");
   });
 
   it("normalizes route prefixes and endpoint URLs", () => {
@@ -350,9 +353,9 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
-    expect(onConnected).toHaveBeenCalledWith("catalogue-1");
+    expect(onConnected).toHaveBeenCalledWith("catalogue-1", null);
     await vi.waitFor(() =>
-      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+      expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} }), null),
     );
     expect(clientId).toBe("server-client-1");
     await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
@@ -395,12 +398,39 @@ describe("sync-transport", () => {
     controller.stop();
   });
 
+  it("stream controller stops reconnecting after structured auth failures", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const fetchMock = vi.fn().mockResolvedValue(unauthenticatedResponse("expired"));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const onAuthFailure = vi.fn();
+    const controller = new SyncStreamController({
+      getAuth: () => ({ jwtToken: "expired-jwt" }),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+      onAuthFailure,
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(onAuthFailure).toHaveBeenCalledWith("expired"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    controller.stop();
+  });
+
   it("stream controller uses backend secret auth when provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue(streamResponse([]));
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const controller = new SyncStreamController({
       getAuth: () => ({ backendSecret: "backend-secret" }),
+      getSchemaHash: () => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       getClientId: () => "initial-client-id",
       setClientId: vi.fn(),
       onConnected: vi.fn(),
@@ -414,6 +444,8 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Accept: "application/octet-stream",
       "X-Jazz-Backend-Secret": "backend-secret",
+      "X-Jazz-Client-Schema-Hash":
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
 
@@ -496,52 +528,6 @@ describe("sync-transport", () => {
     expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
   });
 
-  it("logs schema warnings that arrive over the stream", async () => {
-    const response = streamResponse([
-      {
-        type: "SyncUpdate",
-        payload: {
-          SchemaWarning: {
-            queryId: 7,
-            tableName: "todos",
-            rowCount: 3,
-            fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          },
-        },
-      },
-    ]);
-    const reader = response.body!.getReader();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const onSyncMessage = vi.fn();
-
-    await readBinaryFrames(
-      reader,
-      {
-        onSyncMessage,
-      },
-      "[client] ",
-    );
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[client] Detected 3 rows of todos with differing schema versions."),
-    );
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("npx jazz-tools migrations create aaaaaaaaaaaa bbbbbbbbbbbb"),
-    );
-    expect(onSyncMessage).toHaveBeenCalledWith(
-      JSON.stringify({
-        SchemaWarning: {
-          queryId: 7,
-          tableName: "todos",
-          rowCount: 3,
-          fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        },
-      }),
-    );
-  });
-
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
@@ -574,9 +560,12 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
-    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3");
+    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3", null);
     await vi.waitFor(() =>
-      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
+      expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(
+        JSON.stringify({ Ping: {} }),
+        null,
+      ),
     );
     expect(clientId).toBe("server-client-3");
     await vi.waitFor(() => expect(runtime.removeServer).toHaveBeenCalledTimes(1));
@@ -756,6 +745,21 @@ describe("sync-transport", () => {
       await expect(
         sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {}),
       ).rejects.toThrow("503");
+    });
+
+    it("throws SyncAuthError on structured 401 responses", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(unauthenticatedResponse("invalid"));
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+          jwtToken: "broken-jwt",
+        }),
+      ).rejects.toMatchObject({
+        name: "SyncAuthError",
+        reason: "invalid",
+        message: "auth failed: invalid",
+      });
     });
   });
 });

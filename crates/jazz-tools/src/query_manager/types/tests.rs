@@ -169,25 +169,25 @@ fn tuple_element_id() {
     assert_eq!(elem.id(), id);
     assert!(!elem.is_materialized());
     assert!(elem.content().is_none());
-    assert!(elem.commit_id().is_none());
+    assert!(elem.version_id().is_none());
 }
 
 #[test]
 fn tuple_element_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
     let content = vec![1, 2, 3];
-    let commit_id = make_commit_id(1);
+    let version_id = make_commit_id(1);
     let elem = TupleElement::Row {
         id,
-        content: content.clone(),
-        commit_id,
+        content: content.clone().into(),
+        version_id,
         row_provenance: test_row_provenance(),
     };
 
     assert_eq!(elem.id(), id);
     assert!(elem.is_materialized());
     assert_eq!(elem.content(), Some(content.as_slice()));
-    assert_eq!(elem.commit_id(), Some(commit_id));
+    assert_eq!(elem.version_id(), Some(version_id));
 }
 
 #[test]
@@ -223,6 +223,20 @@ fn tuple_from_row() {
 }
 
 #[test]
+fn tuple_provenance_merge_deduplicates_scoped_objects() {
+    let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
+    let branch = crate::object::BranchName::new("main");
+
+    let mut tuple = Tuple::from_scoped_id(id, branch);
+    let same_scope: TupleProvenance = [(id, branch)].into_iter().collect();
+
+    tuple.merge_provenance(&same_scope);
+
+    assert_eq!(tuple.provenance().len(), 1);
+    assert!(tuple.provenance().contains(&(id, branch)));
+}
+
+#[test]
 fn tuple_equality_based_on_ids() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
 
@@ -230,8 +244,8 @@ fn tuple_equality_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -248,8 +262,8 @@ fn tuple_hash_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -273,8 +287,8 @@ fn tuple_in_hashset() {
     // Same ID with different content should be found
     let tuple_with_content = Tuple::new(vec![TupleElement::Row {
         id: id1,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        version_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
     assert!(set.contains(&tuple_with_content));
@@ -467,8 +481,9 @@ fn schema_hash_deterministic() {
 }
 
 #[test]
-fn schema_hash_column_order_independent() {
-    // Schema with columns in different order should have same hash
+fn schema_hash_column_order_sensitive() {
+    // Schema with columns in different order should have a different hash so
+    // physical row layouts can be bootstrapped precisely from catalogue schemas.
     let schema1 = SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -492,7 +507,7 @@ fn schema_hash_column_order_independent() {
 
     let hash1 = SchemaHash::compute(&schema1);
     let hash2 = SchemaHash::compute(&schema2);
-    assert_eq!(hash1, hash2, "Column order should not affect hash");
+    assert_ne!(hash1, hash2, "Column order should affect schema hash");
 }
 
 #[test]
@@ -713,8 +728,8 @@ fn row_descriptor_content_hash() {
         ColumnDescriptor::new("id", ColumnType::Uuid),
     ]);
 
-    // Same columns, different order -> same hash (order-independent)
-    assert_eq!(desc1.content_hash(), desc2.content_hash());
+    // Same columns, different order -> different hash because physical layout changes.
+    assert_ne!(desc1.content_hash(), desc2.content_hash());
 
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);

@@ -11,7 +11,7 @@ use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::query::ArraySubqueryRequirement;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, Tuple, TupleDelta,
+    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Tuple, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
 
@@ -163,7 +163,7 @@ impl ArraySubqueryNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -327,7 +327,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         // UUID[] FK forward includes correlate an array of ids to scalar inner ids.
         // Evaluate each element independently so output preserves source order/duplicates.
@@ -341,7 +341,9 @@ impl ArraySubqueryNode {
                     continue;
                 };
                 materialized.append(&mut nested);
-                provenance.extend(nested_provenance);
+                for scoped_object in nested_provenance {
+                    provenance.insert(scoped_object);
+                }
             }
             return (Value::Array(materialized), provenance);
         }
@@ -353,7 +355,7 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> (Value, TupleProvenance) {
         let instance = self
             .subgraph_template
@@ -363,7 +365,9 @@ impl ArraySubqueryNode {
             None => return (Value::Array(vec![]), TupleProvenance::default()),
         };
 
-        let _row_delta = instance.graph.settle(io, row_loader);
+        let _row_delta = instance
+            .graph
+            .settle(io, &mut |id, hint| row_loader(id, hint));
         let mut provenance = TupleProvenance::default();
         let array_elements: Vec<Value> = instance
             .graph
@@ -372,7 +376,9 @@ impl ArraySubqueryNode {
             .filter_map(|(row, row_provenance)| {
                 let output_desc = self.subgraph_template.output_descriptor();
                 let values = decode_row(output_desc, &row.data).ok()?;
-                provenance.extend(row_provenance.iter().copied());
+                for scoped_object in row_provenance.iter().copied() {
+                    provenance.insert(scoped_object);
+                }
                 Some(Value::Row {
                     id: Some(row.id),
                     values,
@@ -397,7 +403,7 @@ impl ArraySubqueryNode {
         let element = outer_tuple.get(0)?;
         let outer_id = element.id();
         let outer_content = element.content()?;
-        let commit_id = element.commit_id()?;
+        let version_id = element.version_id()?;
         let row_provenance = element.row_provenance()?.clone();
 
         // Decode outer values
@@ -411,13 +417,15 @@ impl ArraySubqueryNode {
         let output_content = encode_row(&self.output_descriptor, &values).ok()?;
 
         let mut provenance = outer_tuple.provenance().clone();
-        provenance.extend(inner_provenance.iter().copied());
+        for scoped_object in inner_provenance.iter().copied() {
+            provenance.insert(scoped_object);
+        }
 
         Some(Tuple::new_with_provenance(
             vec![TupleElement::Row {
                 id: outer_id,
-                content: output_content,
-                commit_id,
+                content: output_content.into(),
+                version_id,
                 row_provenance,
             }],
             provenance,
@@ -444,7 +452,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -689,8 +697,8 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
-            content: user_data,
-            commit_id: CommitId([0; 32]),
+            content: user_data.into(),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
@@ -732,8 +740,8 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,
-            content: user_data,
-            commit_id: CommitId([0; 32]),
+            content: user_data.into(),
+            version_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 

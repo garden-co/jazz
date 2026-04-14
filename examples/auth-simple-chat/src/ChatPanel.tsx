@@ -56,7 +56,6 @@ export function ChatPanel({
       await db.insertDurable(
         app.messages,
         {
-          author_id: sessionUserId,
           author_name: authorName,
           chat_id: chatId,
           text: messageText.trim(),

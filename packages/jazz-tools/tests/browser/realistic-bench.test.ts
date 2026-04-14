@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { deriveLocalPrincipalId } from "../../src/runtime/client-session.js";
+import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
@@ -475,8 +475,7 @@ async function createServerDb(
   options: {
     includeAdminSecret?: boolean;
     includeJwt?: boolean;
-    localAuthMode?: "anonymous" | "demo";
-    localAuthToken?: string;
+    localFirstSecret?: string;
   } = {},
 ): Promise<Db> {
   const { serverUrl, adminSecret } = await getTestingServerInfo();
@@ -490,11 +489,8 @@ async function createServerDb(
   if (options.includeJwt !== false) {
     config.jwtToken = await getTestingServerJwtForUser(sub, claims);
   }
-  if (options.localAuthMode) {
-    config.localAuthMode = options.localAuthMode;
-  }
-  if (options.localAuthToken) {
-    config.localAuthToken = options.localAuthToken;
+  if (options.localFirstSecret) {
+    config.auth = { localFirstSecret: options.localFirstSecret };
   }
   return createDb(config);
 }
@@ -1714,34 +1710,24 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   let unsubscribeDenied: (() => void) | null = null;
 
   try {
-    const localAuthMode = "anonymous" as const;
-    const seedLocalToken = `${dbPrefix}-b5-seed-token`;
-    const allowedLocalToken = `${dbPrefix}-b5-allowed-token`;
-    const deniedLocalToken = `${dbPrefix}-b5-denied-token`;
-    const intermediateLocalToken = `${dbPrefix}-b5-intermediate-token`;
-    const allowedPrincipalId = await deriveLocalPrincipalId(
-      appId,
-      localAuthMode,
-      allowedLocalToken,
-    );
-    const deniedPrincipalId = await deriveLocalPrincipalId(appId, localAuthMode, deniedLocalToken);
-    const intermediatePrincipalId = await deriveLocalPrincipalId(
-      appId,
-      localAuthMode,
-      intermediateLocalToken,
-    );
+    const seedLocalSecret = `${dbPrefix}-b5-seed-secret`;
+    const allowedLocalSecret = `${dbPrefix}-b5-allowed-secret`;
+    const deniedLocalSecret = `${dbPrefix}-b5-denied-secret`;
+    const intermediateLocalSecret = `${dbPrefix}-b5-intermediate-secret`;
+    const wasmModule = await loadWasmModule();
+    const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
+    const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
+    const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
     const allowedSession = {
       user_id: allowedPrincipalId,
       claims: {
-        auth_mode: "local",
-        local_mode: localAuthMode,
+        auth_mode: "local-first",
       },
     };
     const deniedSession = {
       user_id: deniedPrincipalId,
       claims: {
-        auth_mode: "local",
-        local_mode: localAuthMode,
+        auth_mode: "local-first",
       },
     };
 
@@ -1754,8 +1740,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       {},
       {
         includeJwt: false,
-        localAuthMode,
-        localAuthToken: seedLocalToken,
+        localFirstSecret: seedLocalSecret,
       },
     );
     const seeded = await seedPermissionDataset(seedDb, b5, permissionSchema, {
@@ -1783,8 +1768,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       {
         includeAdminSecret: false,
         includeJwt: false,
-        localAuthMode,
-        localAuthToken: allowedLocalToken,
+        localFirstSecret: allowedLocalSecret,
       },
     );
     deniedDb = await createServerDb(
@@ -1795,8 +1779,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       {
         includeAdminSecret: false,
         includeJwt: false,
-        localAuthMode,
-        localAuthToken: deniedLocalToken,
+        localFirstSecret: deniedLocalSecret,
       },
     );
 

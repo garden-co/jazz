@@ -97,6 +97,50 @@ function resolveBranch(metadata, manifest, fallbackRef) {
   return firstNonEmptyString(metadata?.branch, manifest?.branch) ?? toBranch(fallbackRef);
 }
 
+function normalizeStorageEngine(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveStorageEngine(...values) {
+  for (const value of values) {
+    const normalized = normalizeStorageEngine(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function hasBenchmarkFiles(dir) {
+  if (!dir || !fs.existsSync(dir)) return false;
+  for (const file of [
+    "metadata.json",
+    "manifest.json",
+    "suite_status.json",
+    "realistic.json",
+    "criterion_realistic_phase1.json",
+  ]) {
+    if (fs.existsSync(path.join(dir, file))) return true;
+  }
+  return false;
+}
+
+function artifactDirs(rootDir) {
+  if (!rootDir || !fs.existsSync(rootDir)) return [];
+  const dirs = [];
+  if (hasBenchmarkFiles(rootDir)) dirs.push(rootDir);
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(rootDir, entry.name);
+    if (hasBenchmarkFiles(dir)) dirs.push(dir);
+  }
+  return dirs;
+}
+
+function storageEngineFromDir(dir) {
+  return resolveStorageEngine(path.basename(dir));
+}
+
 function scenarioSummary(scenario) {
   return {
     scenario_id: scenario.scenario_id,
@@ -178,46 +222,83 @@ function passedBenchmarkIds(status) {
   );
 }
 
-function nativeBenchmarkIdForFile(file) {
-  if (file === "w1_interactive.json") return "native:w1_interactive";
-  if (file === "w4_cold_start.json") return "native:w4_cold_start";
+function nativeBenchmarkIdForFile(file, storageEngine) {
+  if (file === "w1_interactive.json") return `native:${storageEngine}:w1_interactive`;
+  if (file === "w4_cold_start.json") return `native:${storageEngine}:w4_cold_start`;
   return null;
 }
 
 function criterionBenchmarkId(benchmark) {
   const groupId = benchmark?.group_id;
-  if (groupId === "realistic_phase1/crud_sustained") {
-    return "native-criterion:r1_crud_sustained";
+  const exactMap = new Map([
+    ["realistic_phase1/crud_sustained_rocksdb", "native-criterion:rocksdb:r1_crud_sustained"],
+    ["realistic_phase1/crud_sustained_sqlite", "native-criterion:sqlite:r1_crud_sustained"],
+    [
+      "realistic_phase1/crud_sustained_single_hop_rocksdb",
+      "native-criterion:rocksdb:r1_crud_sustained_single_hop",
+    ],
+    [
+      "realistic_phase1/crud_sustained_single_hop_sqlite",
+      "native-criterion:sqlite:r1_crud_sustained_single_hop",
+    ],
+    ["realistic_phase1/reads_sustained_rocksdb", "native-criterion:rocksdb:r2_reads_sustained"],
+    ["realistic_phase1/reads_sustained_sqlite", "native-criterion:sqlite:r2_reads_sustained"],
+    [
+      "realistic_phase1/reads_sustained_single_hop_rocksdb",
+      "native-criterion:rocksdb:r2_reads_sustained_single_hop",
+    ],
+    [
+      "realistic_phase1/reads_sustained_single_hop_sqlite",
+      "native-criterion:sqlite:r2_reads_sustained_single_hop",
+    ],
+    [
+      "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
+      "native-criterion:rocksdb:r2_reads_with_write_churn",
+    ],
+    [
+      "realistic_phase1/reads_sustained_with_write_churn_sqlite",
+      "native-criterion:sqlite:r2_reads_with_write_churn",
+    ],
+    ["realistic_phase1/cold_load_rocksdb", "native-criterion:rocksdb:r3_cold_load"],
+    ["realistic_phase1/cold_load_sqlite", "native-criterion:sqlite:r3_cold_load"],
+    ["realistic_phase1/fanout_updates_rocksdb", "native-criterion:rocksdb:r4_fanout_updates"],
+    ["realistic_phase1/fanout_updates_sqlite", "native-criterion:sqlite:r4_fanout_updates"],
+    [
+      "realistic_phase1/permission_recursive_rocksdb",
+      "native-criterion:rocksdb:r5_permission_recursive",
+    ],
+    [
+      "realistic_phase1/permission_recursive_sqlite",
+      "native-criterion:sqlite:r5_permission_recursive",
+    ],
+    [
+      "realistic_phase1/permission_write_heavy_rocksdb",
+      "native-criterion:rocksdb:r6_permission_write_heavy",
+    ],
+    [
+      "realistic_phase1/permission_write_heavy_sqlite",
+      "native-criterion:sqlite:r6_permission_write_heavy",
+    ],
+    ["realistic_phase1/hotspot_history_rocksdb", "native-criterion:rocksdb:r7_hotspot_history"],
+    ["realistic_phase1/hotspot_history_sqlite", "native-criterion:sqlite:r7_hotspot_history"],
+    [
+      "realistic_phase1/subscribed_write_path_rocksdb",
+      "native-criterion:rocksdb:r9_subscribed_write_path",
+    ],
+    [
+      "realistic_phase1/subscribed_write_path_sqlite",
+      "native-criterion:sqlite:r9_subscribed_write_path",
+    ],
+  ]);
+
+  if (exactMap.has(groupId)) {
+    return exactMap.get(groupId);
   }
-  if (groupId === "realistic_phase1/crud_sustained_single_hop") {
-    return "native-criterion:r1_crud_sustained_single_hop";
+  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_rocksdb")) {
+    return "native-criterion:rocksdb:r8_many_branches";
   }
-  if (groupId === "realistic_phase1/reads_sustained") {
-    return "native-criterion:r2_reads_sustained";
-  }
-  if (groupId === "realistic_phase1/reads_sustained_single_hop") {
-    return "native-criterion:r2_reads_sustained_single_hop";
-  }
-  if (groupId === "realistic_phase1/reads_sustained_with_write_churn") {
-    return "native-criterion:r2_reads_with_write_churn";
-  }
-  if (groupId === "realistic_phase1/cold_load_fjall") {
-    return "native-criterion:r3_cold_load_fjall";
-  }
-  if (groupId === "realistic_phase1/fanout_updates") {
-    return "native-criterion:r4_fanout_updates";
-  }
-  if (groupId === "realistic_phase1/permission_recursive") {
-    return "native-criterion:r5_permission_recursive";
-  }
-  if (groupId === "realistic_phase1/permission_write_heavy") {
-    return "native-criterion:r6_permission_write_heavy";
-  }
-  if (groupId === "realistic_phase1/hotspot_history") {
-    return "native-criterion:r7_hotspot_history";
-  }
-  if (groupId === "realistic_phase1/subscribed_write_path") {
-    return "native-criterion:r9_subscribed_write_path";
+  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_sqlite")) {
+    return "native-criterion:sqlite:r8_many_branches";
   }
   return null;
 }
@@ -229,10 +310,16 @@ function extractNative(nativeDir) {
   const metadata = readJsonIfExists(path.join(nativeDir, "metadata.json")) ?? {};
   const manifest = readJsonIfExists(path.join(nativeDir, "manifest.json")) ?? {};
   const suiteStatus = readJsonIfExists(path.join(nativeDir, "suite_status.json")) ?? {};
+  const storageEngine = resolveStorageEngine(
+    metadata?.storage_engine,
+    manifest?.storage_engine,
+    storageEngineFromDir(nativeDir),
+  );
+  if (!storageEngine) return [];
   const passedIds = passedBenchmarkIds(suiteStatus);
   const scenarios = [];
   for (const file of ["w1_interactive.json", "w4_cold_start.json"]) {
-    const benchmarkId = nativeBenchmarkIdForFile(file);
+    const benchmarkId = nativeBenchmarkIdForFile(file, storageEngine);
     if (passedIds.size > 0 && benchmarkId && !passedIds.has(benchmarkId)) {
       continue;
     }
@@ -251,12 +338,14 @@ function extractNative(nativeDir) {
     {
       id: buildRunId([
         "native",
+        storageEngine,
         metadata.run_id,
         metadata.run_attempt,
         metadata.sha,
         metadata.profile,
       ]),
       suite: "native",
+      storage_engine: storageEngine,
       generated_at: generatedAt,
       repository: metadata.repository ?? manifest.repository ?? null,
       run_id: metadata.run_id ?? manifest.run_id ?? null,
@@ -283,6 +372,13 @@ function extractNativeCriterion(nativeDir) {
   const passedIds = passedBenchmarkIds(suiteStatus);
   const criterion = readJsonIfExists(path.join(nativeDir, "criterion_realistic_phase1.json"));
   if (!criterion || !Array.isArray(criterion.benchmarks)) return [];
+  const storageEngine = resolveStorageEngine(
+    metadata?.storage_engine,
+    manifest?.storage_engine,
+    criterion?.storage_engine,
+    storageEngineFromDir(nativeDir),
+  );
+  if (!storageEngine) return [];
 
   const scenarios = criterion.benchmarks
     .filter((x) => x && typeof x === "object" && typeof x.full_id === "string")
@@ -304,12 +400,14 @@ function extractNativeCriterion(nativeDir) {
     {
       id: buildRunId([
         "native-criterion",
+        storageEngine,
         metadata.run_id,
         metadata.run_attempt,
         metadata.sha,
         metadata.profile,
       ]),
       suite: "native-criterion",
+      storage_engine: storageEngine,
       generated_at: generatedAt,
       repository: metadata.repository ?? manifest.repository ?? null,
       run_id: metadata.run_id ?? manifest.run_id ?? null,
@@ -334,6 +432,12 @@ function extractBrowser(browserDir) {
   const manifest = readJsonIfExists(path.join(browserDir, "manifest.json")) ?? {};
   const realistic = readJsonIfExists(path.join(browserDir, "realistic.json"));
   if (!realistic || !Array.isArray(realistic.scenarios)) return [];
+  const storageEngine =
+    resolveStorageEngine(
+      metadata?.storage_engine,
+      manifest?.storage_engine,
+      realistic?.storage_engine,
+    ) ?? "opfs-btree";
 
   const scenarios = realistic.scenarios
     .filter((x) => x && typeof x === "object" && typeof x.scenario_id === "string")
@@ -350,12 +454,14 @@ function extractBrowser(browserDir) {
     {
       id: buildRunId([
         "browser",
+        storageEngine,
         metadata.run_id,
         metadata.run_attempt,
         metadata.sha,
         metadata.profile,
       ]),
       suite: "browser",
+      storage_engine: storageEngine,
       generated_at: generatedAt,
       repository: metadata.repository ?? manifest.repository ?? null,
       run_id: metadata.run_id ?? manifest.run_id ?? null,
@@ -385,10 +491,11 @@ function main() {
   };
   if (!Array.isArray(existing.runs)) existing.runs = [];
 
+  const nativeDirs = artifactDirs(path.resolve(args.native || ""));
+  const browserDirs = artifactDirs(path.resolve(args.browser || ""));
   const incoming = [
-    ...extractNative(path.resolve(args.native || "")),
-    ...extractNativeCriterion(path.resolve(args.native || "")),
-    ...extractBrowser(path.resolve(args.browser || "")),
+    ...nativeDirs.flatMap((dir) => [...extractNative(dir), ...extractNativeCriterion(dir)]),
+    ...browserDirs.flatMap((dir) => extractBrowser(dir)),
   ];
   if (incoming.length === 0) {
     console.log("No benchmark inputs found; history unchanged.");

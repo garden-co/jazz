@@ -188,8 +188,8 @@ Create the basic structure for your app with Jazz and a to-do list.
 
 <Accordions type="single">
   <Accordion title="Client Config">
-    `appId` identifies your app for storage and sync. For all config options, see [Server
-    Setup](/docs/reference/server-setup#client-config-options).
+    `appId` identifies your app for storage and sync. For all client config options and runtime
+    source overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
   </Accordion>
 </Accordions>
 
@@ -364,11 +364,11 @@ Clients pick up the schema from the server when they connect. If you update `sch
 
 Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha permissions push`.
 
-For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
+For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;anonymous, demo, and external JWT auth
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed

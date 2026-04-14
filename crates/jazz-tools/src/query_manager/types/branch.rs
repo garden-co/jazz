@@ -9,7 +9,8 @@ use super::*;
 // ============================================================================
 
 /// Content-addressed hash of a schema's structural elements.
-/// Uses BLAKE3 over canonicalized (sorted) schema representation.
+/// Uses BLAKE3 over deterministic table ordering while preserving each table's
+/// declared column order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SchemaHash(pub [u8; 32]);
 
@@ -17,6 +18,17 @@ impl SchemaHash {
     /// Create a SchemaHash from raw bytes.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Create a SchemaHash from a hex string.
+    pub fn from_hex(hex_str: &str) -> Option<Self> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(Self(arr))
     }
 
     /// Get the raw bytes.
@@ -53,7 +65,7 @@ impl SchemaHash {
             hasher.update(table_name.as_str().as_bytes());
             hasher.update(&[0]); // delimiter
 
-            // Hash row descriptor (columns sorted by name)
+            // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
         }
 
@@ -86,13 +98,9 @@ impl<'de> Deserialize<'de> for SchemaHash {
     }
 }
 
-/// Hash a RowDescriptor into a hasher, sorting columns by name for order-independence.
+/// Hash a RowDescriptor into a hasher, preserving declared column order.
 pub(crate) fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
-    // Sort columns by name
-    let mut columns: Vec<_> = descriptor.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    for col in columns {
+    for col in &descriptor.columns {
         hash_column_descriptor(hasher, col);
     }
 }

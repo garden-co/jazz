@@ -1,8 +1,20 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { jazzPlugin } from "jazz-tools/dev/vite";
+import { DEFAULT_ADMIN_SECRET, DEFAULT_APP_ID, SYNC_SERVER_URL } from "./constants";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    jazzPlugin({
+      server: {
+        jwksUrl: "http://127.0.0.1:3001/.well-known/jwks.json",
+        appId: DEFAULT_APP_ID,
+        adminSecret: DEFAULT_ADMIN_SECRET,
+        port: Number(new URL(SYNC_SERVER_URL).port),
+      },
+    }),
+  ],
   build: { target: "es2020" },
   worker: { format: "es" },
   optimizeDeps: {
@@ -10,20 +22,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/sync": {
-        target: "http://127.0.0.1:1625",
-        changeOrigin: true,
-      },
-      "/events": {
-        target: "http://127.0.0.1:1625",
-        changeOrigin: true,
-      },
       "/auth": {
         target: "http://127.0.0.1:3001",
-        changeOrigin: true,
-      },
-      "/health": {
-        target: "http://127.0.0.1:1625",
         changeOrigin: true,
       },
       "/api/auth": {

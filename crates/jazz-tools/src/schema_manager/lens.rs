@@ -19,9 +19,20 @@ pub enum Direction {
     Backward,
 }
 
+impl Direction {
+    pub fn reverse(&self) -> Self {
+        match self {
+            Direction::Forward => Direction::Backward,
+            Direction::Backward => Direction::Forward,
+        }
+    }
+}
+
 /// A single lens operation representing a schema change.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LensOp {
+    /// Rename a table.
+    RenameTable { old_name: String, new_name: String },
     /// Add a column with a default value.
     AddColumn {
         table: String,
@@ -58,6 +69,10 @@ impl LensOp {
     /// Invert this operation (for computing backward transform).
     pub fn invert(&self) -> LensOp {
         match self {
+            LensOp::RenameTable { old_name, new_name } => LensOp::RenameTable {
+                old_name: new_name.clone(),
+                new_name: old_name.clone(),
+            },
             LensOp::AddColumn {
                 table,
                 column,
@@ -97,17 +112,6 @@ impl LensOp {
                 table: table.clone(),
                 schema: schema.clone(),
             },
-        }
-    }
-
-    /// Get the table this operation affects.
-    pub fn table(&self) -> &str {
-        match self {
-            LensOp::AddColumn { table, .. }
-            | LensOp::RemoveColumn { table, .. }
-            | LensOp::RenameColumn { table, .. }
-            | LensOp::AddTable { table, .. }
-            | LensOp::RemoveTable { table, .. } => table,
         }
     }
 }
@@ -159,11 +163,6 @@ impl LensTransform {
             .map(|&i| self.ops.len() - 1 - i)
             .collect();
         Self { ops, draft_ops }
-    }
-
-    /// Get operations that affect a specific table.
-    pub fn ops_for_table(&self, table: &str) -> Vec<&LensOp> {
-        self.ops.iter().filter(|op| op.table() == table).collect()
     }
 }
 
@@ -232,44 +231,73 @@ impl Lens {
         }
     }
 
-    /// Translate a column name through the lens for a given table.
-    /// Returns the new column name, or None if the column doesn't exist in the output.
-    pub fn translate_column(
+    /// Translate a table name through the lens for a given direction.
+    pub fn translate_table(&self, table: &str, direction: Direction) -> Option<String> {
+        let transform = self.transform(direction);
+        let mut current_table = table.to_string();
+
+        for op in &transform.ops {
+            match op {
+                LensOp::RenameTable { old_name, new_name } => {
+                    if current_table == *old_name {
+                        current_table = new_name.clone();
+                    }
+                }
+                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
+                    if current_table == *table {
+                        return None;
+                    }
+                }
+                LensOp::AddColumn { .. }
+                | LensOp::RemoveColumn { .. }
+                | LensOp::RenameColumn { .. } => {}
+            }
+        }
+
+        Some(current_table)
+    }
+
+    /// Translate a table and column name through the lens for a given direction.
+    pub fn translate_table_and_column(
         &self,
         table: &str,
         column: &str,
         direction: Direction,
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         let transform = self.transform(direction);
-        let mut current_name = column.to_string();
+        let current_table = self.translate_table(table, direction)?;
+        let mut current_column = column.to_string();
 
         for op in &transform.ops {
-            if op.table() != table {
-                continue;
-            }
             match op {
                 LensOp::RenameColumn {
-                    old_name, new_name, ..
+                    table: op_table,
+                    old_name,
+                    new_name,
                 } => {
-                    if current_name == *old_name {
-                        current_name = new_name.clone();
+                    if current_table == *op_table && current_column == *old_name {
+                        current_column = new_name.clone();
                     }
                 }
                 LensOp::RemoveColumn {
-                    column: removed, ..
+                    table: op_table,
+                    column: removed,
+                    ..
                 } => {
-                    if current_name == *removed {
-                        return None; // Column removed
+                    if current_table == *op_table && current_column == *removed {
+                        return None;
                     }
                 }
                 LensOp::AddColumn { .. } => {
-                    // New columns don't affect existing column names
+                    // New columns don't affect existing column references.
                 }
-                _ => {}
+                LensOp::RenameTable { .. }
+                | LensOp::AddTable { .. }
+                | LensOp::RemoveTable { .. } => {}
             }
         }
 
-        Some(current_name)
+        Some((current_table, current_column))
     }
 
     /// Apply the lens transform to a row.
@@ -293,6 +321,9 @@ impl Lens {
 
         for op in &transform.ops {
             match op {
+                LensOp::RenameTable { .. } => {
+                    // Table renames do not change row values directly.
+                }
                 LensOp::AddColumn {
                     column, default, ..
                 } => {
@@ -389,6 +420,22 @@ mod tests {
     }
 
     #[test]
+    fn lens_op_invert_rename_table() {
+        let op = LensOp::RenameTable {
+            old_name: "users".to_string(),
+            new_name: "people".to_string(),
+        };
+
+        let inverted = op.invert();
+        if let LensOp::RenameTable { old_name, new_name } = inverted {
+            assert_eq!(old_name, "people");
+            assert_eq!(new_name, "users");
+        } else {
+            panic!("expected RenameTable");
+        }
+    }
+
+    #[test]
     fn lens_transform_invert() {
         let mut transform = LensTransform::new();
         transform.push(
@@ -442,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn lens_translate_column_rename() {
+    fn lens_translate_table_and_column_rename() {
         let source = make_hash(1);
         let target = make_hash(2);
 
@@ -460,25 +507,25 @@ mod tests {
 
         // Forward: email -> email_address
         assert_eq!(
-            lens.translate_column("users", "email", Direction::Forward),
-            Some("email_address".to_string())
+            lens.translate_table_and_column("users", "email", Direction::Forward),
+            Some(("users".to_string(), "email_address".to_string()))
         );
 
         // Backward: email_address -> email
         assert_eq!(
-            lens.translate_column("users", "email_address", Direction::Backward),
-            Some("email".to_string())
+            lens.translate_table_and_column("users", "email_address", Direction::Backward),
+            Some(("users".to_string(), "email".to_string()))
         );
 
         // Unchanged column
         assert_eq!(
-            lens.translate_column("users", "name", Direction::Forward),
-            Some("name".to_string())
+            lens.translate_table_and_column("users", "name", Direction::Forward),
+            Some(("users".to_string(), "name".to_string()))
         );
     }
 
     #[test]
-    fn lens_translate_column_removed() {
+    fn lens_translate_table_and_column_removed() {
         let source = make_hash(1);
         let target = make_hash(2);
 
@@ -497,14 +544,71 @@ mod tests {
 
         // Forward: deprecated column doesn't exist in target
         assert_eq!(
-            lens.translate_column("users", "deprecated", Direction::Forward),
+            lens.translate_table_and_column("users", "deprecated", Direction::Forward),
             None
         );
 
         // Backward: column is added back
         assert_eq!(
-            lens.translate_column("users", "deprecated", Direction::Backward),
-            Some("deprecated".to_string())
+            lens.translate_table_and_column("users", "deprecated", Direction::Backward),
+            Some(("users".to_string(), "deprecated".to_string()))
+        );
+    }
+
+    #[test]
+    fn lens_translate_table_rename() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+
+        let lens = Lens::new(source, target, transform);
+
+        assert_eq!(
+            lens.translate_table("users", Direction::Forward),
+            Some("people".to_string())
+        );
+        assert_eq!(
+            lens.translate_table("people", Direction::Backward),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            lens.translate_table("orgs", Direction::Forward),
+            Some("orgs".to_string())
+        );
+    }
+
+    #[test]
+    fn lens_translate_table_returns_none_across_add_remove_boundary() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "users".to_string(),
+                schema: TableSchema::new(RowDescriptor::new(vec![
+                    ColumnDescriptor::new("id", ColumnType::Uuid),
+                    ColumnDescriptor::new("name", ColumnType::Text),
+                ])),
+            },
+            false,
+        );
+
+        let lens = Lens::new(source, target, transform);
+
+        assert_eq!(lens.translate_table("users", Direction::Forward), None);
+        assert_eq!(lens.translate_table("users", Direction::Backward), None);
+        assert_eq!(
+            lens.translate_table("orgs", Direction::Forward),
+            Some("orgs".to_string())
         );
     }
 

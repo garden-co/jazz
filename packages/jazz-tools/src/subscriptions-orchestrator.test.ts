@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Session } from "./runtime/context.js";
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
@@ -17,6 +18,7 @@ type SubscribeCall = {
   callback: (delta: SubscriptionDelta<any>) => void;
   query: QueryBuilder<any>;
   options?: QueryOptions;
+  session?: Session;
   unsubscribe: ReturnType<typeof vi.fn>;
 };
 
@@ -60,7 +62,10 @@ function makeDelta(all: Todo[]): SubscriptionDelta<Todo> {
   };
 }
 
-function createUnitHarness(appId = "orchestrator-unit"): UnitHarness {
+function createUnitHarness(
+  appId = "orchestrator-unit",
+  initialSession?: Session | null,
+): UnitHarness {
   const calls: SubscribeCall[] = [];
   let throwOnSubscribe: Error | null = null;
 
@@ -69,12 +74,14 @@ function createUnitHarness(appId = "orchestrator-unit"): UnitHarness {
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
+      session?: Session,
     ): () => void;
   } = {
     subscribeAll<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
+      session?: Session,
     ): () => void {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
@@ -84,13 +91,14 @@ function createUnitHarness(appId = "orchestrator-unit"): UnitHarness {
         callback: callback as (delta: SubscriptionDelta<any>) => void,
         query: query as QueryBuilder<any>,
         options,
+        session,
         unsubscribe,
       });
       return unsubscribe;
     },
   };
 
-  const manager = new SubscriptionsOrchestrator({ appId }, db);
+  const manager = new SubscriptionsOrchestrator({ appId }, db, initialSession);
 
   return {
     manager,
@@ -508,6 +516,57 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
       expect((harness.manager as any).entries.has(key)).toBe(false);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U21 setSession resubscribes active entries with the latest session", async () => {
+    const initialSession: Session = {
+      user_id: "alice",
+      claims: { role: "reader" },
+    };
+    const nextSession: Session = {
+      user_id: "alice",
+      claims: { role: "writer" },
+    };
+    const harness = createUnitHarness("orchestrator-unit-session", initialSession);
+
+    try {
+      harness.makeEntry();
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.session).toEqual(initialSession);
+
+      harness.manager.setSession(nextSession);
+
+      expect(harness.calls).toHaveLength(2);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
+      expect(harness.calls[1]?.session).toEqual(nextSession);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U22 setSession skips resubscribe work when the session is unchanged", async () => {
+    const session: Session = {
+      user_id: "alice",
+      claims: { role: "reader" },
+    };
+    const harness = createUnitHarness("orchestrator-unit-same-session", session);
+
+    try {
+      harness.makeEntry();
+
+      expect(harness.calls).toHaveLength(1);
+
+      harness.manager.setSession({
+        user_id: "alice",
+        claims: { role: "reader" },
+      });
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
     } finally {
       await harness.manager.shutdown();
     }

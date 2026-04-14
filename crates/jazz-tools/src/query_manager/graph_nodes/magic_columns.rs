@@ -10,8 +10,8 @@ use crate::query_manager::magic_columns::MagicColumnKind;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName,
-    Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema,
+    TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
 };
 use crate::storage::Storage;
 
@@ -23,12 +23,12 @@ fn tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
             (
                 TupleElement::Row {
                     content: old_content,
-                    commit_id: old_commit,
+                    version_id: old_commit,
                     ..
                 },
                 TupleElement::Row {
                     content: new_content,
-                    commit_id: new_commit,
+                    version_id: new_commit,
                     ..
                 },
             ) => old_content != new_content || old_commit != new_commit,
@@ -61,6 +61,7 @@ pub struct MagicColumnsNode {
     session: Option<Session>,
     schema: Schema,
     branch: String,
+    row_policy_mode: RowPolicyMode,
     dependency_tables: HashSet<String>,
     dependency_dirty: bool,
     current_tuples: AHashSet<Tuple>,
@@ -70,12 +71,13 @@ pub struct MagicColumnsNode {
 }
 
 impl MagicColumnsNode {
-    pub(crate) fn new(
+    pub(crate) fn new_with_policy_mode(
         input_tuple_descriptor: TupleDescriptor,
         requests: &[MagicColumnRequest],
         session: Option<Session>,
         schema: Schema,
         branch: impl Into<String>,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         if requests.is_empty() {
             return None;
@@ -164,7 +166,7 @@ impl MagicColumnsNode {
                 }
             }
 
-            tables.push((element.table.clone(), descriptor));
+            tables.push((element.table, descriptor));
         }
 
         let output_tuple_descriptor = TupleDescriptor::from_tables(&tables).with_all_materialized();
@@ -178,6 +180,7 @@ impl MagicColumnsNode {
             session,
             schema,
             branch: branch.into(),
+            row_policy_mode,
             dependency_tables,
             dependency_dirty: false,
             current_tuples: AHashSet::new(),
@@ -203,7 +206,7 @@ impl MagicColumnsNode {
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
 
@@ -278,7 +281,7 @@ impl MagicColumnsNode {
     fn reevaluate_all_with_context(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
         let input_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -320,7 +323,7 @@ impl MagicColumnsNode {
         &self,
         tuple: &Tuple,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Option<Tuple> {
         let mut projected = tuple.clone();
 
@@ -352,8 +355,8 @@ impl MagicColumnsNode {
             let element = projected.get_mut(request.element_index)?;
             *element = TupleElement::Row {
                 id: row.id,
-                content: new_content,
-                commit_id: row.commit_id,
+                content: new_content.into(),
+                version_id: row.version_id,
                 row_provenance: row.provenance,
             };
         }
@@ -368,7 +371,7 @@ impl MagicColumnsNode {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> Value {
         match kind {
             MagicColumnKind::CreatedBy => Value::Text(row.provenance.created_by.clone()),
@@ -380,7 +383,12 @@ impl MagicColumnsNode {
                     return Value::Null;
                 };
 
-                let evaluator = PolicyContextEvaluator::new(&self.schema, session, &self.branch);
+                let evaluator = PolicyContextEvaluator::new(
+                    &self.schema,
+                    session,
+                    &self.branch,
+                    self.row_policy_mode,
+                );
                 let operation = match kind {
                     MagicColumnKind::CanRead => Operation::Select,
                     MagicColumnKind::CanEdit => Operation::Update,

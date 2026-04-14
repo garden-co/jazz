@@ -110,7 +110,8 @@ impl std::error::Error for CatalogueEncodingError {}
 /// [version: u8][table_count: u32][table_1]...[table_n]
 /// ```
 ///
-/// Tables are sorted by name for deterministic encoding.
+/// Tables are sorted by name for deterministic encoding. Column order within a
+/// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
     let version = SchemaEncodingVersion::V4;
@@ -205,12 +206,8 @@ fn encode_row_descriptor_with_version(
     desc: &RowDescriptor,
     version: SchemaEncodingVersion,
 ) {
-    // Sort columns by name for deterministic encoding
-    let mut columns: Vec<_> = desc.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    write_u32(buf, columns.len() as u32);
-    for col in columns {
+    write_u32(buf, desc.columns.len() as u32);
+    for col in &desc.columns {
         encode_column_descriptor_with_version(buf, col, version);
     }
 }
@@ -500,9 +497,15 @@ const OP_REMOVE_COLUMN: u8 = 2;
 const OP_RENAME_COLUMN: u8 = 3;
 const OP_ADD_TABLE: u8 = 4;
 const OP_REMOVE_TABLE: u8 = 5;
+const OP_RENAME_TABLE: u8 = 6;
 
 fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
     match op {
+        LensOp::RenameTable { old_name, new_name } => {
+            buf.push(OP_RENAME_TABLE);
+            write_string(buf, old_name);
+            write_string(buf, new_name);
+        }
         LensOp::AddColumn {
             table,
             column,
@@ -553,6 +556,11 @@ fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
 fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
     let tag = read_u8(data, offset)?;
     match tag {
+        OP_RENAME_TABLE => {
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameTable { old_name, new_name })
+        }
         OP_ADD_COLUMN => {
             let table = read_string(data, offset, "table")?;
             let column = read_string(data, offset, "column")?;
@@ -1704,6 +1712,30 @@ mod tests {
     }
 
     #[test]
+    fn schema_roundtrip_preserves_declared_column_order() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let users = decoded.get(&TableName::new("users")).unwrap();
+        let column_names = users
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["name", "id", "email"]);
+    }
+
+    #[test]
     fn schema_roundtrip_complex() {
         let schema = SchemaBuilder::new()
             .table(
@@ -2325,8 +2357,39 @@ mod tests {
     }
 
     #[test]
+    fn lens_transform_roundtrip_rename_table() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+
+        let encoded = encode_lens_transform(&transform);
+        let decoded = decode_lens_transform(&encoded).unwrap();
+
+        assert_eq!(decoded.ops.len(), 1);
+        assert!(matches!(
+            &decoded.ops[0],
+            LensOp::RenameTable { old_name, new_name }
+            if old_name == "users" && new_name == "people"
+        ));
+    }
+
+    #[test]
     fn lens_transform_roundtrip_all_ops() {
         let mut transform = LensTransform::new();
+
+        // RenameTable
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
 
         // AddColumn
         transform.push(
@@ -2387,7 +2450,8 @@ mod tests {
         let encoded = encode_lens_transform(&transform);
         let decoded = decode_lens_transform(&encoded).unwrap();
 
-        assert_eq!(decoded.ops.len(), 5);
+        assert_eq!(decoded.ops.len(), 6);
+        assert_eq!(decoded.ops, transform.ops);
     }
 
     #[test]

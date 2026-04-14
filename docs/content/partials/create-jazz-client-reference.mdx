@@ -2,10 +2,10 @@
 | ---------------- | -------- | --------------------------------------------------------------------------- |
 | `appId`          | yes      | Application identifier. Isolates storage between apps.                      |
 | `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.                    |
-| `localAuthMode`  | no       | Local synthetic auth mode: `"anonymous"` or `"demo"`.                       |
-| `localAuthToken` | no       | Explicit local synthetic token override.                                    |
+| `auth`           | no       | Local-first auth config: `{ localFirstSecret: string }`.                    |
 | `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration.          |
 | `adminSecret`    | no       | Admin secret for schema catalog sync.                                       |
+| `runtimeSources` | no       | Runtime source overrides for browser workers, Wasm URLs, or Wasm input.     |
 | `driver`         | no       | Storage driver: `{ type: "persistent" }` (default) or `{ type: "memory" }`. |
 | `dbName`         | no       | Local database name. Defaults to `appId`.                                   |
 | `env`            | no       | Environment label (for example `"dev"`, `"prod"`).                          |

@@ -330,3 +330,232 @@ impl Value {
         }
     }
 }
+
+// ── From impls for ergonomic Value construction ─────────────────────
+// Note: no `From<u64>` for `Timestamp` — a bare u64 is ambiguous (could be a
+// large integer or a millisecond timestamp). Use `Value::Timestamp(ts)` explicitly.
+
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Value::Boolean(v)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(v: i32) -> Self {
+        Value::Integer(v)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(v: i64) -> Self {
+        Value::BigInt(v)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Value::Double(v)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Value::Text(v.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Value::Text(v)
+    }
+}
+
+impl From<ObjectId> for Value {
+    fn from(v: ObjectId) -> Self {
+        Value::Uuid(v)
+    }
+}
+
+/// Produces `Bytea`, not `Array` of integers. Use `Value::Array(...)` explicitly
+/// if you need an integer array.
+impl From<Vec<u8>> for Value {
+    fn from(v: Vec<u8>) -> Self {
+        Value::Bytea(v)
+    }
+}
+
+impl From<Vec<Value>> for Value {
+    fn from(v: Vec<Value>) -> Self {
+        Value::Array(v)
+    }
+}
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(v: Option<T>) -> Self {
+        match v {
+            Some(inner) => inner.into(),
+            None => Value::Null,
+        }
+    }
+}
+
+/// Build a `HashMap<String, Value>` from key-value pairs with heterogeneous types.
+///
+/// Each value can be any type that implements `Into<Value>`.
+///
+/// ```ignore
+/// row_input!("name" => "Alice", "age" => 30i32)
+/// ```
+#[macro_export]
+macro_rules! row_input {
+    ($( $col:expr => $val:expr ),* $(,)?) => {{
+        #[allow(unused_mut)]
+        let mut map = std::collections::HashMap::<String, $crate::query_manager::types::Value>::new();
+        $( map.insert($col.to_string(), <_ as Into<$crate::query_manager::types::Value>>::into($val)); )*
+        map
+    }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── From<bool> ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_bool_true() {
+        let v: Value = true.into();
+        assert_eq!(v, Value::Boolean(true));
+    }
+
+    #[test]
+    fn from_bool_false() {
+        let v: Value = false.into();
+        assert_eq!(v, Value::Boolean(false));
+    }
+
+    // ── From<i32> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_i32() {
+        let v: Value = 42i32.into();
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn from_i32_negative() {
+        let v: Value = (-1i32).into();
+        assert_eq!(v, Value::Integer(-1));
+    }
+
+    // ── From<i64> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_i64() {
+        let v: Value = 1_000_000_000_000i64.into();
+        assert_eq!(v, Value::BigInt(1_000_000_000_000));
+    }
+
+    // ── From<f64> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_f64() {
+        let v: Value = std::f64::consts::PI.into();
+        assert_eq!(v, Value::Double(std::f64::consts::PI));
+    }
+
+    // ── From<&str> ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_str_ref() {
+        let v: Value = "hello".into();
+        assert_eq!(v, Value::Text("hello".to_string()));
+    }
+
+    // ── From<String> ────────────────────────────────────────────────
+
+    #[test]
+    fn from_string() {
+        let v: Value = String::from("world").into();
+        assert_eq!(v, Value::Text("world".to_string()));
+    }
+
+    // ── From<ObjectId> ──────────────────────────────────────────────
+
+    #[test]
+    fn from_object_id() {
+        let oid = ObjectId::new();
+        let v: Value = oid.into();
+        assert_eq!(v, Value::Uuid(oid));
+    }
+
+    // ── From<Vec<u8>> ───────────────────────────────────────────────
+
+    #[test]
+    fn from_vec_u8() {
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let v: Value = bytes.clone().into();
+        assert_eq!(v, Value::Bytea(bytes));
+    }
+
+    // ── From<Vec<Value>> ────────────────────────────────────────────
+
+    #[test]
+    fn from_vec_value() {
+        let arr = vec![Value::Integer(1), Value::Integer(2)];
+        let v: Value = arr.clone().into();
+        assert_eq!(v, Value::Array(arr));
+    }
+
+    // ── From<Option<T>> ─────────────────────────────────────────────
+
+    #[test]
+    fn from_option_some() {
+        let v: Value = Some(42i32).into();
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn from_option_none() {
+        let v: Value = Option::<i32>::None.into();
+        assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn from_option_some_string() {
+        let v: Value = Some("hey".to_string()).into();
+        assert_eq!(v, Value::Text("hey".to_string()));
+    }
+
+    // ── row_input! ──────────────────────────────────────────────────
+
+    #[test]
+    fn row_input_builds_hashmap() {
+        let map = row_input!("name" => "Alice", "age" => 30i32);
+
+        let mut expected = HashMap::new();
+        expected.insert("name".to_string(), Value::Text("Alice".to_string()));
+        expected.insert("age".to_string(), Value::Integer(30));
+
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn row_input_empty() {
+        let map: HashMap<String, Value> = row_input!();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn row_input_with_option_null() {
+        let map = row_input!(
+            "present" => Some("yes"),
+            "absent" => Option::<&str>::None,
+        );
+
+        assert_eq!(map["present"], Value::Text("yes".to_string()));
+        assert_eq!(map["absent"], Value::Null);
+    }
+}

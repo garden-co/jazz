@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -19,19 +19,16 @@ use uuid::Uuid;
 
 use crate::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
+    SyncPayloadResult, UnauthenticatedResponse,
 };
-use crate::middleware::auth::{
-    derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_backend_secret,
-};
+use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
 use crate::object::ObjectId;
 use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
-use crate::sync_manager::ClientId;
+use crate::sync_manager::{ClientId, SyncPayload};
 
 /// Runs an async closure when this guard is dropped.
 ///
@@ -67,8 +64,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
-        // Link a local anonymous/demo principal to an external identity.
-        .route("/auth/link-external", post(link_external_handler))
         // Health check
         .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http());
@@ -87,9 +82,18 @@ struct EventsParams {
     client_id: Option<String>,
 }
 
+const CLIENT_SCHEMA_HASH_HEADER: &str = "X-Jazz-Client-Schema-Hash";
+
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
     hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSchemaResponse {
+    schema: Schema,
+    published_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,8 +119,14 @@ struct PublishMigrationRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PublishTableLens {
     table: String,
+    #[serde(default)]
+    added: bool,
+    #[serde(default)]
+    removed: bool,
+    renamed_from: Option<String>,
     operations: Vec<PublishLensOp>,
 }
 
@@ -181,14 +191,6 @@ struct PublishMigrationResponse {
     object_id: String,
     from_hash: String,
     to_hash: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LinkExternalResponse {
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
 }
 
 async fn forward_catalogue_request(
@@ -305,12 +307,33 @@ async fn events_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Query(params): Query<EventsParams>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, Response> {
     // Parse client_id from query param - error if malformed, generate if missing
     let client_id = match params.client_id {
-        Some(s) => ClientId::parse(&s)
-            .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
+        Some(s) => ClientId::parse(&s).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "Invalid client_id: {}",
+                    s
+                ))),
+            )
+                .into_response()
+        })?,
         None => ClientId::new(),
+    };
+    let client_schema_hash = match headers
+        .get(CLIENT_SCHEMA_HASH_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(hash_text) => Some(parse_schema_hash_param(hash_text).map_err(|message| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response()
+        })?),
+        None => None,
     };
 
     {
@@ -334,7 +357,7 @@ async fn events_handler(
 
     let setup = if backend_secret.is_some() && !has_session_header {
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
-            return Err((status, msg.to_string()));
+            return Err((status, Json(ErrorResponse::unauthorized(msg))).into_response());
         }
         ClientSetup::Backend
     } else {
@@ -346,13 +369,13 @@ async fn events_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {
                 Ok(s) => s,
-                Err((status, msg)) => {
-                    return Err((status, msg.to_string()));
+                Err(error) => {
+                    return Err((StatusCode::UNAUTHORIZED, Json(error)).into_response());
                 }
             }
         };
@@ -367,9 +390,11 @@ async fn events_handler(
                 );
                 return Err((
                     StatusCode::UNAUTHORIZED,
-                    "Session required for event stream. Provide JWT, local auth headers, or backend secret."
-                        .to_string(),
-                ));
+                    Json(UnauthenticatedResponse::missing(
+                        "Session required for event stream. Provide JWT or backend secret.",
+                    )),
+                )
+                    .into_response());
             }
         };
 
@@ -381,6 +406,9 @@ async fn events_handler(
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (next_sync_seq, mut sync_rx) = state
+        .connection_event_hub
+        .register_connection(connection_id, client_id);
     {
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
@@ -396,8 +424,26 @@ async fn events_handler(
         }
     }
 
-    // Subscribe to broadcast channel for this client's events
-    let mut sync_rx = state.sync_broadcast.subscribe();
+    if let Some(client_schema_hash) = client_schema_hash {
+        match state.runtime.with_schema_manager(|schema_manager| {
+            schema_manager.connection_schema_diagnostics(client_schema_hash)
+        }) {
+            Ok(diagnostics) if diagnostics.has_issues() => {
+                state.connection_event_hub.dispatch_payload(
+                    client_id,
+                    SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(
+                    %client_id,
+                    %client_schema_hash,
+                    "failed to compute connection schema diagnostics: {err}"
+                );
+            }
+        }
+    }
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
@@ -413,6 +459,9 @@ async fn events_handler(
             let conn = connections.remove(&connection_id_cleanup);
             conn.map(|c| c.client_id)
         };
+        state_cleanup
+            .connection_event_hub
+            .unregister_connection(connection_id_cleanup);
         if let Some(closed_client_id) = closed_client_id {
             state_cleanup.on_connection_closed(closed_client_id).await;
             tracing::debug!(
@@ -431,7 +480,7 @@ async fn events_handler(
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
-            next_sync_seq: None,
+            next_sync_seq: Some(next_sync_seq),
             catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
@@ -444,24 +493,15 @@ async fn events_handler(
                 // Check for sync updates for this client
                 result = sync_rx.recv() => {
                     match result {
-                        Ok((target_client_id, payload)) => {
-                            // Only emit if this is for our client
-                            if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate {
-                                    seq: None,
-                                    payload: Box::new(payload),
-                                };
-                                yield Ok(encode_frame(&event));
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            // We fell behind, continue
-                            tracing::warn!("Stream client {} lagged behind on sync updates", connection_id);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Some(update) => {
                             // Channel closed, exit
-                            break;
+                            let event = ServerEvent::SyncUpdate {
+                                seq: Some(update.seq),
+                                payload: Box::new(update.payload),
+                            };
+                            yield Ok(encode_frame(&event));
                         }
+                        None => break,
                     }
                 }
                 // Send periodic heartbeat
@@ -483,6 +523,7 @@ async fn events_handler(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to build SSE response: {e}"),
             )
+                .into_response()
         })
 }
 
@@ -554,7 +595,7 @@ async fn sync_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {
@@ -566,15 +607,13 @@ async fn sync_handler(
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
-                        Json(ErrorResponse::unauthorized(
-                            "Session required for sync. Provide JWT, local auth headers, or backend secret.",
+                        Json(UnauthenticatedResponse::missing(
+                            "Session required for sync. Provide JWT or backend secret.",
                         )),
                     )
                         .into_response();
                 }
-                Err((status, msg)) => {
-                    return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-                }
+                Err(error) => return (StatusCode::UNAUTHORIZED, Json(error)).into_response(),
             }
         };
 
@@ -617,7 +656,7 @@ async fn sync_handler(
     Json(SyncBatchResponse { results }).into_response()
 }
 
-/// Return the catalogue schema for the given hash.
+/// Return the catalogue schema for the given hash plus its publish timestamp.
 ///
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
 async fn schema_handler(
@@ -666,11 +705,26 @@ async fn schema_handler(
 
     match state.runtime.known_schema(&schema_hash) {
         Ok(Some(schema)) => {
+            let published_at = match state.runtime.schema_published_at(&schema_hash) {
+                Ok(timestamp) => timestamp,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::internal(format!(
+                            "failed to read schema publish timestamp: {err}"
+                        ))),
+                    )
+                        .into_response();
+                }
+            };
             tracing::info!(
                 requested_hash = %schema_hash.short(),
                 "schema request: returning requested hash"
             );
-            let body = schema.clone();
+            let body = StoredSchemaResponse {
+                schema: schema.clone(),
+                published_at,
+            };
             Json(body).into_response()
         }
         Ok(None) => (
@@ -1077,8 +1131,8 @@ async fn publish_migration_handler(
         }
     };
 
-    match state.runtime.known_schema(&source_hash) {
-        Ok(Some(_)) => {}
+    let source_schema = match state.runtime.known_schema(&source_hash) {
+        Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -1098,10 +1152,10 @@ async fn publish_migration_handler(
             )
                 .into_response();
         }
-    }
+    };
 
-    match state.runtime.known_schema(&target_hash) {
-        Ok(Some(_)) => {}
+    let target_schema = match state.runtime.known_schema(&target_hash) {
+        Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -1121,11 +1175,96 @@ async fn publish_migration_handler(
             )
                 .into_response();
         }
-    }
+    };
 
     let mut forward = LensTransform::new();
     for table_lens in request.forward {
         let table_name = table_lens.table;
+        if table_lens.added && table_lens.removed {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "table {} cannot be both added and removed",
+                    table_name
+                ))),
+            )
+                .into_response();
+        }
+        if (table_lens.added || table_lens.removed) && table_lens.renamed_from.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "table {} cannot combine added/removed markers with renamedFrom",
+                    table_name
+                ))),
+            )
+                .into_response();
+        }
+        if (table_lens.added || table_lens.removed) && !table_lens.operations.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "table {} cannot combine added/removed markers with column operations",
+                    table_name
+                ))),
+            )
+                .into_response();
+        }
+        if table_lens.added {
+            let target_table_name = TableName::from(table_name.clone());
+            let schema = match target_schema.get(&target_table_name) {
+                Some(schema) => schema.clone(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::bad_request(format!(
+                            "createTables references unknown target table {}",
+                            table_name
+                        ))),
+                    )
+                        .into_response();
+                }
+            };
+            forward.push(
+                LensOp::AddTable {
+                    table: table_name.clone(),
+                    schema,
+                },
+                false,
+            );
+        }
+        if table_lens.removed {
+            let source_table_name = TableName::from(table_name.clone());
+            let schema = match source_schema.get(&source_table_name) {
+                Some(schema) => schema.clone(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::bad_request(format!(
+                            "dropTables references unknown source table {}",
+                            table_name
+                        ))),
+                    )
+                        .into_response();
+                }
+            };
+            forward.push(
+                LensOp::RemoveTable {
+                    table: table_name.clone(),
+                    schema,
+                },
+                false,
+            );
+        }
+        if let Some(renamed_from) = table_lens.renamed_from {
+            forward.push(
+                LensOp::RenameTable {
+                    old_name: renamed_from,
+                    new_name: table_name.clone(),
+                },
+                false,
+            );
+        }
         for operation in table_lens.operations {
             let op = match operation {
                 PublishLensOp::Introduce {
@@ -1317,199 +1456,6 @@ fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-async fn link_external_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let (local_mode, local_token) = match parse_local_auth_headers(&headers) {
-        Ok(Some(local)) => local,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Local auth headers are required for link-external",
-                )),
-            )
-                .into_response();
-        }
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
-        }
-    };
-
-    if !state.auth_config.is_local_mode_enabled(local_mode) {
-        let message = match local_mode {
-            crate::middleware::auth::LocalAuthMode::Anonymous => "Anonymous auth disabled",
-            crate::middleware::auth::LocalAuthMode::Demo => "Demo auth disabled",
-        };
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized(message)),
-        )
-            .into_response();
-    }
-
-    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Authorization bearer token is required",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let token = match auth_value.strip_prefix("Bearer ") {
-        Some(token) if !token.trim().is_empty() => token.trim(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Invalid Authorization header format",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let jwt_result = if let Some(ref cache) = state.jwks_cache {
-        crate::middleware::auth::validate_jwt_with_cache(token, cache).await
-    } else {
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured)
-    };
-
-    let verified = match jwt_result {
-        Ok(verified) => verified,
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(
-                    "JWT validation not configured".to_string(),
-                )),
-            )
-                .into_response();
-        }
-        Err(crate::middleware::auth::JwtError::Invalid(_)) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::unauthorized("Invalid JWT")),
-            )
-                .into_response();
-        }
-    };
-
-    let issuer = match verified.issuer.as_deref().map(str::trim) {
-        Some(iss) if !iss.is_empty() => iss.to_string(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "JWT issuer (iss) is required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let subject = verified.subject.trim().to_string();
-    if subject.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
-        )
-            .into_response();
-    }
-
-    let local_principal_id = derive_local_principal_id(state.app_id, local_mode, &local_token);
-    if let Some(claim_principal) = verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        && claim_principal != local_principal_id
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::bad_request(
-                "JWT jazz_principal_id claim does not match local principal",
-            )),
-        )
-            .into_response();
-    }
-
-    let existing = match state
-        .external_identity_store
-        .get_external_identity(state.app_id, &issuer, &subject)
-        .await
-    {
-        Ok(row) => row,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    };
-
-    let mut created = false;
-
-    if let Some(row) = existing {
-        if row.principal_id != local_principal_id {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(
-                    "external identity is already linked to a different principal",
-                )),
-            )
-                .into_response();
-        }
-    } else {
-        if let Err(err) = state
-            .external_identity_store
-            .create_external_identity(state.app_id, &issuer, &subject, &local_principal_id)
-            .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-        created = true;
-    }
-
-    {
-        let mut mappings = state.external_identities.write().await;
-        match mappings.get(&(issuer.clone(), subject.clone())) {
-            Some(existing_principal) if existing_principal != &local_principal_id => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::bad_request(
-                        "external identity is already linked to a different principal",
-                    )),
-                )
-                    .into_response();
-            }
-            _ => {
-                mappings.insert(
-                    (issuer.clone(), subject.clone()),
-                    local_principal_id.clone(),
-                );
-            }
-        }
-    }
-
-    Json(LinkExternalResponse {
-        principal_id: local_principal_id,
-        issuer,
-        subject,
-        created,
-    })
-    .into_response()
-}
-
 /// Health check endpoint.
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
@@ -1526,10 +1472,12 @@ mod tests {
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync_manager::{
-        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+        ClientId, ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source,
+        SyncPayload,
     };
     use axum::body;
     use axum::routing::{get, post};
+    use futures::StreamExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -1540,10 +1488,14 @@ mod tests {
         AuthConfig {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: true,
             jwks_url: None,
         }
+    }
+
+    fn mint_test_token(audience: &str) -> String {
+        let seed = [42u8; 32];
+        crate::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
     }
 
     /// Spin up the full router backed by an in-process runtime.
@@ -1553,8 +1505,7 @@ mod tests {
         let auth_config = AuthConfig {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: false,
             jwks_url: None,
         };
 
@@ -1597,6 +1548,7 @@ mod tests {
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
         axum::Router::new()
+            .route("/events", get(events_handler))
             .route("/schema/:hash", get(schema_handler))
             .route("/schemas", get(schema_hashes_handler))
             .route("/admin/schemas", post(publish_schema_handler))
@@ -1610,17 +1562,26 @@ mod tests {
             .with_state(state)
     }
 
-    /// A minimal valid `SyncPayload::ObjectUpdated` as a `serde_json::Value`,
-    /// suitable for embedding in batch request bodies.
-    fn object_updated_payload(object_id: &str) -> Value {
-        serde_json::json!({
-            "ObjectUpdated": {
-                "object_id": object_id,
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        })
+    /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
+    /// in batch request bodies.
+    fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
+        let row_id =
+            ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
+        let row = crate::row_histories::StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::<crate::commit::CommitId>::new(),
+            b"alice".to_vec(),
+            crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
+            Default::default(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+
+        crate::sync_manager::SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1631,15 +1592,28 @@ mod tests {
         body: Option<Value>,
     }
 
-    // -------------------------------------------------------------------------
-    // Batch sync handler tests
-    //
-    // These are RED: the /sync endpoint currently expects
-    // {"payload":…,"client_id":…} (singular). Sending the new always-array
-    // {"payloads":[…],"client_id":…} body currently returns 422. These tests
-    // will go green once SyncPayloadRequest is replaced with SyncBatchRequest
-    // and sync_handler returns {"results":[…]}.
-    // -------------------------------------------------------------------------
+    async fn read_server_events(body: axum::body::Body, expected_count: usize) -> Vec<ServerEvent> {
+        let mut stream = body.into_data_stream();
+        let mut events = Vec::new();
+        let mut buffered = Vec::new();
+
+        while events.len() < expected_count {
+            if let Some((event, consumed)) = ServerEvent::decode_frame(&buffered) {
+                events.push(event);
+                buffered.drain(..consumed);
+                continue;
+            }
+
+            let next_chunk = tokio::time::timeout(Duration::from_millis(250), stream.next())
+                .await
+                .expect("timed out waiting for stream chunk")
+                .expect("stream ended before expected events")
+                .expect("stream chunk should decode");
+            buffered.extend_from_slice(&next_chunk);
+        }
+
+        events
+    }
 
     #[tokio::test]
     async fn sync_batch_accepts_two_payloads_and_returns_ok_results() {
@@ -1655,13 +1629,13 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
-        let body = serde_json::json!({
-            "payloads": [
-                object_updated_payload("00000000-0000-0000-0000-000000000001"),
-                object_updated_payload("00000000-0000-0000-0000-000000000002"),
+        let body = SyncBatchRequest {
+            payloads: vec![
+                row_version_created_payload("00000000-0000-0000-0000-000000000001"),
+                row_version_created_payload("00000000-0000-0000-0000-000000000002"),
             ],
-            "client_id": client_id,
-        });
+            client_id,
+        };
 
         let response = app
             .oneshot(
@@ -1694,10 +1668,12 @@ mod tests {
         // No auth headers → 401 before any payloads are applied
         let app = make_sync_test_app("test-backend-secret").await;
 
-        let body = serde_json::json!({
-            "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
-            "client_id": ClientId::new(),
-        });
+        let body = SyncBatchRequest {
+            payloads: vec![row_version_created_payload(
+                "00000000-0000-0000-0000-000000000001",
+            )],
+            client_id: ClientId::new(),
+        };
 
         let response = app
             .oneshot(
@@ -1713,6 +1689,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "unauthenticated");
+        assert_eq!(json["code"], "missing");
     }
 
     #[tokio::test]
@@ -1722,14 +1705,14 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
-        let payloads: Vec<Value> = (0..60)
-            .map(|i| object_updated_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
+        let payloads: Vec<crate::sync_manager::SyncPayload> = (0..60)
+            .map(|i| row_version_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
             .collect();
 
-        let body = serde_json::json!({
-            "payloads": payloads,
-            "client_id": client_id,
-        });
+        let body = SyncBatchRequest {
+            payloads,
+            client_id,
+        };
 
         let response = app
             .oneshot(
@@ -1764,8 +1747,7 @@ mod tests {
             .with_auth_config(AuthConfig {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
-                allow_anonymous: true,
-                allow_demo: true,
+                allow_local_first_auth: false,
                 jwks_url: None,
             })
             .with_in_memory_storage()
@@ -1829,7 +1811,7 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
+        let state = make_state_with_schema(schema.clone()).await;
 
         let app = make_test_router(state);
 
@@ -1867,6 +1849,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(schema_response.status(), StatusCode::OK);
+        let schema_body = body::to_bytes(schema_response.into_body(), usize::MAX)
+            .await
+            .expect("schema body");
+        let schema_json: Value = serde_json::from_slice(&schema_body).expect("schema json");
+        let expected_schema_json = serde_json::to_value(schema).expect("expected schema json");
+        assert_eq!(schema_json["schema"], expected_schema_json);
+        assert!(schema_json.get("publishedAt").is_some());
 
         let bad_hash_response = app
             .oneshot(
@@ -2486,6 +2475,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_migration_persists_table_rename_ops() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2).await;
+        state
+            .runtime
+            .add_known_schema(v1)
+            .expect("seed known schema for publish test");
+        let app = make_test_router(state.clone());
+
+        let request_body = serde_json::json!({
+            "fromHash": v1_hash.to_string(),
+            "toHash": v2_hash.to_string(),
+            "forward": [{
+                "table": "people",
+                "renamedFrom": "users",
+                "operations": [{
+                    "type": "rename",
+                    "column": "email",
+                    "value": "email_address"
+                }]
+            }]
+        });
+
+        let created = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lens = state
+            .runtime
+            .with_schema_manager(|schema_manager| {
+                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
+            })
+            .expect("read schema manager lens")
+            .expect("published lens should be registered in schema manager");
+
+        assert_eq!(
+            lens.forward.ops,
+            vec![
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "people".to_string(),
+                },
+                LensOp::RenameColumn {
+                    table: "people".to_string(),
+                    old_name: "email".to_string(),
+                    new_name: "email_address".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_migration_persists_added_and_removed_table_ops() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("legacy_profiles")
+                    .column("id", ColumnType::Uuid)
+                    .column("bio", ColumnType::Text)
+                    .nullable_column("avatar_url", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("profiles")
+                    .column("id", ColumnType::Uuid)
+                    .column("bio", ColumnType::Text)
+                    .nullable_column("avatar_url", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2.clone()).await;
+        state
+            .runtime
+            .add_known_schema(v1.clone())
+            .expect("seed known schema for publish test");
+        let app = make_test_router(state.clone());
+
+        let request_body = serde_json::json!({
+            "fromHash": v1_hash.to_string(),
+            "toHash": v2_hash.to_string(),
+            "forward": [
+                {
+                    "table": "profiles",
+                    "added": true,
+                    "operations": []
+                },
+                {
+                    "table": "legacy_profiles",
+                    "removed": true,
+                    "operations": []
+                }
+            ]
+        });
+
+        let created = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lens = state
+            .runtime
+            .with_schema_manager(|schema_manager| {
+                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
+            })
+            .expect("read schema manager lens")
+            .expect("published lens should be registered in schema manager");
+
+        assert_eq!(lens.forward.ops.len(), 2);
+
+        match &lens.forward.ops[0] {
+            LensOp::AddTable { table, schema } => {
+                assert_eq!(table, "profiles");
+                let expected = v2.get(&TableName::from("profiles")).unwrap();
+                assert_eq!(
+                    schema.columns.content_hash(),
+                    expected.columns.content_hash(),
+                );
+                assert_eq!(schema.policies, expected.policies);
+            }
+            other => panic!("expected AddTable op, got {other:?}"),
+        }
+
+        match &lens.forward.ops[1] {
+            LensOp::RemoveTable { table, schema } => {
+                assert_eq!(table, "legacy_profiles");
+                let expected = v1.get(&TableName::from("legacy_profiles")).unwrap();
+                assert_eq!(
+                    schema.columns.content_hash(),
+                    expected.columns.content_hash(),
+                );
+                assert_eq!(schema.policies, expected.policies);
+            }
+            other => panic!("expected RemoveTable op, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn admin_subscription_introspection_requires_admin_secret_and_valid_app_id() {
         let schema = SchemaBuilder::new()
             .table(
@@ -2648,5 +2823,53 @@ mod tests {
                     .map(|query| query.contains("\"name\""))
                     .unwrap_or(false)
         }));
+    }
+
+    #[tokio::test]
+    async fn events_handler_emits_connection_schema_diagnostics_for_client_schema() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let current_hash = SchemaHash::compute(&schema);
+        let declared_hash = SchemaHash::from_bytes([9; 32]);
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/events")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", mint_test_token("test-app")),
+                    )
+                    .header("X-Jazz-Client-Schema-Hash", declared_hash.to_string())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("events response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = read_server_events(response.into_body(), 2).await;
+        assert!(matches!(events[0], ServerEvent::Connected { .. }));
+
+        match &events[1] {
+            ServerEvent::SyncUpdate { payload, .. } => {
+                assert_eq!(
+                    payload.as_ref(),
+                    &SyncPayload::ConnectionSchemaDiagnostics(ConnectionSchemaDiagnostics {
+                        client_schema_hash: declared_hash,
+                        disconnected_permissions_schema_hash: Some(current_hash),
+                        unreachable_schema_hashes: vec![],
+                    })
+                );
+            }
+            other => panic!("expected SyncUpdate, got {}", other.variant_name()),
+        }
     }
 }

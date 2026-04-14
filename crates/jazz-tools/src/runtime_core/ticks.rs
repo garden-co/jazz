@@ -22,6 +22,53 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         //    was just processed and made the schema available).
         self.schema_manager.process(&mut self.storage);
 
+        // 2b. Release QuerySettled notifications whose upstream stream watermark
+        // has definitely been applied.
+        let ready_query_settled = {
+            let pending = self
+                .schema_manager
+                .query_manager_mut()
+                .sync_manager_mut()
+                .take_pending_query_settled();
+            let mut ready = Vec::new();
+            let mut blocked = Vec::new();
+
+            for pending_settled in pending {
+                let is_ready = pending_settled.server_id.is_none_or(|server_id| {
+                    self.last_applied_server_seq
+                        .get(&server_id)
+                        .copied()
+                        .unwrap_or(0)
+                        >= pending_settled.through_seq
+                });
+                if is_ready {
+                    ready.push(pending_settled);
+                } else {
+                    blocked.push(pending_settled);
+                }
+            }
+
+            if !blocked.is_empty() {
+                self.schema_manager
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .requeue_pending_query_settled(blocked);
+            }
+
+            ready
+        };
+
+        if !ready_query_settled.is_empty() {
+            {
+                let query_manager = self.schema_manager.query_manager_mut();
+                for pending_settled in ready_query_settled {
+                    query_manager
+                        .apply_query_settled(pending_settled.query_id, pending_settled.tier);
+                }
+            }
+            self.schema_manager.process(&mut self.storage);
+        }
+
         // 3. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
         let subscription_failures = self
@@ -122,14 +169,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .take_received_acks();
-        for (commit_id, acked_tier) in received_acks {
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
+            .take_received_row_version_acks();
+        for (row_version_key, acked_tier) in received_acks {
+            if let Some(watchers) = self.ack_watchers.remove(&row_version_key) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
                         tracing::debug!(
-                            ?commit_id,
+                            ?row_version_key,
                             ?acked_tier,
                             ?requested_tier,
                             "ack watcher resolved"
@@ -140,7 +187,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     }
                 }
                 if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
+                    self.ack_watchers.insert(row_version_key, remaining);
                 }
             }
         }
@@ -197,9 +244,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
-        {
+        if self.storage_write_pending_flush {
             let _span = tracing::debug_span!("flush_wal").entered();
             self.storage.flush_wal();
+            self.clear_storage_write_pending_flush();
         }
     }
 
@@ -215,6 +263,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             );
         }
         for msg in messages {
+            if msg.payload.writes_storage() {
+                self.mark_storage_write_pending_flush();
+            }
             self.push_sync_inbox(msg);
             applied_messages += 1;
         }
@@ -230,7 +281,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let mut remove_buffer = false;
             if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
                 while let Some(msg) = buffered.remove(&next_expected) {
-                    ready_messages.push(msg);
+                    ready_messages.push((next_expected, msg));
                     next_expected += 1;
                 }
 
@@ -238,12 +289,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     remove_buffer = true;
                 }
             }
-            for msg in ready_messages {
+            let mut last_applied = self
+                .last_applied_server_seq
+                .get(&server_id)
+                .copied()
+                .unwrap_or(next_expected.saturating_sub(1));
+            for (sequence, msg) in ready_messages {
+                if msg.payload.writes_storage() {
+                    self.mark_storage_write_pending_flush();
+                }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
+                last_applied = sequence;
             }
             self.next_expected_server_seq
                 .insert(server_id, next_expected);
+            self.last_applied_server_seq.insert(server_id, last_applied);
             if remove_buffer {
                 self.parked_sync_messages_by_server_seq.remove(&server_id);
             }
@@ -305,6 +366,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let next_sequence = next_sequence.max(1);
         self.next_expected_server_seq
             .insert(server_id, next_sequence);
+        self.last_applied_server_seq
+            .insert(server_id, next_sequence.saturating_sub(1));
         if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
             buffered.retain(|seq, _| *seq >= next_sequence);
         }

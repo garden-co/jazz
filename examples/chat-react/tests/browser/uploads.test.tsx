@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { Toaster } from "../../src/components/ui/sonner.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
 
@@ -33,6 +34,16 @@ function simulateClick(el: HTMLElement) {
   el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
   el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
   el.click();
+}
+
+function findPlusButton(el: HTMLElement): HTMLButtonElement | null {
+  return (
+    el.querySelector<HTMLButtonElement>("button:has(.lucide-plus)") ??
+    ([...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus")) as
+      | HTMLButtonElement
+      | undefined) ??
+    null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +87,7 @@ describe("Upload E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
@@ -102,12 +114,19 @@ describe("Upload E2E", () => {
       "Editor should be visible",
     );
 
+    await waitFor(
+      () => {
+        const plusButton = findPlusButton(el);
+        return plusButton !== null && !plusButton.disabled;
+      },
+      10000,
+      "Action menu button should be enabled",
+    );
+
     // Open the action menu and click "Image"
-    const plusButton =
-      el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    await act(async () => simulateClick(plusButton as HTMLButtonElement));
 
     await waitFor(
       () =>
@@ -178,12 +197,19 @@ describe("Upload E2E", () => {
       "Editor should be visible",
     );
 
+    await waitFor(
+      () => {
+        const plusButton = findPlusButton(el);
+        return plusButton !== null && !plusButton.disabled;
+      },
+      10000,
+      "Action menu button should be enabled",
+    );
+
     // Open the action menu and click "File"
-    const plusButton =
-      el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    await act(async () => simulateClick(plusButton as HTMLButtonElement));
 
     await waitFor(
       () =>
