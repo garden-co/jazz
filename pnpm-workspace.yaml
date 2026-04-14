@@ -1,6 +1,7 @@
 packages:
   - docs
   - packages/*
+  - starters/*
   - examples/*
   - "!examples/world-tour"
   - examples/docs/*
