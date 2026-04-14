@@ -39,8 +39,6 @@ pub mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
-mod transport;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;
@@ -51,8 +49,6 @@ use thiserror::Error;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, SessionClient};
 
-#[cfg(all(feature = "client", feature = "transport"))]
-pub use jazz_transport::ServerEvent;
 #[cfg(feature = "client")]
 pub use object::ObjectId;
 #[cfg(feature = "client")]
@@ -138,9 +134,6 @@ pub enum JazzError {
 
     #[error("Schema error: {0}")]
     Schema(String),
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

@@ -699,9 +699,7 @@ pub struct NativeTickNotifier<S: Storage + Send + 'static> {
 }
 
 #[cfg(feature = "transport")]
-impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier
-    for NativeTickNotifier<S>
-{
+impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();
     }
@@ -737,6 +735,17 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// `TransportManager` task detects the dropped handle and exits cleanly.
     pub fn disconnect(&self) {
         self.core.lock().unwrap().clear_transport();
+    }
+
+    /// Returns `true` once the WebSocket transport has completed at least one
+    /// successful handshake. Useful for callers that need to wait until the
+    /// initial connection is established before proceeding.
+    pub fn transport_ever_connected(&self) -> bool {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.has_ever_connected()))
+            .unwrap_or(false)
     }
 }
 

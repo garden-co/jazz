@@ -2,17 +2,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
-use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{
-    OrderedRowDelta, RowDescriptor, Schema, SchemaHash, TableName, Value,
-};
+use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -20,16 +16,12 @@ use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 #[cfg(feature = "rocksdb")]
 use crate::storage::{RocksDBStorage, StorageError};
-use crate::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
-};
+use crate::sync_manager::{ClientId, DurabilityTier, OutboxEntry, SyncManager};
+use crate::transport_manager::AuthConfig as WsAuthConfig;
 use base64::Engine;
-use bytes::BytesMut;
-use futures::StreamExt;
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
 
-use crate::transport::{AuthConfig, ServerConnection};
 use crate::{
     AppContext, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream,
 };
@@ -54,14 +46,12 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
-    /// Connection to the server (shared for event processor).
-    server_connection: Option<Arc<ServerConnection>>,
+    /// Whether a server URL was provided at construction time.
+    has_server: bool,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
-    /// Handle for the stream listener task.
-    stream_listener_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// State for an active subscription.
@@ -124,8 +114,8 @@ impl JazzClient {
     /// This will:
     /// 1. Open local storage
     /// 2. Initialize the runtime
-    /// 3. Connect to the server (if URL provided)
-    /// 4. Start syncing
+    /// 3. Connect to the server over WebSocket (if URL provided)
+    /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
@@ -139,20 +129,6 @@ impl JazzClient {
             tracer.register_client(client_id, name);
         }
 
-        // Connect to server if URL provided (before creating runtime so we have the connection)
-        let auth_config = AuthConfig::from_context(&context);
-        let server_connection = if !context.server_url.is_empty() {
-            match ServerConnection::connect(&context.server_url, auth_config).await {
-                Ok(conn) => Some(Arc::new(conn)),
-                Err(e) => {
-                    tracing::warn!("Failed to connect to server: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let storage: DynStorage = match context.storage {
             ClientStorage::Persistent => open_persistent_storage(&context.data_dir).await?,
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
@@ -160,203 +136,56 @@ impl JazzClient {
 
         let schema_manager = build_client_schema_manager(&storage, &context)?;
 
-        // Clone server connection for sync callback
-        let server_conn_for_sync = server_connection.clone();
-        let client_id_for_sync = client_id;
-        let server_id = ServerId::default();
-        let tracer_for_outgoing = context.sync_tracer.clone();
-
-        // Create runtime with sync callback
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            // Record outgoing message to tracer if present
-            if let Some((ref tracer, ref name)) = tracer_for_outgoing {
-                tracer.record_outgoing(name, &entry.destination, &entry.payload);
-            }
-            // Send to server if connected and destination is server
-            if let Destination::Server(_) = entry.destination
-                && let Some(ref conn) = server_conn_for_sync
-            {
-                let conn = conn.clone();
-                let payload = entry.payload.clone();
-                let cid = client_id_for_sync;
-                tokio::spawn(async move {
-                    if let Some(delay) = test_send_delay_for_object_updated(&payload) {
-                        tokio::time::sleep(delay).await;
-                    }
-
-                    if let Err(e) = conn.push_sync(payload, cid).await {
-                        tracing::warn!("Failed to push sync to server: {}", e);
-                    }
-                });
-            }
-        });
+        // Create runtime. The sync callback is a no-op — the WS TransportManager
+        // drives the outbox directly via its own channel.
+        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
 
         // Persist schema to catalogue for server sync
         runtime
             .persist_schema()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
-        // Spawn binary stream listener if connected to server
-        let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
-            let (tx, rx) = oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+        let has_server = !context.server_url.is_empty();
 
-        let stream_listener_task = if let Some(ref conn) = server_connection {
-            let conn_for_stream = conn.clone();
-            let client_id_str = client_id.to_string();
-            let runtime_for_stream = runtime.clone();
-            let stream_headers = conn.build_stream_headers(SchemaHash::compute(&declared_schema));
-            let server_id_for_stream = server_id;
-            let mut initial_stream_ready_tx = initial_stream_ready_tx;
-            let tracer_for_incoming = context.sync_tracer.clone();
-
-            Some(tokio::spawn(async move {
-                let http_client = reqwest::Client::new();
-                loop {
-                    let url = conn_for_stream.stream_url(&client_id_str);
-
-                    tracing::info!("Connecting to server event stream: {}", url);
-
-                    match http_client
-                        .get(&url)
-                        .headers(stream_headers.clone())
-                        .send()
-                        .await
-                    {
-                        Ok(response) => {
-                            if !response.status().is_success() {
-                                tracing::warn!(
-                                    "Event stream connection failed: {}",
-                                    response.status()
-                                );
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                continue;
-                            }
-
-                            tracing::info!("Event stream connected");
-
-                            let mut body = response.bytes_stream();
-                            let mut buffer = BytesMut::new();
-
-                            while let Some(chunk_result) = body.next().await {
-                                match chunk_result {
-                                    Ok(chunk) => {
-                                        buffer.extend_from_slice(&chunk);
-
-                                        // Read complete frames from buffer
-                                        while buffer.len() >= 4 {
-                                            let len =
-                                                u32::from_be_bytes(buffer[..4].try_into().unwrap())
-                                                    as usize;
-                                            if buffer.len() < 4 + len {
-                                                break; // Incomplete frame
-                                            }
-                                            let json = &buffer[4..4 + len];
-
-                                            match serde_json::from_slice::<ServerEvent>(json) {
-                                                Ok(event) => {
-                                                    let connected_catalogue_state_hash =
-                                                        match &event {
-                                                            ServerEvent::Connected {
-                                                                catalogue_state_hash,
-                                                                ..
-                                                            } => Some(catalogue_state_hash.clone()),
-                                                            _ => None,
-                                                        };
-
-                                                    if let Err(e) = handle_server_event(
-                                                        event,
-                                                        &runtime_for_stream,
-                                                        server_id_for_stream,
-                                                        tracer_for_incoming.as_ref(),
-                                                    ) {
-                                                        tracing::warn!(
-                                                            "Error handling server event: {}",
-                                                            e
-                                                        );
-                                                    } else if let Some(catalogue_state_hash) =
-                                                        connected_catalogue_state_hash
-                                                        && let Some(tx) =
-                                                            initial_stream_ready_tx.take()
-                                                    {
-                                                        let _ = tx.send(catalogue_state_hash);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to parse server event: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-
-                                            // Advance buffer past this frame
-                                            let _ = buffer.split_to(4 + len);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Stream chunk error: {}", e);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Event stream connection error: {}", e);
-                        }
-                    }
-
-                    // Reconnect after delay
-                    tracing::info!("Event stream disconnected, reconnecting in 5s...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }))
-        } else {
-            None
-        };
-
-        let initial_server_catalogue_state_hash =
-            if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
-                tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
-                    .await
-                    .map_err(|_| {
-                        JazzError::Connection(
-                            "timed out waiting for server event stream to connect".to_string(),
-                        )
-                    })?
-                    .map_err(|_| {
-                        JazzError::Connection(
-                            "server event stream ended before sending Connected".to_string(),
-                        )
-                    })?
-            } else {
-                None
+        if has_server {
+            let ws_url = http_url_to_ws(&context.server_url)?;
+            let auth = WsAuthConfig {
+                jwt_token: context.jwt_token.clone(),
+                backend_secret: context.backend_secret.clone(),
+                admin_secret: context.admin_secret.clone(),
+                backend_session: None,
+                local_mode: None,
+                local_token: None,
             };
+            runtime.connect(ws_url, auth);
 
-        // Register server with sync manager if connected.
-        //
-        // The initial Connected event carries the server's catalogue digest, so
-        // we wait for it before deciding whether catalogue replay can be skipped.
-        if server_connection.is_some()
-            && let Err(e) = runtime.add_server_with_catalogue_state_hash(
-                server_id,
-                initial_server_catalogue_state_hash.as_deref(),
-            )
-        {
-            tracing::warn!("Failed to register server with sync manager: {}", e);
+            // Wait until the WS handshake has completed at least once.
+            // `batched_tick` handles `TransportInbound::Connected` automatically —
+            // it calls `add_server_with_catalogue_state_hash` — so we only need
+            // to gate here until that first tick fires.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if runtime.transport_ever_connected() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                JazzError::Connection(
+                    "timed out waiting for WebSocket handshake to complete".to_string(),
+                )
+            })?;
         }
 
         Ok(Self {
             declared_schema,
             default_session,
             runtime,
-            server_connection,
+            has_server,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
-            stream_listener_task,
         })
     }
 
@@ -536,7 +365,7 @@ impl JazzClient {
 
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
-        self.server_connection.is_some()
+        self.has_server && self.runtime.transport_ever_connected()
     }
 
     /// Create a session-scoped client for backend operations.
@@ -548,11 +377,10 @@ impl JazzClient {
     }
 
     /// Shutdown the client and release resources.
-    pub async fn shutdown(mut self) -> Result<()> {
-        // Abort stream listener first (it holds TokioRuntime clone)
-        if let Some(handle) = self.stream_listener_task.take() {
-            handle.abort();
-            let _ = handle.await;
+    pub async fn shutdown(self) -> Result<()> {
+        // Disconnect from server (drops the TransportHandle; manager task exits cleanly)
+        if self.has_server {
+            self.runtime.disconnect();
         }
 
         // Flush pending operations
@@ -1143,114 +971,6 @@ mod tests {
     }
 }
 
-fn parse_delay_ms(raw: &str) -> Option<Duration> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((min_raw, max_raw)) = trimmed.split_once('-') {
-        let min = min_raw.trim().parse::<u64>().ok()?;
-        let max = max_raw.trim().parse::<u64>().ok()?;
-        if min > max {
-            return None;
-        }
-        return Some(Duration::from_millis(min + ((max - min) / 2)));
-    }
-
-    trimmed.parse::<u64>().ok().map(Duration::from_millis)
-}
-
-fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
-    if !matches!(
-        payload,
-        SyncPayload::RowVersionCreated { .. }
-            | SyncPayload::RowVersionNeeded { .. }
-            | SyncPayload::RowVersionStateChanged { .. }
-    ) {
-        return None;
-    }
-
-    let delay = parse_delay_ms(&std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS").ok()?)?;
-    let every_n = std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(2);
-
-    static OBJECT_UPDATED_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
-    let seq = OBJECT_UPDATED_SEND_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if !seq.is_multiple_of(every_n) {
-        return None;
-    }
-
-    Some(delay)
-}
-
-/// Handle incoming server events.
-fn handle_server_event(
-    event: ServerEvent,
-    runtime: &ClientRuntime,
-    server_id: ServerId,
-    sync_tracer: Option<&(crate::sync_tracer::SyncTracer, String)>,
-) -> Result<()> {
-    match event {
-        ServerEvent::Connected {
-            connection_id,
-            client_id,
-            next_sync_seq,
-            ..
-        } => {
-            tracing::info!(
-                "Stream connected with id: {:?}, client_id: {}",
-                connection_id,
-                client_id
-            );
-            if let Some(next_sequence) = next_sync_seq {
-                runtime
-                    .set_server_next_sequence(server_id, next_sequence)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            }
-            Ok(())
-        }
-        ServerEvent::SyncUpdate { seq, payload } => {
-            if let SyncPayload::SchemaWarning(warning) = payload.as_ref() {
-                crate::sync_manager::log_schema_warning(warning, None, None);
-            }
-            // Record incoming message to tracer if present
-            if let Some((tracer, name)) = sync_tracer {
-                tracer.record_incoming(&Source::Server(server_id), name, &payload);
-            }
-            let entry = InboxEntry {
-                source: Source::Server(server_id),
-                payload: *payload,
-            };
-            if let Some(sequence) = seq {
-                runtime
-                    .push_sync_inbox_with_sequence(entry, sequence)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            } else {
-                runtime
-                    .push_sync_inbox(entry)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            }
-            Ok(())
-        }
-        ServerEvent::Subscribed { query_id } => {
-            tracing::debug!("Server acknowledged subscription: {:?}", query_id);
-            Ok(())
-        }
-        ServerEvent::Error { message, code } => {
-            tracing::error!("Server error {:?}: {}", code, message);
-            Ok(())
-        }
-        ServerEvent::Heartbeat => {
-            tracing::trace!("Heartbeat received");
-            Ok(())
-        }
-    }
-}
-
 fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId> {
     std::fs::create_dir_all(&context.data_dir)?;
 
@@ -1272,6 +992,31 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     };
 
     Ok(client_id)
+}
+
+/// Convert an HTTP(S) server URL to the WebSocket `/ws` endpoint URL.
+///
+/// `http://host/prefix` → `ws://host/prefix/ws`
+/// `https://host` → `wss://host/ws`
+fn http_url_to_ws(server_url: &str) -> Result<String> {
+    let trimmed = server_url.trim().trim_end_matches('/');
+    let (ws_scheme, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        ("wss", r)
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        ("ws", r)
+    } else if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        // Already a WS URL — just append /ws if not already present
+        return Ok(if trimmed.ends_with("/ws") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/ws")
+        });
+    } else {
+        return Err(JazzError::Connection(format!(
+            "invalid server URL '{server_url}': expected http:// or https://"
+        )));
+    };
+    Ok(format!("{ws_scheme}://{rest}/ws"))
 }
 
 async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {
