@@ -97,3 +97,81 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
     await expect(pb.backup(tooLong)).rejects.toMatchObject({ code: "invalid-secret" });
   });
 });
+
+const VALID_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 zero bytes
+
+describe("BrowserPasskeyBackup.backup — credentials.create", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("calls credentials.create with user.id equal to the decoded secret bytes", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    expect(mockCreate).toHaveBeenCalledOnce();
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    const userId = new Uint8Array(callArg.publicKey.user.id as ArrayBuffer);
+    expect(userId).toEqual(new Uint8Array(32)); // 32 zero bytes
+  });
+
+  it("sets residentKey: required on authenticatorSelection", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.authenticatorSelection?.residentKey).toBe("required");
+    expect(callArg.publicKey.authenticatorSelection?.requireResidentKey).toBe(true);
+  });
+
+  it("sets rp.id to appHostname", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "myapp.com" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.rp.id).toBe("myapp.com");
+  });
+
+  it("sets pubKeyCredParams with ES256 first then RS256", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.pubKeyCredParams).toEqual([
+      { alg: -7, type: "public-key" },
+      { alg: -257, type: "public-key" },
+    ]);
+  });
+
+  it("throws create-failed with cause when credentials.create rejects", async () => {
+    const underlying = new Error("User cancelled");
+    const mockCreate = vi.fn().mockRejectedValue(underlying);
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.backup(VALID_SECRET)).rejects.toMatchObject({
+      code: "create-failed",
+      cause: underlying,
+    });
+  });
+});
