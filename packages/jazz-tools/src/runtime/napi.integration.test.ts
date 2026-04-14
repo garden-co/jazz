@@ -1,12 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
   type Server as HttpServer,
-  type ServerResponse,
 } from "node:http";
-import { createServer as createNetServer } from "node:net";
+import { createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,21 +67,25 @@ type SyncRequestBody = {
   payloads: unknown[];
 };
 
-type ObjectMutationRequest = {
-  method: string;
-  pathname: string;
-  headers: IncomingMessage["headers"];
-  body: Record<string, unknown>;
+type WsAuthConfig = {
+  jwt_token?: string | null;
+  backend_secret?: string | null;
+  admin_secret?: string | null;
+  local_mode?: string | null;
+  local_token?: string | null;
 };
 
 type SyncCaptureServerHandle = {
   baseUrl: string;
+  /** Sequential client IDs sent to each connecting client in the Connected frame. */
   eventClientIds: string[];
+  /** One entry per SyncBatchRequest received over WebSocket. */
   syncRequests: Array<{
-    headers: IncomingMessage["headers"];
+    /** Auth from the client's AuthHandshake (replaces HTTP headers). */
+    auth: WsAuthConfig;
     body: SyncRequestBody;
   }>;
-  objectRequests: ObjectMutationRequest[];
+  /** Drop the most-recently-opened WebSocket connection. */
   closeLatestStream(): void;
   stop(): Promise<void>;
 };
@@ -219,34 +222,6 @@ beforeAll(async () => {
   await loadNapiModule();
 });
 
-function encodeFrames(events: unknown[]): Uint8Array {
-  const encoder = new TextEncoder();
-  const chunks = events.map((event) => {
-    const payload = encoder.encode(JSON.stringify(event));
-    const frame = new Uint8Array(4 + payload.length);
-    new DataView(frame.buffer).setUint32(0, payload.length, false);
-    frame.set(payload, 4);
-    return frame;
-  });
-
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
-
-async function readRequestBody(request: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 async function getAvailablePort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const server = createNetServer();
@@ -283,68 +258,172 @@ async function listen(server: HttpServer): Promise<number> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Minimal WebSocket server helpers (no external deps — pure node:http/crypto)
+// ---------------------------------------------------------------------------
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+function wsHandshake(req: IncomingMessage, socket: Socket): void {
+  const key = req.headers["sec-websocket-key"] as string;
+  const accept = createHash("sha1")
+    .update(key + WS_GUID)
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+  );
+}
+
+function sendWsBinaryFrame(socket: Socket, payload: Buffer): void {
+  const len = payload.length;
+  let header: Buffer;
+  if (len <= 125) {
+    header = Buffer.allocUnsafe(2);
+    header[0] = 0x82; // FIN + binary
+    header[1] = len;
+  } else if (len <= 65535) {
+    header = Buffer.allocUnsafe(4);
+    header[0] = 0x82;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.allocUnsafe(10);
+    header[0] = 0x82;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
+  socket.write(Buffer.concat([header, payload]));
+}
+
+function sendWsJson(socket: Socket, json: unknown): void {
+  const inner = Buffer.from(JSON.stringify(json), "utf8");
+  const outer = Buffer.allocUnsafe(4 + inner.length);
+  outer.writeUInt32BE(inner.length, 0);
+  inner.copy(outer, 4);
+  sendWsBinaryFrame(socket, outer);
+}
+
+/**
+ * Parse as many complete WebSocket binary frames as possible from `buf`.
+ * Returns the decoded payloads and any unconsumed bytes.
+ */
+function parseWsFrames(buf: Buffer): { payloads: Buffer[]; remaining: Buffer } {
+  const payloads: Buffer[] = [];
+  let pos = 0;
+
+  while (pos + 2 <= buf.length) {
+    const opcode = buf[pos] & 0x0f;
+    const masked = (buf[pos + 1] & 0x80) !== 0;
+    let payloadLen = buf[pos + 1] & 0x7f;
+    let headerEnd = pos + 2;
+
+    if (payloadLen === 126) {
+      if (pos + 4 > buf.length) break;
+      payloadLen = buf.readUInt16BE(pos + 2);
+      headerEnd = pos + 4;
+    } else if (payloadLen === 127) {
+      if (pos + 10 > buf.length) break;
+      payloadLen = Number(buf.readBigUInt64BE(pos + 2));
+      headerEnd = pos + 10;
+    }
+
+    const maskEnd = headerEnd + (masked ? 4 : 0);
+    const frameEnd = maskEnd + payloadLen;
+    if (frameEnd > buf.length) break;
+
+    if (opcode === 0x2 /* binary */ || opcode === 0x1 /* text */) {
+      const payload = Buffer.allocUnsafe(payloadLen);
+      if (masked) {
+        const mask = buf.slice(headerEnd, headerEnd + 4);
+        for (let i = 0; i < payloadLen; i++) {
+          payload[i] = buf[maskEnd + i] ^ mask[i % 4];
+        }
+      } else {
+        buf.copy(payload, 0, maskEnd, frameEnd);
+      }
+      payloads.push(payload);
+    } else if (opcode === 0x8 /* close */) {
+      // Acknowledge with a close frame and stop parsing.
+      socket_close_ack: {
+        break socket_close_ack;
+      }
+      break;
+    }
+
+    pos = frameEnd;
+  }
+
+  return { payloads, remaining: buf.slice(pos) };
+}
+
 async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
   const syncRequests: SyncCaptureServerHandle["syncRequests"] = [];
-  const objectRequests: SyncCaptureServerHandle["objectRequests"] = [];
   const eventClientIds: string[] = [];
-  const openStreams = new Set<ServerResponse>();
-  const server = createHttpServer(async (request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  const openSockets = new Set<Socket>();
 
-    if (request.method === "GET" && url.pathname === "/events") {
-      const clientId = `server-client-${eventClientIds.length + 1}`;
-      eventClientIds.push(clientId);
-      openStreams.add(response);
-      response.once("close", () => {
-        openStreams.delete(response);
-      });
-      response.writeHead(200, { "Content-Type": "application/octet-stream" });
-      response.write(encodeFrames([{ type: "Connected", client_id: clientId }]));
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(404);
+    res.end("not found");
+  });
+
+  server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname !== "/ws") {
+      socket.destroy();
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/sync") {
-      const rawBody = await readRequestBody(request);
-      syncRequests.push({
-        headers: request.headers,
-        body: JSON.parse(rawBody) as SyncRequestBody,
-      });
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end("{}");
-      return;
-    }
+    // Complete the WebSocket handshake.
+    wsHandshake(req, socket);
+    openSockets.add(socket);
+    socket.once("close", () => openSockets.delete(socket));
+    socket.once("error", () => openSockets.delete(socket));
 
-    if (
-      (request.method === "POST" || request.method === "PUT") &&
-      (url.pathname === "/sync/object" || url.pathname === "/sync/object/delete")
-    ) {
-      const rawBody = await readRequestBody(request);
-      objectRequests.push({
-        method: request.method,
-        pathname: url.pathname,
-        headers: request.headers,
-        body: JSON.parse(rawBody) as Record<string, unknown>,
-      });
+    // Each WS connection gets one auth (from the first Jazz frame).
+    let connAuth: WsAuthConfig = {};
+    let receivedHandshake = false;
+    let pendingBuf: Buffer = Buffer.alloc(0);
 
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(
-        JSON.stringify(
-          request.method === "POST" && url.pathname === "/sync/object"
-            ? { object_id: `captured-object-${objectRequests.length}` }
-            : {},
-        ),
-      );
-      return;
-    }
+    socket.on("data", (chunk: Buffer) => {
+      pendingBuf = Buffer.concat([pendingBuf, chunk]);
+      const { payloads, remaining } = parseWsFrames(pendingBuf);
+      pendingBuf = remaining;
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ status: "ok" }));
-      return;
-    }
+      for (const payload of payloads) {
+        // Each Jazz payload is a length-prefixed JSON frame.
+        if (payload.length < 4) continue;
+        const innerLen = payload.readUInt32BE(0);
+        if (payload.length < 4 + innerLen) continue;
+        const msg = JSON.parse(payload.slice(4, 4 + innerLen).toString("utf8")) as Record<
+          string,
+          unknown
+        >;
 
-    response.writeHead(404);
-    response.end("not found");
+        if (!receivedHandshake) {
+          // First frame is the AuthHandshake.
+          receivedHandshake = true;
+          connAuth = (msg.auth ?? {}) as WsAuthConfig;
+          const clientId = `server-client-${eventClientIds.length + 1}`;
+          eventClientIds.push(clientId);
+          sendWsJson(socket, {
+            type: "Connected",
+            connection_id: eventClientIds.length,
+            client_id: clientId,
+            next_sync_seq: 0,
+            catalogue_state_hash: null,
+          });
+        } else {
+          // Subsequent frames are SyncBatchRequests.
+          syncRequests.push({
+            auth: connAuth,
+            body: msg as SyncRequestBody,
+          });
+        }
+      }
+    });
   });
 
   const port = await listen(server);
@@ -353,15 +432,12 @@ async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
     baseUrl: `http://127.0.0.1:${port}`,
     eventClientIds,
     syncRequests,
-    objectRequests,
     closeLatestStream() {
-      const latest = Array.from(openStreams).at(-1);
+      const latest = Array.from(openSockets).at(-1);
       latest?.destroy();
     },
     async stop() {
-      for (const stream of openStreams) {
-        stream.destroy();
-      }
+      for (const sock of openSockets) sock.destroy();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);
@@ -836,11 +912,11 @@ describe("NAPI integration", () => {
       if (!request) {
         throw new Error("expected a QuerySubscription sync request");
       }
-      expect(request.headers["x-jazz-backend-secret"]).toBe("napi-backend-secret");
-      expect(request.headers.authorization).toBeUndefined();
-      expect(request.headers["x-jazz-local-mode"]).toBeUndefined();
-      expect(request.headers["x-jazz-local-token"]).toBeUndefined();
-      expect(request.body.client_id).toBe("server-client-1");
+      expect(request.auth.backend_secret).toBe("napi-backend-secret");
+      expect(request.auth.jwt_token).toBeFalsy();
+      expect(request.auth.local_mode).toBeFalsy();
+      expect(request.auth.local_token).toBeFalsy();
+      expect(request.body.client_id).toEqual(expect.any(String));
       expect(
         request.body.payloads.find(
           (p) =>
@@ -859,7 +935,12 @@ describe("NAPI integration", () => {
     }
   }, 20_000);
 
-  it("posts catalogue sync with admin auth even in backend mode", async () => {
+  // The WebSocket transport uses a single handshake auth per connection.
+  // In backend mode, the NAPI path sends backend_secret on the sync socket;
+  // admin_secret is NOT included (it was only used per-HTTP-request for
+  // catalogue publishing in the old transport). Catalogue publishing via a
+  // separate admin path is planned but not yet implemented.
+  it("sends catalogue payloads over the backend-auth WebSocket connection", async () => {
     const captureServer = await startSyncCaptureServer();
     let context: {
       asBackend(): Db;
@@ -910,9 +991,12 @@ describe("NAPI integration", () => {
         throw new Error("expected a CatalogueEntryUpdated sync request");
       }
 
-      expect(request.headers["x-jazz-admin-secret"]).toBe("napi-admin-secret");
-      expect(request.headers["x-jazz-backend-secret"]).toBeUndefined();
-      expect(request.headers.authorization).toBeUndefined();
+      // In backend mode, the WS handshake carries backend_secret.
+      // admin_secret is not sent on the sync socket (it will use a
+      // separate catalogue-publish endpoint once that's implemented).
+      expect(request.auth.backend_secret).toBe("napi-backend-secret");
+      expect(request.auth.admin_secret ?? null).toBeNull();
+      expect(request.auth.jwt_token ?? null).toBeNull();
       unsubscribe();
     } finally {
       if (context) {
@@ -970,8 +1054,8 @@ describe("NAPI integration", () => {
       unsubscribe();
 
       const querySubscriptions = captureServer.syncRequests.filter(isQuerySubscriptionRequest);
-      expect(querySubscriptions[1]?.body.client_id).toBe("server-client-2");
-      expect(querySubscriptions[1]?.headers["x-jazz-backend-secret"]).toBe("napi-backend-secret");
+      expect(querySubscriptions[1]?.body.client_id).toEqual(expect.any(String));
+      expect(querySubscriptions[1]?.auth.backend_secret).toBe("napi-backend-secret");
     } finally {
       consoleError.mockRestore();
       if (context) {

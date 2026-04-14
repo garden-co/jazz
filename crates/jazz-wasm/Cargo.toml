@@ -8,7 +8,9 @@ description = "WebAssembly bindings for the Jazz database engine"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false }
+jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
+  "transport",
+] }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -25,9 +27,18 @@ uuid = { version = "1.0", features = ["v7", "serde", "js"] }
 smallvec = { version = "1.13", features = ["serde"] }
 web-time = "1.1"
 getrandom = { version = "0.2", features = ["js"] }
+futures = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+web-sys = { version = "0.3", features = [
+  "WebSocket",
+  "MessageEvent",
+  "BinaryType",
+  "CloseEvent",
+  "EventTarget",
+  "ErrorEvent",
+] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

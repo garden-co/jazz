@@ -18,7 +18,7 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::SyncManager;
 
-pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
+pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs
@@ -272,7 +272,9 @@ pub fn create_runtime_with_storage<S: Storage>(storage: S) -> BenchRuntime<S> {
         "main",
     )
     .expect("schema manager");
-    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler);
+    core.set_peer_sender(Box::new(VecSyncSender::new()));
+    core
 }
 
 /// Create a new RuntimeCore with MemoryStorage for benchmarking.

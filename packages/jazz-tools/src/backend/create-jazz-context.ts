@@ -165,7 +165,9 @@ export class JazzContext {
       defaultDurabilityTier: "edge",
     };
 
-    this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
+    this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context, {
+      useBackendSyncAuth: !!this.config.backendSecret,
+    });
     return this.clientInstance;
   }
 

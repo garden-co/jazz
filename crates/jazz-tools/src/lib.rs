@@ -20,6 +20,7 @@ pub mod sync_manager;
 pub mod sync_tracer;
 #[cfg(test)]
 mod test_row_history;
+pub mod transport_manager;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
@@ -32,9 +33,12 @@ pub mod transport_protocol;
 #[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
 
+#[cfg(feature = "transport-websocket")]
+pub mod ws_stream;
+
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
+#[cfg(feature = "transport-http")]
 mod transport;
 
 #[cfg(feature = "client")]
@@ -134,6 +138,7 @@ pub enum JazzError {
     #[error("Schema error: {0}")]
     Schema(String),
 
+    #[cfg(feature = "transport-http")]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

@@ -162,7 +162,7 @@ fn make_subscription_callback(
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,10 +330,10 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+    core.set_peer_sender(Box::new(NapiSyncSender::new()));
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -379,6 +379,22 @@ fn build_napi_runtime(
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
     })
+}
+
+// ============================================================================
+// NapiTickNotifier
+// ============================================================================
+
+/// TickNotifier for the NAPI runtime.
+/// Bridges the async transport task back to the synchronous RuntimeCore scheduler.
+struct NapiTickNotifier {
+    schedule_fn: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for NapiTickNotifier {
+    fn notify(&self) {
+        (self.schedule_fn)();
+    }
 }
 
 // ============================================================================
@@ -1037,11 +1053,13 @@ impl NapiRuntime {
             SyncCallbackParams,
         >,
     ) -> napi::Result<()> {
-        let core = self
+        let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(callback);
+        let sender = NapiSyncSender::new();
+        sender.set_callback(callback);
+        core.set_peer_sender(Box::new(sender));
         Ok(())
     }
 
@@ -1182,6 +1200,75 @@ impl NapiRuntime {
             .close()
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
+    }
+
+    // =========================================================================
+    // Transport (WebSocket connect/disconnect)
+    // =========================================================================
+
+    /// Connect to a remote server via WebSocket.
+    ///
+    /// `auth_json` must be a JSON-serialised `AuthConfig`.
+    /// Spawns a background transport task; inbound events drive `batched_tick`
+    /// via `NapiTickNotifier`.
+    #[napi]
+    pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
+        use jazz_tools::transport_manager::AuthConfig;
+        use jazz_tools::ws_stream::NativeWsStream;
+
+        let auth: AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid auth JSON: {e}")))?;
+
+        let core_weak = std::sync::Arc::downgrade(&self.core);
+        let schedule_fn = std::sync::Arc::new(move || {
+            if let Some(core_arc) = core_weak.upgrade()
+                && let Ok(core) = core_arc.lock()
+            {
+                core.scheduler().schedule_batched_tick();
+            }
+        }) as std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
+        let tick = NapiTickNotifier { schedule_fn };
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            NativeWsStream,
+            NapiTickNotifier,
+        >(url, auth, tick);
+
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?
+            .set_transport(handle);
+
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime for transport")
+                .block_on(manager.run());
+        });
+
+        Ok(())
+    }
+
+    /// Disconnect from the server by dropping the transport handle.
+    #[napi]
+    pub fn disconnect(&self) -> napi::Result<()> {
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?
+            .clear_transport();
+        Ok(())
+    }
+
+    /// Returns true once the current transport has successfully completed
+    /// at least one auth handshake with the server.
+    #[napi]
+    pub fn transport_ever_connected(&self) -> napi::Result<bool> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?;
+        Ok(core.transport_ever_connected())
     }
 }
 

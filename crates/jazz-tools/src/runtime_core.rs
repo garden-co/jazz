@@ -1,8 +1,8 @@
 //! RuntimeCore - Unified synchronous runtime logic for both native and WASM.
 //!
 //! This module provides the shared core logic that both jazz-tokio
-//! and jazz-wasm wrap. RuntimeCore is generic over `Storage`, `Scheduler`,
-//! and `SyncSender` which provide platform-specific behavior.
+//! and jazz-wasm wrap. RuntimeCore is generic over `Storage` and `Scheduler`
+//! which provide platform-specific behavior.
 //!
 //! ## Design
 //!
@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler);
 //! runtime.insert(
 //!     "users",
 //!     std::collections::HashMap::from([
@@ -68,6 +68,11 @@ pub trait Scheduler {
 /// by the concrete wrapping type where needed.
 pub trait SyncSender {
     fn send_sync_message(&self, message: OutboxEntry);
+
+    /// Drain all buffered messages (test helper). Returns empty by default.
+    fn take_messages(&self) -> Vec<OutboxEntry> {
+        Vec::new()
+    }
 }
 
 // ============================================================================
@@ -83,13 +88,13 @@ impl Scheduler for NoopScheduler {
 
 /// Collects sync messages for test inspection.
 pub struct VecSyncSender {
-    messages: std::sync::Mutex<Vec<OutboxEntry>>,
+    messages: std::sync::Arc<std::sync::Mutex<Vec<OutboxEntry>>>,
 }
 
 impl Default for VecSyncSender {
     fn default() -> Self {
         Self {
-            messages: std::sync::Mutex::new(Vec::new()),
+            messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -97,6 +102,16 @@ impl Default for VecSyncSender {
 impl VecSyncSender {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a VecSyncSender backed by a shared buffer.
+    pub fn from_shared(messages: std::sync::Arc<std::sync::Mutex<Vec<OutboxEntry>>>) -> Self {
+        Self { messages }
+    }
+
+    /// Get a shared handle to the internal message buffer.
+    pub fn shared(&self) -> std::sync::Arc<std::sync::Mutex<Vec<OutboxEntry>>> {
+        self.messages.clone()
     }
 
     /// Take all collected messages.
@@ -108,6 +123,35 @@ impl VecSyncSender {
 impl SyncSender for VecSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         self.messages.lock().unwrap().push(message);
+    }
+
+    fn take_messages(&self) -> Vec<OutboxEntry> {
+        self.take()
+    }
+}
+
+/// SyncSender adapter that delegates to a callback closure.
+///
+/// Useful for native platforms that dispatch outbox entries via a closure
+/// (e.g., spawning tokio tasks to push to a server connection).
+pub struct CallbackSyncSender {
+    callback: std::sync::Arc<dyn Fn(OutboxEntry) + Send + Sync>,
+}
+
+impl CallbackSyncSender {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(OutboxEntry) + Send + Sync + 'static,
+    {
+        Self {
+            callback: std::sync::Arc::new(callback),
+        }
+    }
+}
+
+impl SyncSender for CallbackSyncSender {
+    fn send_sync_message(&self, message: OutboxEntry) {
+        (self.callback)(message);
     }
 }
 
@@ -207,6 +251,34 @@ pub type SubscriptionCallback = Box<dyn Fn(SubscriptionDelta) + 'static>;
 #[cfg(not(target_arch = "wasm32"))]
 pub type SubscriptionCallback = Box<dyn Fn(SubscriptionDelta) + Send + 'static>;
 
+/// Boxed peer sender type.
+///
+/// On native platforms, must be `Send` for thread safety.
+/// On WASM (single-threaded), `Send` is not required.
+#[cfg(target_arch = "wasm32")]
+type PeerSenderBox = Box<dyn SyncSender>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type PeerSenderBox = Box<dyn SyncSender + Send>;
+
+/// Boxed outbox observer. Called for every outbox entry just before it is
+/// dispatched to the transport or peer sender. On native platforms must be
+/// `Send`; on WASM the runtime is single-threaded so `Send` is not required.
+#[cfg(target_arch = "wasm32")]
+pub type OutboxObserverBox = Box<dyn Fn(&OutboxEntry) + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type OutboxObserverBox = Box<dyn Fn(&OutboxEntry) + Send + Sync + 'static>;
+
+/// Boxed inbox observer. Called for every inbound sync entry drained from the
+/// transport. Used by the SyncTracer to capture incoming traffic with a
+/// human-readable client name.
+#[cfg(target_arch = "wasm32")]
+pub type InboxObserverBox = Box<dyn Fn(&InboxEntry) + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type InboxObserverBox = Box<dyn Fn(&InboxEntry) + Send + Sync + 'static>;
+
 /// State for a subscription.
 struct SubscriptionState {
     /// QueryManager's internal subscription ID.
@@ -223,16 +295,27 @@ struct PendingOneShotQuery {
 
 /// Unified runtime core for both native and WASM platforms.
 ///
-/// Generic over `Storage` for data persistence, `Scheduler` for tick scheduling,
-/// and `SyncSender` for network message dispatch.
+/// Generic over `Storage` for data persistence and `Scheduler` for tick scheduling.
 /// All business logic is synchronous.
-pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
+pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     schema_manager: SchemaManager,
     pub(crate) storage: S,
     scheduler: Sch,
-    sync_sender: Sy,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
+
+    /// WebSocket transport handle (server sync).
+    transport: Option<crate::transport_manager::TransportHandle>,
+    /// Peer/worker-bridge sender (WASM main-thread runtime only).
+    peer_sender: Option<PeerSenderBox>,
+    /// Optional observer called for every outbox entry just before it is
+    /// dispatched to the transport or peer sender. Used by the SyncTracer in
+    /// tests to capture outgoing messages with a human-readable client name.
+    outbox_observer: Option<OutboxObserverBox>,
+    /// Optional observer called for every inbound sync entry drained from the
+    /// transport. Used by the SyncTracer to capture incoming messages with a
+    /// human-readable client name.
+    inbox_observer: Option<InboxObserverBox>,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -262,22 +345,20 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     tier_label: &'static str,
 }
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
-    pub fn new(
-        mut schema_manager: SchemaManager,
-        mut storage: S,
-        scheduler: Sch,
-        sync_sender: Sy,
-    ) -> Self {
+    pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
 
         Self {
             schema_manager,
             storage,
             scheduler,
-            sync_sender,
             storage_write_pending_flush: false,
+            transport: None,
+            peer_sender: None,
+            outbox_observer: None,
+            inbox_observer: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -331,9 +412,60 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage
     }
 
-    /// Get reference to the SyncSender.
-    pub fn sync_sender(&self) -> &Sy {
-        &self.sync_sender
+    /// Set the transport handle for server sync.
+    /// Called by platform runtimes (TokioRuntime::connect, NapiRuntime::connect, etc.)
+    /// when a WebSocket connection is established.
+    pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
+        self.transport = Some(handle);
+    }
+
+    /// Clear the transport handle (on disconnect or shutdown).
+    pub fn clear_transport(&mut self) {
+        self.transport = None;
+    }
+
+    /// Returns true once the current transport handle has successfully
+    /// completed at least one auth handshake with the server.
+    pub fn transport_ever_connected(&self) -> bool {
+        self.transport
+            .as_ref()
+            .map(|h| h.has_ever_connected())
+            .unwrap_or(false)
+    }
+
+    /// Set the peer/worker-bridge sender.
+    pub fn set_peer_sender(&mut self, sender: PeerSenderBox) {
+        self.peer_sender = Some(sender);
+    }
+
+    /// Install an observer closure called for every outbox entry just before
+    /// it is dispatched. Used by tests to record outgoing sync traffic with a
+    /// human-readable client name.
+    pub fn set_outbox_observer(&mut self, observer: OutboxObserverBox) {
+        self.outbox_observer = Some(observer);
+    }
+
+    pub(crate) fn outbox_observer(&self) -> Option<&OutboxObserverBox> {
+        self.outbox_observer.as_ref()
+    }
+
+    /// Install an observer closure called for every inbound sync entry
+    /// drained from the transport. Used by tests to record incoming sync
+    /// traffic with a human-readable client name.
+    pub fn set_inbox_observer(&mut self, observer: InboxObserverBox) {
+        self.inbox_observer = Some(observer);
+    }
+
+    pub(crate) fn inbox_observer(&self) -> Option<&InboxObserverBox> {
+        self.inbox_observer.as_ref()
+    }
+
+    /// Take all buffered messages from the peer sender (test helper).
+    pub fn take_peer_messages(&self) -> Vec<OutboxEntry> {
+        self.peer_sender
+            .as_ref()
+            .map(|s| s.take_messages())
+            .unwrap_or_default()
     }
 
     /// Get reference to the Scheduler.

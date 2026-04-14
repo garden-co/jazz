@@ -49,6 +49,21 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
+  /**
+   * Connect to a remote server via WebSocket.
+   *
+   * `auth_json` must be a JSON-serialised `AuthConfig`.
+   * Spawns a background transport task; inbound events drive `batched_tick`
+   * via `NapiTickNotifier`.
+   */
+  connect(url: string, authJson: string): void
+  /** Disconnect from the server by dropping the transport handle. */
+  disconnect(): void
+  /**
+   * Returns true once the current transport has successfully completed
+   * at least one auth handshake with the server.
+   */
+  transportEverConnected(): boolean
 }
 
 export declare class TestingServer {

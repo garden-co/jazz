@@ -2,8 +2,7 @@
  * Shared sync transport utilities.
  *
  * Used by both `client.ts` (main thread) and `jazz-worker.ts` (worker)
- * to avoid duplicating binary frame parsing, sync POST logic, and
- * catalogue payload detection.
+ * for outbox routing, auth headers, URL building, and identity management.
  */
 
 import { fetchWithTimeout } from "./utils.js";
@@ -36,67 +35,6 @@ export interface LinkExternalResponse {
   created: boolean;
 }
 
-/** Callbacks for stream events. */
-export interface StreamCallbacks {
-  onSyncMessage(payloadJson: string, seq?: number | null): void;
-  onConnected?(
-    clientId: string,
-    catalogueStateHash?: string | null,
-    nextSyncSeq?: number | null,
-  ): void;
-}
-
-export interface SyncStreamControllerOptions {
-  logPrefix?: string;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
-  getSchemaHash?(): string | undefined;
-  getClientId(): string;
-  setClientId(clientId: string): void;
-  onConnected(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-  onDisconnected(): void;
-  onSyncMessage(payloadJson: string, seq?: number | null): void;
-  onAuthFailure?(reason: AuthFailureReason): void;
-}
-
-/**
- * Minimal runtime surface required for sync stream lifecycle wiring.
- */
-export interface RuntimeSyncTarget {
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-  removeServer(): void;
-  onSyncMessageReceived(payload: string, seq?: number | null): void;
-}
-
-export interface RuntimeSyncStreamControllerOptions {
-  logPrefix?: string;
-  getRuntime(): RuntimeSyncTarget | null | undefined;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
-  getSchemaHash?(): string | undefined;
-  getClientId(): string;
-  setClientId(clientId: string): void;
-  onConnected?(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-  onDisconnected?(): void;
-  onAuthFailure?(reason: AuthFailureReason): void;
-}
-
-type UnauthenticatedPayload = {
-  error?: unknown;
-  code?: unknown;
-  message?: unknown;
-};
-
-export class SyncAuthError extends Error {
-  readonly name = "SyncAuthError";
-
-  constructor(
-    readonly reason: AuthFailureReason,
-    message: string,
-    readonly status = 401,
-  ) {
-    super(message);
-  }
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error && typeof error.message === "string") {
     return error.message;
@@ -104,6 +42,8 @@ function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   return String(error);
 }
+
+const SYNC_FETCH_TIMEOUT_MS = 10_000;
 
 export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true;
@@ -127,260 +67,6 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   }
 
   return false;
-}
-
-export async function readSyncAuthError(response: Response): Promise<SyncAuthError | null> {
-  if (response.status !== 401) {
-    return null;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-  }
-
-  try {
-    const body = (await response.json()) as UnauthenticatedPayload;
-    if (body.error !== "unauthenticated") {
-      return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-    }
-
-    const reason: AuthFailureReason =
-      body.code === "expired" ||
-      body.code === "missing" ||
-      body.code === "invalid" ||
-      body.code === "disabled"
-        ? body.code
-        : "invalid";
-
-    const message = typeof body.message === "string" ? body.message : `Unauthenticated (${reason})`;
-
-    return new SyncAuthError(reason, message, response.status);
-  } catch {
-    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-  }
-}
-
-/**
- * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
- *
- * Keeps stream state and backoff policy in one place so both main-thread and
- * worker runtimes follow the same behavior.
- */
-export class SyncStreamController {
-  private readonly logPrefix: string;
-  private streamAbortController: AbortController | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempt = 0;
-  private streamConnecting = false;
-  private streamAttached = false;
-  private activeServerUrl: string | null = null;
-  private activeServerPathPrefix: string | undefined;
-  private stopped = true;
-  private pausedForAuthFailure = false;
-
-  constructor(private readonly options: SyncStreamControllerOptions) {
-    this.logPrefix = options.logPrefix ?? "";
-  }
-
-  start(serverUrl: string, pathPrefix?: string): void {
-    this.stop();
-    this.stopped = false;
-    this.pausedForAuthFailure = false;
-    this.activeServerUrl = serverUrl;
-    this.activeServerPathPrefix = pathPrefix;
-    this.connectStream();
-  }
-
-  stop(): void {
-    this.stopped = true;
-    this.pausedForAuthFailure = false;
-    this.activeServerUrl = null;
-    this.activeServerPathPrefix = undefined;
-    this.clearReconnectTimer();
-    this.abortStream();
-    this.detachServer();
-  }
-
-  updateAuth(): void {
-    this.pausedForAuthFailure = false;
-    this.abortStream();
-    this.detachServer();
-    if (this.activeServerUrl && !this.stopped) {
-      this.scheduleReconnect();
-    }
-  }
-
-  notifyAuthFailure(reason: AuthFailureReason): void {
-    this.pausedForAuthFailure = true;
-    this.abortStream();
-    this.detachServer();
-    this.options.onAuthFailure?.(reason);
-  }
-
-  notifyTransportFailure(): void {
-    this.abortStream();
-    this.detachServer();
-    this.scheduleReconnect();
-  }
-
-  getServerUrl(): string | null {
-    return this.activeServerUrl;
-  }
-
-  getPathPrefix(): string | undefined {
-    return this.activeServerPathPrefix;
-  }
-
-  private attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
-    if (this.streamAttached) {
-      this.options.onDisconnected();
-    }
-    this.options.onConnected(catalogueStateHash, nextSyncSeq);
-    this.streamAttached = true;
-    this.reconnectAttempt = 0;
-  }
-
-  private detachServer(): void {
-    if (!this.streamAttached) return;
-    this.options.onDisconnected();
-    this.streamAttached = false;
-  }
-
-  private clearReconnectTimer(): void {
-    if (!this.reconnectTimer) return;
-    clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = null;
-  }
-
-  private abortStream(): void {
-    if (!this.streamAbortController) return;
-    this.streamAbortController.abort();
-    this.streamAbortController = null;
-  }
-
-  private scheduleReconnect(): void {
-    if (this.stopped || this.pausedForAuthFailure || !this.activeServerUrl) return;
-    if (this.reconnectTimer) return;
-
-    const baseMs = 300;
-    const maxMs = 10_000;
-    const jitterMs = Math.floor(Math.random() * 200);
-    const delayMs = Math.min(maxMs, baseMs * 2 ** this.reconnectAttempt) + jitterMs;
-    this.reconnectAttempt += 1;
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connectStream();
-    }, delayMs);
-  }
-
-  private async connectStream(): Promise<void> {
-    if (
-      this.streamConnecting ||
-      this.stopped ||
-      this.pausedForAuthFailure ||
-      !this.activeServerUrl
-    ) {
-      return;
-    }
-    this.streamConnecting = true;
-
-    const serverUrl = this.activeServerUrl;
-    const serverPathPrefix = this.activeServerPathPrefix;
-    const headers: Record<string, string> = {
-      Accept: "application/octet-stream",
-    };
-    applySyncAuthHeaders(headers, this.options.getAuth());
-    const schemaHash = this.options.getSchemaHash?.();
-    if (schemaHash) {
-      headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
-    }
-
-    const abortController = new AbortController();
-    this.streamAbortController = abortController;
-
-    try {
-      const eventsUrl = buildEventsUrl(serverUrl, this.options.getClientId(), serverPathPrefix);
-
-      const response = await fetch(eventsUrl, {
-        headers,
-        signal: abortController.signal,
-      });
-
-      if (!response.ok) {
-        const authError = await readSyncAuthError(response);
-        if (authError) {
-          this.notifyAuthFailure(authError.reason);
-          return;
-        }
-        console.error(`${this.logPrefix}Stream connect failed: ${response.status}`);
-        this.detachServer();
-        this.streamConnecting = false;
-        this.scheduleReconnect();
-        return;
-      }
-
-      if (!response.body) {
-        throw new Error("Stream response did not include a body");
-      }
-
-      const reader = response.body.getReader();
-      let connected = false;
-      await readBinaryFrames(
-        reader,
-        {
-          onSyncMessage: this.options.onSyncMessage,
-          onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
-            this.options.setClientId(clientId);
-            if (!connected) {
-              connected = true;
-              this.attachServer(catalogueStateHash, nextSyncSeq);
-            }
-          },
-        },
-        this.logPrefix,
-      );
-    } catch (e: any) {
-      if (isExpectedFetchAbortError(e, abortController.signal)) return;
-      console.error(`${this.logPrefix}Stream connect error:`, e);
-    } finally {
-      if (this.streamAbortController === abortController) {
-        this.streamAbortController = null;
-      }
-      this.streamConnecting = false;
-    }
-
-    if (!abortController.signal.aborted && !this.stopped) {
-      this.detachServer();
-      this.scheduleReconnect();
-    }
-  }
-}
-
-/**
- * Build a stream controller bound to a runtime's server/sync hooks.
- */
-export function createRuntimeSyncStreamController(
-  options: RuntimeSyncStreamControllerOptions,
-): SyncStreamController {
-  return new SyncStreamController({
-    logPrefix: options.logPrefix,
-    getAuth: options.getAuth,
-    getSchemaHash: options.getSchemaHash,
-    getClientId: options.getClientId,
-    setClientId: options.setClientId,
-    onConnected: (catalogueStateHash, nextSyncSeq) => {
-      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq);
-      options.onConnected?.(catalogueStateHash, nextSyncSeq);
-    },
-    onDisconnected: () => {
-      options.getRuntime()?.removeServer();
-      options.onDisconnected?.();
-    },
-    onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
-    onAuthFailure: options.onAuthFailure,
-  });
 }
 
 export interface SyncOutboxRouterOptions {
@@ -516,17 +202,6 @@ export function generateClientId(): string {
   });
 }
 
-let fallbackClientId: string | null = null;
-const SYNC_FETCH_TIMEOUT_MS = 10_000;
-
-function getFallbackClientId(): string {
-  if (!fallbackClientId) {
-    fallbackClientId = generateClientId();
-  }
-
-  return fallbackClientId;
-}
-
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
@@ -551,10 +226,16 @@ export function buildEndpointUrl(serverUrl: string, endpoint: string, pathPrefix
 }
 
 /**
- * Build the stream URL for binary events.
+ * Build the WebSocket URL for the runtime-internal transport.
+ * Converts http(s) → ws(s) and appends the /ws endpoint.
  */
-export function buildEventsUrl(serverUrl: string, clientId: string, pathPrefix?: string): string {
-  return `${buildEndpointUrl(serverUrl, "/events", pathPrefix)}?client_id=${encodeURIComponent(clientId)}`;
+export function buildWsUrl(httpUrl: string, pathPrefix?: string): string {
+  const wsBase = httpUrl
+    .replace(/^https:\/\//i, "wss://")
+    .replace(/^http:\/\//i, "ws://")
+    .replace(/\/+$/, "");
+  const prefix = normalizePathPrefix(pathPrefix);
+  return `${wsBase}${prefix}/ws`;
 }
 
 /**
@@ -590,141 +271,6 @@ export function applySyncAuthHeaders(headers: Record<string, string>, auth: Sync
   }
 
   applyUserAuthHeaders(headers, auth);
-}
-
-async function postSyncBatch(
-  url: string,
-  headers: Record<string, string>,
-  body: string,
-  logPrefix: string,
-): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(
-      url,
-      { method: "POST", headers, body },
-      SYNC_FETCH_TIMEOUT_MS,
-    );
-  } catch (e) {
-    if ((e as { name?: string })?.name === "AbortError") {
-      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-      throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-    }
-    if (isExpectedFetchAbortError(e)) {
-      throw new Error(`${logPrefix}Sync POST failed: ${errorMessage(e)}`);
-    }
-    console.error(`${logPrefix}Sync POST fetch error:`, e);
-    throw new Error(`${logPrefix}Sync POST failed: ${errorMessage(e)}`);
-  }
-
-  if (!response.ok) {
-    const authError = await readSyncAuthError(response);
-    if (authError) {
-      throw authError;
-    }
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
-  }
-}
-
-function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
-  try {
-    const parsed = JSON.parse(payloadJson) as {
-      CatalogueEntryUpdated?: {
-        entry?: {
-          metadata?: {
-            type?: unknown;
-          };
-        };
-      };
-      ObjectUpdated?: {
-        metadata?: {
-          metadata?: {
-            type?: unknown;
-          };
-        };
-      };
-    };
-    const kind =
-      parsed.CatalogueEntryUpdated?.entry?.metadata?.type ??
-      parsed.ObjectUpdated?.metadata?.metadata?.type;
-    return typeof kind === "string" ? kind : null;
-  } catch {
-    return null;
-  }
-}
-
-function isStructuralSchemaCataloguePayload(payloadJson: string): boolean {
-  return catalogueObjectTypeFromPayloadJson(payloadJson) === "catalogue_schema";
-}
-
-/**
- * POST a sync payload to the server.
- *
- * User auth headers are always applied first (JWT or local auth).
- * Structural schema catalogue payloads can also flow with ordinary user auth so
- * development servers can learn schemas without exposing an admin secret to the client.
- * Other catalogue payloads still require the admin secret.
- */
-export async function sendSyncPayload(
-  serverUrl: string,
-  payloadJson: string,
-  isCatalogue: boolean,
-  auth: SyncAuth,
-  logPrefix = "",
-): Promise<void> {
-  const catalogueType = catalogueObjectTypeFromPayloadJson(payloadJson);
-  const effectiveIsCatalogue = isCatalogue || catalogueType !== null;
-  const isSchemaCatalogue =
-    effectiveIsCatalogue &&
-    (catalogueType === "catalogue_schema" || isStructuralSchemaCataloguePayload(payloadJson));
-
-  if (effectiveIsCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
-    return;
-  }
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (effectiveIsCatalogue && auth.adminSecret) {
-    headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
-  } else {
-    applySyncAuthHeaders(headers, auth);
-  }
-
-  const body = `{"payloads":[${payloadJson}],"client_id":${JSON.stringify(auth.clientId ?? getFallbackClientId())}}`;
-  await postSyncBatch(
-    buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
-    headers,
-    body,
-    logPrefix,
-  );
-}
-
-/**
- * POST an ordered batch of sync payloads to the server in a single request.
- *
- * Wire format: {"payloads":[<payload1>,<payload2>,…],"client_id":"…"}
- *
- * Each payload JSON string is embedded raw (no double-serialisation).
- * Non-catalogue payloads only — catalogue payloads are sent via sendSyncPayload.
- */
-export async function sendSyncPayloadBatch(
-  serverUrl: string,
-  payloads: string[],
-  auth: SyncAuth,
-  logPrefix = "",
-): Promise<void> {
-  if (payloads.length === 0) return;
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  applySyncAuthHeaders(headers, auth);
-
-  const body = `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? getFallbackClientId())}}`;
-  await postSyncBatch(
-    buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
-    headers,
-    body,
-    logPrefix,
-  );
 }
 
 /**
@@ -779,62 +325,4 @@ export async function linkExternalIdentity(
   }
 
   return (await response.json()) as LinkExternalResponse;
-}
-
-/**
- * Read length-prefixed binary frames from a ReadableStreamDefaultReader.
- *
- * Each frame is: 4-byte big-endian length + UTF-8 JSON payload.
- * Calls `callbacks.onSyncMessage` for SyncUpdate events and
- * `callbacks.onConnected` for Connected events.
- *
- * Returns when the stream ends or is aborted.
- */
-export async function readBinaryFrames(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  callbacks: StreamCallbacks,
-  logPrefix = "",
-): Promise<void> {
-  let buffer = new Uint8Array(0);
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    // Append chunk to buffer
-    const newBuffer = new Uint8Array(buffer.length + value.length);
-    newBuffer.set(buffer);
-    newBuffer.set(value, buffer.length);
-    buffer = newBuffer;
-
-    // Read complete frames
-    while (buffer.length >= 4) {
-      const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
-      if (buffer.length < 4 + len) break;
-      const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
-      buffer = buffer.slice(4 + len);
-
-      let event: any;
-      try {
-        event = JSON.parse(json);
-      } catch (error) {
-        console.error(`${logPrefix}Stream parse error:`, error);
-        continue;
-      }
-
-      try {
-        if (event.type === "Connected" && event.client_id) {
-          callbacks.onConnected?.(
-            event.client_id,
-            event.catalogue_state_hash ?? null,
-            event.next_sync_seq ?? null,
-          );
-        } else if (event.type === "SyncUpdate") {
-          callbacks.onSyncMessage(JSON.stringify(event.payload), event.seq ?? null);
-        }
-      } catch (error) {
-        console.error(`${logPrefix}Stream callback error:`, error);
-      }
-    }
-  }
 }

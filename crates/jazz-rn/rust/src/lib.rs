@@ -265,10 +265,24 @@ impl SyncSender for RnSyncSender {
 }
 
 // ============================================================================
+// RnTickNotifier
+// ============================================================================
+
+struct RnTickNotifier {
+    schedule_fn: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
+    fn notify(&self) {
+        (self.schedule_fn)();
+    }
+}
+
+// ============================================================================
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -331,9 +345,9 @@ impl RnRuntime {
                     ),
                 })?;
             let scheduler = RnScheduler::default();
-            let sync_sender = RnSyncSender::default();
 
-            let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+            core.set_peer_sender(Box::new(RnSyncSender::default()));
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -365,10 +379,12 @@ impl RnRuntime {
         callback: Option<Box<dyn SyncMessageCallback>>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("on_sync_message_to_send", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.sync_sender().set_callback(callback);
+            let sender = RnSyncSender::default();
+            sender.set_callback(callback);
+            core.set_peer_sender(Box::new(sender));
             Ok(())
         })
     }
@@ -857,6 +873,75 @@ impl RnRuntime {
             core.flush_storage();
             Ok(())
         })
+    }
+
+    // =========================================================================
+    // Transport (WebSocket connect/disconnect)
+    // =========================================================================
+
+    /// Connect to a remote server via WebSocket.
+    ///
+    /// `auth_json` must be a JSON-serialised `AuthConfig`.
+    /// Spawns a background thread with its own tokio runtime running the
+    /// transport manager; inbound events drive `batched_tick` via
+    /// `RnTickNotifier`.
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
+        use jazz_tools::transport_manager::AuthConfig;
+        use jazz_tools::ws_stream::NativeWsStream;
+
+        let auth: AuthConfig =
+            serde_json::from_str(&auth_json).map_err(|e| JazzRnError::InvalidJson {
+                message: format!("invalid auth JSON: {e}"),
+            })?;
+
+        // Clone the scheduler so the closure can call schedule_batched_tick()
+        // without holding a lock on the core.
+        let scheduler = self
+            .core
+            .lock()
+            .map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?
+            .scheduler()
+            .clone();
+
+        let schedule_fn = std::sync::Arc::new(move || {
+            scheduler.schedule_batched_tick();
+        }) as std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
+        let tick = RnTickNotifier { schedule_fn };
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            NativeWsStream,
+            RnTickNotifier,
+        >(url, auth, tick);
+
+        self.core
+            .lock()
+            .map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?
+            .set_transport(handle);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio rt");
+            rt.block_on(manager.run());
+        });
+
+        Ok(())
+    }
+
+    /// Disconnect from the server by dropping the transport handle.
+    pub fn disconnect(&self) -> Result<(), JazzRnError> {
+        self.core
+            .lock()
+            .map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?
+            .clear_transport();
+        Ok(())
     }
 
     /// Flush and close the underlying storage, releasing filesystem locks.

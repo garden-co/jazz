@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Path as AxumPath, Query, State, ws::WebSocketUpgrade},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
@@ -1493,7 +1493,7 @@ impl MetaStore {
             .map_err(|e| format!("failed to open meta storage '{}': {e:?}", db_path.display()))?;
 
         // Meta app is local-only; no sync callback needed yet.
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+        let runtime = TokioRuntime::new(schema_manager, storage);
 
         Ok(Self {
             runtime,
@@ -1961,22 +1961,28 @@ impl AppRuntime {
         rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id)?;
 
         let connection_event_hub_clone = connection_event_hub.clone();
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                let payload = entry.payload;
-                let delay = test_delay_server_send_object_updated(&payload);
-                let prepared = connection_event_hub_clone.prepare_payload(client_id, payload);
-                if let Some(delay) = delay {
-                    let connection_event_hub = connection_event_hub_clone.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        connection_event_hub.dispatch_prepared(prepared);
-                    });
-                } else {
-                    connection_event_hub_clone.dispatch_prepared(prepared);
-                }
-            }
-        });
+        let runtime = TokioRuntime::new(schema_manager, storage);
+        runtime
+            .set_peer_sender(Box::new(jazz_tools::runtime_core::CallbackSyncSender::new(
+                move |entry| {
+                    if let Destination::Client(client_id) = entry.destination {
+                        let payload = entry.payload;
+                        let delay = test_delay_server_send_object_updated(&payload);
+                        let prepared =
+                            connection_event_hub_clone.prepare_payload(client_id, payload);
+                        if let Some(delay) = delay {
+                            let connection_event_hub = connection_event_hub_clone.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                connection_event_hub.dispatch_prepared(prepared);
+                            });
+                        } else {
+                            connection_event_hub_clone.dispatch_prepared(prepared);
+                        }
+                    }
+                },
+            )))
+            .map_err(|e| format!("failed to set peer sender: {e}"))?;
 
         Ok(Self { runtime })
     }
@@ -2619,6 +2625,7 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
 
 fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
+        .route("/apps/:app_id/ws", get(ws_handler))
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
         .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
@@ -3634,6 +3641,315 @@ async fn manage_rotate_admin_secret_handler(
     )
     .await
     .into_response()
+}
+
+// ============================================================================
+// WebSocket /apps/:app_id/ws endpoint
+// ============================================================================
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, path.app_id))
+}
+
+/// Build synthetic HTTP headers from `AuthConfig` so we can reuse the existing
+/// `extract_session` / `validate_backend_secret` / `validate_admin_secret` helpers.
+fn build_auth_headers(auth: &jazz_tools::transport_manager::AuthConfig) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(ref jwt) = auth.jwt_token
+        && let Ok(val) = format!("Bearer {jwt}").parse()
+    {
+        headers.insert(AUTHORIZATION, val);
+    }
+    if let Some(ref secret) = auth.backend_secret
+        && let Ok(val) = secret.parse()
+    {
+        headers.insert("X-Jazz-Backend-Secret", val);
+    }
+    if let Some(ref secret) = auth.admin_secret
+        && let Ok(val) = secret.parse()
+    {
+        headers.insert("X-Jazz-Admin-Secret", val);
+    }
+    if let Some(ref session_json) = auth.backend_session {
+        let json_bytes = serde_json::to_vec(session_json).unwrap_or_default();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&json_bytes);
+        if let Ok(val) = b64.parse() {
+            headers.insert("X-Jazz-Session", val);
+        }
+    }
+    if let Some(ref mode) = auth.local_mode
+        && let Ok(val) = mode.parse()
+    {
+        headers.insert("X-Jazz-Local-Mode", val);
+    }
+    if let Some(ref token) = auth.local_token
+        && let Ok(val) = token.parse()
+    {
+        headers.insert("X-Jazz-Local-Token", val);
+    }
+    headers
+}
+
+async fn send_ws_error(socket: &mut axum::extract::ws::WebSocket, message: &str) {
+    use axum::extract::ws::Message as WsMessage;
+    let event = jazz_tools::jazz_transport::ServerEvent::Error {
+        message: message.to_string(),
+        code: jazz_tools::jazz_transport::ErrorCode::Unauthorized,
+    };
+    let _ = socket.send(WsMessage::Binary(event.encode_frame())).await;
+}
+
+async fn handle_ws_connection(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<ServerState>,
+    app_id_str: String,
+) {
+    use axum::extract::ws::Message as WsMessage;
+    use jazz_tools::ClientId;
+    use jazz_tools::jazz_transport::{ServerEvent, SyncBatchRequest};
+    use jazz_tools::transport_manager::AuthHandshake;
+
+    // 1. Parse app_id from path.
+    let app_id = match parse_app_id(&app_id_str) {
+        Ok(id) => id,
+        Err((_, msg)) => {
+            send_ws_error(&mut socket, &msg).await;
+            return;
+        }
+    };
+
+    // 2. Look up app.
+    let app = match state.get_app(app_id).await {
+        Some(a) => a,
+        None => {
+            send_ws_error(&mut socket, &format!("unknown app_id: {app_id_str}")).await;
+            return;
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    if cfg.status == AppStatus::Disabled {
+        send_ws_error(&mut socket, "app is disabled for sync traffic").await;
+        return;
+    }
+
+    // 3. Read first message: length-prefixed AuthHandshake.
+    let first_msg = match socket.recv().await {
+        Some(Ok(WsMessage::Binary(data))) => data,
+        _ => return,
+    };
+    if first_msg.len() < 4 {
+        return;
+    }
+    let len = u32::from_be_bytes(first_msg[..4].try_into().unwrap()) as usize;
+    if first_msg.len() < 4 + len {
+        return;
+    }
+    let handshake: AuthHandshake = match serde_json::from_slice(&first_msg[4..4 + len]) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    // 4. Authenticate using synthetic headers.
+    let headers = build_auth_headers(&handshake.auth);
+    let is_admin = match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(v) => v,
+        Err((_, msg)) => {
+            send_ws_error(&mut socket, msg).await;
+            return;
+        }
+    };
+    let is_backend = match validate_backend_secret(&headers, &cfg, &state.meta_store) {
+        Ok(v) => v,
+        Err((_, msg)) => {
+            send_ws_error(&mut socket, msg).await;
+            return;
+        }
+    };
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
+
+    let client_id = ClientId::parse(&handshake.client_id).unwrap_or_default();
+
+    // 5. Extract session once (needed for user clients and payload dispatch).
+    // Admin and pure-backend clients skip session resolution.
+    let session_opt = if is_admin || (is_backend && !has_session_header) {
+        None
+    } else {
+        match extract_session(&headers, app_id, &cfg, &state).await {
+            Ok(Some(s)) => Some(s),
+            Ok(None) => {
+                send_ws_error(
+                    &mut socket,
+                    "session required — provide JWT, backend secret, or admin secret",
+                )
+                .await;
+                return;
+            }
+            Err((_, msg)) => {
+                send_ws_error(&mut socket, msg).await;
+                return;
+            }
+        }
+    };
+
+    // 6. Register client role with the worker.
+    // Admin clients use backend registration (no EnsureClientAsAdmin exists).
+    let register_result = if is_backend && !has_session_header {
+        state
+            .workers
+            .ensure_client_as_backend(app_id, client_id)
+            .await
+    } else if let Some(ref session) = session_opt {
+        state
+            .workers
+            .ensure_client_with_session(app_id, client_id, session.clone())
+            .await
+    } else {
+        // Admin-only client: use backend registration.
+        state
+            .workers
+            .ensure_client_as_backend(app_id, client_id)
+            .await
+    };
+    if let Err(err) = register_result {
+        let (_, msg) = worker_dispatch_status_and_message(err);
+        send_ws_error(&mut socket, &msg).await;
+        return;
+    }
+
+    // 7. Get catalogue hash and register connection with event hub.
+    let worker = state.workers.worker_for_app(&app_id);
+    let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
+        Ok(hash) => Some(hash),
+        Err(err) => {
+            warn!(
+                app_id = %app_id,
+                worker,
+                %client_id,
+                ?err,
+                "failed to read catalogue state hash for ws handshake"
+            );
+            None
+        }
+    };
+
+    let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
+    {
+        let mut connections = app.connections.write().await;
+        connections.insert(
+            connection_id,
+            ConnectionState {
+                _client_id: client_id,
+            },
+        );
+    }
+    let (next_sync_seq, mut sync_rx) = app
+        .connection_event_hub
+        .register_connection(connection_id, client_id);
+
+    info!(
+        app_id = %app_id,
+        worker,
+        %client_id,
+        connection_id,
+        "WebSocket connected"
+    );
+
+    // 8. Send Connected frame.
+    let connected = ServerEvent::Connected {
+        connection_id: ConnectionId(connection_id),
+        client_id: client_id.to_string(),
+        next_sync_seq: Some(next_sync_seq),
+        catalogue_state_hash,
+    };
+    if socket
+        .send(WsMessage::Binary(connected.encode_frame()))
+        .await
+        .is_err()
+    {
+        app.connection_event_hub
+            .unregister_connection(connection_id);
+        app.connections.write().await.remove(&connection_id);
+        return;
+    }
+
+    // 9. Bidirectional loop.
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        if data.len() < 4 { break; }
+                        let len = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+                        if data.len() < 4 + len { break; }
+                        let batch: SyncBatchRequest = match serde_json::from_slice(&data[4..4+len]) {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        };
+                        for payload in batch.payloads {
+                            let dispatch = if is_admin {
+                                state.workers.sync_as_admin(app_id, client_id, payload).await
+                            } else if is_backend && !has_session_header {
+                                state.workers.sync_as_backend(app_id, client_id, payload).await
+                            } else {
+                                let session = session_opt.clone().expect("session resolved at handshake");
+                                state.workers.sync_as_session(app_id, client_id, session, payload).await
+                            };
+                            if let Err(err) = dispatch {
+                                warn!(
+                                    app_id = %app_id,
+                                    %client_id,
+                                    ?err,
+                                    "ws payload dispatch error"
+                                );
+                            }
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => continue,
+                }
+            }
+            update = sync_rx.recv() => {
+                let Some(update) = update else { break };
+                let event = ServerEvent::SyncUpdate {
+                    seq: Some(update.seq),
+                    payload: Box::new(update.payload),
+                };
+                if socket.send(WsMessage::Binary(event.encode_frame())).await.is_err() {
+                    break;
+                }
+            }
+            _ = heartbeat.tick() => {
+                if socket.send(WsMessage::Binary(ServerEvent::Heartbeat.encode_frame())).await.is_err() {
+                    break;
+                }
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 10. Cleanup.
+    app.connection_event_hub
+        .unregister_connection(connection_id);
+    app.connections.write().await.remove(&connection_id);
+    info!(
+        app_id = %app_id,
+        %client_id,
+        connection_id,
+        "WebSocket disconnected"
+    );
 }
 
 async fn events_handler(

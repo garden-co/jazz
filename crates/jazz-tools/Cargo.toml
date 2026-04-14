@@ -22,10 +22,10 @@ sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
+transport-websocket = ["transport", "runtime-tokio", "dep:tokio-tungstenite"]
+client = ["runtime-tokio", "transport-websocket", "dep:thiserror", "dep:tokio", "dep:base64"]
 server = [
-  "runtime-tokio",
-  "transport",
+  "transport-websocket",
   "dep:tokio",
   "dep:axum",
   "dep:tracing-subscriber",
@@ -71,10 +71,14 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
+rocksdb = { version = "0.24", default-features = false, features = [
+  "lz4",
+  "zstd",
+], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
-axum = { version = "0.7", optional = true }
+axum = { version = "0.7", features = ["ws"], optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

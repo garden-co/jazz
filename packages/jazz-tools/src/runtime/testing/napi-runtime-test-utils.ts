@@ -5,7 +5,10 @@ import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import type { Runtime } from "../client.js";
 
 type NapiModule = typeof import("jazz-napi");
-export type TestNapiRuntime = Runtime & { close?: () => void };
+export type TestNapiRuntime = Runtime & {
+  close?: () => void;
+  transportEverConnected?: () => boolean;
+};
 
 const require = createRequire(import.meta.url);
 

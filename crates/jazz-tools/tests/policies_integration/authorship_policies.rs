@@ -1,19 +1,23 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
-use jazz_tools::jazz_transport::{SyncBatchRequest, SyncBatchResponse};
+use super::support::{
+    connect_ready_client, connect_ready_user, has_added, has_removed, wait_for_rows,
+    wait_for_subscription_update,
+};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::TestingServer;
 use jazz_tools::storage::MemoryStorage;
-use jazz_tools::sync_manager::{ClientId, Destination, ServerId, SyncManager};
+use jazz_tools::sync_manager::SyncManager;
+use jazz_tools::transport_manager::AuthConfig;
 use jazz_tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    ColumnType, JazzClient, ObjectId, OrderedRowDelta, QueryBuilder, Schema, SchemaBuilder,
+    TableSchema, Value,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,6 +59,12 @@ async fn create_note_with_backend_attribution(
     attributed_user_id: &str,
     title: &str,
 ) -> ObjectId {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", server.port());
+    let auth = AuthConfig {
+        backend_secret: Some(server.backend_secret().to_string()),
+        ..Default::default()
+    };
+
     let schema_manager = SchemaManager::new(
         SyncManager::new(),
         schema.clone(),
@@ -63,59 +73,31 @@ async fn create_note_with_backend_attribution(
         "main",
     )
     .expect("build backend attributed schema manager");
-    let mut runtime = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
-    let client_id = ClientId::new();
-    runtime.add_server(ServerId::default());
+
+    let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
+    runtime.persist_schema().expect("persist schema");
+    runtime.connect(ws_url, auth).expect("connect via ws");
+
+    // Allow the connection to establish before inserting.
+    for _ in 0..10 {
+        runtime.flush().await.expect("flush");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let write_context = WriteContext {
         session: None,
         attribution: Some(attributed_user_id.to_string()),
     };
     let note_id = runtime
-        .insert("notes", note_input(title), Some(&write_context))
+        .insert_with_write_context("notes", note_input(title), Some(&write_context))
         .expect("create note with backend attribution")
         .0;
-    runtime.batched_tick();
 
-    let payloads = runtime
-        .sync_sender()
-        .take()
-        .into_iter()
-        .filter_map(|entry| match entry.destination {
-            Destination::Server(_) => Some(entry.payload),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        !payloads.is_empty(),
-        "backend attributed insert should enqueue sync payloads"
-    );
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/sync", server.base_url()))
-        .header("X-Jazz-Backend-Secret", server.backend_secret())
-        .json(&SyncBatchRequest {
-            payloads,
-            client_id,
-        })
-        .send()
-        .await
-        .expect("push backend attributed sync batch")
-        .error_for_status()
-        .expect("backend attributed sync batch should succeed")
-        .json::<SyncBatchResponse>()
-        .await
-        .expect("decode backend attributed sync response");
-    assert!(
-        response.results.iter().all(|result| result.ok),
-        "backend attributed sync payloads should all apply: {:?}",
-        response.results
-    );
+    // Flush to deliver the note to the server.
+    for _ in 0..20 {
+        runtime.flush().await.expect("flush");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     note_id
 }
@@ -533,6 +515,28 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     assert_eq!(bob_rows[0].1[2], Value::from("alice"));
     assert_eq!(bob_rows[0].1[3], Value::from("alice"));
 
+    // Establish a persistent subscription for Alice before Bob's update.
+    // This keeps Alice's server-side scope live so the server forwards the
+    // update to her local state (one-shot EdgeServer queries above already
+    // unsubscribed, leaving Alice with empty scope).
+    let mut alice_sub = alice
+        .for_session(Session::new("alice"))
+        .subscribe(query.clone())
+        .await
+        .expect("alice persistent subscription for scope maintenance");
+    let mut alice_sub_log: Vec<OrderedRowDelta> = Vec::new();
+
+    // Confirm the subscription is registered on the server: note must appear
+    // as added (initial scope state) before we let Bob proceed.
+    wait_for_subscription_update(
+        &mut alice_sub,
+        &mut alice_sub_log,
+        Duration::from_secs(10),
+        "alice subscription initial state shows note",
+        |log| has_added(log, note_id),
+    )
+    .await;
+
     bob.for_session(Session::new("bob"))
         .update(
             note_id,
@@ -543,6 +547,16 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
         )
         .await
         .expect("bob becomes latest updater");
+
+    // Confirm Alice received the scope removal via her persistent subscription.
+    wait_for_subscription_update(
+        &mut alice_sub,
+        &mut alice_sub_log,
+        Duration::from_secs(10),
+        "alice subscription shows note removed after bob's update",
+        |log| has_removed(log, note_id),
+    )
+    .await;
 
     let alice_rows = wait_for_rows(
         &alice,
