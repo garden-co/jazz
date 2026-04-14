@@ -1,6 +1,6 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
+import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
+import { JazzProvider, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -85,10 +85,7 @@ export function App() {
   const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
     readStoredAuthSession(DEFAULT_APP_ID),
   );
-  const localAuth = React.useMemo(
-    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
-    [],
-  );
+  const localFirstSecret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
 
   const config = React.useMemo((): DbConfig => {
     const sharedConfig = {
@@ -108,10 +105,9 @@ export function App() {
 
     return {
       ...sharedConfig,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
+      auth: { localFirstSecret },
     };
-  }, [localAuth.localAuthMode, localAuth.localAuthToken, storedAuthSession]);
+  }, [localFirstSecret, storedAuthSession]);
 
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>

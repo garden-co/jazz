@@ -6,7 +6,6 @@ import {
   createSyncOutboxRouter,
   generateClientId,
   isExpectedFetchAbortError,
-  linkExternalIdentity,
   normalizePathPrefix,
   readBinaryFrames,
   sendSyncPayload,
@@ -203,8 +202,6 @@ describe("sync-transport", () => {
       "X-Jazz-Backend-Secret": "backend-secret",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("posts schema catalogue payloads with user auth when admin secret is missing", async () => {
@@ -281,8 +278,6 @@ describe("sync-transport", () => {
       "X-Jazz-Admin-Secret": "admin-secret",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("detects mis-tagged catalogue payloads from their JSON shape", async () => {
@@ -310,39 +305,6 @@ describe("sync-transport", () => {
       "X-Jazz-Admin-Secret": "admin-secret",
     });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Backend-Secret");
-  });
-
-  it("posts link-external with bearer and local auth headers", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        principal_id: "local:abc",
-        issuer: "https://issuer.example",
-        subject: "user-1",
-        created: true,
-      }),
-    });
-    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await linkExternalIdentity("http://localhost:3000/", {
-      jwtToken: "jwt-token",
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-      pathPrefix: "apps/app-123/",
-    });
-
-    expect(result.created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:3000/apps/app-123/auth/link-external",
-    );
-    expect(fetchMock.mock.calls[0]![1].method).toBe("POST");
-    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
-      Authorization: "Bearer jwt-token",
-      "X-Jazz-Local-Mode": "anonymous",
-      "X-Jazz-Local-Token": "device-token",
-    });
   });
 
   it("normalizes route prefixes and endpoint URLs", () => {

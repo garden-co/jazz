@@ -55,6 +55,10 @@
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
     },
+    "./dev/expo": {
+      "types": "./dist/dev/expo.d.ts",
+      "default": "./dist/dev/expo.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",
@@ -69,6 +73,11 @@
       "types": "./dist/expo/polyfills.d.ts",
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
+    },
+    "./expo/auth-secret-store": {
+      "types": "./dist/expo/auth-secret-store.d.ts",
+      "react-native": "./dist/expo/auth-secret-store.js",
+      "default": "./dist/expo/auth-secret-store.js"
     },
     "./package.json": "./package.json"
   },
@@ -90,12 +99,12 @@
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
+    "esbuild": "^0.27.0",
     "jazz-rn": "workspace:*",
     "jazz-wasm": "workspace:*",
     "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
-    "tsx": "^4.0.0",
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
@@ -119,6 +128,8 @@
   },
   "peerDependencies": {
     "expo": ">=54",
+    "expo-crypto": ">=14.0.0",
+    "expo-secure-store": ">=14.0.0",
     "react": "^18 || ^19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
@@ -126,6 +137,12 @@
   },
   "peerDependenciesMeta": {
     "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-secure-store": {
       "optional": true
     },
     "react": {

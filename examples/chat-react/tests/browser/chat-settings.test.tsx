@@ -8,7 +8,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,8 +53,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -78,6 +78,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
@@ -288,8 +289,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-alice"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-alice-${Date.now()}`,
+      auth: { localFirstSecret: await testSecret(`settings-alice-${Date.now()}`) },
     });
 
     await waitFor(
@@ -312,8 +312,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-bob"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `settings-bob-${Date.now()}`,
+      auth: { localFirstSecret: await testSecret(`settings-bob-${Date.now()}`) },
     });
 
     // Wait for Bob to see the chat

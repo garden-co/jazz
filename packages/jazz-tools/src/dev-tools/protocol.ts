@@ -240,8 +240,6 @@ export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig |
     userBranch: dbConfig.userBranch,
     devMode: dbConfig.devMode,
     jwtToken: dbConfig.jwtToken,
-    localAuthMode: dbConfig.localAuthMode,
-    localAuthToken: dbConfig.localAuthToken,
     adminSecret: dbConfig.adminSecret,
     driver: dbConfig.driver,
   };

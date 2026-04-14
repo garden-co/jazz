@@ -512,6 +512,12 @@ importers:
       expo:
         specifier: ^54.0.0
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      expo-crypto:
+        specifier: ~14.0.0
+        version: 14.0.2(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      expo-secure-store:
+        specifier: ~14.0.0
+        version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
       jazz-rn:
         specifier: workspace:*
         version: link:../../../crates/jazz-rn
@@ -818,6 +824,12 @@ importers:
       expo:
         specifier: ^54.0.0
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      expo-crypto:
+        specifier: ~14.0.0
+        version: 14.0.2(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      expo-secure-store:
+        specifier: ~14.0.0
+        version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -1104,9 +1116,18 @@ importers:
       '@standard-schema/spec':
         specifier: ^1.1.0
         version: 1.1.0
+      esbuild:
+        specifier: ^0.27.0
+        version: 0.27.4
       expo:
         specifier: '>=54'
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      expo-crypto:
+        specifier: '>=14.0.0'
+        version: 14.0.2(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      expo-secure-store:
+        specifier: '>=14.0.0'
+        version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
       jazz-rn:
         specifier: workspace:*
         version: link:../../crates/jazz-rn
@@ -1128,9 +1149,6 @@ importers:
       react-native:
         specifier: '>=0.76'
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
-      tsx:
-        specifier: ^4.0.0
-        version: 4.21.0
       web-streams-polyfill:
         specifier: ^4.2.0
         version: 4.2.0
@@ -1196,6 +1214,12 @@ importers:
       expo:
         specifier: ^54.0.0
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      expo-crypto:
+        specifier: ~14.0.0
+        version: 14.0.2(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      expo-secure-store:
+        specifier: ~14.0.0
+        version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
       jazz-rn:
         specifier: workspace:*
         version: link:../../crates/jazz-rn
@@ -7592,6 +7616,11 @@ packages:
       expo: '*'
       react-native: '*'
 
+  expo-crypto@14.0.2:
+    resolution: {integrity: sha512-WRc9PBpJraJN29VD5Ef7nCecxJmZNyRKcGkNiDQC1nhY5agppzwhqh7zEzNFarE/GqDgSiaDHS8yd5EgFhP9AQ==}
+    peerDependencies:
+      expo: '*'
+
   expo-file-system@19.0.21:
     resolution: {integrity: sha512-s3DlrDdiscBHtab/6W1osrjGL+C2bvoInPJD7sOwmxfJ5Woynv2oc+Fz1/xVXaE/V7HE/+xrHC/H45tu6lZzzg==}
     peerDependencies:
@@ -7620,6 +7649,11 @@ packages:
     peerDependencies:
       react: 19.2.4
       react-native: '*'
+
+  expo-secure-store@14.0.1:
+    resolution: {integrity: sha512-QUS+j4+UG4jRQalgnpmTvvrFnMVLqPiUZRzYPnG3+JrZ5kwVW2w6YS3WWerPoR7C6g3y/a2htRxRSylsDs+TaQ==}
+    peerDependencies:
+      expo: '*'
 
   expo-server@1.0.5:
     resolution: {integrity: sha512-IGR++flYH70rhLyeXF0Phle56/k4cee87WeQ4mamS+MkVAVP+dDlOHf2nN06Z9Y2KhU0Gp1k+y61KkghF7HdhA==}
@@ -19056,6 +19090,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  expo-crypto@14.0.2(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)):
+    dependencies:
+      base64-js: 1.5.1
+      expo: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+
   expo-file-system@19.0.21(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)):
     dependencies:
       expo: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
@@ -19086,6 +19125,10 @@ snapshots:
       invariant: 2.2.4
       react: 19.2.4
       react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
+
+  expo-secure-store@14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)):
+    dependencies:
+      expo: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
 
   expo-server@1.0.5: {}
 
