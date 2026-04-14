@@ -13,12 +13,12 @@ use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::SyncManager;
 
-pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
+pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs
@@ -272,7 +272,7 @@ pub fn create_runtime_with_storage<S: Storage>(storage: S) -> BenchRuntime<S> {
         "main",
     )
     .expect("schema manager");
-    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+    RuntimeCore::new(schema_manager, storage, NoopScheduler)
 }
 
 /// Create a new RuntimeCore with MemoryStorage for benchmarking.
