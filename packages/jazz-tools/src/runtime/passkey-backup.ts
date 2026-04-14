@@ -4,7 +4,8 @@ export type PasskeyBackupErrorCode =
   | "create-failed"
   | "get-failed"
   | "no-credential"
-  | "invalid-credential";
+  | "invalid-credential"
+  | "verification-failed";
 
 const DEFAULT_MESSAGES: Record<PasskeyBackupErrorCode, string> = {
   "not-supported": "WebAuthn is not supported in this browser",
@@ -13,6 +14,7 @@ const DEFAULT_MESSAGES: Record<PasskeyBackupErrorCode, string> = {
   "get-failed": "Failed to retrieve passkey credential",
   "no-credential": "No passkey credential found",
   "invalid-credential": "Passkey credential does not contain a valid secret",
+  "verification-failed": "Authenticator did not perform user verification",
 };
 
 export class PasskeyBackupError extends Error {
@@ -97,9 +99,17 @@ export class BrowserPasskeyBackup {
             { alg: -257, type: "public-key" },
           ],
           authenticatorSelection: {
+            authenticatorAttachment: "platform",
+            userVerification: "required",
             residentKey: "required",
             requireResidentKey: true,
           },
+          // credentialProtectionPolicy is a FIDO2 extension not in the TypeScript
+          // standard lib types; it instructs the authenticator to never return this
+          // credential without full user verification.
+          extensions: {
+            credentialProtectionPolicy: "userVerificationRequired",
+          } as unknown as AuthenticationExtensionsClientInputs,
         },
       });
     } catch (err) {
@@ -112,6 +122,9 @@ export class BrowserPasskeyBackup {
       throw new PasskeyBackupError("not-supported");
     }
 
+    // Prevent the browser from silently returning credentials without user interaction.
+    await navigator.credentials.preventSilentAccess?.().catch(() => {});
+
     const challenge = new Uint8Array(16);
     crypto.getRandomValues(challenge);
 
@@ -121,7 +134,7 @@ export class BrowserPasskeyBackup {
         publicKey: {
           challenge,
           rpId: this.rpId,
-          userVerification: "preferred",
+          userVerification: "required",
         },
         mediation: "required" as CredentialMediationRequirement,
       });
@@ -135,8 +148,16 @@ export class BrowserPasskeyBackup {
 
     const assertionResponse = (credential as PublicKeyCredential)
       .response as AuthenticatorAssertionResponse;
-    const { userHandle } = assertionResponse;
 
+    // Verify the authenticator set both UP (user present, bit 0) and UV (user
+    // verified, bit 2) in the authenticatorData flags byte (offset 32).
+    const authData = new Uint8Array(assertionResponse.authenticatorData);
+    const flags = authData[32] ?? 0;
+    if ((flags & 0x01) === 0 || (flags & 0x04) === 0) {
+      throw new PasskeyBackupError("verification-failed");
+    }
+
+    const { userHandle } = assertionResponse;
     if (userHandle === null || userHandle.byteLength !== 32) {
       throw new PasskeyBackupError("invalid-credential");
     }
