@@ -87,7 +87,7 @@ export class BrowserPasskeyBackup {
         publicKey: {
           rp: { id: this.rpId, name: this.appName },
           user: {
-            id: secretBytes,
+            id: secretBytes as Uint8Array<ArrayBuffer>,
             name: this.appName,
             displayName: this.appName,
           },
