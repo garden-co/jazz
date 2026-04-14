@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
+import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
   return {
@@ -84,6 +85,62 @@ describe("JazzRnRuntimeAdapter", () => {
         data: { type: "Bytea", value: "0102ff" },
       }),
     );
+  });
+
+  it("round-trips Bytea values through the RN FFI JSON codec", () => {
+    const encoded = JSON.parse(
+      encodeFFIRecordToJson({
+        data: { type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) },
+        chunks: {
+          type: "Array",
+          value: [{ type: "Bytea", value: new Uint8Array([0x0a, 0x0b]) }],
+        },
+        nested: {
+          type: "Row",
+          value: {
+            id: "nested-row",
+            values: [{ type: "Bytea", value: new Uint8Array([0x7f]) }],
+          },
+        },
+      }),
+    ) as Record<string, unknown>;
+
+    expect(encoded).toEqual({
+      data: { type: "Bytea", value: "0102ff" },
+      chunks: {
+        type: "Array",
+        value: [{ type: "Bytea", value: "0a0b" }],
+      },
+      nested: {
+        type: "Row",
+        value: {
+          id: "nested-row",
+          values: [{ type: "Bytea", value: "7f" }],
+        },
+      },
+    });
+
+    const decoded = decodeFFIRowFromJson(
+      JSON.stringify({
+        id: "row-1",
+        values: [encoded.data, encoded.chunks, encoded.nested],
+      }),
+    );
+
+    const [data, chunks, nested] = decoded.values;
+    expect(decoded.id).toBe("row-1");
+    expect(data).toEqual({ type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) });
+    expect(chunks).toEqual({
+      type: "Array",
+      value: [{ type: "Bytea", value: new Uint8Array([0x0a, 0x0b]) }],
+    });
+    expect(nested).toEqual({
+      type: "Row",
+      value: {
+        id: "nested-row",
+        values: [{ type: "Bytea", value: new Uint8Array([0x7f]) }],
+      },
+    });
   });
 
   it("serializes write context payloads for session-aware mutations", async () => {
