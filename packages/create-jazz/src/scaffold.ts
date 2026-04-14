@@ -7,7 +7,11 @@ const REPO = "garden-co/jazz2";
 const BRANCH = "main";
 const DEFAULT_STARTER = "next-betterauth";
 
-export const KNOWN_STARTERS = ["next-betterauth", "next-localfirst"] as const;
+export const KNOWN_STARTERS = [
+  "next-betterauth",
+  "next-localfirst",
+  "sveltekit-betterauth",
+] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 
 function isKnownStarter(name: string): name is StarterName {
