@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { PasskeyBackupError } from "./passkey-backup.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { PasskeyBackupError, BrowserPasskeyBackup } from "./passkey-backup.js";
 
 describe("PasskeyBackupError", () => {
   it("has the correct name", () => {
@@ -39,5 +39,61 @@ describe("PasskeyBackupError", () => {
 
   it("is an instance of Error", () => {
     expect(new PasskeyBackupError("not-supported")).toBeInstanceOf(Error);
+  });
+});
+
+describe("BrowserPasskeyBackup.backup — not-supported", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws not-supported when navigator.credentials is absent", async () => {
+    vi.stubGlobal("navigator", {});
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+      code: "not-supported",
+    });
+  });
+
+  it("throws not-supported when navigator is undefined", async () => {
+    vi.stubGlobal("navigator", undefined);
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+      code: "not-supported",
+    });
+  });
+});
+
+describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws invalid-secret when the secret is not valid base64url", async () => {
+    vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.backup("not!!!valid!!!base64url")).rejects.toMatchObject({
+      code: "invalid-secret",
+    });
+  });
+
+  it("throws invalid-secret when the secret decodes to fewer than 32 bytes", async () => {
+    vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    // 16 zero bytes as base64url
+    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+      code: "invalid-secret",
+    });
+  });
+
+  it("throws invalid-secret when the secret decodes to more than 32 bytes", async () => {
+    vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    // 33 zero bytes as base64url
+    const bytes = new Uint8Array(33);
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const tooLong = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    await expect(pb.backup(tooLong)).rejects.toMatchObject({ code: "invalid-secret" });
   });
 });
