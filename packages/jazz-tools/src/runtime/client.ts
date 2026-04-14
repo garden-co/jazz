@@ -105,6 +105,31 @@ export interface Runtime {
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
+  /** Connect to a Jazz server over WebSocket (Rust transport). */
+  connect?(url: string, auth_json: string): void;
+  /** Disconnect from the Jazz server and drop the transport handle. */
+  disconnect?(): void;
+}
+
+/**
+ * Authentication configuration for connecting to a Jazz server.
+ *
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_manager.rs`.
+ * All fields are optional; supply only the ones relevant to your auth mode.
+ */
+export interface AuthConfig {
+  /** JWT bearer token for user authentication. */
+  jwt_token?: string;
+  /** Backend service secret for server-to-server calls. */
+  backend_secret?: string;
+  /** Admin secret for privileged operations. */
+  admin_secret?: string;
+  /** Opaque session payload forwarded by a backend proxy. */
+  backend_session?: unknown;
+  /** Local-first auth mode identifier (e.g. "local"). */
+  local_mode?: string;
+  /** Local-first identity token. */
+  local_token?: string;
 }
 
 /**
@@ -1365,6 +1390,31 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
+  }
+
+  /**
+   * Connect to a Jazz server over WebSocket using the Rust transport layer.
+   *
+   * Serialises `auth` to JSON and delegates to the underlying runtime's
+   * `connect(url, auth_json)` method (available on NapiRuntime and WasmRuntime).
+   *
+   * @param url  WebSocket URL of the Jazz server (e.g. "ws://localhost:4000").
+   * @param auth Authentication credentials for the connection.
+   */
+  connectTransport(url: string, auth: AuthConfig): void {
+    if (!this.runtime.connect) {
+      throw new Error("Underlying runtime does not support connect()");
+    }
+    this.runtime.connect(url, JSON.stringify(auth));
+  }
+
+  /**
+   * Disconnect from the Jazz server and drop the Rust transport handle.
+   *
+   * No-op if the underlying runtime does not support disconnect().
+   */
+  disconnectTransport(): void {
+    this.runtime.disconnect?.();
   }
 
   /**

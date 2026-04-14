@@ -1709,6 +1709,7 @@ dependencies = [
  "napi-derive",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -1724,6 +1725,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "uniffi",
  "uuid",
 ]
