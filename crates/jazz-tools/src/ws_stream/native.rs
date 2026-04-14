@@ -27,10 +27,10 @@ impl StreamAdapter for NativeWsStream {
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
                 Some(Ok(Message::Close(_))) | None => return Ok(None),
                 Some(Ok(Message::Text(_))) => {
-                    tracing::warn!("received unexpected text frame on binary-only WS connection; ignoring");
+                    tracing::debug!("received unexpected text frame on binary-only WS connection; ignoring");
                     continue;
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(Message::Frame(_))) => continue, // raw frame: send-only, cannot arrive on read
                 Some(Err(e)) => return Err(e),
             }
         }
@@ -51,14 +51,17 @@ mod tests {
     async fn native_ws_stream_send_recv_roundtrip() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ready_tx.send(());
             while let Some(Ok(msg)) = ws.next().await {
                 ws.send(msg).await.unwrap();
             }
         });
         let mut stream = NativeWsStream::connect(&format!("ws://{addr}")).await.unwrap();
+        ready_rx.await.unwrap();
         stream.send(b"hello ws").await.unwrap();
         assert_eq!(stream.recv().await.unwrap().unwrap(), b"hello ws".to_vec());
     }
