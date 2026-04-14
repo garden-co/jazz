@@ -66,7 +66,7 @@ export class BrowserPasskeyBackup {
     this.rpId = options.appHostname ?? globalThis.location?.hostname ?? "localhost";
   }
 
-  async backup(secret: string): Promise<void> {
+  async backup(secret: string, displayName: string): Promise<void> {
     if (!globalThis.navigator?.credentials) {
       throw new PasskeyBackupError("not-supported");
     }
@@ -90,8 +90,8 @@ export class BrowserPasskeyBackup {
           rp: { id: this.rpId, name: this.appName },
           user: {
             id: secretBytes as Uint8Array<ArrayBuffer>,
-            name: this.appName,
-            displayName: this.appName,
+            name: displayName,
+            displayName,
           },
           challenge,
           pubKeyCredParams: [

@@ -63,7 +63,9 @@ describe("BrowserPasskeyBackup.backup — not-supported", () => {
   it("throws not-supported when navigator.credentials is absent", async () => {
     vi.stubGlobal("navigator", {});
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+    await expect(
+      pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
+    ).rejects.toMatchObject({
       code: "not-supported",
     });
   });
@@ -71,7 +73,9 @@ describe("BrowserPasskeyBackup.backup — not-supported", () => {
   it("throws not-supported when navigator is undefined", async () => {
     vi.stubGlobal("navigator", undefined);
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+    await expect(
+      pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
+    ).rejects.toMatchObject({
       code: "not-supported",
     });
   });
@@ -85,7 +89,7 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
   it("throws invalid-secret when the secret is not valid base64url", async () => {
     vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await expect(pb.backup("not!!!valid!!!base64url")).rejects.toMatchObject({
+    await expect(pb.backup("not!!!valid!!!base64url", "Alice")).rejects.toMatchObject({
       code: "invalid-secret",
     });
   });
@@ -94,7 +98,7 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
     vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
     // 16 zero bytes as base64url
-    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAA")).rejects.toMatchObject({
+    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAA", "Alice")).rejects.toMatchObject({
       code: "invalid-secret",
     });
   });
@@ -107,7 +111,7 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
     let bin = "";
     for (const b of bytes) bin += String.fromCharCode(b);
     const tooLong = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    await expect(pb.backup(tooLong)).rejects.toMatchObject({ code: "invalid-secret" });
+    await expect(pb.backup(tooLong, "Alice")).rejects.toMatchObject({ code: "invalid-secret" });
   });
 });
 
@@ -123,7 +127,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     expect(mockCreate).toHaveBeenCalledOnce();
     const callArg = mockCreate.mock.calls[0][0] as {
@@ -133,12 +137,26 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     expect(userId).toEqual(new Uint8Array(32)); // 32 zero bytes
   });
 
+  it("sets user.name and user.displayName to the provided displayName", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET, "Bob");
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.user.name).toBe("Bob");
+    expect(callArg.publicKey.user.displayName).toBe("Bob");
+  });
+
   it("sets authenticatorAttachment: platform", async () => {
     const mockCreate = vi.fn().mockResolvedValue({});
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions;
@@ -151,7 +169,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions;
@@ -164,7 +182,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions;
@@ -178,7 +196,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions & {
@@ -195,7 +213,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "myapp.com" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions;
@@ -208,7 +226,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(VALID_SECRET);
+    await pb.backup(VALID_SECRET, "Alice");
 
     const callArg = mockCreate.mock.calls[0][0] as {
       publicKey: PublicKeyCredentialCreationOptions;
@@ -225,7 +243,7 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await expect(pb.backup(VALID_SECRET)).rejects.toMatchObject({
+    await expect(pb.backup(VALID_SECRET, "Alice")).rejects.toMatchObject({
       code: "create-failed",
       cause: underlying,
     });
@@ -432,7 +450,7 @@ describe("BrowserPasskeyBackup round-trip", () => {
     vi.stubGlobal("navigator", { credentials: { create: mockCreate, get: vi.fn() } });
 
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
-    await pb.backup(originalSecret);
+    await pb.backup(originalSecret, "Alice");
 
     // Now restore using the captured bytes as the userHandle
     const mockGet = vi.fn().mockResolvedValue({
