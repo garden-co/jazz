@@ -229,9 +229,9 @@ If the row is visible to the query, provenance magic columns evaluate from the v
 
 ## Execution Semantics
 
-### What row version is checked?
+### What row batch member is checked?
 
-Policy evaluation should use the same visible row version the query/mutation path already uses.
+Policy evaluation should use the same visible row batch member the query/mutation path already uses.
 
 - `created_by` comes from the visible row commit metadata
 - `updated_by` comes from the visible row commit author

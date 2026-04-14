@@ -7,7 +7,7 @@ use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::encoding::encode_row;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
-use crate::row_histories::{BatchId, StoredRowVersion, VisibleRowEntry};
+use crate::row_histories::{BatchId, StoredRowBatch, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
 use crate::test_row_history::{create_test_row_with_id, persist_test_schema};
 use std::collections::{HashMap, HashSet};
@@ -39,12 +39,12 @@ fn row_metadata(table: &str) -> HashMap<String, String> {
 fn visible_row(
     row_id: ObjectId,
     branch: &str,
-    parents: Vec<crate::commit::CommitId>,
+    parents: Vec<BatchId>,
     updated_at: u64,
     data: &[u8],
-) -> crate::row_histories::StoredRowVersion {
+) -> crate::row_histories::StoredRowBatch {
     let payload = std::str::from_utf8(data).expect("sync-manager test row payload should be utf8");
-    crate::row_histories::StoredRowVersion::new(
+    crate::row_histories::StoredRowBatch::new(
         row_id,
         branch,
         parents,
@@ -60,11 +60,42 @@ fn visible_row(
     )
 }
 
+fn row_with_batch_state(
+    row: crate::row_histories::StoredRowBatch,
+    batch_id: BatchId,
+    state: crate::row_histories::RowState,
+    confirmed_tier: Option<DurabilityTier>,
+) -> crate::row_histories::StoredRowBatch {
+    crate::row_histories::StoredRowBatch::new_with_batch_id(
+        batch_id,
+        row.row_id,
+        row.branch.as_str(),
+        row.parents.iter().copied(),
+        row.data.as_ref().to_vec(),
+        row.row_provenance(),
+        row.metadata
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
+        state,
+        confirmed_tier,
+    )
+}
+
+fn row_with_state(
+    row: crate::row_histories::StoredRowBatch,
+    state: crate::row_histories::RowState,
+    confirmed_tier: Option<DurabilityTier>,
+) -> crate::row_histories::StoredRowBatch {
+    let batch_id = row.batch_id;
+    row_with_batch_state(row, batch_id, state, confirmed_tier)
+}
+
 fn seed_visible_row(
     _sm: &mut SyncManager,
     io: &mut MemoryStorage,
     table: &str,
-    row: crate::row_histories::StoredRowVersion,
+    row: crate::row_histories::StoredRowBatch,
 ) {
     seed_users_schema(io);
     create_test_row_with_id(io, row.row_id, Some(row_metadata(table)));
@@ -118,7 +149,7 @@ fn load_visible_row(
     table: &str,
     row_id: ObjectId,
     branch: &str,
-) -> StoredRowVersion {
+) -> StoredRowBatch {
     storage
         .load_visible_region_row(table, branch, row_id)
         .unwrap()
@@ -376,7 +407,7 @@ fn schema_warning_from_server_relays_to_interested_clients() {
 }
 
 #[test]
-fn row_version_created_emits_row_version_state_changed_to_source() {
+fn row_batch_created_emits_row_batch_state_changed_to_source() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
@@ -386,7 +417,7 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
     sm.process_from_server(
         &mut io,
         server_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
@@ -401,10 +432,10 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
         OutboxEntry {
             destination: Destination::Server(id),
             payload:
-                SyncPayload::RowVersionStateChanged {
+                SyncPayload::RowBatchStateChanged {
                     row_id: ack_row_id,
                     branch_name,
-                    version_id,
+                    batch_id,
                     state,
                     confirmed_tier,
                 },
@@ -412,16 +443,16 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
             assert_eq!(*id, server_id);
             assert_eq!(*ack_row_id, row_id);
             assert_eq!(*branch_name, BranchName::new("main"));
-            assert_eq!(*version_id, row.version_id());
+            assert_eq!(*batch_id, row.batch_id);
             assert_eq!(*state, None);
             assert_eq!(*confirmed_tier, Some(DurabilityTier::Worker));
         }
-        other => panic!("expected RowVersionStateChanged to server, got {other:?}"),
+        other => panic!("expected RowBatchStateChanged to server, got {other:?}"),
     }
 }
 
 #[test]
-fn row_version_created_stamps_local_durability_into_storage() {
+fn row_batch_created_stamps_local_durability_into_storage() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
@@ -432,7 +463,7 @@ fn row_version_created_stamps_local_durability_into_storage() {
     sm.process_from_server(
         &mut io,
         server_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
@@ -463,21 +494,21 @@ fn row_version_created_stamps_local_durability_into_storage() {
 }
 
 #[test]
-fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
+fn row_batch_state_changed_updates_row_region_confirmed_tier_monotonically() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    let version_id = row.version_id();
+    let batch_id = row.batch_id;
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
 
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::EdgeServer),
         },
@@ -485,10 +516,10 @@ fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -509,21 +540,21 @@ fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
 }
 
 #[test]
-fn row_version_state_changed_enqueues_pending_row_update_for_visible_row() {
+fn row_batch_state_changed_enqueues_pending_row_update_for_visible_row() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    let version_id = row.version_id();
+    let batch_id = row.batch_id;
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
 
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::EdgeServer),
         },
@@ -539,13 +570,13 @@ fn row_version_state_changed_enqueues_pending_row_update_for_visible_row() {
 }
 
 #[test]
-fn row_version_state_changed_relays_to_clients_that_received_row_version_needed() {
+fn row_batch_state_changed_relays_to_clients_that_received_row_batch_needed() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    let version_id = row.version_id();
+    let batch_id = row.batch_id;
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
@@ -565,17 +596,17 @@ fn row_version_state_changed_relays_to_clients_that_received_row_version_needed(
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowVersionNeeded { row: needed, .. },
+            payload: SyncPayload::RowBatchNeeded { row: needed, .. },
         } if *id == client_id && needed.row_id == row_id
     )));
 
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -586,13 +617,13 @@ fn row_version_state_changed_relays_to_clients_that_received_row_version_needed(
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::RowVersionStateChanged {
+                SyncPayload::RowBatchStateChanged {
                     row_id: changed_row_id,
-                    version_id: changed_version_id,
+                    batch_id: changed_batch_id,
                     confirmed_tier: Some(DurabilityTier::Worker),
                     ..
                 },
-        } if id == client_id && changed_row_id == row_id && changed_version_id == version_id
+        } if id == client_id && changed_row_id == row_id && changed_batch_id == batch_id
     )));
 }
 
@@ -642,9 +673,11 @@ fn initial_query_sync_replays_current_accepted_transaction_settlement() {
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
-    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    row.state = crate::row_histories::RowState::VisibleTransactional;
-    row.confirmed_tier = Some(DurabilityTier::Worker);
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::VisibleTransactional,
+        Some(DurabilityTier::Worker),
+    );
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
@@ -683,9 +716,11 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
-    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    row.state = crate::row_histories::RowState::VisibleTransactional;
-    row.confirmed_tier = Some(DurabilityTier::Worker);
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::VisibleTransactional,
+        Some(DurabilityTier::Worker),
+    );
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
@@ -778,13 +813,13 @@ fn batch_settlement_needed_returns_persisted_rejected_without_visible_rows() {
 }
 
 #[test]
-fn row_version_state_changed_relays_direct_batch_settlement_to_interested_clients() {
+fn row_batch_state_changed_relays_direct_batch_settlement_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    let version_id = row.version_id();
+    let batch_id = row.batch_id;
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
@@ -803,10 +838,10 @@ fn row_version_state_changed_relays_direct_batch_settlement_to_interested_client
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -830,14 +865,17 @@ fn row_version_state_changed_relays_direct_batch_settlement_to_interested_client
 }
 
 #[test]
-fn row_version_state_changed_relays_accepted_transaction_settlement_to_interested_clients() {
+fn row_batch_state_changed_relays_accepted_transaction_settlement_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
-    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    row.state = crate::row_histories::RowState::VisibleTransactional;
-    let version_id = row.version_id();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::VisibleTransactional,
+        None,
+    );
+    let batch_id = row.batch_id;
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
@@ -856,10 +894,10 @@ fn row_version_state_changed_relays_accepted_transaction_settlement_to_intereste
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -883,14 +921,16 @@ fn row_version_state_changed_relays_accepted_transaction_settlement_to_intereste
 }
 
 #[test]
-fn row_version_state_changed_persists_accepted_transaction_tier_upgrade_authoritatively() {
+fn row_batch_state_changed_persists_accepted_transaction_tier_upgrade_authoritatively() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
-    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    row.state = crate::row_histories::RowState::VisibleTransactional;
-    row.confirmed_tier = Some(DurabilityTier::Worker);
-    let version_id = row.version_id();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::VisibleTransactional,
+        Some(DurabilityTier::Worker),
+    );
+    let batch_id = row.batch_id;
 
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
     io.upsert_authoritative_batch_settlement(&BatchSettlement::AcceptedTransaction {
@@ -907,10 +947,10 @@ fn row_version_state_changed_persists_accepted_transaction_tier_upgrade_authorit
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::EdgeServer),
         },
@@ -932,7 +972,7 @@ fn row_version_state_changed_persists_accepted_transaction_tier_upgrade_authorit
 }
 
 #[test]
-fn row_version_state_changed_stops_relaying_after_scope_removal() {
+fn row_batch_state_changed_stops_relaying_after_scope_removal() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -957,10 +997,10 @@ fn row_version_state_changed_stops_relaying_after_scope_removal() {
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name: BranchName::new("main"),
-            version_id: row.version_id(),
+            batch_id: row.batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -970,13 +1010,13 @@ fn row_version_state_changed_stops_relaying_after_scope_removal() {
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowVersionStateChanged { row_id: changed_row_id, .. },
+            payload: SyncPayload::RowBatchStateChanged { row_id: changed_row_id, .. },
         } if id == client_id && changed_row_id == row_id
     )));
 }
 
 #[test]
-fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row() {
+fn stale_row_batch_from_client_replays_upstream_without_regressing_visible_row() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -994,7 +1034,7 @@ fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
@@ -1004,14 +1044,14 @@ fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row
     );
 
     let visible = load_visible_row(&io, "users", row_id, "main");
-    assert_eq!(visible.version_id(), newer.version_id());
+    assert_eq!(visible.batch_id(), newer.batch_id());
 
     assert!(sm.take_outbox().into_iter().any(|entry| matches!(
         entry,
         OutboxEntry {
             destination: Destination::Server(id),
-            payload: SyncPayload::RowVersionCreated { row, .. },
-        } if id == server_id && row.version_id() == older.version_id()
+            payload: SyncPayload::RowBatchCreated { row, .. },
+        } if id == server_id && row.batch_id() == older.batch_id()
     )));
 }
 
@@ -1021,8 +1061,11 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
-    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    row.state = crate::row_histories::RowState::StagingPending;
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
     seed_users_schema(&mut io);
 
     add_client(&mut sm, &io, client_id);
@@ -1032,7 +1075,7 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
@@ -1041,7 +1084,7 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
         },
     );
 
-    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    let history_rows = io.scan_history_row_batches("users", row_id).unwrap();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
         history_rows[0].state,
@@ -1065,7 +1108,7 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
             destination: Destination::Client(id),
             payload:
                 SyncPayload::BatchSettlement { .. }
-                | SyncPayload::RowVersionStateChanged { .. },
+                | SyncPayload::RowBatchStateChanged { .. },
         } if id == client_id
     )));
 }
@@ -1080,26 +1123,28 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
     let second_row_id = ObjectId::new();
     seed_users_schema(&mut io);
 
-    let mut second_row = visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
-
     add_client(&mut sm, &io, client_id);
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut first_row = visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
-    let mut second_row = visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
+    let first_row = row_with_batch_state(
+        visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    let second_row = row_with_batch_state(
+        visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     for row in [first_row.clone(), second_row.clone()] {
         sm.process_from_client(
             &mut io,
             client_id,
-            SyncPayload::RowVersionCreated {
+            SyncPayload::RowBatchCreated {
                 metadata: Some(RowMetadata {
                     id: row.row_id,
                     metadata: row_metadata("users"),
@@ -1121,12 +1166,12 @@ fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
                     SealedBatchMember {
                         object_id: first_row_id,
                         branch_name: BranchName::new("main"),
-                        version_id: first_row.version_id(),
+                        row_digest: first_row.content_digest(),
                     },
                     SealedBatchMember {
                         object_id: second_row_id,
                         branch_name: BranchName::new("main"),
-                        version_id: second_row.version_id(),
+                        row_digest: second_row.content_digest(),
                     },
                 ],
                 Vec::new(),
@@ -1212,19 +1257,25 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
     // authority
     //   settles one visible member for that row
     //   publishes only the latest staged content
-    let mut first_row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
+    let first_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
-    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
+    let second_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     for row in [first_row.clone(), second_row.clone()] {
         sm.process_from_client(
             &mut io,
             client_id,
-            SyncPayload::RowVersionCreated {
+            SyncPayload::RowBatchCreated {
                 metadata: Some(RowMetadata {
                     id: row.row_id,
                     metadata: row_metadata("users"),
@@ -1245,7 +1296,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
                 vec![SealedBatchMember {
                     object_id: row_id,
                     branch_name: BranchName::new("main"),
-                    version_id: second_row.version_id(),
+                    row_digest: second_row.content_digest(),
                 }],
                 Vec::new(),
             ),
@@ -1275,7 +1326,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
         .expect("latest row should become visible after seal");
-    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
+    assert_eq!(visible.batch_id(), batch_id);
     assert!(visible.parents.is_empty());
     assert_eq!(visible.data, second_row.data);
     assert_eq!(visible.batch_id, batch_id);
@@ -1284,47 +1335,38 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
         crate::row_histories::RowState::VisibleTransactional
     );
 
-    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
-    assert_eq!(history_rows.len(), 3);
-    assert!(history_rows.iter().any(|row| {
-        row.version_id() == first_row.version_id()
-            && row.state == crate::row_histories::RowState::Superseded
-    }));
-    assert!(history_rows.iter().any(|row| {
-        row.version_id() == second_row.version_id()
-            && row.state == crate::row_histories::RowState::Superseded
-    }));
-    assert!(history_rows.iter().any(|row| {
-        row.version_id() == batch_id.accepted_version_id()
-            && row.state == crate::row_histories::RowState::VisibleTransactional
-    }));
+    let history_rows = io.scan_history_row_batches("users", row_id).unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(history_rows[0].batch_id(), batch_id);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(history_rows[0].data, second_row.data);
 
     let outbox = sm.take_outbox();
     assert!(outbox.iter().any(|entry| matches!(
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowVersionStateChanged {
+            payload: SyncPayload::RowBatchStateChanged {
                 row_id: changed_row_id,
                 branch_name,
-                version_id,
-                state: Some(crate::row_histories::RowState::Superseded),
-                ..
+                batch_id: changed_batch_id,
+                state: Some(crate::row_histories::RowState::VisibleTransactional),
+                confirmed_tier: Some(DurabilityTier::Worker),
             },
         } if *id == client_id
             && *changed_row_id == row_id
             && *branch_name == BranchName::new("main")
-            && *version_id == second_row.version_id()
+            && *changed_batch_id == batch_id
     )));
-    assert!(outbox.iter().any(|entry| matches!(
+    assert!(!outbox.iter().any(|entry| matches!(
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowVersionNeeded { row, .. },
-        } if *id == client_id
-            && row.row_id == row_id
-            && row.version_id() == batch_id.accepted_version_id()
-            && row.state == crate::row_histories::RowState::VisibleTransactional
+            payload: SyncPayload::RowBatchNeeded { row, .. },
+        } if *id == client_id && row.row_id == row_id
     )));
 }
 
@@ -1342,25 +1384,31 @@ fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut first_row = visible_row(row_id, "main", vec![base_row.version_id()], 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
-
-    let mut second_row = visible_row(
-        row_id,
-        "main",
-        vec![base_row.version_id()],
-        1_100,
-        b"alice-updated",
+    let first_row = row_with_batch_state(
+        visible_row(row_id, "main", vec![base_row.batch_id()], 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
     );
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
+
+    let second_row = row_with_batch_state(
+        visible_row(
+            row_id,
+            "main",
+            vec![base_row.batch_id()],
+            1_100,
+            b"alice-updated",
+        ),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     for row in [first_row.clone(), second_row.clone()] {
         sm.process_from_client(
             &mut io,
             client_id,
-            SyncPayload::RowVersionCreated {
+            SyncPayload::RowBatchCreated {
                 metadata: Some(RowMetadata {
                     id: row.row_id,
                     metadata: row_metadata("users"),
@@ -1381,12 +1429,12 @@ fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
                 vec![SealedBatchMember {
                     object_id: row_id,
                     branch_name: BranchName::new("main"),
-                    version_id: second_row.version_id(),
+                    row_digest: second_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {
                     object_id: row_id,
                     branch_name: BranchName::new("main"),
-                    version_id: base_row.version_id(),
+                    batch_id: base_row.batch_id(),
                 }],
             ),
         },
@@ -1396,8 +1444,8 @@ fn seal_batch_same_row_preserves_pre_transaction_parent_frontier() {
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
         .expect("sealed batch should publish the accepted row");
-    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
-    assert_eq!(visible.parents.as_slice(), [base_row.version_id()]);
+    assert_eq!(visible.batch_id(), batch_id);
+    assert_eq!(visible.parents.as_slice(), [base_row.batch_id()]);
     assert_eq!(visible.data, second_row.data);
 }
 
@@ -1411,24 +1459,29 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
     let second_row_id = ObjectId::new();
     seed_users_schema(&mut io);
 
-    let mut second_row = visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
-
     add_client(&mut sm, &io, client_id);
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut first_row = visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
-    let first_row_version_id = first_row.version_id();
-    let second_row_version_id = second_row.version_id();
+    let first_row = row_with_batch_state(
+        visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    let second_row = row_with_batch_state(
+        visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    let first_row_batch_id = first_row.content_digest();
+    let second_row_batch_id = second_row.content_digest();
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: first_row.row_id,
                 metadata: row_metadata("users"),
@@ -1449,12 +1502,12 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
                     SealedBatchMember {
                         object_id: first_row_id,
                         branch_name: BranchName::new("main"),
-                        version_id: first_row_version_id,
+                        row_digest: first_row_batch_id,
                     },
                     SealedBatchMember {
                         object_id: second_row_id,
                         branch_name: BranchName::new("main"),
-                        version_id: second_row_version_id,
+                        row_digest: second_row_batch_id,
                     },
                 ],
                 Vec::new(),
@@ -1477,7 +1530,7 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: second_row.row_id,
                 metadata: row_metadata("users"),
@@ -1500,7 +1553,7 @@ fn seal_batch_waits_for_all_declared_rows_before_accepting() {
 }
 
 #[test]
-fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
+fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -1512,18 +1565,24 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut first_row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
+    let first_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
-    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
+    let second_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: first_row.row_id,
                 metadata: row_metadata("users"),
@@ -1543,7 +1602,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
                 vec![SealedBatchMember {
                     object_id: row_id,
                     branch_name: BranchName::new("main"),
-                    version_id: second_row.version_id(),
+                    row_digest: second_row.content_digest(),
                 }],
                 Vec::new(),
             ),
@@ -1553,7 +1612,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     assert_eq!(
         io.load_authoritative_batch_settlement(batch_id).unwrap(),
         None,
-        "authority should wait for the declared final row version, not just any row for that object"
+        "authority should wait for the declared final row batch member, not just any row for that object"
     );
     assert_eq!(
         io.load_visible_region_row("users", "main", row_id).unwrap(),
@@ -1564,7 +1623,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: second_row.row_id,
                 metadata: row_metadata("users"),
@@ -1576,7 +1635,7 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     let settlement = io
         .load_authoritative_batch_settlement(batch_id)
         .unwrap()
-        .expect("authority should settle once the declared final row version arrives");
+        .expect("authority should settle once the declared final row batch member arrives");
     let BatchSettlement::AcceptedTransaction {
         visible_members, ..
     } = settlement
@@ -1595,8 +1654,8 @@ fn seal_batch_waits_for_declared_latest_row_version_before_accepting() {
     let visible = io
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
-        .expect("declared final row version should become visible");
-    assert_eq!(visible.version_id(), batch_id.accepted_version_id());
+        .expect("declared final row batch member should become visible");
+    assert_eq!(visible.batch_id(), batch_id);
 }
 
 #[test]
@@ -1612,18 +1671,24 @@ fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_se
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut first_row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    first_row.batch_id = batch_id;
-    first_row.state = crate::row_histories::RowState::StagingPending;
+    let first_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
-    let mut second_row = visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated");
-    second_row.batch_id = batch_id;
-    second_row.state = crate::row_histories::RowState::StagingPending;
+    let second_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_100, b"alice-updated"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: first_row.row_id,
                 metadata: row_metadata("users"),
@@ -1634,7 +1699,7 @@ fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_se
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: second_row.row_id,
                 metadata: row_metadata("users"),
@@ -1643,7 +1708,7 @@ fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_se
         },
     );
 
-    let history_rows = io.scan_history_row_versions("users", row_id).unwrap();
+    let history_rows = io.scan_history_row_batches("users", row_id).unwrap();
     let live_pending_rows: Vec<_> = history_rows
         .iter()
         .filter(|row| matches!(row.state, crate::row_histories::RowState::StagingPending))
@@ -1653,14 +1718,9 @@ fn same_row_staging_in_one_batch_keeps_only_latest_live_pending_member_before_se
         1,
         "authority staging should keep one live pending member for a same-row batch rewrite"
     );
-    assert_eq!(live_pending_rows[0].version_id(), second_row.version_id());
-
-    let superseded_rows: Vec<_> = history_rows
-        .iter()
-        .filter(|row| matches!(row.state, crate::row_histories::RowState::Superseded))
-        .collect();
-    assert_eq!(superseded_rows.len(), 1);
-    assert_eq!(superseded_rows[0].version_id(), first_row.version_id());
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(live_pending_rows[0].batch_id(), batch_id);
+    assert_eq!(live_pending_rows[0].data, second_row.data);
     assert_eq!(
         io.load_visible_region_row("users", "main", row_id).unwrap(),
         None,
@@ -1682,18 +1742,24 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
     sm.set_client_role(client_id, ClientRole::Peer);
     sm.take_outbox();
 
-    let mut main_row = visible_row(main_row_id, "main", Vec::new(), 1_000, b"alice");
-    main_row.batch_id = batch_id;
-    main_row.state = crate::row_histories::RowState::StagingPending;
+    let main_row = row_with_batch_state(
+        visible_row(main_row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
-    let mut draft_row = visible_row(draft_row_id, "draft", Vec::new(), 1_100, b"bob");
-    draft_row.batch_id = batch_id;
-    draft_row.state = crate::row_histories::RowState::StagingPending;
+    let draft_row = row_with_batch_state(
+        visible_row(draft_row_id, "draft", Vec::new(), 1_100, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: main_row.row_id,
                 metadata: row_metadata("users"),
@@ -1704,7 +1770,7 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: draft_row.row_id,
                 metadata: row_metadata("users"),
@@ -1725,12 +1791,12 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
                     SealedBatchMember {
                         object_id: main_row_id,
                         branch_name: BranchName::new("main"),
-                        version_id: main_row.version_id(),
+                        row_digest: main_row.content_digest(),
                     },
                     SealedBatchMember {
                         object_id: draft_row_id,
                         branch_name: BranchName::new("draft"),
-                        version_id: draft_row.version_id(),
+                        row_digest: draft_row.content_digest(),
                     },
                 ],
                 Vec::new(),
@@ -1758,8 +1824,8 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
         None
     );
 
-    let main_history_rows = io.scan_history_row_versions("users", main_row_id).unwrap();
-    let draft_history_rows = io.scan_history_row_versions("users", draft_row_id).unwrap();
+    let main_history_rows = io.scan_history_row_batches("users", main_row_id).unwrap();
+    let draft_history_rows = io.scan_history_row_batches("users", draft_row_id).unwrap();
     assert_eq!(main_history_rows.len(), 1);
     assert_eq!(draft_history_rows.len(), 1);
     assert_eq!(
@@ -1769,6 +1835,68 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
     assert_eq!(
         draft_history_rows[0].state,
         crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
+fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let staged_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let mut submission = sealed_submission(
+        batch_id,
+        "main",
+        vec![SealedBatchMember {
+            object_id: row_id,
+            branch_name: BranchName::new("main"),
+            row_digest: staged_row.content_digest(),
+        }],
+        Vec::new(),
+    );
+    submission.batch_digest = crate::commit::CommitId([255; 32]);
+
+    sm.process_from_client(&mut io, client_id, SyncPayload::SealBatch { submission });
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(BatchSettlement::Rejected {
+            batch_id,
+            code: "invalid_batch_submission".to_string(),
+            reason: "sealed transactional batch digest does not match declared members".to_string(),
+        })
+    );
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "invalid batch digests should be rejected before publication"
     );
 }
 
@@ -1792,14 +1920,17 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
     let existing_row = visible_row(existing_row_id, target_branch, Vec::new(), 900, b"seen");
     seed_visible_row(&mut sm, &mut io, "users", existing_row.clone());
 
-    let mut staged_row = visible_row(staged_row_id, target_branch, Vec::new(), 1_000, b"alice");
-    staged_row.batch_id = batch_id;
-    staged_row.state = crate::row_histories::RowState::StagingPending;
+    let staged_row = row_with_batch_state(
+        visible_row(staged_row_id, target_branch, Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: staged_row.row_id,
                 metadata: row_metadata("users"),
@@ -1819,7 +1950,7 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: conflicting_row.row_id,
                 metadata: row_metadata("users"),
@@ -1839,12 +1970,12 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
                 vec![SealedBatchMember {
                     object_id: staged_row_id,
                     branch_name: BranchName::new(target_branch),
-                    version_id: staged_row.version_id(),
+                    row_digest: staged_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {
                     object_id: existing_row_id,
                     branch_name: BranchName::new(target_branch),
-                    version_id: existing_row.version_id(),
+                    batch_id: existing_row.batch_id(),
                 }],
             ),
         },
@@ -1865,9 +1996,7 @@ fn seal_batch_rejects_when_family_visible_frontier_changed() {
         "conflicted sealed batch should not publish its staged row"
     );
 
-    let history_rows = io
-        .scan_history_row_versions("users", staged_row_id)
-        .unwrap();
+    let history_rows = io.scan_history_row_batches("users", staged_row_id).unwrap();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
         history_rows[0].state,
@@ -1893,14 +2022,17 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
     let existing_row = visible_row(existing_row_id, target_branch, Vec::new(), 900, b"seen");
     seed_visible_row(&mut sm, &mut io, "users", existing_row.clone());
 
-    let mut staged_row = visible_row(staged_row_id, target_branch, Vec::new(), 1_000, b"alice");
-    staged_row.batch_id = batch_id;
-    staged_row.state = crate::row_histories::RowState::StagingPending;
+    let staged_row = row_with_batch_state(
+        visible_row(staged_row_id, target_branch, Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
 
     sm.process_from_client(
         &mut io,
         client_id,
-        SyncPayload::RowVersionCreated {
+        SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: staged_row.row_id,
                 metadata: row_metadata("users"),
@@ -1920,12 +2052,12 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
                 vec![SealedBatchMember {
                     object_id: staged_row_id,
                     branch_name: BranchName::new(target_branch),
-                    version_id: staged_row.version_id(),
+                    row_digest: staged_row.content_digest(),
                 }],
                 vec![CapturedFrontierMember {
                     object_id: existing_row_id,
                     branch_name: BranchName::new(target_branch),
-                    version_id: existing_row.version_id(),
+                    batch_id: existing_row.batch_id(),
                 }],
             ),
         },
@@ -1967,8 +2099,8 @@ fn forward_update_to_servers_with_storage_replays_row_history_without_visible_re
         entry,
         OutboxEntry {
             destination: Destination::Server(id),
-            payload: SyncPayload::RowVersionCreated { row: created, metadata, .. },
-        } if id == server_id && created.version_id() == row.version_id() && metadata.is_some()
+            payload: SyncPayload::RowBatchCreated { row: created, metadata, .. },
+        } if id == server_id && created.batch_id() == row.batch_id() && metadata.is_some()
     )));
 }
 
@@ -1977,7 +2109,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
     let older = visible_row(row_id, "main", Vec::new(), 1_000, b"older");
-    let newer = visible_row(row_id, "main", vec![older.version_id()], 2_000, b"newer");
+    let newer = visible_row(row_id, "main", vec![older.batch_id()], 2_000, b"newer");
 
     seed_users_schema(&mut io);
     io.put_metadata(row_id, row_metadata("users")).unwrap();
@@ -2018,7 +2150,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
                 entry,
                 OutboxEntry {
                     destination: Destination::Server(id),
-                    payload: SyncPayload::RowVersionCreated { .. },
+                    payload: SyncPayload::RowBatchCreated { .. },
                 } if *id == server_id
             )
         })
@@ -2028,15 +2160,15 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
         row_syncs[0],
         OutboxEntry {
             destination: Destination::Server(id),
-            payload: SyncPayload::RowVersionCreated { row, metadata, .. },
-        } if *id == server_id && row.version_id() == older.version_id() && metadata.is_some()
+            payload: SyncPayload::RowBatchCreated { row, metadata, .. },
+        } if *id == server_id && row.batch_id() == older.batch_id() && metadata.is_some()
     ));
     assert!(matches!(
         row_syncs[1],
         OutboxEntry {
             destination: Destination::Server(id),
-            payload: SyncPayload::RowVersionCreated { row, metadata, .. },
-        } if *id == server_id && row.version_id() == newer.version_id() && metadata.is_none()
+            payload: SyncPayload::RowBatchCreated { row, metadata, .. },
+        } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_none()
     ));
 }
 
@@ -2126,14 +2258,14 @@ fn remove_client_cleans_outbox_entries() {
     let row = visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice");
     sm.outbox.push(OutboxEntry {
         destination: Destination::Client(alice),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row: row.clone(),
         },
     });
     sm.outbox.push(OutboxEntry {
         destination: Destination::Client(bob),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row: row.clone(),
         },
@@ -2141,7 +2273,7 @@ fn remove_client_cleans_outbox_entries() {
     let server_id = ServerId::new();
     sm.outbox.push(OutboxEntry {
         destination: Destination::Server(server_id),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         },
@@ -2165,7 +2297,7 @@ fn remove_client_skips_when_inbox_entries_exist() {
 
     sm.push_inbox(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row: visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice"),
         },

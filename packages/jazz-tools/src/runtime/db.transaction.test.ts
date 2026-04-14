@@ -38,10 +38,13 @@ function todoTable() {
   >;
 }
 
-function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
+function makeLocalBatchRecord(
+  batchId: string,
+  mode: LocalBatchRecord["mode"] = "transactional",
+): LocalBatchRecord {
   return {
     batchId,
-    mode: "transactional",
+    mode,
     requestedTier: "global",
     sealed: false,
     latestSettlement: null,
@@ -100,12 +103,7 @@ describe("Db transactions", () => {
       { title: "Transactional", done: false },
       { tier: "global" },
     );
-    const updated = tx.updatePersisted(
-      table,
-      "todo-1",
-      { done: true },
-      { tier: "edge" },
-    );
+    const updated = tx.updatePersisted(table, "todo-1", { done: true }, { tier: "edge" });
     const deleted = tx.deletePersisted(table, "todo-1", { tier: "worker" });
 
     expect(beginTransactionInternal).toHaveBeenCalledWith();
@@ -138,10 +136,7 @@ describe("Db transactions", () => {
       },
       { tier: "edge" },
     );
-    expect(runtimeTransaction.deletePersisted).toHaveBeenCalledWith(
-      "todo-1",
-      { tier: "worker" },
-    );
+    expect(runtimeTransaction.deletePersisted).toHaveBeenCalledWith("todo-1", { tier: "worker" });
     expect(persisted.value()).toEqual({
       id: "todo-1",
       title: "Transactional",
@@ -209,10 +204,7 @@ describe("Db transactions", () => {
       done: true,
     });
 
-    expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(
-      session,
-      "alice@writer",
-    );
+    expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(session, "alice@writer");
     expect(tx.commit()).toBe("batch-session-tx");
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(inserted).toEqual({
@@ -260,5 +252,98 @@ describe("Db transactions", () => {
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
     expect(runtimeTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it("creates a typed db direct batch seeded by a table schema", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-direct-1",
+      values: [
+        { type: "Text", value: "Direct batch" },
+        { type: "Boolean", value: false },
+      ],
+    };
+    const persistedInsert = makePendingWrite("batch-direct-insert", runtimeRow);
+    const persistedUpdate = makePendingWrite("batch-direct-update", undefined);
+    const persistedDelete = makePendingWrite("batch-direct-delete", undefined);
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct"),
+      create: vi.fn(() => runtimeRow),
+      createPersisted: vi.fn(() => persistedInsert),
+      update: vi.fn(),
+      updatePersisted: vi.fn(() => persistedUpdate),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(() => persistedDelete),
+      localBatchRecord: vi.fn((batchId = "batch-direct") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-direct", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const beginDirectBatchInternal = vi.fn(() => runtimeBatch);
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginDirectBatchInternal,
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const batch = db.beginDirectBatch(table);
+    const inserted = batch.insert(table, { title: "Direct batch", done: false });
+    batch.update(table, "todo-direct-1", { done: true });
+    batch.delete(table, "todo-direct-1");
+    const persisted = batch.insertPersisted(
+      table,
+      { title: "Direct batch", done: false },
+      { tier: "global" },
+    );
+    const updated = batch.updatePersisted(table, "todo-direct-1", { done: true }, { tier: "edge" });
+    const deleted = batch.deletePersisted(table, "todo-direct-1", { tier: "worker" });
+
+    expect(beginDirectBatchInternal).toHaveBeenCalledWith();
+    expect(batch.batchId()).toBe("batch-direct");
+    expect(inserted).toEqual({
+      id: "todo-direct-1",
+      title: "Direct batch",
+      done: false,
+    });
+    expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Direct batch" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(runtimeBatch.update).toHaveBeenCalledWith("todo-direct-1", {
+      done: { type: "Boolean", value: true },
+    });
+    expect(runtimeBatch.delete).toHaveBeenCalledWith("todo-direct-1");
+    expect(runtimeBatch.createPersisted).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Direct batch" },
+        done: { type: "Boolean", value: false },
+      },
+      { tier: "global" },
+    );
+    expect(runtimeBatch.updatePersisted).toHaveBeenCalledWith(
+      "todo-direct-1",
+      {
+        done: { type: "Boolean", value: true },
+      },
+      { tier: "edge" },
+    );
+    expect(runtimeBatch.deletePersisted).toHaveBeenCalledWith("todo-direct-1", { tier: "worker" });
+    expect(persisted.value()).toEqual({
+      id: "todo-direct-1",
+      title: "Direct batch",
+      done: false,
+    });
+    await expect(updated.wait()).resolves.toBeUndefined();
+    await expect(deleted.wait()).resolves.toBeUndefined();
+    expect(batch.localBatchRecord()).toMatchObject({
+      batchId: "batch-direct",
+      mode: "direct",
+    });
+    expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
+    expect(batch.acknowledgeRejectedBatch()).toBe(false);
   });
 });

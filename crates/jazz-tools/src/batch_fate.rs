@@ -1,4 +1,5 @@
 use crate::commit::CommitId;
+use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
 use crate::object::{BranchName, ObjectId};
@@ -86,6 +87,27 @@ impl BatchSettlement {
     }
 }
 
+fn merged_visible_batch_members(
+    current: &[VisibleBatchMember],
+    incoming: &[VisibleBatchMember],
+) -> Vec<VisibleBatchMember> {
+    let mut merged = current.to_vec();
+    for member in incoming {
+        if !merged.iter().any(|existing| existing == member) {
+            merged.push(member.clone());
+        }
+    }
+    merged.sort_by(|left, right| {
+        left.object_id
+            .uuid()
+            .as_bytes()
+            .cmp(right.object_id.uuid().as_bytes())
+            .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+            .then_with(|| left.batch_id.as_bytes().cmp(right.batch_id.as_bytes()))
+    });
+    merged
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalBatchRecord {
     pub batch_id: BatchId,
@@ -100,6 +122,7 @@ pub struct LocalBatchRecord {
 pub struct SealedBatchSubmission {
     pub batch_id: BatchId,
     pub target_branch_name: BranchName,
+    pub batch_digest: CommitId,
     pub members: Vec<SealedBatchMember>,
     pub captured_frontier: Vec<CapturedFrontierMember>,
 }
@@ -108,14 +131,14 @@ pub struct SealedBatchSubmission {
 pub struct SealedBatchMember {
     pub object_id: ObjectId,
     pub branch_name: BranchName,
-    pub version_id: CommitId,
+    pub row_digest: CommitId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedFrontierMember {
     pub object_id: ObjectId,
     pub branch_name: BranchName,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
 }
 
 impl LocalBatchRecord {
@@ -148,27 +171,55 @@ impl LocalBatchRecord {
             "settlement batch id should match record batch id"
         );
 
-        match (&self.latest_settlement, &settlement) {
+        match (&self.latest_settlement, settlement) {
             (Some(BatchSettlement::Rejected { .. }), _) => {}
-            (_, BatchSettlement::Rejected { .. }) => {
-                self.latest_settlement = Some(settlement);
+            (_, rejected @ BatchSettlement::Rejected { .. }) => {
+                self.latest_settlement = Some(rejected);
             }
             (
                 Some(BatchSettlement::DurableDirect {
                     confirmed_tier: current_tier,
+                    visible_members: current_members,
                     ..
                 }),
-                BatchSettlement::DurableDirect { confirmed_tier, .. },
-            )
-            | (
+                BatchSettlement::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                    visible_members,
+                },
+            ) => {
+                if confirmed_tier >= *current_tier {
+                    self.latest_settlement = Some(BatchSettlement::DurableDirect {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members: merged_visible_batch_members(
+                            current_members,
+                            &visible_members,
+                        ),
+                    });
+                }
+            }
+            (
                 Some(BatchSettlement::AcceptedTransaction {
                     confirmed_tier: current_tier,
+                    visible_members: current_members,
                     ..
                 }),
-                BatchSettlement::AcceptedTransaction { confirmed_tier, .. },
+                BatchSettlement::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier,
+                    visible_members,
+                },
             ) => {
-                if confirmed_tier >= current_tier {
-                    self.latest_settlement = Some(settlement);
+                if confirmed_tier >= *current_tier {
+                    self.latest_settlement = Some(BatchSettlement::AcceptedTransaction {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members: merged_visible_batch_members(
+                            current_members,
+                            &visible_members,
+                        ),
+                    });
                 }
             }
             (
@@ -176,7 +227,7 @@ impl LocalBatchRecord {
                 | Some(BatchSettlement::AcceptedTransaction { .. }),
                 BatchSettlement::Missing { .. },
             ) => {}
-            _ => {
+            (_, settlement) => {
                 self.latest_settlement = Some(settlement);
             }
         }
@@ -196,7 +247,7 @@ impl LocalBatchRecord {
             .transpose()
             .map_err(|err| format!("encode sealed submission: {err}"))?;
         let values = vec![
-            Value::Bytea(self.batch_id.0.as_bytes().to_vec()),
+            Value::Bytea(self.batch_id.as_bytes().to_vec()),
             Value::Text(self.mode.as_str().to_string()),
             Value::Text(durability_tier_to_str(self.requested_tier).to_string()),
             Value::Boolean(self.sealed),
@@ -223,9 +274,10 @@ impl LocalBatchRecord {
 
         let batch_id = match batch_id {
             Value::Bytea(bytes) => {
-                let uuid = uuid::Uuid::from_slice(bytes)
-                    .map_err(|err| format!("decode batch id uuid: {err}"))?;
-                BatchId(uuid)
+                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                    format!("decode batch id: expected 16 bytes, got {}", bytes.len())
+                })?;
+                BatchId(bytes)
             }
             other => return Err(format!("expected batch id bytes, got {other:?}")),
         };
@@ -278,6 +330,19 @@ impl LocalBatchRecord {
 }
 
 impl SealedBatchSubmission {
+    pub fn compute_batch_digest(members: &[SealedBatchMember]) -> CommitId {
+        let mut hasher = Hasher::new();
+        hasher.update(b"sealed-batch-manifest-v1");
+        hasher.update(&(members.len() as u64).to_le_bytes());
+        for member in members {
+            hasher.update(member.object_id.uuid().as_bytes());
+            hasher.update(&(member.branch_name.as_str().len() as u64).to_le_bytes());
+            hasher.update(member.branch_name.as_str().as_bytes());
+            hasher.update(&member.row_digest.0);
+        }
+        CommitId(*hasher.finalize().as_bytes())
+    }
+
     pub fn new(
         batch_id: BatchId,
         target_branch_name: BranchName,
@@ -290,21 +355,23 @@ impl SealedBatchSubmission {
                 .as_bytes()
                 .cmp(right.object_id.uuid().as_bytes())
                 .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| left.version_id.0.cmp(&right.version_id.0))
+                .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
         });
         members.dedup();
+        let batch_digest = Self::compute_batch_digest(&members);
         captured_frontier.sort_by(|left, right| {
             left.object_id
                 .uuid()
                 .as_bytes()
                 .cmp(right.object_id.uuid().as_bytes())
                 .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| left.version_id.0.cmp(&right.version_id.0))
+                .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
         });
         captured_frontier.dedup();
         Self {
             batch_id,
             target_branch_name,
+            batch_digest,
             members,
             captured_frontier,
         }
@@ -312,8 +379,9 @@ impl SealedBatchSubmission {
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
         let values = vec![
-            Value::Bytea(self.batch_id.0.as_bytes().to_vec()),
+            Value::Bytea(self.batch_id.as_bytes().to_vec()),
             Value::Text(self.target_branch_name.as_str().to_string()),
+            Value::Bytea(self.batch_digest.0.to_vec()),
             Value::Array(
                 self.members
                     .iter()
@@ -322,7 +390,7 @@ impl SealedBatchSubmission {
                         values: vec![
                             Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
                             Value::Text(member.branch_name.as_str().to_string()),
-                            Value::Bytea(member.version_id.0.to_vec()),
+                            Value::Bytea(member.row_digest.0.to_vec()),
                         ],
                     })
                     .collect(),
@@ -335,7 +403,7 @@ impl SealedBatchSubmission {
                         values: vec![
                             Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
                             Value::Text(member.branch_name.as_str().to_string()),
-                            Value::Bytea(member.version_id.0.to_vec()),
+                            Value::Bytea(member.batch_id.as_bytes().to_vec()),
                         ],
                     })
                     .collect(),
@@ -348,15 +416,26 @@ impl SealedBatchSubmission {
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
         let values = decode_row(&sealed_batch_submission_storage_descriptor(), bytes)
             .map_err(|err| format!("decode sealed batch submission row: {err}"))?;
-        let [batch_id, target_branch_name, members, captured_frontier] = values.as_slice() else {
+        let [
+            batch_id,
+            target_branch_name,
+            batch_digest,
+            members,
+            captured_frontier,
+        ] = values.as_slice()
+        else {
             return Err("unexpected sealed batch submission shape".to_string());
         };
 
         let batch_id = match batch_id {
             Value::Bytea(bytes) => {
-                let uuid = uuid::Uuid::from_slice(bytes)
-                    .map_err(|err| format!("decode sealed batch submission uuid: {err}"))?;
-                BatchId(uuid)
+                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                    format!(
+                        "decode sealed batch submission batch id: expected 16 bytes, got {}",
+                        bytes.len()
+                    )
+                })?;
+                BatchId(bytes)
             }
             other => return Err(format!("expected batch id bytes, got {other:?}")),
         };
@@ -364,13 +443,22 @@ impl SealedBatchSubmission {
             Value::Text(raw) => BranchName::new(raw),
             other => return Err(format!("expected target branch text, got {other:?}")),
         };
+        let batch_digest = match batch_digest {
+            Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(|_| {
+                format!(
+                    "expected sealed batch submission batch digest to be 32 bytes, got {}",
+                    bytes.len()
+                )
+            })?),
+            other => return Err(format!("expected batch digest bytes, got {other:?}")),
+        };
 
         let members = match members {
             Value::Array(elements) => elements
                 .iter()
                 .map(|element| match element {
                     Value::Row { values, .. } => {
-                        let [object_id, branch_name, version_id] = values.as_slice() else {
+                        let [object_id, branch_name, row_digest] = values.as_slice() else {
                             return Err(
                                 "expected sealed batch member row to have three values".to_string(),
                             );
@@ -395,25 +483,25 @@ impl SealedBatchSubmission {
                                 ));
                             }
                         };
-                        let version_id = match version_id {
+                        let row_digest = match row_digest {
                             Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(
                                 |_| {
                                     format!(
-                                        "expected sealed batch member version id to be 32 bytes, got {}",
+                                        "expected sealed batch member row digest to be 32 bytes, got {}",
                                         bytes.len()
                                     )
                                 },
                             )?),
                             other => {
                                 return Err(format!(
-                                    "expected sealed batch member version id bytes, got {other:?}"
+                                    "expected sealed batch member row digest bytes, got {other:?}"
                                 ));
                             }
                         };
                         Ok(SealedBatchMember {
                             object_id,
                             branch_name,
-                            version_id,
+                            row_digest,
                         })
                     }
                     other => Err(format!("expected sealed batch member row, got {other:?}")),
@@ -427,7 +515,7 @@ impl SealedBatchSubmission {
                 .iter()
                 .map(|element| match element {
                     Value::Row { values, .. } => {
-                        let [object_id, branch_name, version_id] = values.as_slice() else {
+                        let [object_id, branch_name, batch_id] = values.as_slice() else {
                             return Err(
                                 "expected captured frontier row to have three values".to_string(),
                             );
@@ -452,25 +540,25 @@ impl SealedBatchSubmission {
                                 ));
                             }
                         };
-                        let version_id = match version_id {
-                            Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(
+                        let batch_id = match batch_id {
+                            Value::Bytea(bytes) => BatchId(bytes.as_slice().try_into().map_err(
                                 |_| {
                                     format!(
-                                        "expected captured frontier version id to be 32 bytes, got {}",
+                                        "expected captured frontier batch id to be 16 bytes, got {}",
                                         bytes.len()
                                     )
                                 },
                             )?),
                             other => {
                                 return Err(format!(
-                                    "expected captured frontier version id bytes, got {other:?}"
+                                    "expected captured frontier batch id bytes, got {other:?}"
                                 ));
                             }
                         };
                         Ok(CapturedFrontierMember {
                             object_id,
                             branch_name,
-                            version_id,
+                            batch_id,
                         })
                     }
                     other => Err(format!("expected captured frontier row, got {other:?}")),
@@ -479,12 +567,14 @@ impl SealedBatchSubmission {
             other => return Err(format!("expected captured frontier array, got {other:?}")),
         };
 
-        Ok(Self::new(
-            batch_id,
-            target_branch_name,
-            members,
-            captured_frontier,
-        ))
+        let submission = Self::new(batch_id, target_branch_name, members, captured_frontier);
+        if submission.batch_digest != batch_digest {
+            return Err(format!(
+                "sealed batch submission batch digest mismatch: expected {batch_digest:?}, computed {:?}",
+                submission.batch_digest
+            ));
+        }
+        Ok(submission)
     }
 }
 
@@ -520,6 +610,7 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::Bytea),
         ColumnDescriptor::new("target_branch_name", ColumnType::Text),
+        ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
             "members",
             ColumnType::Array {
@@ -527,7 +618,7 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
                     columns: Box::new(RowDescriptor::new(vec![
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
                         ColumnDescriptor::new("branch_name", ColumnType::Text),
-                        ColumnDescriptor::new("version_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
                     ])),
                 }),
             },
@@ -539,7 +630,7 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
                     columns: Box::new(RowDescriptor::new(vec![
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
                         ColumnDescriptor::new("branch_name", ColumnType::Text),
-                        ColumnDescriptor::new("version_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("batch_id", ColumnType::Bytea),
                     ])),
                 }),
             },
@@ -608,6 +699,58 @@ mod tests {
     }
 
     #[test]
+    fn local_batch_record_merges_visible_members_for_shared_direct_batches() {
+        let batch_id = BatchId::new();
+        let first_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
+        let second_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(2));
+        let mut record = LocalBatchRecord::new(
+            batch_id,
+            BatchMode::Direct,
+            DurabilityTier::Worker,
+            true,
+            Some(BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Worker,
+                visible_members: vec![VisibleBatchMember {
+                    object_id: first_row_id,
+                    branch_name: BranchName::new("main"),
+                    batch_id,
+                }],
+            }),
+        );
+
+        record.apply_settlement(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![VisibleBatchMember {
+                object_id: second_row_id,
+                branch_name: BranchName::new("main"),
+                batch_id,
+            }],
+        });
+
+        assert_eq!(
+            record.latest_settlement,
+            Some(BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Worker,
+                visible_members: vec![
+                    VisibleBatchMember {
+                        object_id: first_row_id,
+                        branch_name: BranchName::new("main"),
+                        batch_id,
+                    },
+                    VisibleBatchMember {
+                        object_id: second_row_id,
+                        branch_name: BranchName::new("main"),
+                        batch_id,
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
     fn local_batch_record_storage_row_roundtrips_with_sealed_submission() {
         let batch_id = BatchId::new();
         let mut record = LocalBatchRecord::new(
@@ -623,12 +766,12 @@ mod tests {
             vec![SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(42)),
                 branch_name: BranchName::new("dev-aaaaaaaaaaaa-main"),
-                version_id: CommitId([4; 32]),
+                row_digest: CommitId([4; 32]),
             }],
             vec![CapturedFrontierMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(7)),
                 branch_name: BranchName::new("dev-bbbbbbbbbbbb-main"),
-                version_id: CommitId([8; 32]),
+                batch_id: BatchId([8; 16]),
             }],
         ));
 
@@ -642,7 +785,7 @@ mod tests {
     fn sealed_batch_submission_storage_row_roundtrips() {
         let batch_id = BatchId::new();
         let object_id = ObjectId::new();
-        let version_id = CommitId([7; 32]);
+        let row_digest = CommitId([7; 32]);
         let submission = SealedBatchSubmission::new(
             batch_id,
             BranchName::new("main"),
@@ -650,18 +793,18 @@ mod tests {
                 SealedBatchMember {
                     object_id,
                     branch_name: BranchName::new("main"),
-                    version_id,
+                    row_digest,
                 },
                 SealedBatchMember {
                     object_id,
                     branch_name: BranchName::new("main"),
-                    version_id,
+                    row_digest,
                 },
             ],
             vec![CapturedFrontierMember {
                 object_id,
                 branch_name: BranchName::new("dev-aaaaaaaaaaaa-main"),
-                version_id: CommitId([9; 32]),
+                batch_id: BatchId([9; 16]),
             }],
         );
 
@@ -676,17 +819,45 @@ mod tests {
             SealedBatchSubmission {
                 batch_id,
                 target_branch_name: BranchName::new("main"),
+                batch_digest: submission.batch_digest,
                 members: vec![SealedBatchMember {
                     object_id,
                     branch_name: BranchName::new("main"),
-                    version_id,
+                    row_digest,
                 }],
                 captured_frontier: vec![CapturedFrontierMember {
                     object_id,
                     branch_name: BranchName::new("dev-aaaaaaaaaaaa-main"),
-                    version_id: CommitId([9; 32]),
+                    batch_id: BatchId([9; 16]),
                 }],
             }
         );
+    }
+
+    #[test]
+    fn sealed_batch_submission_batch_digest_tracks_current_member_manifest() {
+        let object_id = ObjectId::from_uuid(uuid::Uuid::from_u128(11));
+        let first = SealedBatchSubmission::new(
+            BatchId::new(),
+            BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id,
+                branch_name: BranchName::new("main"),
+                row_digest: CommitId([1; 32]),
+            }],
+            Vec::new(),
+        );
+        let second = SealedBatchSubmission::new(
+            BatchId::new(),
+            BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id,
+                branch_name: BranchName::new("main"),
+                row_digest: CommitId([2; 32]),
+            }],
+            Vec::new(),
+        );
+
+        assert_ne!(first.batch_digest, second.batch_digest);
     }
 }

@@ -1,43 +1,30 @@
 use super::*;
-use crate::row_histories::{RowState, patch_row_version_state};
+use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
-    fn batch_id_for_row_version_ack(
-        &self,
-        row_version_key: crate::sync_manager::RowVersionKey,
-    ) -> Option<crate::row_histories::BatchId> {
-        let row_locator = match self.storage.load_row_locator(row_version_key.row_id) {
-            Ok(Some(row_locator)) => row_locator,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::warn!(
-                    row_id = %row_version_key.row_id,
-                    ?row_version_key.version_id,
-                    %error,
-                    "failed to load row locator for durability ack"
-                );
-                return None;
+    fn resolve_ack_watchers_for_key(
+        &mut self,
+        row_batch_key: crate::sync_manager::RowBatchKey,
+        acked_tier: DurabilityTier,
+    ) {
+        if let Some(watchers) = self.ack_watchers.remove(&row_batch_key) {
+            let mut remaining = Vec::new();
+            for (requested_tier, sender) in watchers {
+                if acked_tier >= requested_tier {
+                    tracing::debug!(
+                        ?row_batch_key,
+                        ?acked_tier,
+                        ?requested_tier,
+                        "ack watcher resolved"
+                    );
+                    let _ = sender.send(());
+                } else {
+                    remaining.push((requested_tier, sender));
+                }
             }
-        };
-
-        match self.storage.load_history_row_version(
-            row_locator.table.as_str(),
-            row_version_key.branch_name.as_str(),
-            row_version_key.row_id,
-            row_version_key.version_id,
-        ) {
-            Ok(Some(row)) => Some(row.batch_id),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    table = row_locator.table.as_str(),
-                    row_id = %row_version_key.row_id,
-                    ?row_version_key.version_id,
-                    %error,
-                    "failed to load row history for durability ack"
-                );
-                None
+            if !remaining.is_empty() {
+                self.ack_watchers.insert(row_batch_key, remaining);
             }
         }
     }
@@ -67,25 +54,27 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             self.retransmit_local_batch_to_servers(batch_id);
         }
 
-        if let Some(acked_tier) = settlement.confirmed_tier()
-            && let Some(watchers) = self.ack_watchers.remove(&batch_id)
-        {
-            let mut remaining = Vec::new();
-            for (requested_tier, sender) in watchers {
-                if acked_tier >= requested_tier {
-                    tracing::debug!(
-                        ?batch_id,
-                        ?acked_tier,
-                        ?requested_tier,
-                        "batch settlement resolved ack watcher"
-                    );
-                    let _ = sender.send(());
-                } else {
-                    remaining.push((requested_tier, sender));
+        if let Some(acked_tier) = settlement.confirmed_tier() {
+            match &settlement {
+                crate::batch_fate::BatchSettlement::DurableDirect {
+                    visible_members, ..
                 }
-            }
-            if !remaining.is_empty() {
-                self.ack_watchers.insert(batch_id, remaining);
+                | crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => {
+                    for member in visible_members {
+                        self.resolve_ack_watchers_for_key(
+                            crate::sync_manager::RowBatchKey::new(
+                                member.object_id,
+                                member.branch_name,
+                                member.batch_id,
+                            ),
+                            acked_tier,
+                        );
+                    }
+                }
+                crate::batch_fate::BatchSettlement::Missing { .. }
+                | crate::batch_fate::BatchSettlement::Rejected { .. } => {}
             }
         }
     }
@@ -99,7 +88,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         for (row_id, row_locator) in row_locators {
             let Ok(history_rows) = self
                 .storage
-                .scan_history_row_versions(row_locator.table.as_str(), row_id)
+                .scan_history_row_batches(row_locator.table.as_str(), row_id)
             else {
                 continue;
             };
@@ -112,11 +101,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 }
 
                 let branch_name = crate::object::BranchName::new(&row.branch);
-                let _ = patch_row_version_state(
+                let _ = patch_row_batch_state(
                     &mut self.storage,
                     row_id,
                     &branch_name,
-                    row.version_id(),
+                    row.batch_id(),
                     Some(RowState::Rejected),
                     None,
                 );
@@ -161,7 +150,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         for (row_id, row_locator) in row_locators {
             let Ok(history_rows) = self
                 .storage
-                .scan_history_row_versions(row_locator.table.as_str(), row_id)
+                .scan_history_row_batches(row_locator.table.as_str(), row_id)
             else {
                 continue;
             };
@@ -175,7 +164,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         let sync_manager = self.schema_manager.query_manager_mut().sync_manager_mut();
         for (row_id, metadata, row) in rows_to_retransmit {
-            sync_manager.force_row_version_to_servers(row_id, metadata, row);
+            sync_manager.force_row_batch_to_servers(row_id, metadata, row);
         }
         if let Some(submission) = sealed_submission {
             sync_manager.seal_batch_to_servers(submission);
@@ -369,35 +358,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 3b. Process received row-version persistence acks — resolve matching watchers
+        // 3b. Process received row-batch persistence acks — resolve matching watchers
         let received_acks = self
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .take_received_row_version_acks();
-        for (row_version_key, acked_tier) in received_acks {
-            let Some(batch_id) = self.batch_id_for_row_version_ack(row_version_key) else {
-                continue;
-            };
-            if let Some(watchers) = self.ack_watchers.remove(&batch_id) {
-                let mut remaining = Vec::new();
-                for (requested_tier, sender) in watchers {
-                    if acked_tier >= requested_tier {
-                        tracing::debug!(
-                            ?batch_id,
-                            ?acked_tier,
-                            ?requested_tier,
-                            "ack watcher resolved"
-                        );
-                        let _ = sender.send(());
-                    } else {
-                        remaining.push((requested_tier, sender));
-                    }
-                }
-                if !remaining.is_empty() {
-                    self.ack_watchers.insert(batch_id, remaining);
-                }
-            }
+            .take_received_row_batch_acks();
+        for (row_batch_key, acked_tier) in received_acks {
+            self.resolve_ack_watchers_for_key(row_batch_key, acked_tier);
         }
 
         // 4. Schedule batched_tick if outbound messages exist or a WAL flush

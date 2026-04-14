@@ -41,8 +41,8 @@ impl SyncManager {
         check: PendingPermissionCheck,
         reason: String,
     ) {
-        if let SyncPayload::RowVersionCreated { row, .. }
-        | SyncPayload::RowVersionNeeded { row, .. } = &check.payload
+        if let SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } =
+            &check.payload
             && matches!(row.state, RowState::StagingPending)
         {
             let settlement = BatchSettlement::Rejected {
@@ -59,10 +59,10 @@ impl SyncManager {
             }
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(check.client_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: row.row_id,
                     branch_name: crate::object::BranchName::new(&row.branch),
-                    version_id: row.version_id(),
+                    batch_id: row.batch_id,
                     state: Some(RowState::Rejected),
                     confirmed_tier: None,
                 },

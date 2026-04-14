@@ -1489,14 +1489,14 @@ impl SchemaManager {
     }
 
     /// Update a row using current-schema column names, performing copy-on-write
-    /// when the latest visible row version still lives on an older schema branch.
+    /// when the latest visible row batch member still lives on an older schema branch.
     pub fn update_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
         values: &[(String, Value)],
         write_context: Option<&WriteContext>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
         let target_schema = self
@@ -1526,7 +1526,7 @@ impl SchemaManager {
                                 table,
                                 target_branch.clone(),
                                 row.data.to_vec(),
-                                row.version_id(),
+                                row.batch_id(),
                                 row.row_provenance(),
                             )
                         })
@@ -1561,7 +1561,7 @@ impl SchemaManager {
         }
 
         let _ = source_branch;
-        let commit_id = self
+        let batch_id = self
             .query_manager
             .write_existing_row_on_branch_with_schema_and_write_context(
                 storage,
@@ -1577,7 +1577,7 @@ impl SchemaManager {
                 write_context,
             )?;
 
-        Ok(commit_id)
+        Ok(batch_id)
     }
 
     pub fn update_with_session<H: Storage>(
@@ -1586,13 +1586,13 @@ impl SchemaManager {
         object_id: ObjectId,
         values: &[(String, Value)],
         session: Option<&Session>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_with_write_context(storage, object_id, values, owned.as_ref())
     }
 
     /// Delete a row (soft delete), performing copy-on-write when the latest
-    /// visible row version still lives on an older schema branch.
+    /// visible row batch member still lives on an older schema branch.
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1628,7 +1628,7 @@ impl SchemaManager {
                                 table,
                                 target_branch.clone(),
                                 row.data.to_vec(),
-                                row.version_id(),
+                                row.batch_id(),
                                 row.row_provenance(),
                             )
                         })

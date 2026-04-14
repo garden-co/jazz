@@ -4,16 +4,16 @@ This is the simplest way to think about Jazz today:
 
 - every application table is still a table
 - every logical row has a stable row id
-- edits create row versions
+- edits create row batch members
 - current reads come from a compact visible entry
-- history stays around so sync, reconnect, and replay can speak in row-version terms
+- history stays around so sync, reconnect, and replay can speak in row-batch terms
 
 If you are new to the internals, it helps to picture one user table as two engine-managed regions:
 
 ```text
 todos
   visible: (branch, row_id) -> current visible winner
-  history: (row_id, version_id) -> every stored row version
+  history: (row_id, batch_id) -> every stored row batch member
 ```
 
 The visible region is the hot path for ordinary queries. The history region is the source of truth for replay, ancestry, and tier-aware fallbacks.
@@ -24,21 +24,21 @@ The visible region is the hot path for ordinary queries. The history region is t
 
 The logical row is the stable identity your application thinks of as "the todo". It is identified by a row id and mapped back to its table through storage.
 
-### 2. Stored row version
+### 2. Stored row batch member
 
-A `StoredRowVersion` is one concrete version of that logical row. It carries:
+A `StoredRowBatch` is one concrete stored entry for that logical row. It carries:
 
 - row identity
 - branch
-- version id
-- parent version ids
+- batch id
+- parent batch ids
 - state
 - confirmed durability tier
 - delete markers
 - engine/user metadata
 - the application row values
 
-Physically, a stored row version is one flat `row_format` record:
+Physically, a stored row batch member is one flat `row_format` record:
 
 - reserved `_jazz_*` columns first
 - user columns after that
@@ -50,7 +50,7 @@ decoded view over the flat stored bytes.
 
 A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pair. It stores:
 
-- the current winning version id
+- the current winning batch id
 - the current visible row values for that branch view
 - optional tier-specific winner ids for `worker`, `edge`, and `global`
 
@@ -69,8 +69,8 @@ The important reserved columns are:
 
 - `_jazz_row_id` — stable logical row identity
 - `_jazz_branch` — the branch view this version belongs to
-- `_jazz_version_id` — identity of this concrete version
-- `_jazz_parents` — parent version ids for row-local ancestry
+- `_jazz_batch_id` — identity of this concrete stored entry
+- `_jazz_parents` — parent batch ids for row-local ancestry
 - `_jazz_state` — whether the version is visible, staging, or rejected
 - `_jazz_confirmed_tier` — highest durability tier known for that version
 - `_jazz_is_deleted` — tombstone marker
@@ -84,12 +84,12 @@ table columns inside the engine's flat row format.
 
 For a normal row write, the engine does four things:
 
-1. Append a new `StoredRowVersion` to the history region.
+1. Append a new `StoredRowBatch` to the history region.
 2. Recompute the visible winner for that `(branch, row_id)`.
 3. Upsert the `VisibleRowEntry` for the branch view.
 4. Update the relevant indices and queue sync notifications.
 
-That work produces an `ApplyRowVersionResult`, including any `RowVisibilityChange` that downstream systems care about.
+That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream systems care about.
 
 ## Why Visible Entries Exist
 
@@ -105,7 +105,7 @@ This is why the current engine feels table-first even though it retains full row
 
 ## Deletion Semantics
 
-Deletes are row versions too.
+Deletes are row batch members too.
 
 - a delete creates a version marked deleted
 - the visible entry may disappear from current live scans, or resolve as deleted when explicitly requested
@@ -125,10 +125,10 @@ That split keeps the mental model tidy:
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/row_histories/mod.rs` | Row-history types and reducer logic |
-| `crates/jazz-tools/src/storage/mod.rs` | Storage-backed persistence and lookup helpers |
-| `crates/jazz-tools/src/row_format.rs` | Shared binary row/value encoding |
-| `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization |
-| `crates/jazz-tools/src/sync_manager/types.rs` | Row-version oriented sync payloads |
+| File                                                             | Purpose                                       |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| `crates/jazz-tools/src/row_histories/mod.rs`                     | Row-history types and reducer logic           |
+| `crates/jazz-tools/src/storage/mod.rs`                           | Storage-backed persistence and lookup helpers |
+| `crates/jazz-tools/src/row_format.rs`                            | Shared binary row/value encoding              |
+| `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization          |
+| `crates/jazz-tools/src/sync_manager/types.rs`                    | Row-batch oriented sync payloads              |

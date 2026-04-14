@@ -22,7 +22,7 @@ The nice part is that both calls go through almost the same machinery.
 Application code builds queries from the generated `app` surface:
 
 ```ts
-app.todos.where({ done: false }).orderBy("title")
+app.todos.where({ done: false }).orderBy("title");
 ```
 
 That typed builder is turned into runtime query JSON before it ever reaches Rust/WASM.
@@ -108,18 +108,18 @@ db.subscribeAll(...)
   -> main runtime registers subscription
   -> worker/runtime sync path receives forwarded query state
   -> worker settles current answer from OPFS + upstream state
-  -> worker sends row versions + QuerySettled
+  -> worker sends row batch members + QuerySettled
   -> main runtime updates its local graph
   -> callback receives first snapshot
 ```
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `packages/jazz-tools/src/runtime/db.ts` | `Db` surface used by apps |
-| `packages/jazz-tools/src/runtime/client.ts` | `JazzClient` query/subscription orchestration |
-| `packages/jazz-tools/src/runtime/worker-bridge.ts` | Main thread <-> worker bridge |
-| `packages/jazz-tools/src/worker/jazz-worker.ts` | Persistent worker host |
-| `crates/jazz-tools/src/runtime_core.rs` | Rust runtime entry points |
-| `crates/jazz-tools/src/query_manager/manager.rs` | Query settling and subscription updates |
+| File                                               | Purpose                                       |
+| -------------------------------------------------- | --------------------------------------------- |
+| `packages/jazz-tools/src/runtime/db.ts`            | `Db` surface used by apps                     |
+| `packages/jazz-tools/src/runtime/client.ts`        | `JazzClient` query/subscription orchestration |
+| `packages/jazz-tools/src/runtime/worker-bridge.ts` | Main thread <-> worker bridge                 |
+| `packages/jazz-tools/src/worker/jazz-worker.ts`    | Persistent worker host                        |
+| `crates/jazz-tools/src/runtime_core.rs`            | Rust runtime entry points                     |
+| `crates/jazz-tools/src/query_manager/manager.rs`   | Query settling and subscription updates       |

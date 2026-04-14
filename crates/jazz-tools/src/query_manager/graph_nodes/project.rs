@@ -1,6 +1,5 @@
 use ahash::AHashSet;
 
-use crate::commit::CommitId;
 use crate::query_manager::encoding::{decode_column, encode_row};
 use crate::query_manager::relation_ir::{ProjectColumn, ProjectExpr, RowIdRef};
 use crate::query_manager::types::{
@@ -197,10 +196,10 @@ impl ProjectNode {
             .collect();
         let projected_content = encode_row(&self.output_descriptor, &values?).ok()?;
         let id = tuple.first_id()?;
-        let version_id = tuple
+        let batch_id = tuple
             .iter()
-            .find_map(TupleElement::version_id)
-            .unwrap_or(CommitId([0; 32]));
+            .find_map(TupleElement::batch_id)
+            .unwrap_or(crate::row_histories::BatchId([0; 16]));
         let row_provenance = tuple
             .iter()
             .find_map(TupleElement::row_provenance)
@@ -210,7 +209,7 @@ impl ProjectNode {
             Tuple::new(vec![TupleElement::Row {
                 id,
                 content: projected_content.into(),
-                version_id,
+                batch_id,
                 row_provenance,
             }])
             .with_provenance(tuple.provenance().clone())
@@ -288,7 +287,6 @@ impl RowNode for ProjectNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::relation_ir::ColumnRef;
@@ -309,7 +307,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -485,13 +483,13 @@ mod tests {
             TupleElement::Row {
                 id: user_id,
                 content: user_row.into(),
-                version_id: CommitId([1; 32]),
+                batch_id: crate::row_histories::BatchId([1; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: post_id,
                 content: post_row.into(),
-                version_id: CommitId([2; 32]),
+                batch_id: crate::row_histories::BatchId([2; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ]);

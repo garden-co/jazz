@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for a row version in the history DAG.
+/// Stable identifier for a row batch member in the history DAG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
 

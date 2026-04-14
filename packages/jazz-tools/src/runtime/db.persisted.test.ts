@@ -1,9 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  Db,
-  createDbFromClient,
-  type TableProxy,
-} from "./db.js";
+import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient, LocalBatchRecord, Row } from "./client.js";
 import type { Session } from "./context.js";
@@ -130,12 +126,7 @@ describe("Db persisted writes", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const updated = db.updatePersisted(
-      table,
-      "todo-1",
-      { done: true },
-      { tier: "edge" },
-    );
+    const updated = db.updatePersisted(table, "todo-1", { done: true }, { tier: "edge" });
     const deleted = db.deletePersisted(table, "todo-1", { tier: "global" });
 
     expect(updatePersisted).toHaveBeenCalledWith(
@@ -191,12 +182,7 @@ describe("Db persisted writes", () => {
       { title: "With session", done: true },
       { tier: "global" },
     );
-    const updated = db.updatePersisted(
-      table,
-      "todo-2",
-      { done: false },
-      { tier: "edge" },
-    );
+    const updated = db.updatePersisted(table, "todo-2", { done: false }, { tier: "edge" });
     const deleted = db.deletePersisted(table, "todo-2", { tier: "worker" });
 
     expect(createPersistedInternal).toHaveBeenCalledWith(
@@ -218,12 +204,9 @@ describe("Db persisted writes", () => {
       "alice@writer",
       { tier: "edge" },
     );
-    expect(deletePersistedInternal).toHaveBeenCalledWith(
-      "todo-2",
-      session,
-      "alice@writer",
-      { tier: "worker" },
-    );
+    expect(deletePersistedInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer", {
+      tier: "worker",
+    });
     expect(inserted.value()).toEqual({
       id: "todo-2",
       title: "With session",

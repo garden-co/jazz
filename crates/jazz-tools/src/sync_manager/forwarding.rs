@@ -1,7 +1,7 @@
 use super::*;
 use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{BatchId, HistoryScan, StoredRowVersion};
+use crate::row_histories::{BatchId, HistoryScan, StoredRowBatch};
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -108,7 +108,7 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: &BranchName,
         row_locator: &RowLocator,
-    ) -> Option<StoredRowVersion> {
+    ) -> Option<StoredRowBatch> {
         let table = row_locator.table.as_str();
 
         if let Ok(Some(row)) =
@@ -126,7 +126,7 @@ impl SyncManager {
             .ok()?
             .into_iter()
             .filter(|row| row.state.is_visible())
-            .max_by_key(|row| (row.updated_at, row.version_id()))
+            .max_by_key(|row| (row.updated_at, row.batch_id()))
     }
 
     pub(super) fn load_current_batch_settlement_from_storage<
@@ -202,7 +202,7 @@ impl SyncManager {
 
         for (object_id, row_locator) in row_locators {
             let Ok(history_rows) =
-                storage.scan_history_row_versions(row_locator.table.as_str(), object_id)
+                storage.scan_history_row_batches(row_locator.table.as_str(), object_id)
             else {
                 continue;
             };
@@ -341,11 +341,11 @@ impl SyncManager {
         }
     }
 
-    pub(crate) fn forward_row_version_to_servers(
+    pub(crate) fn forward_row_batch_to_servers(
         &mut self,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         if !server_ids.is_empty() {
@@ -353,7 +353,7 @@ impl SyncManager {
                 %object_id,
                 branch = row.branch.as_str(),
                 servers = server_ids.len(),
-                "forwarding row version to servers"
+                "forwarding row batch member to servers"
             );
         }
 
@@ -362,25 +362,24 @@ impl SyncManager {
         }
     }
 
-    pub(crate) fn force_row_version_to_servers(
+    pub(crate) fn force_row_batch_to_servers(
         &mut self,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     ) {
         let branch_name = BranchName::new(&row.branch);
-        let version_id = row.version_id();
+        let batch_id = row.batch_id;
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
 
         for server_id in server_ids {
             if let Some(server) = self.servers.get_mut(&server_id) {
                 server.sent_metadata.remove(&object_id);
-                if let Some(sent_versions) =
-                    server.sent_row_versions.get_mut(&(object_id, branch_name))
+                if let Some(sent_batches) = server.sent_batch_ids.get_mut(&(object_id, branch_name))
                 {
-                    sent_versions.remove(&version_id);
-                    if sent_versions.is_empty() {
-                        server.sent_row_versions.remove(&(object_id, branch_name));
+                    sent_batches.remove(&batch_id);
+                    if sent_batches.is_empty() {
+                        server.sent_batch_ids.remove(&(object_id, branch_name));
                     }
                 }
             }

@@ -7,7 +7,7 @@ It does not execute SQL and it does not own storage. Its job is to answer questi
 - which peers are connected?
 - what role does each peer have?
 - which queries has each peer subscribed to?
-- which row-version or catalogue payloads still need to be sent?
+- which row-batch or catalogue payloads still need to be sent?
 - when can we tell a downstream runtime that a query has settled at a given durability tier?
 
 ## The Core Asymmetry
@@ -16,7 +16,7 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row versions and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch members and catalogue updates so the server can build the same relational view and answer forwarded queries.
 
 ### Downward, toward clients
 
@@ -54,9 +54,9 @@ Peer is used for trusted runtime-to-runtime links such as browser main-thread to
 The sync payloads now speak in row-history and query terms:
 
 - `CatalogueEntryUpdated`
-- `RowVersionCreated`
-- `RowVersionNeeded`
-- `RowVersionStateChanged`
+- `RowBatchCreated`
+- `RowBatchNeeded`
+- `RowBatchStateChanged`
 - `QuerySubscription`
 - `QueryUnsubscription`
 - `QuerySettled`
@@ -65,8 +65,8 @@ The sync payloads now speak in row-history and query terms:
 
 That payload set matches the table-first runtime model:
 
-- new row versions travel as row versions
-- initial query fill can explicitly ask for needed row versions
+- new row batch members travel as row batch members
+- initial query fill can explicitly ask for needed row batch members
 - row-state and durability progression travel as row-state changes
 - schemas and lenses travel as catalogue entries
 
@@ -74,22 +74,22 @@ That payload set matches the table-first runtime model:
 
 ### Local write
 
-1. A runtime appends a new row version locally.
+1. A runtime appends a new row batch member locally.
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
-4. The Sync Manager queues `RowVersionCreated` (and later state changes if needed) for peers and servers.
+4. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
 
 ### New query subscription
 
 1. A client sends `QuerySubscription`.
 2. The Sync Manager records that desired state.
 3. The Query Manager compiles and settles the server-side query.
-4. Matching rows are sent down as `RowVersionNeeded`.
+4. Matching rows are sent down as `RowBatchNeeded`.
 5. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
 
 ### Later visibility/state change
 
-When a row already known to a peer changes durability or state, the runtime can send `RowVersionStateChanged` without pretending the row is brand new.
+When a row already known to a peer changes durability or state, the runtime can send `RowBatchStateChanged` without pretending the row is brand new.
 
 ## Query-Scoped Delivery
 
@@ -139,10 +139,10 @@ This is what makes reconnect feel reliable without every app having to remember 
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/sync_manager/mod.rs` | Core state machine and queues |
-| `crates/jazz-tools/src/sync_manager/inbox.rs` | Applying inbound sync payloads |
-| `crates/jazz-tools/src/sync_manager/types.rs` | Payloads, ids, roles, and durability tiers |
-| `crates/jazz-tools/src/sync_manager/permissions.rs` | Permission-check routing |
-| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling |
+| File                                                    | Purpose                                    |
+| ------------------------------------------------------- | ------------------------------------------ |
+| `crates/jazz-tools/src/sync_manager/mod.rs`             | Core state machine and queues              |
+| `crates/jazz-tools/src/sync_manager/inbox.rs`           | Applying inbound sync payloads             |
+| `crates/jazz-tools/src/sync_manager/types.rs`           | Payloads, ids, roles, and durability tiers |
+| `crates/jazz-tools/src/sync_manager/permissions.rs`     | Permission-check routing                   |
+| `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling    |

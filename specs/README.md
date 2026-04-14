@@ -8,7 +8,7 @@ The easiest way to picture the runtime is:
 - the engine stores those rows in raw tables
 - every stored row is one flat `row_format` record with reserved `_jazz_*` columns plus the application columns
 - current reads come from compact visible entries
-- history, replay, sync, and durability all speak the same row-version language
+- history, replay, sync, and durability all speak the same row-batch language
 
 These docs describe the system as it works today.
 
@@ -16,7 +16,7 @@ These docs describe the system as it works today.
 
 ### 1. Table-First Foundation
 
-**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row versions, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
+**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row batch members, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
 
 **[Storage](status-quo/storage.md)** — The synchronous storage boundary beneath the runtime. Covers raw tables, indices, row locators, catalogue rows, row-history persistence, and the current durable backends.
 
@@ -34,7 +34,7 @@ These docs describe the system as it works today.
 
 ### 4. Sync and Runtime Orchestration
 
-**[Sync Manager](status-quo/sync_manager.md)** — Query-scoped sync, role-aware writes, row-version replication, and delivery/settled signals across worker, edge, and global tiers.
+**[Sync Manager](status-quo/sync_manager.md)** — Query-scoped sync, role-aware writes, row-batch replication, and delivery/settled signals across worker, edge, and global tiers.
 
 **[Query/Sync Integration](status-quo/query_sync_integration.md)** — How query subscriptions become sync scopes, how initial snapshots are replayed, and how live row changes flow back into subscription updates.
 

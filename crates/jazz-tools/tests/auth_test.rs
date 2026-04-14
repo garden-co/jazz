@@ -112,7 +112,7 @@ fn sync_body() -> String {
     );
     let request = SyncBatchRequest {
         client_id: ClientId::new(),
-        payloads: vec![SyncPayload::RowVersionCreated {
+        payloads: vec![SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         }],

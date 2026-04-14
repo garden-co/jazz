@@ -15,17 +15,16 @@ use rocksdb::{
 use super::{
     HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
-        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
+        append_history_region_row_bytes_core, load_history_row_batch_bytes_core,
         load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
         raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
-        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_batch_branches_core,
         upsert_visible_region_row_bytes_core,
     },
 };
-use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::sync_manager::DurabilityTier;
 
 struct RocksDBInner {
@@ -391,7 +390,7 @@ impl Storage for RocksDBStorage {
     fn apply_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[StoredRowVersion],
+        history_rows: &[StoredRowBatch],
         visible_entries: &[VisibleRowEntry],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
@@ -404,7 +403,7 @@ impl Storage for RocksDBStorage {
                 .map(|row| HistoryRowBytes {
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
-                    version_id: row.version_id,
+                    batch_id: row.batch_id,
                     bytes: &row.bytes,
                 })
                 .collect::<Vec<_>>();
@@ -418,7 +417,7 @@ impl Storage for RocksDBStorage {
                 .map(|row| VisibleRowBytes {
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
-                    current_version_id: row.current_version_id,
+                    current_batch_id: row.current_batch_id,
                     bytes: &row.bytes,
                 })
                 .collect::<Vec<_>>();
@@ -471,13 +470,13 @@ impl Storage for RocksDBStorage {
         })
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let branches = self.with_inner(|inner| {
-            scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
+            scan_visible_region_row_batch_branches_core(table, row_id, |prefix| {
                 Self::scan_prefix_keys_from_db(&inner.db, prefix)
             })
         })?;
@@ -492,15 +491,15 @@ impl Storage for RocksDBStorage {
         Ok(rows)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_history_row_version_bytes_core(table, branch, row_id, version_id, |key| {
+            load_history_row_batch_bytes_core(table, branch, row_id, batch_id, |key| {
                 Self::get_from_db(&inner.db, key)
             })
         })

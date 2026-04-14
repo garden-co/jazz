@@ -42,7 +42,7 @@ Each table handle is a typed query builder plus a table identity.
 That is why application code can write:
 
 ```ts
-app.todos.where({ done: false }).orderBy("title").limit(10)
+app.todos.where({ done: false }).orderBy("title").limit(10);
 ```
 
 and also:
@@ -99,12 +99,12 @@ The current `Db` API centers around a small set of predictable operations:
 
 There are also durable variants for callers that want to wait for a specific durability tier instead of stopping at local application.
 
-## What App Code Does *Not* Need to Care About
+## What App Code Does _Not_ Need to Care About
 
 The runtime still tracks engine-owned row information such as:
 
 - row ids
-- version ids
+- batch ids
 - branches
 - visibility state
 - durability tiers
@@ -125,11 +125,11 @@ The data model does not change between frameworks.
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `packages/jazz-tools/src/typed-app.ts` | Typed app/table/query builder surface |
-| `packages/jazz-tools/src/runtime/db.ts` | App-facing runtime API |
-| `packages/jazz-tools/src/index.ts` | Main TypeScript export surface |
-| `packages/jazz-tools/src/react/` | React bindings |
-| `packages/jazz-tools/src/vue/` | Vue bindings |
-| `packages/jazz-tools/src/svelte/` | Svelte bindings |
+| File                                    | Purpose                               |
+| --------------------------------------- | ------------------------------------- |
+| `packages/jazz-tools/src/typed-app.ts`  | Typed app/table/query builder surface |
+| `packages/jazz-tools/src/runtime/db.ts` | App-facing runtime API                |
+| `packages/jazz-tools/src/index.ts`      | Main TypeScript export surface        |
+| `packages/jazz-tools/src/react/`        | React bindings                        |
+| `packages/jazz-tools/src/vue/`          | Vue bindings                          |
+| `packages/jazz-tools/src/svelte/`       | Svelte bindings                       |

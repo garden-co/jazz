@@ -1733,12 +1733,12 @@ mod tests {
             .with_state(state)
     }
 
-    /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
+    /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
-    fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
+    fn row_batch_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
         let row_id =
             ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
             Vec::<crate::commit::CommitId>::new(),
@@ -1749,7 +1749,7 @@ mod tests {
             None,
         );
 
-        crate::sync_manager::SyncPayload::RowVersionCreated {
+        crate::sync_manager::SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         }
@@ -1779,8 +1779,8 @@ mod tests {
 
         let body = SyncBatchRequest {
             payloads: vec![
-                row_version_created_payload("00000000-0000-0000-0000-000000000001"),
-                row_version_created_payload("00000000-0000-0000-0000-000000000002"),
+                row_batch_created_payload("00000000-0000-0000-0000-000000000001"),
+                row_batch_created_payload("00000000-0000-0000-0000-000000000002"),
             ],
             client_id,
         };
@@ -1817,7 +1817,7 @@ mod tests {
         let app = make_sync_test_app("test-backend-secret").await;
 
         let body = SyncBatchRequest {
-            payloads: vec![row_version_created_payload(
+            payloads: vec![row_batch_created_payload(
                 "00000000-0000-0000-0000-000000000001",
             )],
             client_id: ClientId::new(),
@@ -1854,7 +1854,7 @@ mod tests {
         let client_id = ClientId::new();
 
         let payloads: Vec<crate::sync_manager::SyncPayload> = (0..60)
-            .map(|i| row_version_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
+            .map(|i| row_batch_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
             .collect();
 
         let body = SyncBatchRequest {

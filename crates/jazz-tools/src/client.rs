@@ -106,6 +106,13 @@ pub struct Transaction<'a> {
     committed: Cell<bool>,
 }
 
+/// Explicit direct batch helper for grouping multiple visible writes under one
+/// logical `BatchId`.
+pub struct DirectBatch<'a> {
+    client: &'a JazzClient,
+    write_context: WriteContext,
+}
+
 /// Result of a persisted write: a logical batch id, the immediate local value,
 /// and a receiver that resolves once the requested durability tier is
 /// acknowledged.
@@ -653,6 +660,12 @@ impl JazzClient {
         self.begin_transaction_internal(None)
     }
 
+    /// Start an explicit direct batch. All writes through the returned handle
+    /// share one logical `BatchId`.
+    pub fn begin_direct_batch(&self) -> DirectBatch<'_> {
+        self.begin_direct_batch_internal(None)
+    }
+
     /// Load one replayable local batch record by logical batch id.
     pub fn local_batch_record(&self, batch_id: BatchId) -> Result<Option<LocalBatchRecord>> {
         self.runtime
@@ -666,7 +679,7 @@ impl JazzClient {
             .runtime
             .local_batch_records()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
-        records.sort_by(|left, right| left.batch_id.0.as_bytes().cmp(right.batch_id.0.as_bytes()));
+        records.sort_by_key(|record| record.batch_id);
         Ok(records)
     }
 
@@ -758,14 +771,34 @@ impl JazzClient {
         }
     }
 
-    fn begin_transaction_internal(&self, session: Option<Session>) -> Transaction<'_> {
+    fn begin_batch_write_context(
+        &self,
+        session: Option<Session>,
+        batch_mode: BatchMode,
+    ) -> WriteContext {
+        let target_branch_name = self
+            .runtime
+            .with_schema_manager(|manager| manager.branch_name().to_string())
+            .expect("read batch target branch");
         let mut write_context = session.map(WriteContext::from_session).unwrap_or_default();
-        write_context.batch_mode = Some(BatchMode::Transactional);
+        write_context.batch_mode = Some(batch_mode);
         write_context.batch_id = Some(BatchId::new());
+        write_context.target_branch_name = Some(target_branch_name);
+        write_context
+    }
+
+    fn begin_transaction_internal(&self, session: Option<Session>) -> Transaction<'_> {
         Transaction {
             client: self,
-            write_context,
+            write_context: self.begin_batch_write_context(session, BatchMode::Transactional),
             committed: Cell::new(false),
+        }
+    }
+
+    fn begin_direct_batch_internal(&self, session: Option<Session>) -> DirectBatch<'_> {
+        DirectBatch {
+            client: self,
+            write_context: self.begin_batch_write_context(session, BatchMode::Direct),
         }
     }
 }
@@ -925,6 +958,11 @@ impl<'a> SessionClient<'a> {
             .begin_transaction_internal(Some(self.session.clone()))
     }
 
+    pub fn begin_direct_batch(&self) -> DirectBatch<'_> {
+        self.client
+            .begin_direct_batch_internal(Some(self.session.clone()))
+    }
+
     pub fn local_batch_record(&self, batch_id: BatchId) -> Result<Option<LocalBatchRecord>> {
         self.client.local_batch_record(batch_id)
     }
@@ -1061,6 +1099,119 @@ impl<'a> Transaction<'a> {
             value: (),
             receiver,
         })
+    }
+}
+
+impl<'a> DirectBatch<'a> {
+    pub fn batch_id(&self) -> BatchId {
+        self.write_context
+            .batch_id()
+            .expect("direct batch handles always carry a batch id")
+    }
+
+    pub async fn create(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values) = self
+            .client
+            .runtime
+            .insert_with_write_context(table, values, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok((
+            object_id,
+            self.client
+                .align_created_row_to_declared_schema(table, row_values),
+        ))
+    }
+
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<(ObjectId, Vec<Value>)>> {
+        let ((object_id, row_values), batch_id, receiver) = self
+            .client
+            .runtime
+            .insert_persisted_with_write_context(table, values, Some(&self.write_context), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (
+                object_id,
+                self.client
+                    .align_created_row_to_declared_schema(table, row_values),
+            ),
+            receiver,
+        })
+    }
+
+    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+        self.client
+            .runtime
+            .update_with_write_context(object_id, updates, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .update_persisted_with_write_context(
+                object_id,
+                updates,
+                Some(&self.write_context),
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
+    }
+
+    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+        self.client
+            .runtime
+            .delete_with_write_context(object_id, Some(&self.write_context))
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWrite<()>> {
+        let (batch_id, receiver) = self
+            .client
+            .runtime
+            .delete_persisted_with_write_context(object_id, Some(&self.write_context), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        Ok(PersistedWrite {
+            batch_id,
+            value: (),
+            receiver,
+        })
+    }
+
+    pub fn local_batch_record(&self, batch_id: BatchId) -> Result<Option<LocalBatchRecord>> {
+        self.client.local_batch_record(batch_id)
+    }
+
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>> {
+        self.client.local_batch_records()
+    }
+
+    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool> {
+        self.client.acknowledge_rejected_batch(batch_id)
     }
 }
 
@@ -1482,10 +1633,10 @@ mod tests {
             .runtime
             .with_storage(|storage| {
                 let first_rows = storage
-                    .scan_history_row_versions("todos", first_id)
+                    .scan_history_row_batches("todos", first_id)
                     .expect("scan first history rows");
                 let second_rows = storage
-                    .scan_history_row_versions("todos", second_id)
+                    .scan_history_row_batches("todos", second_id)
                     .expect("scan second history rows");
 
                 assert_eq!(first_rows.len(), 1);
@@ -1494,6 +1645,64 @@ mod tests {
                 assert_eq!(second_rows[0].batch_id, batch_id);
                 assert_eq!(first_rows[0].state, RowState::StagingPending);
                 assert_eq!(second_rows[0].state, RowState::StagingPending);
+            })
+            .expect("inspect client storage");
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_direct_batch_reuses_one_batch_id_for_multiple_creates() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-direct-batch");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let batch = client.begin_direct_batch();
+        let batch_id = batch.batch_id();
+
+        let (first_id, _) = batch
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("first".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create first direct-batch row");
+        let (second_id, _) = batch
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("second".to_string())),
+                    ("completed".to_string(), Value::Boolean(true)),
+                ]),
+            )
+            .await
+            .expect("create second direct-batch row");
+
+        client
+            .runtime
+            .with_storage(|storage| {
+                let first_rows = storage
+                    .scan_history_row_batches("todos", first_id)
+                    .expect("scan first history rows");
+                let second_rows = storage
+                    .scan_history_row_batches("todos", second_id)
+                    .expect("scan second history rows");
+
+                assert_eq!(first_rows.len(), 1);
+                assert_eq!(second_rows.len(), 1);
+                assert_eq!(first_rows[0].batch_id, batch_id);
+                assert_eq!(second_rows[0].batch_id, batch_id);
+                assert_eq!(first_rows[0].state, RowState::VisibleDirect);
+                assert_eq!(second_rows[0].state, RowState::VisibleDirect);
             })
             .expect("inspect client storage");
 
@@ -1685,7 +1894,7 @@ mod tests {
             .runtime
             .with_storage(|storage| {
                 let history_rows = storage
-                    .scan_history_row_versions("todos", row_id)
+                    .scan_history_row_batches("todos", row_id)
                     .expect("scan history rows");
                 assert_eq!(history_rows.len(), 1);
                 assert_eq!(history_rows[0].batch_id, batch_id);
@@ -1936,9 +2145,9 @@ fn parse_delay_ms(raw: &str) -> Option<Duration> {
 fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
     if !matches!(
         payload,
-        SyncPayload::RowVersionCreated { .. }
-            | SyncPayload::RowVersionNeeded { .. }
-            | SyncPayload::RowVersionStateChanged { .. }
+        SyncPayload::RowBatchCreated { .. }
+            | SyncPayload::RowBatchNeeded { .. }
+            | SyncPayload::RowBatchStateChanged { .. }
     ) {
         return None;
     }

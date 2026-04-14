@@ -234,7 +234,7 @@ impl QueryManager {
     /// 1. Creates a local subscription (like `subscribe_with_session`)
     /// 2. Sends a QuerySubscription to all connected servers
     ///
-    /// Servers will evaluate the query against their data and send row-version
+    /// Servers will evaluate the query against their data and send row-batch
     /// messages for matching rows plus legacy object updates for non-row
     /// objects. As new objects match the query on the server, they are
     /// automatically synced.

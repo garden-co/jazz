@@ -344,13 +344,13 @@ mod tests {
     fn test_sync_batch_request_serialization() {
         use crate::metadata::RowProvenance;
         use crate::object::ObjectId;
-        use crate::row_histories::{RowState, StoredRowVersion};
+        use crate::row_histories::{RowState, StoredRowBatch};
         use crate::sync_manager::ClientId;
 
         let row_id = ObjectId::new();
-        let payload = SyncPayload::RowVersionCreated {
+        let payload = SyncPayload::RowBatchCreated {
             metadata: None,
-            row: StoredRowVersion::new(
+            row: StoredRowBatch::new(
                 row_id,
                 "main",
                 Vec::new(),
@@ -368,14 +368,14 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("payloads"));
-        assert!(json.contains("RowVersionCreated"));
+        assert!(json.contains("RowBatchCreated"));
         assert!(json.contains("main"));
 
         let parsed: SyncBatchRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         assert!(matches!(
             parsed.payloads[0],
-            SyncPayload::RowVersionCreated { .. }
+            SyncPayload::RowBatchCreated { .. }
         ));
     }
 

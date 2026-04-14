@@ -8,7 +8,6 @@
 use ahash::{AHashMap, AHashSet};
 use uuid::Uuid;
 
-use crate::commit::CommitId;
 use crate::metadata::{RowProvenance, SYSTEM_PRINCIPAL_ID};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -16,6 +15,7 @@ use crate::query_manager::types::{
     LoadedRow, Row, RowDescriptor, Schema, TableName, Tuple, TupleBatchProvenance, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
+use crate::row_histories::BatchId;
 use crate::storage::Storage;
 
 use super::RowNode;
@@ -259,7 +259,7 @@ impl RecursiveRelationNode {
             ObjectId,
             (
                 Vec<u8>,
-                CommitId,
+                BatchId,
                 RowProvenance,
                 TupleProvenance,
                 TupleBatchProvenance,
@@ -268,7 +268,7 @@ impl RecursiveRelationNode {
         let mut frontier = Vec::<(ObjectId, Vec<u8>, TupleProvenance, TupleBatchProvenance)>::new();
 
         for tuple in self.seed_tuples.values() {
-            if let Some((id, content, version_id, row_provenance)) =
+            if let Some((id, content, batch_id, row_provenance)) =
                 self.normalize_seed_tuple_with_id(tuple)
             {
                 let provenance = tuple.provenance().clone();
@@ -290,10 +290,10 @@ impl RecursiveRelationNode {
                             existing_batch_provenance.insert(batch_id);
                         }
                         let changed =
-                            *existing_content != content || *existing_commit_id != version_id;
+                            *existing_content != content || *existing_commit_id != batch_id;
                         if changed {
                             *existing_content = content.clone();
-                            *existing_commit_id = version_id;
+                            *existing_commit_id = batch_id;
                             *existing_row_provenance = row_provenance.clone();
                         }
                         changed
@@ -305,7 +305,7 @@ impl RecursiveRelationNode {
                             id,
                             (
                                 content.clone(),
-                                version_id,
+                                batch_id,
                                 row_provenance,
                                 provenance.clone(),
                                 batch_provenance.clone(),
@@ -344,7 +344,7 @@ impl RecursiveRelationNode {
                 for (step_row, step_provenance, step_batch_provenance) in
                     self.evaluate_step_rows(&corr, io, row_loader)
                 {
-                    let Some((next_id, next_content, next_commit_id, next_row_provenance)) =
+                    let Some((next_id, next_content, next_batch_id, next_row_provenance)) =
                         self.normalize_step_row(&step_desc, &step_row)
                     else {
                         continue;
@@ -362,7 +362,7 @@ impl RecursiveRelationNode {
                     let enqueue = match seen_rows.get_mut(&next_id) {
                         Some((
                             existing_content,
-                            existing_commit_id,
+                            existing_batch_id,
                             existing_row_provenance,
                             existing_provenance,
                             existing_batch_provenance,
@@ -376,10 +376,10 @@ impl RecursiveRelationNode {
                                 existing_batch_provenance.insert(batch_id);
                             }
                             let changed = *existing_content != next_content
-                                || *existing_commit_id != next_commit_id;
+                                || *existing_batch_id != next_batch_id;
                             if changed {
                                 *existing_content = next_content.clone();
-                                *existing_commit_id = next_commit_id;
+                                *existing_batch_id = next_batch_id;
                                 *existing_row_provenance = next_row_provenance.clone();
                             }
                             changed
@@ -391,7 +391,7 @@ impl RecursiveRelationNode {
                                 next_id,
                                 (
                                     next_content.clone(),
-                                    next_commit_id,
+                                    next_batch_id,
                                     next_row_provenance,
                                     combined_provenance.clone(),
                                     combined_batch_provenance.clone(),
@@ -425,12 +425,12 @@ impl RecursiveRelationNode {
         seen_rows
             .into_iter()
             .map(
-                |(id, (content, version_id, row_provenance, provenance, batch_provenance))| {
+                |(id, (content, batch_id, row_provenance, provenance, batch_provenance))| {
                     Tuple::new_with_shadow_state(
                         vec![TupleElement::Row {
                             id,
                             content: content.into(),
-                            version_id,
+                            batch_id,
                             row_provenance,
                         }],
                         provenance,
@@ -454,7 +454,7 @@ impl RecursiveRelationNode {
             ObjectId,
             (
                 Vec<u8>,
-                CommitId,
+                BatchId,
                 RowProvenance,
                 TupleProvenance,
                 TupleBatchProvenance,
@@ -463,7 +463,7 @@ impl RecursiveRelationNode {
         let mut frontier = Vec::<(ObjectId, Vec<u8>, TupleProvenance, TupleBatchProvenance)>::new();
 
         for tuple in self.seed_tuples.values() {
-            if let Some((id, content, version_id, row_provenance)) =
+            if let Some((id, content, batch_id, row_provenance)) =
                 self.normalize_seed_tuple_with_id(tuple)
             {
                 let provenance = tuple.provenance().clone();
@@ -485,10 +485,10 @@ impl RecursiveRelationNode {
                             existing_batch_provenance.insert(batch_id);
                         }
                         let changed =
-                            *existing_content != content || *existing_commit_id != version_id;
+                            *existing_content != content || *existing_commit_id != batch_id;
                         if changed {
                             *existing_content = content.clone();
-                            *existing_commit_id = version_id;
+                            *existing_commit_id = batch_id;
                             *existing_row_provenance = row_provenance.clone();
                         }
                         changed
@@ -500,7 +500,7 @@ impl RecursiveRelationNode {
                             id,
                             (
                                 content.clone(),
-                                version_id,
+                                batch_id,
                                 row_provenance,
                                 provenance.clone(),
                                 batch_provenance.clone(),
@@ -585,10 +585,10 @@ impl RecursiveRelationNode {
                                 existing_batch_provenance.insert(batch_id);
                             }
                             let changed = *existing_content != target_row.data
-                                || *existing_commit_id != target_row.version_id;
+                                || *existing_commit_id != target_row.batch_id;
                             if changed {
                                 *existing_content = target_row.data.to_vec();
-                                *existing_commit_id = target_row.version_id;
+                                *existing_commit_id = target_row.batch_id;
                                 *existing_row_provenance = target_row.row_provenance.clone();
                             }
                             changed
@@ -600,7 +600,7 @@ impl RecursiveRelationNode {
                                 *target_id,
                                 (
                                     target_row.data.to_vec(),
-                                    target_row.version_id,
+                                    target_row.batch_id,
                                     target_row.row_provenance.clone(),
                                     combined_provenance.clone(),
                                     combined_batch_provenance.clone(),
@@ -634,12 +634,12 @@ impl RecursiveRelationNode {
         seen_rows
             .into_iter()
             .map(
-                |(id, (content, version_id, row_provenance, provenance, batch_provenance))| {
+                |(id, (content, batch_id, row_provenance, provenance, batch_provenance))| {
                     Tuple::new_with_shadow_state(
                         vec![TupleElement::Row {
                             id,
                             content: content.into(),
-                            version_id,
+                            batch_id,
                             row_provenance,
                         }],
                         provenance,
@@ -664,13 +664,13 @@ impl RecursiveRelationNode {
     fn normalize_seed_tuple_with_id(
         &self,
         tuple: &Tuple,
-    ) -> Option<(ObjectId, Vec<u8>, CommitId, RowProvenance)> {
+    ) -> Option<(ObjectId, Vec<u8>, BatchId, RowProvenance)> {
         let element = tuple.get(0)?;
         let id = element.id();
-        let version_id = element.version_id().unwrap_or(CommitId([0; 32]));
+        let batch_id = element.batch_id().unwrap_or(BatchId([0; 16]));
         let row_provenance = element.row_provenance()?.clone();
         let content = self.normalize_seed_tuple(tuple)?;
-        Some((id, content, version_id, row_provenance))
+        Some((id, content, batch_id, row_provenance))
     }
 
     fn extract_correlation_from_content(
@@ -758,7 +758,7 @@ impl RecursiveRelationNode {
         &self,
         step_descriptor: &RowDescriptor,
         step_row: &Row,
-    ) -> Option<(ObjectId, Vec<u8>, crate::commit::CommitId, RowProvenance)> {
+    ) -> Option<(ObjectId, Vec<u8>, BatchId, RowProvenance)> {
         let values = decode_row(step_descriptor, &step_row.data).ok()?;
         if values.len() != self.output_descriptor.columns.len() {
             return None;
@@ -767,7 +767,7 @@ impl RecursiveRelationNode {
         Some((
             step_row.id,
             normalized_content,
-            step_row.version_id,
+            step_row.batch_id,
             step_row.provenance.clone(),
         ))
     }
@@ -806,12 +806,12 @@ fn tuple_from_normalized_content(
     // Stable synthetic id by row content for deterministic dedupe.
     let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, &content);
     let id = ObjectId::from_uuid(uuid);
-    let version_id = CommitId([0; 32]);
+    let batch_id = crate::row_histories::BatchId([0; 16]);
     Tuple::new_with_shadow_state(
         vec![TupleElement::Row {
             id,
             content: content.into(),
-            version_id,
+            batch_id,
             row_provenance: RowProvenance::for_insert(SYSTEM_PRINCIPAL_ID, 0),
         }],
         provenance,
@@ -938,7 +938,7 @@ mod tests {
         let seed_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
             content: seed.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
         let mut input = TupleDelta::new();

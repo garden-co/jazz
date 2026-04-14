@@ -875,7 +875,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "row": {
                 "id": object_id.uuid().to_string(),
                 "values": row_values,
@@ -919,7 +919,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "row": {
                 "id": object_id.uuid().to_string(),
                 "values": row_values,
@@ -1015,7 +1015,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
     }
 
@@ -1052,7 +1052,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
     }
 
@@ -1126,7 +1126,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
     }
 
@@ -1154,7 +1154,7 @@ impl NapiRuntime {
         };
 
         Ok(serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
     }
 
