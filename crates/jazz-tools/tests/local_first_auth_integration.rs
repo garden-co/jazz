@@ -2,31 +2,22 @@
 
 //! End-to-end integration coverage for local-first (Ed25519 seed) auth.
 //!
-//! The in-process `TestingServer` accepts local-first Bearer tokens by default.
-//! These tests prove that a `JazzClient` carrying such a token syncs correctly,
-//! that seeds map deterministically to principals across devices, that state
-//! persists across reconnects, and that a server configured with local-first
-//! auth disabled rejects the same tokens.
+//! These tests prove that a `JazzClient` carrying an Ed25519-minted Bearer
+//! token syncs correctly, that seeds map deterministically to principals
+//! across devices, and that state persists across reconnects.
 //!
-//! Narrow middleware-level assertions (wrong audience, expired token, disabled
-//! flag at the `extract_session` layer) live in `local_first_auth.rs`.
+//! Narrow middleware-level assertions (wrong audience, expired token,
+//! disabled flag) live in `local_first_auth.rs` and `src/middleware/auth.rs`.
 
 mod support;
 
 use std::collections::HashMap;
 
-use jazz_tools::commit::CommitId;
-use jazz_tools::jazz_transport::SyncBatchRequest;
-use jazz_tools::metadata::RowProvenance;
-use jazz_tools::row_histories::{RowState, StoredRowVersion};
 use jazz_tools::server::TestingServer;
-use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jazz_tools::{
-    AppContext, ClientStorage, ColumnType, JazzClient, ObjectId, QueryBuilder, Schema,
-    SchemaBuilder, TableSchema, Value, identity,
+    AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder,
+    TableSchema, Value, identity,
 };
-use reqwest::StatusCode;
-use uuid::Uuid;
 
 use support::{has_row, wait_for_rows};
 
@@ -263,63 +254,4 @@ async fn persistent_seed_reconnects_as_same_principal() {
 
     reconnected.shutdown().await.expect("shutdown reconnected");
     server.shutdown().await;
-}
-
-/// A server built with `allow_local_first_auth = false` rejects valid
-/// local-first tokens at the HTTP auth boundary.
-#[tokio::test]
-async fn server_with_local_first_disabled_rejects() {
-    let server = TestingServer::builder()
-        .with_local_first_auth(false)
-        .start()
-        .await;
-
-    let token = identity::mint_local_first_token(
-        &alice_seed(),
-        &server.app_id().to_string(),
-        TOKEN_TTL_SECS,
-    )
-    .expect("mint local-first token");
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/sync", server.base_url()))
-        .bearer_auth(&token)
-        .header("Content-Type", "application/json")
-        .body(sync_body())
-        .send()
-        .await
-        .expect("post sync");
-
-    assert_eq!(
-        response.status(),
-        StatusCode::UNAUTHORIZED,
-        "server with local-first disabled must reject Ed25519 Bearer tokens"
-    );
-
-    server.shutdown().await;
-}
-
-/// Minimal valid `SyncBatchRequest` body for HTTP-level auth probes. Mirrors
-/// the helper in `auth_test.rs`; we duplicate it so neither file has to
-/// depend on the other.
-fn sync_body() -> String {
-    let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
-    let row = StoredRowVersion::new(
-        ObjectId::from_uuid(Uuid::parse_str(object_id_text).expect("parse object id")),
-        "main",
-        Vec::<CommitId>::new(),
-        b"alice".to_vec(),
-        RowProvenance::for_insert(object_id_text.to_string(), 1_000),
-        Default::default(),
-        RowState::VisibleDirect,
-        None,
-    );
-    let request = SyncBatchRequest {
-        client_id: ClientId::new(),
-        payloads: vec![SyncPayload::RowVersionCreated {
-            metadata: None,
-            row,
-        }],
-    };
-    serde_json::to_string(&request).expect("serialize sync batch request")
 }
