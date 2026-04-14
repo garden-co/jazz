@@ -16,11 +16,11 @@ const DEFAULT_MESSAGES: Record<PasskeyBackupErrorCode, string> = {
 };
 
 export class PasskeyBackupError extends Error {
+  readonly name = "PasskeyBackupError";
   readonly code: PasskeyBackupErrorCode;
 
   constructor(code: PasskeyBackupErrorCode, cause?: unknown) {
     super(DEFAULT_MESSAGES[code]);
-    this.name = "PasskeyBackupError";
     this.code = code;
     if (cause !== undefined) {
       this.cause = cause;
