@@ -285,6 +285,111 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     }
 }
 
+// WASM-compatible run() — uses `futures::select!` instead of `tokio::select!`.
+// Activated when `transport` is enabled but `runtime-tokio` is not (i.e. WASM).
+#[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
+enum WasmConnectedExit { HandleDropped, NetworkError }
+
+#[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
+impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
+    /// Returns only when the `TransportHandle` is dropped.
+    pub async fn run(mut self) {
+        loop {
+            match W::connect(&self.url).await {
+                Ok(mut ws) => {
+                    match self.wasm_perform_auth_handshake(&mut ws).await {
+                        Ok(resp) => {
+                            self.ever_connected.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
+                                catalogue_state_hash: resp.catalogue_state_hash,
+                                next_sync_seq: resp.next_sync_seq,
+                            });
+                            self.tick.notify();
+                            self.reconnect.reset();
+                            match self.wasm_run_connected(&mut ws).await {
+                                WasmConnectedExit::HandleDropped => { ws.close().await; return; }
+                                WasmConnectedExit::NetworkError => {
+                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Disconnected);
+                                    self.tick.notify();
+                                    ws.close().await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("ws auth handshake failed: {e}");
+                            ws.close().await;
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("ws connect failed: {e}"),
+            }
+            self.reconnect.backoff().await;
+        }
+    }
+
+    async fn wasm_perform_auth_handshake(&mut self, ws: &mut W) -> Result<ConnectedResponse, String> {
+        let handshake = AuthHandshake {
+            client_id: self.client_id.to_string(),
+            auth: self.auth.clone(),
+            catalogue_state_hash: None,
+        };
+        let payload = serde_json::to_vec(&handshake).map_err(|e| e.to_string())?;
+        let frame = frame_encode(&payload);
+        ws.send(&frame).await.map_err(|e| e.to_string())?;
+        let resp_bytes = ws.recv().await.map_err(|e| e.to_string())?
+            .ok_or_else(|| "server closed before handshake response".to_string())?;
+        let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
+        serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
+    }
+
+    async fn wasm_run_connected(&mut self, ws: &mut W) -> WasmConnectedExit {
+        use futures::{FutureExt as _, StreamExt as _};
+        loop {
+            futures::select! {
+                out = self.outbox_rx.next().fuse() => {
+                    let Some(entry) = out else { return WasmConnectedExit::HandleDropped; };
+                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
+                    let frame = frame_encode(&bytes);
+                    if ws.send(&frame).await.is_err() { return WasmConnectedExit::NetworkError; }
+                }
+                incoming = ws.recv().fuse() => {
+                    match incoming {
+                        Ok(Some(data)) => {
+                            let Some(payload) = frame_decode(&data) else { continue; };
+                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            match event {
+                                crate::transport_protocol::ServerEvent::SyncUpdate { seq, payload } => {
+                                    let entry = InboxEntry {
+                                        source: crate::sync_manager::types::Source::Server(self.server_id),
+                                        payload: *payload,
+                                    };
+                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Sync {
+                                        entry: Box::new(entry),
+                                        sequence: seq,
+                                    });
+                                    self.tick.notify();
+                                }
+                                crate::transport_protocol::ServerEvent::Heartbeat => {}
+                                crate::transport_protocol::ServerEvent::Connected { .. } => {
+                                    tracing::warn!("unexpected Connected frame mid-stream; ignoring");
+                                }
+                                crate::transport_protocol::ServerEvent::Error { message, code } => {
+                                    tracing::warn!(message, ?code, "server reported error");
+                                }
+                                other => {
+                                    tracing::debug!(variant = other.variant_name(), "received non-sync ServerEvent; skipping");
+                                }
+                            }
+                        }
+                        Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(feature = "runtime-tokio")]
 #[cfg(test)]
 mod tests {

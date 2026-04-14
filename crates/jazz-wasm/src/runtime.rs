@@ -301,6 +301,7 @@ type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 ///
 /// Uses `wasm_bindgen_futures::spawn_local` to schedule a batched tick.
 /// Debounced: only one task is scheduled at a time.
+#[derive(Clone)]
 pub struct WasmScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Rc<RefCell<bool>>,
@@ -1491,5 +1492,54 @@ impl WasmRuntime {
         let seed = decode_seed(seed_b64)?;
         let verifying_key = identity::derive_verifying_key(&seed);
         Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+    }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop via `spawn_local`.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JsValue> {
+        let auth: jazz_tools::transport_manager::AuthConfig =
+            serde_json::from_str(&auth_json)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let scheduler = self.core.borrow().scheduler().clone();
+        let tick = WasmTickNotifier { scheduler };
+        let (handle, manager) =
+            jazz_tools::transport_manager::create::<
+                crate::ws_stream::WasmWsStream,
+                WasmTickNotifier,
+            >(url, auth, tick);
+        self.core.borrow_mut().set_transport(handle);
+        wasm_bindgen_futures::spawn_local(manager.run());
+        Ok(())
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn disconnect(&self) {
+        self.core.borrow_mut().clear_transport();
+    }
+}
+
+// ============================================================================
+// WasmTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the WASM runtime.
+///
+/// Holds a clone of `WasmScheduler` and calls `schedule_batched_tick()`
+/// whenever the transport layer needs to wake up `batched_tick`.
+#[cfg(target_arch = "wasm32")]
+struct WasmTickNotifier {
+    scheduler: WasmScheduler,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl jazz_tools::transport_manager::TickNotifier for WasmTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
     }
 }
