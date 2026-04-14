@@ -101,6 +101,7 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
 // ============================================================================
 
 /// SyncSender implementation using a callback.
+#[derive(Clone)]
 pub struct CallbackSyncSender {
     callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
 }
@@ -169,6 +170,12 @@ impl From<CoreRuntimeError> for RuntimeError {
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
     core: Arc<Mutex<TokioCoreType<S>>>,
+    /// Kept alive to prevent the callback from being dropped prematurely.
+    ///
+    /// Outbox delivery through this sender is not wired into `batched_tick` yet;
+    /// Task 8 will replace this with the transport-based `connect()` pathway.
+    /// Until then, this field exists solely to keep the callback resources alive.
+    _sync_sender: CallbackSyncSender,
 }
 
 // Manual Clone impl — only needs Arc::clone, not S: Clone
@@ -176,6 +183,7 @@ impl<S: Storage + Send + 'static> Clone for TokioRuntime<S> {
     fn clone(&self) -> Self {
         Self {
             core: Arc::clone(&self.core),
+            _sync_sender: self._sync_sender.clone(),
         }
     }
 }
@@ -192,7 +200,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
         let scheduler = TokioScheduler::new();
-        let _sync_sender = CallbackSyncSender::new(sync_callback);
+        let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
         let core = RuntimeCore::new(schema_manager, storage, scheduler);
@@ -208,7 +216,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
                 .set_core_ref(Arc::downgrade(&core_arc));
         }
 
-        Self { core: core_arc }
+        Self {
+            core: core_arc,
+            _sync_sender: sync_sender,
+        }
     }
 
     /// Persist the current schema to the catalogue for server sync.
