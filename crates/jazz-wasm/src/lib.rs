@@ -52,6 +52,8 @@ pub mod driver_bridge;
 pub mod query;
 pub mod runtime;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+pub mod ws_stream;
 
 // Re-export main types for JavaScript
 pub use driver_bridge::JsStorageDriver;
