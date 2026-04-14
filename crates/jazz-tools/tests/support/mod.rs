@@ -3,11 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
 use jazz_tools::{
@@ -15,8 +14,6 @@ use jazz_tools::{
     QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
-use reqwest::Client;
-use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -31,58 +28,6 @@ const TEST_JWT_KID: &str = "test-jwks-kid";
 
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
-
-struct SyncServerClient {
-    http_client: Client,
-    base_url: String,
-    route_prefix: String,
-    admin_secret: String,
-}
-
-impl SyncServerClient {
-    async fn connect(
-        server_url: &str,
-        admin_secret: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let http_client = Client::new();
-        let (base_url, route_prefix) = split_base_url(server_url)?;
-
-        let health_url = format!("{base_url}/health");
-        http_client
-            .get(health_url)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(Self {
-            http_client,
-            base_url,
-            route_prefix,
-            admin_secret: admin_secret.to_string(),
-        })
-    }
-
-    async fn push_sync(
-        &self,
-        payload: jazz_tools::sync_manager::SyncPayload,
-        client_id: ClientId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let request = SyncBatchRequest {
-            payloads: vec![payload],
-            client_id,
-        };
-        let sync_url = format!("{}{}/sync", self.base_url, self.route_prefix);
-        self.http_client
-            .post(sync_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header("X-Jazz-Admin-Secret", &self.admin_secret)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
@@ -341,38 +286,10 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn split_base_url(input: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let parsed = reqwest::Url::parse(input)?;
-
-    let mut origin = parsed.clone();
-    origin.set_path("");
-    origin.set_query(None);
-    origin.set_fragment(None);
-
-    let base_url = origin.as_str().trim_end_matches('/').to_string();
-    let route_prefix = normalize_route_prefix(parsed.path());
-
-    Ok((base_url, route_prefix))
-}
-
-fn normalize_route_prefix(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return String::new();
-    }
-
-    let trimmed = trimmed.trim_end_matches('/');
-    if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
-}
-
 fn build_catalogue_runtime(
     schema_manager: SchemaManager,
     storage: MemoryStorage,
-    connection: Arc<SyncServerClient>,
+    state: Arc<ServerState>,
     client_id: ClientId,
     in_flight_pushes: Arc<AtomicUsize>,
     push_errors: Arc<Mutex<Vec<String>>>,
@@ -384,14 +301,19 @@ fn build_catalogue_runtime(
         } = entry;
         if let Destination::Server(_) = destination {
             in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let connection = connection.clone();
+            let state = state.clone();
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
             tokio::spawn(async move {
-                if let Err(error) = connection.push_sync(payload, client_id).await
-                    && let Ok(mut errors) = push_errors.lock()
-                {
-                    errors.push(error.to_string());
+                let frame = serde_json::to_vec(&jazz_tools::sync_manager::OutboxEntry {
+                    destination: Destination::Server(ServerId::default()),
+                    payload,
+                })
+                .expect("serialize OutboxEntry");
+                if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
+                    if let Ok(mut errors) = push_errors.lock() {
+                        errors.push(error);
+                    }
                 }
                 in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
             });
@@ -406,16 +328,19 @@ async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
 }
 
 pub async fn push_catalogue_in_memory(
-    server_url: &str,
+    state: Arc<ServerState>,
     app_id: AppId,
     env: &str,
     user_branch: &str,
-    admin_secret: &str,
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Arc::new(SyncServerClient::connect(server_url, admin_secret).await?);
     let client_id = ClientId::new();
+    state
+        .runtime
+        .ensure_client_as_backend(client_id)
+        .map_err(|e| format!("register backend client: {e:?}"))?;
+
     let in_flight_pushes = Arc::new(AtomicUsize::new(0));
     let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -431,7 +356,7 @@ pub async fn push_catalogue_in_memory(
         let runtime = build_catalogue_runtime(
             schema_manager,
             MemoryStorage::default(),
-            connection.clone(),
+            state.clone(),
             client_id,
             in_flight_pushes.clone(),
             push_errors.clone(),
@@ -463,7 +388,7 @@ pub async fn push_catalogue_in_memory(
         let runtime = build_catalogue_runtime(
             schema_manager,
             storage,
-            connection.clone(),
+            state.clone(),
             client_id,
             in_flight_pushes.clone(),
             push_errors.clone(),

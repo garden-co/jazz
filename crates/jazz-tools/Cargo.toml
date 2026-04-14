@@ -21,9 +21,8 @@ rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
-transport-http = ["transport", "dep:reqwest", "dep:bytes"]
 transport-websocket = ["transport", "runtime-tokio", "dep:tokio-tungstenite"]
-client = ["runtime-tokio", "transport-websocket", "transport-http", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-websocket", "dep:thiserror", "dep:tokio"]
 server = [
   "transport-websocket",
   "dep:tokio",

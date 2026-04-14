@@ -317,6 +317,12 @@ impl TestingServer {
         &self.backend_secret
     }
 
+    /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
+    /// that need to call internal server methods (e.g. `process_ws_client_frame`).
+    pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
+        self.hosted.state.clone()
+    }
+
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
     pub async fn set_client_ttl(&self, ttl: Duration) {
         self.hosted.state.set_client_ttl(ttl).await;
