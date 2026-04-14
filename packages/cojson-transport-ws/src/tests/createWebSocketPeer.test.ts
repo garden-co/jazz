@@ -153,6 +153,66 @@ describe("createWebSocketPeer", () => {
     vi.useRealTimers();
   });
 
+  test("should invoke onPingReceived with server and local receive times", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_500);
+    const onPingReceived = vi.fn();
+    const { triggerEvent } = setup({ onPingReceived });
+
+    triggerEvent(
+      "message",
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ping",
+          time: 1_700_000_000_000,
+          dc: "us-east-1",
+        }),
+      }),
+    );
+
+    expect(onPingReceived).toHaveBeenCalledTimes(1);
+    expect(onPingReceived).toHaveBeenCalledWith({
+      serverTime: 1_700_000_000_000,
+      localReceiveTime: 1_700_000_000_500,
+    });
+
+    nowSpy.mockRestore();
+  });
+
+  test("should not crash when ping is received without onPingReceived callback", () => {
+    const { triggerEvent } = setup();
+
+    expect(() =>
+      triggerEvent(
+        "message",
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "ping",
+            time: 1_700_000_000_000,
+            dc: "us-east-1",
+          }),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  test("should invoke onPingReceived even when enablePingDelayLogs is false", () => {
+    const onPingReceived = vi.fn();
+    const { triggerEvent } = setup({ onPingReceived });
+
+    triggerEvent(
+      "message",
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ping",
+          time: 1_700_000_000_000,
+          dc: "eu-west-1",
+        }),
+      }),
+    );
+
+    expect(onPingReceived).toHaveBeenCalledTimes(1);
+  });
+
   test("should log ping delay when enabled", () => {
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
