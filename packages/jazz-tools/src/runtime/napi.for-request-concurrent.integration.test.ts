@@ -2,13 +2,38 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { WasmSchema } from "../drivers/types.js";
+import { schema as s } from "jazz-tools";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
-import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "./schema-fetch.js";
+import { startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+
+// ---------------------------------------------------------------------------
+// Inline schema + permissions
+// ---------------------------------------------------------------------------
+
+const inlineSchema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    owner_id: s.string(),
+  }),
+};
+
+const inlineApp = s.defineApp(inlineSchema);
+
+const inlinePermissions = s.definePermissions(inlineApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user_id });
+  policy.todos.allowInsert.where({ owner_id: session.user_id });
+  policy.todos.allowUpdate.where({ owner_id: session.user_id });
+  policy.todos.allowDelete.where({ owner_id: session.user_id });
+});
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,14 +63,10 @@ type TempRuntimeData = {
 // Constants
 // ---------------------------------------------------------------------------
 
-// Deterministic base64url-encoded seeds — different values produce different
-// local-first identities, which map to different owner_id values in policy checks.
+// Deterministic base64url-encoded 32-byte seeds — different values produce
+// different local-first identities, which map to different owner_id values.
 const ALICE_SECRET = "YWxpY2Utc2VjcmV0LWZvci10ZXN0LXB1cnBvc2VzISE";
 const BOB_SECRET = "Ym9iLS0tc2VjcmV0LWZvci10ZXN0LXB1cnBvc2VzISE";
-
-const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
-  new URL("../../../../examples/todo-server-ts", import.meta.url),
-);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -81,31 +102,19 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-let todoServerProjectPromise: Promise<LoadedSchemaProject> | null = null;
-
-async function loadTodoServerProject(): Promise<LoadedSchemaProject> {
-  if (!todoServerProjectPromise) {
-    todoServerProjectPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR);
-  }
-  return await todoServerProjectPromise;
-}
-
-function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, PolicyTodoInit> {
+function makePolicyTodosTable(): TableProxy<PolicyTodo, PolicyTodoInit> {
   return {
     _table: "todos",
-    _schema: schema,
+    _schema: inlineApp.wasmSchema,
     _rowType: undefined as unknown as PolicyTodo,
     _initType: undefined as unknown as PolicyTodoInit,
   };
 }
 
-function makePolicyTodosByDescriptionQuery(
-  schema: WasmSchema,
-  description: string,
-): QueryBuilder<PolicyTodo> {
+function makePolicyTodosByDescriptionQuery(description: string): QueryBuilder<PolicyTodo> {
   return {
     _table: "todos",
-    _schema: schema,
+    _schema: inlineApp.wasmSchema,
     _rowType: undefined as unknown as PolicyTodo,
     _build() {
       return JSON.stringify({
@@ -147,25 +156,23 @@ describe("forRequest concurrent session isolation", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       const { mintLocalFirstToken, verifyLocalFirstIdentityProof } = await loadNapiModule();
 
-      await pushSchemaCatalogue({
-        serverUrl: server.url,
-        appId,
+      const { hash: schemaHash } = await publishStoredSchema(server.url, {
         adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
+        schema: inlineApp.wasmSchema,
       });
-
-      const todoServerProject = await loadTodoServerProject();
-      const todoServerSchema = todoServerProject.wasmSchema;
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const scopedQuery = makePolicyTodosByDescriptionQuery(todoServerSchema, scopeTag);
+      const { head } = await fetchPermissionsHead(server.url, { adminSecret });
+      await publishStoredPermissions(server.url, {
+        adminSecret,
+        schemaHash,
+        permissions: inlinePermissions,
+        expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+      });
 
       runtimeData = await createTempRuntimeData("jazz-napi-concurrent-request-");
       context = createJazzContext({
         appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: todoServerProject.permissions ?? {},
+        app: inlineApp,
+        permissions: inlinePermissions,
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
@@ -183,6 +190,9 @@ describe("forRequest concurrent session isolation", () => {
       // use them as owner_id when inserting rows.
       const aliceId = verifyLocalFirstIdentityProof(aliceToken, appId).id;
       const bobId = verifyLocalFirstIdentityProof(bobToken, appId).id;
+
+      const policyTodosTable = makePolicyTodosTable();
+      const scopedQuery = makePolicyTodosByDescriptionQuery(scopeTag);
 
       // Obtain session-scoped Db handles for alice and bob concurrently from
       // the same shared context — this is the pattern a real server would use.
