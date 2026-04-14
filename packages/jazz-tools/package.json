@@ -79,6 +79,10 @@
       "react-native": "./dist/expo/auth-secret-store.js",
       "default": "./dist/expo/auth-secret-store.js"
     },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
