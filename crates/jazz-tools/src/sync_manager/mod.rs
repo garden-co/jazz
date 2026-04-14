@@ -6,7 +6,7 @@ use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::RowVisibilityChange;
+use crate::row_histories::{BatchId, RowVisibilityChange};
 use crate::storage::Storage;
 
 // Module declarations
@@ -217,6 +217,94 @@ impl SyncManager {
     /// Return the strongest durability tier this node can attest to locally.
     pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
         self.my_tiers.iter().copied().max()
+    }
+
+    /// Approximate heap-backed memory owned by sync state, grouped for benches.
+    ///
+    /// Returns `(catalogue, connections, subscriptions, queues, total)`.
+    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
+        let mut catalogue = 0usize;
+        for (object_id, entry) in &self.catalogue_entries {
+            catalogue += std::mem::size_of_val(object_id);
+            catalogue += std::mem::size_of_val(entry);
+            catalogue += 48;
+        }
+
+        let mut connections = 0usize;
+        for (server_id, state) in &self.servers {
+            connections += std::mem::size_of_val(server_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        for (client_id, state) in &self.clients {
+            connections += std::mem::size_of_val(client_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            if let Some(session) = &state.session {
+                connections += session.user_id.len();
+            }
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        connections += self.my_tiers.len() * std::mem::size_of::<DurabilityTier>();
+
+        let mut subscriptions = 0usize;
+        for state in self.clients.values() {
+            for (query_id, scope) in &state.queries {
+                subscriptions += std::mem::size_of_val(query_id);
+                subscriptions += std::mem::size_of_val(scope);
+                subscriptions += scope.scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+                if let Some(session) = &scope.session {
+                    subscriptions += session.user_id.len();
+                }
+                subscriptions += 48;
+            }
+        }
+        for (row_batch_key, clients) in &self.row_batch_interest {
+            subscriptions += std::mem::size_of_val(row_batch_key);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (query_id, clients) in &self.query_origin {
+            subscriptions += std::mem::size_of_val(query_id);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (key, scope) in &self.remote_query_scopes {
+            subscriptions += std::mem::size_of_val(key);
+            subscriptions += scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+            subscriptions += 48;
+        }
+
+        let queues = self.inbox.len() * std::mem::size_of::<InboxEntry>()
+            + self.outbox.len() * std::mem::size_of::<OutboxEntry>()
+            + self.pending_permission_checks.len() * std::mem::size_of::<PendingPermissionCheck>()
+            + self.pending_query_subscriptions.len()
+                * std::mem::size_of::<PendingQuerySubscription>()
+            + self.pending_query_unsubscriptions.len()
+                * std::mem::size_of::<PendingQueryUnsubscription>()
+            + self.pending_row_visibility_changes.len()
+                * std::mem::size_of::<RowVisibilityChange>()
+            + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
+            + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
+            + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
+            + self.received_row_batch_acks.len()
+                * std::mem::size_of::<(RowBatchKey, DurabilityTier)>();
+
+        let total = catalogue + connections + subscriptions + queues;
+        (catalogue, connections, subscriptions, queues, total)
     }
 
     // ========================================================================

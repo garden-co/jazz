@@ -305,12 +305,12 @@ async fn named_object_trace() {
     insta::assert_snapshot!(tracer.trace_normalized(), @"
     # => sent, -> received
     alice    -> server    QueryUnsubscription  query:0
-    alice    => server    RowBatchCreated      created row:my-todo branch:main version:C1
-    alice    -> server    RowBatchCreated      created row:my-todo branch:main version:C1
-    server   => alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
-    server   -> alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
-    server   => alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
-    server   -> alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
+    alice    => server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

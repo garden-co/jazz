@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for a row batch member in the history DAG.
+/// Fixed-width 32-byte digest used for row and batch freshness checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
 
