@@ -89,7 +89,7 @@ pub struct AuthHandshake {
     pub catalogue_state_hash: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectedResponse {
     pub connection_id: String,
     pub client_id: String,
@@ -162,6 +162,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
 
 /// Encode a payload as a 4-byte big-endian length-prefixed frame.
 pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
+    debug_assert!(payload.len() <= u32::MAX as usize, "frame payload exceeds u32 limit");
     let mut out = Vec::with_capacity(4 + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     out.extend_from_slice(payload);
@@ -176,18 +177,24 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     Some(&data[4..4 + len])
 }
 
+#[cfg(feature = "runtime-tokio")]
 enum ConnectedExit { HandleDropped, NetworkError }
 
 #[cfg(feature = "runtime-tokio")]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
     /// Returns only when the `TransportHandle` is dropped.
+    ///
+    /// Note: termination during connect/handshake/backoff requires the caller to abort the
+    /// spawned task; `HandleDropped` is only detected inside `run_connected`.
     pub async fn run(mut self) {
         loop {
             match W::connect(&self.url).await {
                 Ok(mut ws) => {
                     match self.perform_auth_handshake(&mut ws).await {
                         Ok(resp) => {
+                            // TODO(later tasks): resp.connection_id is currently dropped; wire it
+                            // through once the protocol layer consumes it.
                             self.ever_connected.store(true, std::sync::atomic::Ordering::Release);
                             let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
                                 catalogue_state_hash: resp.catalogue_state_hash,
@@ -262,6 +269,9 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                                 crate::transport_protocol::ServerEvent::Connected { .. } => {
                                     tracing::warn!("unexpected Connected frame mid-stream; ignoring");
                                 }
+                                crate::transport_protocol::ServerEvent::Error { message, code } => {
+                                    tracing::warn!(message, ?code, "server reported error");
+                                }
                                 other => {
                                     tracing::debug!(variant = other.variant_name(), "received non-sync ServerEvent; skipping");
                                 }
@@ -275,15 +285,33 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     }
 }
 
+#[cfg(feature = "runtime-tokio")]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::VecDeque;
 
-    struct MockStream { sent: Vec<Vec<u8>>, inbound: std::collections::VecDeque<Vec<u8>> }
+    struct MockStream {
+        sent: Vec<Vec<u8>>,
+        inbound: VecDeque<Vec<u8>>,
+    }
     impl StreamAdapter for MockStream {
         type Error = &'static str;
         async fn connect(_url: &str) -> Result<Self, Self::Error> {
-            Ok(MockStream { sent: vec![], inbound: Default::default() })
+            // Pre-load a valid ConnectedResponse frame so the handshake succeeds.
+            let resp = ConnectedResponse {
+                connection_id: "conn-1".into(),
+                client_id: "client-1".into(),
+                next_sync_seq: Some(0),
+                catalogue_state_hash: None,
+            };
+            let payload = serde_json::to_vec(&resp).unwrap();
+            let frame = frame_encode(&payload);
+            let mut inbound = VecDeque::new();
+            inbound.push_back(frame);
+            Ok(MockStream { sent: Vec::new(), inbound })
         }
         async fn send(&mut self, data: &[u8]) -> Result<(), Self::Error> {
             self.sent.push(data.to_vec()); Ok(())
@@ -295,14 +323,14 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct CountingTick(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    struct CountingTick(Arc<AtomicUsize>);
     impl TickNotifier for CountingTick {
-        fn notify(&self) { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+        fn notify(&self) { self.0.fetch_add(1, Ordering::SeqCst); }
     }
 
     #[tokio::test]
     async fn handshake_marks_ever_connected_and_notifies_tick() {
-        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::new(AtomicUsize::new(0));
         let tick = CountingTick(counter.clone());
         let (handle, manager) = create::<MockStream, CountingTick>(
             "mock://".to_string(),
@@ -310,7 +338,13 @@ mod tests {
             tick,
         );
         let task = tokio::spawn(manager.run());
+
+        // Give the manager time to run the handshake.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(handle.has_ever_connected(), "handshake should have set ever_connected");
+        assert!(counter.load(Ordering::SeqCst) >= 1, "tick should have been notified");
+
         drop(handle);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
     }
