@@ -1,0 +1,39 @@
+{
+  "name": "create-jazz",
+  "version": "0.0.1",
+  "description": "Scaffold a new Jazz app from a starter template.",
+  "bin": {
+    "create-jazz": "bin/create-jazz.js"
+  },
+  "files": [
+    "bin/**",
+    "dist/**",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --out-dir dist",
+    "prepublishOnly": "pnpm build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.10.0",
+    "picocolors": "^1.1.1",
+    "tiged": "^2.12.7",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
