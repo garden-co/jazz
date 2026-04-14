@@ -1424,6 +1424,7 @@ impl DevServer {
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
+            ..Default::default()
         };
 
         let in_memory = opts.in_memory.unwrap_or(false);
