@@ -618,19 +618,13 @@ describe("forRequest concurrent session isolation", () => {
    *   aliceDb2: all() ──► [alice-todo]  (bob's row invisible)
    */
   it("two concurrent forRequest sessions for the same user both see only that user's rows", async () => {
-    const {
-      context,
-      alice,
-      bob,
-      aliceDb: aliceDb1,
-      bobDb,
-      scopeTag,
-    } = await createConcurrentTestEnv();
+    const { context, alice, bob, bobDb, scopeTag } = await createConcurrentTestEnv();
 
-    // Second Db handle for alice — same identity, independent forRequest call.
-    const aliceDb2 = await context.forRequest({
-      headers: { authorization: `Bearer ${alice.token}` },
-    });
+    // Two Db handles opened with the same token — same identity, two independent sessions.
+    const [aliceDb1, aliceDb2] = await Promise.all([
+      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+    ]);
 
     await aliceDb1.insertDurable(
       todoApp.todos,
