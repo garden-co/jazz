@@ -3,8 +3,11 @@
 import Foundation
 import PackageDescription
 
+let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let xcframeworkPath = "artifacts/JazzSwiftFFI.xcframework"
-let hasXCFramework = FileManager.default.fileExists(atPath: xcframeworkPath)
+let hasXCFramework = FileManager.default.fileExists(
+    atPath: packageDirectory + "/artifacts/JazzSwiftFFI.xcframework"
+)
 
 var targets: [Target] = []
 
@@ -24,7 +27,7 @@ targets.append(
             ? [
                 .target(
                     name: "jazz_swiftFFI",
-                    condition: .when(platforms: [.iOS])
+                    condition: .when(platforms: [.iOS, .macOS])
                 ),
             ]
             : []

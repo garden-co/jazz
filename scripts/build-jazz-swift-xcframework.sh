@@ -5,8 +5,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 headers_dir="${JAZZ_SWIFT_GENERATED_DIR:-$repo_root/crates/jazz-swift/generated}"
 ios_root="${JAZZ_SWIFT_IOS_ARTIFACTS_DIR:-$repo_root/crates/jazz-swift/artifacts/ios}"
+host_root="${JAZZ_SWIFT_HOST_ARTIFACTS_DIR:-$repo_root/crates/jazz-swift/artifacts/macos}"
 output_path="${JAZZ_SWIFT_XCFRAMEWORK_PATH:-$repo_root/crates/jazz-swift/artifacts/JazzSwiftFFI.xcframework}"
-targets=(${JAZZ_SWIFT_IOS_TARGETS:-aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios})
+targets=(${JAZZ_SWIFT_IOS_TARGETS:-aarch64-apple-ios aarch64-apple-ios-sim})
 
 if ! command -v xcodebuild >/dev/null 2>&1; then
   echo "xcodebuild is required to assemble the JazzSwift xcframework." >&2
@@ -21,7 +22,17 @@ fi
 
 rm -rf "$output_path"
 
+staged_headers_dir="$(mktemp -d)"
+trap 'rm -rf "$staged_headers_dir"' EXIT
+cp "$headers_dir/jazz_swiftFFI.h" "$staged_headers_dir/"
+cp "$headers_dir/jazz_swiftFFI.modulemap" "$staged_headers_dir/module.modulemap"
+
 create_cmd=(xcodebuild -create-xcframework)
+host_library_path="$host_root/libjazz_swift.a"
+if [[ -f "$host_library_path" ]]; then
+  create_cmd+=(-library "$host_library_path" -headers "$staged_headers_dir")
+fi
+
 for target in "${targets[@]}"; do
   library_path="$ios_root/$target/libjazz_swift.a"
   if [[ ! -f "$library_path" ]]; then
@@ -30,7 +41,7 @@ for target in "${targets[@]}"; do
     exit 1
   fi
 
-  create_cmd+=(-library "$library_path" -headers "$headers_dir")
+  create_cmd+=(-library "$library_path" -headers "$staged_headers_dir")
 done
 
 create_cmd+=(-output "$output_path")
