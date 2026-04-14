@@ -175,3 +175,77 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     });
   });
 });
+
+describe("BrowserPasskeyBackup.restore — not-supported", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws not-supported when navigator.credentials is absent", async () => {
+    vi.stubGlobal("navigator", {});
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "not-supported" });
+  });
+});
+
+describe("BrowserPasskeyBackup.restore — get-failed", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws get-failed with cause when credentials.get rejects", async () => {
+    const underlying = new Error("User cancelled");
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockRejectedValue(underlying) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({
+      code: "get-failed",
+      cause: underlying,
+    });
+  });
+});
+
+describe("BrowserPasskeyBackup.restore — no-credential", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws no-credential when credentials.get returns null", async () => {
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(null) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "no-credential" });
+  });
+});
+
+describe("BrowserPasskeyBackup.restore — invalid-credential", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws invalid-credential when userHandle is null", async () => {
+    const mockCredential = {
+      type: "public-key",
+      response: { userHandle: null },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "invalid-credential" });
+  });
+
+  it("throws invalid-credential when userHandle is not 32 bytes", async () => {
+    const mockCredential = {
+      type: "public-key",
+      response: { userHandle: new Uint8Array(16).buffer },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "invalid-credential" });
+  });
+});

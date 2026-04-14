@@ -108,6 +108,39 @@ export class BrowserPasskeyBackup {
   }
 
   async restore(): Promise<string> {
-    throw new Error("not implemented yet");
+    if (!globalThis.navigator?.credentials) {
+      throw new PasskeyBackupError("not-supported");
+    }
+
+    const challenge = new Uint8Array(16);
+    crypto.getRandomValues(challenge);
+
+    let credential: Credential | null;
+    try {
+      credential = await navigator.credentials.get({
+        publicKey: {
+          challenge,
+          rpId: this.rpId,
+          userVerification: "preferred",
+        },
+        mediation: "required" as CredentialMediationRequirement,
+      });
+    } catch (err) {
+      throw new PasskeyBackupError("get-failed", err);
+    }
+
+    if (credential === null) {
+      throw new PasskeyBackupError("no-credential");
+    }
+
+    const assertionResponse = (credential as PublicKeyCredential)
+      .response as AuthenticatorAssertionResponse;
+    const { userHandle } = assertionResponse;
+
+    if (userHandle === null || userHandle.byteLength !== 32) {
+      throw new PasskeyBackupError("invalid-credential");
+    }
+
+    return bytesToBase64url(new Uint8Array(userHandle));
   }
 }
