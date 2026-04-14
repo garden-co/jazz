@@ -304,9 +304,7 @@ describe("JazzRnRuntimeAdapter", () => {
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    expect(() =>
-      adapter.update("row-1", { done: { type: "Boolean", value: true } }),
-    ).not.toThrow();
+    expect(() => adapter.update("row-1", { done: { type: "Boolean", value: true } })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
   });
 

@@ -59,7 +59,11 @@ export interface Runtime {
     tier: string,
   ): Promise<Row>;
   update(object_id: string, values: FFIRecord): void;
-  updateWithSession?(object_id: string, values: FFIRecord, write_context_json?: string | null): void;
+  updateWithSession?(
+    object_id: string,
+    values: FFIRecord,
+    write_context_json?: string | null,
+  ): void;
   updateDurable(object_id: string, values: FFIRecord, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
