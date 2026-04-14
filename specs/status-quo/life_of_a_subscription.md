@@ -108,7 +108,7 @@ db.subscribeAll(...)
   -> main runtime registers subscription
   -> worker/runtime sync path receives forwarded query state
   -> worker settles current answer from OPFS + upstream state
-  -> worker sends row batch members + QuerySettled
+  -> worker sends row batch entries + QuerySettled
   -> main runtime updates its local graph
   -> callback receives first snapshot
 ```

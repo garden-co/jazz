@@ -33,7 +33,7 @@ The stream uses length-prefixed binary frames containing JSON payloads. That kee
 
 The transport does not invent a second data model. It carries the same sync payloads the runtime already understands:
 
-- row batch members
+- row batch entries
 - row state changes
 - catalogue entries
 - query subscriptions and unsubscriptions

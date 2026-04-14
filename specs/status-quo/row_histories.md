@@ -4,7 +4,7 @@ This is the simplest way to think about Jazz today:
 
 - every application table is still a table
 - every logical row has a stable row id
-- edits create row batch members
+- edits create row batch entries
 - current reads come from a compact visible entry
 - history stays around so sync, reconnect, and replay can speak in row-batch terms
 
@@ -13,7 +13,7 @@ If you are new to the internals, it helps to picture one user table as two engin
 ```text
 todos
   visible: (branch, row_id) -> current visible winner
-  history: (row_id, batch_id) -> every stored row batch member
+  history: (row_id, batch_id) -> every stored row batch entry
 ```
 
 The visible region is the hot path for ordinary queries. The history region is the source of truth for replay, ancestry, and tier-aware fallbacks.
@@ -24,7 +24,7 @@ The visible region is the hot path for ordinary queries. The history region is t
 
 The logical row is the stable identity your application thinks of as "the todo". It is identified by a row id and mapped back to its table through storage.
 
-### 2. Stored row batch member
+### 2. Stored row batch entry
 
 A `StoredRowBatch` is one concrete stored entry for that logical row. It carries:
 
@@ -38,7 +38,7 @@ A `StoredRowBatch` is one concrete stored entry for that logical row. It carries
 - engine/user metadata
 - the application row values
 
-Physically, a stored row batch member is one flat `row_format` record:
+Physically, a stored row batch entry is one flat `row_format` record:
 
 - reserved `_jazz_*` columns first
 - user columns after that
@@ -105,7 +105,7 @@ This is why the current engine feels table-first even though it retains full row
 
 ## Deletion Semantics
 
-Deletes are row batch members too.
+Deletes are row batch entries too.
 
 - a delete creates a version marked deleted
 - the visible entry may disappear from current live scans, or resolve as deleted when explicitly requested

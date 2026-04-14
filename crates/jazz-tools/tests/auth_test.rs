@@ -12,12 +12,11 @@ mod test_server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use jazz_tools::commit::CommitId;
 use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::metadata::RowProvenance;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch};
 use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
@@ -100,10 +99,10 @@ fn encode_session(session: &Session) -> String {
 /// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
     let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         ObjectId::from_uuid(uuid::Uuid::parse_str(object_id_text).expect("parse test object id")),
         "main",
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         b"alice".to_vec(),
         RowProvenance::for_insert(object_id_text.to_string(), 1_000),
         Default::default(),

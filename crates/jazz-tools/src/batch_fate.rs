@@ -1,4 +1,4 @@
-use crate::commit::CommitId;
+use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +122,7 @@ pub struct LocalBatchRecord {
 pub struct SealedBatchSubmission {
     pub batch_id: BatchId,
     pub target_branch_name: BranchName,
-    pub batch_digest: CommitId,
+    pub batch_digest: Digest32,
     pub members: Vec<SealedBatchMember>,
     pub captured_frontier: Vec<CapturedFrontierMember>,
 }
@@ -131,7 +131,7 @@ pub struct SealedBatchSubmission {
 pub struct SealedBatchMember {
     pub object_id: ObjectId,
     pub branch_name: BranchName,
-    pub row_digest: CommitId,
+    pub row_digest: Digest32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,7 +330,7 @@ impl LocalBatchRecord {
 }
 
 impl SealedBatchSubmission {
-    pub fn compute_batch_digest(members: &[SealedBatchMember]) -> CommitId {
+    pub fn compute_batch_digest(members: &[SealedBatchMember]) -> Digest32 {
         let mut hasher = Hasher::new();
         hasher.update(b"sealed-batch-manifest-v1");
         hasher.update(&(members.len() as u64).to_le_bytes());
@@ -340,7 +340,7 @@ impl SealedBatchSubmission {
             hasher.update(member.branch_name.as_str().as_bytes());
             hasher.update(&member.row_digest.0);
         }
-        CommitId(*hasher.finalize().as_bytes())
+        Digest32(*hasher.finalize().as_bytes())
     }
 
     pub fn new(
@@ -444,7 +444,7 @@ impl SealedBatchSubmission {
             other => return Err(format!("expected target branch text, got {other:?}")),
         };
         let batch_digest = match batch_digest {
-            Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(|_| {
+            Value::Bytea(bytes) => Digest32(bytes.as_slice().try_into().map_err(|_| {
                 format!(
                     "expected sealed batch submission batch digest to be 32 bytes, got {}",
                     bytes.len()
@@ -484,7 +484,7 @@ impl SealedBatchSubmission {
                             }
                         };
                         let row_digest = match row_digest {
-                            Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(
+                            Value::Bytea(bytes) => Digest32(bytes.as_slice().try_into().map_err(
                                 |_| {
                                     format!(
                                         "expected sealed batch member row digest to be 32 bytes, got {}",
@@ -766,7 +766,7 @@ mod tests {
             vec![SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(42)),
                 branch_name: BranchName::new("dev-aaaaaaaaaaaa-main"),
-                row_digest: CommitId([4; 32]),
+                row_digest: Digest32([4; 32]),
             }],
             vec![CapturedFrontierMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(7)),
@@ -785,7 +785,7 @@ mod tests {
     fn sealed_batch_submission_storage_row_roundtrips() {
         let batch_id = BatchId::new();
         let object_id = ObjectId::new();
-        let row_digest = CommitId([7; 32]);
+        let row_digest = Digest32([7; 32]);
         let submission = SealedBatchSubmission::new(
             batch_id,
             BranchName::new("main"),
@@ -843,7 +843,7 @@ mod tests {
             vec![SealedBatchMember {
                 object_id,
                 branch_name: BranchName::new("main"),
-                row_digest: CommitId([1; 32]),
+                row_digest: Digest32([1; 32]),
             }],
             Vec::new(),
         );
@@ -853,7 +853,7 @@ mod tests {
             vec![SealedBatchMember {
                 object_id,
                 branch_name: BranchName::new("main"),
-                row_digest: CommitId([2; 32]),
+                row_digest: Digest32([2; 32]),
             }],
             Vec::new(),
         );

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
-use crate::commit::CommitId;
+use crate::digest::Digest32;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
@@ -60,16 +60,16 @@ impl FromStr for BatchId {
     }
 }
 
-impl From<BatchId> for CommitId {
+impl From<BatchId> for Digest32 {
     fn from(value: BatchId) -> Self {
         let mut bytes = [0u8; 32];
         bytes[..16].copy_from_slice(&value.0);
-        CommitId(bytes)
+        Digest32(bytes)
     }
 }
 
-impl From<CommitId> for BatchId {
-    fn from(value: CommitId) -> Self {
+impl From<Digest32> for BatchId {
+    fn from(value: Digest32) -> Self {
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&value.0[..16]);
         Self(bytes)
@@ -139,7 +139,7 @@ pub fn compute_row_digest(
     updated_at: u64,
     updated_by: &str,
     metadata: Option<&RowMetadata>,
-) -> CommitId {
+) -> Digest32 {
     let mut hasher = Hasher::new();
 
     hasher.update(b"row-batch-v1");
@@ -170,7 +170,7 @@ pub fn compute_row_digest(
         hasher.update(&[0u8]);
     }
 
-    CommitId(*hasher.finalize().as_bytes())
+    Digest32(*hasher.finalize().as_bytes())
 }
 
 fn metadata_entry_descriptor() -> &'static RowDescriptor {
@@ -926,7 +926,7 @@ impl StoredRowBatch {
         self.batch_id
     }
 
-    pub fn content_digest(&self) -> CommitId {
+    pub fn content_digest(&self) -> Digest32 {
         compute_row_digest(
             &self.branch,
             &self.parents,

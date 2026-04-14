@@ -6,9 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
-use jazz_tools::commit::CommitId;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch};
 use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{ObjectId, metadata::RowProvenance};
@@ -339,10 +338,10 @@ fn get_free_port() -> u16 {
 
 fn sync_body() -> SyncBatchRequest {
     let row_id = ObjectId::new();
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         row_id,
         "main",
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         b"alice".to_vec(),
         RowProvenance::for_insert(row_id.to_string(), 1_000),
         Default::default(),

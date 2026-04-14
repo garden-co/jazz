@@ -1741,7 +1741,7 @@ mod tests {
         let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
-            Vec::<crate::commit::CommitId>::new(),
+            Vec::<crate::row_histories::BatchId>::new(),
             b"alice".to_vec(),
             crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
             Default::default(),

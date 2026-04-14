@@ -1612,7 +1612,7 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
     assert_eq!(
         io.load_authoritative_batch_settlement(batch_id).unwrap(),
         None,
-        "authority should wait for the declared final row batch member, not just any row for that object"
+        "authority should wait for the declared final row batch entry, not just any row for that object"
     );
     assert_eq!(
         io.load_visible_region_row("users", "main", row_id).unwrap(),
@@ -1635,7 +1635,7 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
     let settlement = io
         .load_authoritative_batch_settlement(batch_id)
         .unwrap()
-        .expect("authority should settle once the declared final row batch member arrives");
+        .expect("authority should settle once the declared final row batch entry arrives");
     let BatchSettlement::AcceptedTransaction {
         visible_members, ..
     } = settlement
@@ -1654,7 +1654,7 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
     let visible = io
         .load_visible_region_row("users", "main", row_id)
         .unwrap()
-        .expect("declared final row batch member should become visible");
+        .expect("declared final row batch entry should become visible");
     assert_eq!(visible.batch_id(), batch_id);
 }
 
@@ -1881,7 +1881,7 @@ fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
         }],
         Vec::new(),
     );
-    submission.batch_digest = crate::commit::CommitId([255; 32]);
+    submission.batch_digest = crate::digest::Digest32([255; 32]);
 
     sm.process_from_client(&mut io, client_id, SyncPayload::SealBatch { submission });
 

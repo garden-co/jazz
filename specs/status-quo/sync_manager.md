@@ -16,7 +16,7 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row batch members and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch entries and catalogue updates so the server can build the same relational view and answer forwarded queries.
 
 ### Downward, toward clients
 
@@ -65,8 +65,8 @@ The sync payloads now speak in row-history and query terms:
 
 That payload set matches the table-first runtime model:
 
-- new row batch members travel as row batch members
-- initial query fill can explicitly ask for needed row batch members
+- new row batch entries travel as row batch entries
+- initial query fill can explicitly ask for needed row batch entries
 - row-state and durability progression travel as row-state changes
 - schemas and lenses travel as catalogue entries
 
@@ -74,7 +74,7 @@ That payload set matches the table-first runtime model:
 
 ### Local write
 
-1. A runtime appends a new row batch member locally.
+1. A runtime appends a new row batch entry locally.
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
 4. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.

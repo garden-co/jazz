@@ -100,7 +100,7 @@ If a client updates a row that was originally stored on an older schema branch, 
 
 1. load the row through the current schema view
 2. apply the user's update in the current schema
-3. write a new row batch member on the current schema branch
+3. write a new row batch entry on the current schema branch
 
 The old stored row history remains intact. The new visible row is written as a fresh flat visible
 record on the current schema branch.

@@ -19,7 +19,7 @@ the runtime does four things:
 
 1. record that desired query subscription
 2. compile and settle the query using the client's schema/session context
-3. send the row batch members needed for the initial result
+3. send the row batch entries needed for the initial result
 4. keep the subscription live so later row changes can add, update, or remove rows
 
 That is the entire shape of query-scoped sync in Jazz.
@@ -71,7 +71,7 @@ In the browser stack, for example:
 main thread subscribes
   -> worker settles locally
   -> worker may also forward upstream
-  -> worker sends row batch members + QuerySettled(worker)
+  -> worker sends row batch entries + QuerySettled(worker)
   -> main thread publishes once requested tier is satisfied
 ```
 

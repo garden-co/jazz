@@ -4,7 +4,7 @@ The Query Manager is where Jazz turns raw tables into live relational reads.
 
 If the storage layer answers:
 
-> "What row batch members and visible entries exist?"
+> "What row batch entries and visible entries exist?"
 
 the Query Manager answers:
 
@@ -83,7 +83,7 @@ Both APIs use the same graph engine.
 
 ### Live subscription
 
-`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row batch members, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
+`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row batch entries, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
 
 This shared machinery is why one-shot reads and live reads stay behaviorally aligned.
 

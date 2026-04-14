@@ -387,10 +387,10 @@ pub struct QueryManager {
     /// These are retried when new schemas activate via try_activate_pending().
     pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
 
-    /// Latest locally-authored row batch member per row id.
+    /// Latest locally-authored row batch entry per row id.
     ///
     /// Used to let `local_updates = Immediate` queries fall back to the current
-    /// local row batch member when the requested remote durability tier has not been
+    /// local row batch entry when the requested remote durability tier has not been
     /// reached yet.
     pub(super) pending_local_row_batches: HashMap<ObjectId, RowBatchKey>,
 

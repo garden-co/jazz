@@ -1489,7 +1489,7 @@ impl SchemaManager {
     }
 
     /// Update a row using current-schema column names, performing copy-on-write
-    /// when the latest visible row batch member still lives on an older schema branch.
+    /// when the latest visible row batch entry still lives on an older schema branch.
     pub fn update_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1592,7 +1592,7 @@ impl SchemaManager {
     }
 
     /// Delete a row (soft delete), performing copy-on-write when the latest
-    /// visible row batch member still lives on an older schema branch.
+    /// visible row batch entry still lives on an older schema branch.
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,

@@ -97,7 +97,7 @@ pub enum QueryPropagation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
 
-/// Stable identity for one concrete row batch member.
+/// Stable identity for one concrete row batch entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RowBatchKey {
     pub row_id: ObjectId,
@@ -249,19 +249,19 @@ pub enum SyncPayload {
     /// Semantic update for one catalogue/system entry.
     CatalogueEntryUpdated { entry: CatalogueEntry },
 
-    /// Upstream replication of a newly created or newly learned row batch member.
+    /// Upstream replication of a newly created or newly learned row batch entry.
     RowBatchCreated {
         metadata: Option<RowMetadata>,
         row: StoredRowBatch,
     },
 
-    /// Downstream delivery of a row batch member that is needed for a subscriber's scope.
+    /// Downstream delivery of a row batch entry that is needed for a subscriber's scope.
     RowBatchNeeded {
         metadata: Option<RowMetadata>,
         row: StoredRowBatch,
     },
 
-    /// System-column update for a previously sent row batch member.
+    /// System-column update for a previously sent row batch entry.
     RowBatchStateChanged {
         row_id: ObjectId,
         branch_name: BranchName,

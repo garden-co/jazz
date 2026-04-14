@@ -353,7 +353,7 @@ impl SyncManager {
                 %object_id,
                 branch = row.branch.as_str(),
                 servers = server_ids.len(),
-                "forwarding row batch member to servers"
+                "forwarding row batch entry to servers"
             );
         }
 

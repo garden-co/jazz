@@ -9,7 +9,7 @@ use crate::batch_fate::{
     SealedBatchSubmission, VisibleBatchMember,
 };
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
+use crate::digest::Digest32;
 use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::ObjectId;
 use crate::query_manager::types::{
@@ -821,7 +821,7 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            row_digest: CommitId([9; 32]),
+            row_digest: Digest32([9; 32]),
         }],
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(93)),
@@ -938,17 +938,17 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
             SealedBatchMember {
                 object_id: alice,
                 branch_name: crate::object::BranchName::new("main"),
-                row_digest: CommitId([1; 32]),
+                row_digest: Digest32([1; 32]),
             },
             SealedBatchMember {
                 object_id: bob,
                 branch_name: crate::object::BranchName::new("main"),
-                row_digest: CommitId([2; 32]),
+                row_digest: Digest32([2; 32]),
             },
             SealedBatchMember {
                 object_id: alice,
                 branch_name: crate::object::BranchName::new("main"),
-                row_digest: CommitId([1; 32]),
+                row_digest: Digest32([1; 32]),
             },
         ],
         vec![CapturedFrontierMember {
@@ -969,12 +969,12 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
                 SealedBatchMember {
                     object_id: alice,
                     branch_name: crate::object::BranchName::new("main"),
-                    row_digest: CommitId([1; 32]),
+                    row_digest: Digest32([1; 32]),
                 },
                 SealedBatchMember {
                     object_id: bob,
                     branch_name: crate::object::BranchName::new("main"),
-                    row_digest: CommitId([2; 32]),
+                    row_digest: Digest32([2; 32]),
                 },
             ],
             vec![CapturedFrontierMember {
@@ -1008,7 +1008,7 @@ pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> 
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
             branch_name: crate::object::BranchName::new("main"),
-            row_digest: CommitId([4; 32]),
+            row_digest: Digest32([4; 32]),
         }],
         Vec::new(),
     );
@@ -1131,7 +1131,7 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            row_digest: CommitId([11; 32]),
+            row_digest: Digest32([11; 32]),
         }],
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(113)),
@@ -1211,12 +1211,12 @@ pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentSt
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(501)),
                 branch_name: crate::object::BranchName::new("main"),
-                row_digest: CommitId([5; 32]),
+                row_digest: Digest32([5; 32]),
             },
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(502)),
                 branch_name: crate::object::BranchName::new("main"),
-                row_digest: CommitId([6; 32]),
+                row_digest: Digest32([6; 32]),
             },
         ],
         vec![CapturedFrontierMember {
