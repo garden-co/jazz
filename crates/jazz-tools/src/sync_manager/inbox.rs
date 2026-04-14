@@ -268,76 +268,172 @@ impl SyncManager {
         settlement: &BatchSettlement,
         batch_rows: &[(String, StoredRowVersion)],
     ) {
-        let (state, confirmed_tier, relay_to_servers) = match settlement {
-            BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => (
-                Some(RowState::VisibleTransactional),
-                Some(*confirmed_tier),
-                true,
-            ),
-            BatchSettlement::Rejected { .. } => (Some(RowState::Rejected), None, false),
-            BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => {
-                return;
-            }
-        };
-
         let server_ids: Vec<_> = self.servers.keys().copied().collect();
-        for (_, row) in batch_rows {
-            let row_id = row.row_id;
-            let branch_name = BranchName::new(&row.branch);
-            let version_id = row.version_id();
+        match settlement {
+            BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
+                for (table, row) in batch_rows {
+                    let row_id = row.row_id;
+                    let branch_name = BranchName::new(&row.branch);
+                    let staged_version_id = row.version_id();
 
-            let visibility_change = patch_row_version_state(
-                storage,
-                row_id,
-                &branch_name,
-                version_id,
-                state,
-                confirmed_tier,
-            )
-            .ok()
-            .flatten();
-
-            if let Some(client_id) = origin_client_id {
-                self.outbox.push(OutboxEntry {
-                    destination: Destination::Client(client_id),
-                    payload: SyncPayload::RowVersionStateChanged {
+                    let _ = patch_row_version_state(
+                        storage,
                         row_id,
-                        branch_name,
-                        version_id,
-                        state,
-                        confirmed_tier,
-                    },
-                });
-            }
+                        &branch_name,
+                        staged_version_id,
+                        Some(RowState::Superseded),
+                        None,
+                    );
 
-            if relay_to_servers {
+                    if let Some(client_id) = origin_client_id {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::RowVersionStateChanged {
+                                row_id,
+                                branch_name,
+                                version_id: staged_version_id,
+                                state: Some(RowState::Superseded),
+                                confirmed_tier: None,
+                            },
+                        });
+                    }
+
+                    for server_id in &server_ids {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Server(*server_id),
+                            payload: SyncPayload::RowVersionStateChanged {
+                                row_id,
+                                branch_name,
+                                version_id: staged_version_id,
+                                state: Some(RowState::Superseded),
+                                confirmed_tier: None,
+                            },
+                        });
+                    }
+
+                    let accepted_row = row.accepted_transaction_output(*confirmed_tier);
+                    let accepted_version_id = accepted_row.version_id();
+                    let existed = storage
+                        .load_history_row_version(
+                            table,
+                            branch_name.as_str(),
+                            row_id,
+                            accepted_version_id,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    let applied =
+                        apply_row_version(storage, row_id, &branch_name, accepted_row.clone(), &[])
+                            .ok();
+
+                    let metadata = storage
+                        .load_row_locator(row_id)
+                        .ok()
+                        .flatten()
+                        .map(|locator| metadata_from_row_locator(&locator));
+
+                    if !existed {
+                        if let (Some(client_id), Some(metadata)) =
+                            (origin_client_id, metadata.clone())
+                        {
+                            self.queue_row_to_client_unscoped(
+                                client_id,
+                                row_id,
+                                metadata,
+                                accepted_row.clone(),
+                                false,
+                            );
+                        }
+                        if let Some(metadata) = metadata {
+                            self.forward_row_version_to_servers(
+                                row_id,
+                                metadata,
+                                accepted_row.clone(),
+                            );
+                        }
+                    }
+
+                    if let Some(applied) = applied
+                        && let Some(update) = applied.visibility_change
+                    {
+                        self.pending_row_visibility_changes.push(update);
+                        if let Some(client_id) = origin_client_id {
+                            self.forward_update_to_clients_except_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                                client_id,
+                            );
+                        } else {
+                            self.forward_update_to_clients_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                            );
+                        }
+                    }
+                }
+
                 for server_id in &server_ids {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Server(*server_id),
-                        payload: SyncPayload::RowVersionStateChanged {
-                            row_id,
-                            branch_name,
-                            version_id,
-                            state,
-                            confirmed_tier,
+                        payload: SyncPayload::BatchSettlement {
+                            settlement: settlement.clone(),
                         },
                     });
                 }
             }
+            BatchSettlement::Rejected { .. } => {
+                for (_, row) in batch_rows {
+                    let row_id = row.row_id;
+                    let branch_name = BranchName::new(&row.branch);
+                    let version_id = row.version_id();
 
-            if let Some(update) = visibility_change {
-                self.pending_row_visibility_changes.push(update);
-                if let Some(client_id) = origin_client_id {
-                    self.forward_update_to_clients_except_with_storage(
+                    let visibility_change = patch_row_version_state(
                         storage,
                         row_id,
-                        branch_name,
-                        client_id,
-                    );
-                } else {
-                    self.forward_update_to_clients_with_storage(storage, row_id, branch_name);
+                        &branch_name,
+                        version_id,
+                        Some(RowState::Rejected),
+                        None,
+                    )
+                    .ok()
+                    .flatten();
+
+                    if let Some(client_id) = origin_client_id {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::RowVersionStateChanged {
+                                row_id,
+                                branch_name,
+                                version_id,
+                                state: Some(RowState::Rejected),
+                                confirmed_tier: None,
+                            },
+                        });
+                    }
+
+                    if let Some(update) = visibility_change {
+                        self.pending_row_visibility_changes.push(update);
+                        if let Some(client_id) = origin_client_id {
+                            self.forward_update_to_clients_except_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                                client_id,
+                            );
+                        } else {
+                            self.forward_update_to_clients_with_storage(
+                                storage,
+                                row_id,
+                                branch_name,
+                            );
+                        }
+                    }
                 }
             }
+            BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => return,
         }
 
         if let Some(client_id) = origin_client_id {

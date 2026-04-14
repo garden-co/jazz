@@ -23,6 +23,13 @@ impl BatchId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
+
+    pub fn accepted_version_id(self) -> CommitId {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(b"txb1");
+        bytes[4..20].copy_from_slice(self.0.as_bytes());
+        CommitId(bytes)
+    }
 }
 
 impl Default for BatchId {
@@ -908,6 +915,15 @@ impl StoredRowVersion {
 
     pub fn version_id(&self) -> CommitId {
         self.version_id
+    }
+
+    pub fn accepted_transaction_output(&self, confirmed_tier: DurabilityTier) -> Self {
+        let mut row = self.clone();
+        row.parents = self.parents.clone();
+        row.version_id = self.batch_id.accepted_version_id();
+        row.state = RowState::VisibleTransactional;
+        row.confirmed_tier = Some(confirmed_tier);
+        row
     }
 
     pub fn is_soft_deleted(&self) -> bool {

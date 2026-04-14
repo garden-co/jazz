@@ -2916,19 +2916,24 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
             .scan_history_row_versions("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
-    s.a.seal_batch(history_rows[0].batch_id).unwrap();
+    let batch_id = history_rows[0].batch_id;
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     let history_rows =
         s.b.storage()
             .scan_history_row_versions("users", row_id)
             .unwrap();
-    assert_eq!(history_rows.len(), 1);
-    assert_eq!(
-        history_rows[0].state,
-        crate::row_histories::RowState::VisibleTransactional
-    );
-    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(history_rows.len(), 2);
+    assert!(history_rows.iter().any(|row| {
+        row.state == crate::row_histories::RowState::Superseded
+            && row.confirmed_tier == Some(DurabilityTier::Worker)
+    }));
+    assert!(history_rows.iter().any(|row| {
+        row.state == crate::row_histories::RowState::VisibleTransactional
+            && row.confirmed_tier == Some(DurabilityTier::Worker)
+            && row.version_id() == batch_id.accepted_version_id()
+    }));
 
     let worker_row =
         s.b.storage()
@@ -2939,6 +2944,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
+    assert_eq!(worker_row.version_id(), batch_id.accepted_version_id());
 }
 
 #[test]
@@ -2968,7 +2974,8 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
             .scan_history_row_versions("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
-    s.a.seal_batch(history_rows[0].batch_id).unwrap();
+    let batch_id = history_rows[0].batch_id;
+    s.a.seal_batch(batch_id).unwrap();
 
     pump_a_to_b(&mut s);
 
@@ -2982,6 +2989,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(worker_row.version_id(), batch_id.accepted_version_id());
 
     assert_eq!(
         s.a.storage()
@@ -3003,6 +3011,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(client_row.version_id(), batch_id.accepted_version_id());
 }
 
 #[test]
@@ -3119,6 +3128,10 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
         })
         .max_by_key(|row| (row.updated_at, row.version_id()))
         .expect("transaction should keep one staged member for the row");
+    assert!(
+        latest_staged.parents.is_empty(),
+        "rewriting a row inserted earlier in the same batch should keep the insert's empty parent frontier"
+    );
     let values = decode_row(
         &test_schema()[&TableName::new("users")].columns,
         &latest_staged.data,
@@ -3142,6 +3155,13 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
             None,
         )
         .expect("seed visible todo");
+    let base_visible = core
+        .storage()
+        .scan_history_row_versions("todos", row_id)
+        .unwrap()
+        .into_iter()
+        .find(|row| matches!(row.state, crate::row_histories::RowState::VisibleDirect))
+        .expect("seeded todo should be visible before the transaction");
 
     let batch_id = BatchId::new();
     let write_context = WriteContext {
@@ -3169,6 +3189,16 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
         .storage()
         .scan_history_row_versions("todos", row_id)
         .unwrap();
+    let transactional_rows: Vec<_> = history_rows
+        .iter()
+        .filter(|row| row.batch_id == batch_id)
+        .collect();
+    assert_eq!(transactional_rows.len(), 2);
+    assert!(
+        transactional_rows
+            .iter()
+            .all(|row| { row.parents.as_slice() == [base_visible.version_id()] })
+    );
     let live_staged_rows: Vec<_> = history_rows
         .iter()
         .filter(|row| {
@@ -3180,6 +3210,10 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
         live_staged_rows.len(),
         1,
         "same-row transactional rewrites should keep one live staged member"
+    );
+    assert_eq!(
+        live_staged_rows[0].parents.as_slice(),
+        [base_visible.version_id()]
     );
     let values = decode_row(
         &defaulted_todos_schema()[&TableName::new("todos")].columns,
