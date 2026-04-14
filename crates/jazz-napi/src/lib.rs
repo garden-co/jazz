@@ -1175,7 +1175,31 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?
             .set_transport(handle);
-        tokio::spawn(manager.run());
+        // Spawn the TransportManager loop. If we're inside an active Tokio
+        // runtime (typical: Node.js with napi-rs bootstrapping one), use it.
+        // Otherwise (e.g. Next.js SSG build workers that load the addon
+        // without a runtime) fall back to a dedicated runtime on a background
+        // thread so `tokio::spawn` never panics.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(manager.run());
+            }
+            Err(_) => {
+                std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            eprintln!("jazz-napi: failed to build fallback tokio runtime: {e}");
+                            return;
+                        }
+                    };
+                    rt.block_on(manager.run());
+                });
+            }
+        }
         Ok(())
     }
 
