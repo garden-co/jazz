@@ -61,10 +61,7 @@ pub fn mint_local_first_token(
     audience: &str,
     ttl_seconds: u64,
 ) -> Result<String, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
+    let now = current_unix_timestamp_secs()?;
     mint_local_first_token_at(seed, audience, ttl_seconds, now)
 }
 
@@ -122,10 +119,11 @@ pub fn verify_local_first_identity_proof(
     token: &str,
     expected_audience: &str,
 ) -> Result<VerifiedLocalFirst, String> {
-    verify_local_first_identity_proof_with_max_ttl(
+    verify_local_first_identity_proof_with_max_ttl_at(
         token,
         expected_audience,
         DEFAULT_MAX_TTL_SECONDS,
+        current_unix_timestamp_secs()?,
     )
 }
 
@@ -133,6 +131,33 @@ pub fn verify_local_first_identity_proof_with_max_ttl(
     token: &str,
     expected_audience: &str,
     max_ttl_seconds: u64,
+) -> Result<VerifiedLocalFirst, String> {
+    verify_local_first_identity_proof_with_max_ttl_at(
+        token,
+        expected_audience,
+        max_ttl_seconds,
+        current_unix_timestamp_secs()?,
+    )
+}
+
+pub fn verify_local_first_identity_proof_at(
+    token: &str,
+    expected_audience: &str,
+    now_seconds: u64,
+) -> Result<VerifiedLocalFirst, String> {
+    verify_local_first_identity_proof_with_max_ttl_at(
+        token,
+        expected_audience,
+        DEFAULT_MAX_TTL_SECONDS,
+        now_seconds,
+    )
+}
+
+pub fn verify_local_first_identity_proof_with_max_ttl_at(
+    token: &str,
+    expected_audience: &str,
+    max_ttl_seconds: u64,
+    now_seconds: u64,
 ) -> Result<VerifiedLocalFirst, String> {
     // Normalize expected audience the same way as minting
     let normalized_expected = match Uuid::parse_str(expected_audience) {
@@ -223,10 +248,7 @@ pub fn verify_local_first_identity_proof_with_max_ttl(
     let iat = claims.iat.ok_or("missing iat")?;
     let exp = claims.exp.ok_or("missing exp")?;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
+    let now = now_seconds;
 
     // iat must not be in the future (allow 60s clock skew)
     if iat > now + 60 {
@@ -246,6 +268,13 @@ pub fn verify_local_first_identity_proof_with_max_ttl(
         user_id: derived_user_id.to_string(),
         public_key_bytes: pub_key_bytes,
     })
+}
+
+fn current_unix_timestamp_secs() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())
+        .map(|duration| duration.as_secs())
 }
 
 /// Derive a signing key from a 32-byte seed and a domain string.

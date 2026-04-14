@@ -38,3 +38,20 @@ export function JwtAuthApp() {
   );
 }
 // #endregion auth-jwt-react
+
+// #region auth-localfirst-react-backup
+export async function getRecoveryPhraseForBackup(): Promise<string | null> {
+  const secret = await BrowserAuthSecretStore.loadSecret();
+  if (!secret) return null;
+  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
+  return RecoveryPhrase.fromSecret(secret);
+}
+// #endregion auth-localfirst-react-backup
+
+// #region auth-localfirst-react-restore
+export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
+  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
+  const secret = RecoveryPhrase.toSecret(userInput);
+  await BrowserAuthSecretStore.saveSecret(secret);
+}
+// #endregion auth-localfirst-react-restore
