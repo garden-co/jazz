@@ -11,8 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { loadWasmModule } from "./runtime/client.js";
@@ -33,6 +32,8 @@ const bootstrapVerifierPath = fileURLToPath(
   new URL("../scripts/verify-packed-runtime-bootstrap.mjs", import.meta.url),
 );
 
+const packageRoot = dirname(fileURLToPath(import.meta.url));
+const tmpBase = join(packageRoot, ".test-tmp");
 const tempRoots: string[] = [];
 
 afterEach(async () => {
@@ -41,7 +42,8 @@ afterEach(async () => {
 });
 
 async function createWorkspace(): Promise<{ root: string; schemaDir: string }> {
-  const root = await mkdtemp(join(tmpdir(), "jazz-tools-cli-test-"));
+  await mkdir(tmpBase, { recursive: true });
+  const root = await mkdtemp(join(tmpBase, "jazz-tools-cli-test-"));
   tempRoots.push(root);
   const schemaDir = join(root, "schema");
   await mkdir(schemaDir, { recursive: true });

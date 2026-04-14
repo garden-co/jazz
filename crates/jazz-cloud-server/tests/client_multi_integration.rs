@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
+use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::object::BranchName;
 use jazz_tools::query_manager::types::{ComposedBranchName, SchemaHash};
 use jazz_tools::storage::{RocksDBStorage, Storage};
@@ -137,7 +138,7 @@ impl ServerProcess {
 
         let process = cmd.spawn().expect("spawn jazz-cloud-server");
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             client: Client::new(),
@@ -150,9 +151,12 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -302,25 +306,35 @@ async fn wait_for_todos_count(
 
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
+    let mut last_error: Option<String> = None;
 
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(rows)) = tokio::time::timeout(
+        match tokio::time::timeout(
             Duration::from_secs(8),
             client.query(query.clone(), durability_tier),
         )
         .await
         {
-            if rows.len() == expected_count {
-                return rows;
+            Ok(Ok(rows)) => {
+                if rows.len() == expected_count {
+                    return rows;
+                }
+                last = rows;
             }
-            last = rows;
+            Ok(Err(error)) => {
+                last_error = Some(error.to_string());
+            }
+            Err(_) => {
+                last_error = Some("query timed out".to_string());
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     panic!(
-        "timed out waiting for todos count {expected_count}, last_count={}",
-        last.len()
+        "timed out waiting for todos count {expected_count}, last_count={}, last_error={:?}",
+        last.len(),
+        last_error
     );
 }
 
@@ -378,23 +392,19 @@ async fn wait_for_todos_count_on_disk(
             let row_ids = storage.index_scan_all("todos", "_id", &branch);
             let mut materialized = 0usize;
             for row_id in row_ids {
-                let has_metadata = storage
-                    .load_object_metadata(row_id)
+                let has_locator = storage
+                    .load_row_locator(row_id)
                     .ok()
                     .flatten()
-                    .is_some();
-                let has_content = storage
-                    .load_branch(row_id, &branch_name)
-                    .ok()
-                    .flatten()
-                    .map(|loaded| {
-                        loaded
-                            .commits
-                            .iter()
-                            .any(|commit| !commit.content.is_empty())
-                    })
+                    .map(|locator| locator.table.as_str() == "todos")
                     .unwrap_or(false);
-                if has_metadata && has_content {
+                let has_content = storage
+                    .load_visible_region_row("todos", branch_name.as_str(), row_id)
+                    .ok()
+                    .flatten()
+                    .map(|row| !row.data.is_empty())
+                    .unwrap_or(false);
+                if has_locator && has_content {
                     materialized += 1;
                 }
             }
@@ -411,7 +421,7 @@ async fn wait_for_todos_count_on_disk(
     panic!("timed out waiting for on-disk todos count {expected_count}, last_count={last_count}");
 }
 
-async fn wait_for_catalogue_manifest_schema_count_on_disk(
+async fn wait_for_catalogue_schema_count_on_disk(
     app_id: AppId,
     data_root: &Path,
     expected_min_count: usize,
@@ -428,11 +438,19 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
         if db_path.exists()
             && let Ok(storage) = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
         {
-            let manifest = storage
-                .load_catalogue_manifest(app_id.as_object_id())
-                .ok()
-                .flatten();
-            last_count = manifest.map(|m| m.schema_seen.len()).unwrap_or(0);
+            last_count = storage
+                .scan_catalogue_entries()
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            entry.metadata.get(MetadataKey::AppId.as_str())
+                                == Some(&app_id.uuid().to_string())
+                                && entry.object_type() == Some(ObjectType::CatalogueSchema.as_str())
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
             let _ = storage.close();
             if last_count >= expected_min_count {
                 return;
@@ -550,13 +568,24 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
         .await
         .expect("client a create todo");
 
+    let seed_reader_dir = TempDir::new().expect("seed reader dir");
+    let seed_reader = JazzClient::connect(make_context(
+        app_id,
+        seed_server.base_url(),
+        seed_reader_dir.path().to_path_buf(),
+        make_jwt("sender-delay-seed-reader"),
+    ))
+    .await
+    .expect("connect seed reader");
+
     let _ = wait_for_todos_count(
-        &client_a,
+        &seed_reader,
         1,
         Duration::from_secs(20),
         Some(DurabilityTier::EdgeServer),
     )
     .await;
+    seed_reader.shutdown().await.expect("shutdown seed reader");
     client_a.shutdown().await.expect("shutdown client a");
     drop(seed_server);
 
@@ -709,13 +738,8 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
 
     let restart_port = server.port;
     drop(server);
-    wait_for_catalogue_manifest_schema_count_on_disk(
-        app_id,
-        server_data.path(),
-        1,
-        Duration::from_secs(20),
-    )
-    .await;
+    wait_for_catalogue_schema_count_on_disk(app_id, server_data.path(), 1, Duration::from_secs(20))
+        .await;
     let restarted = ServerProcess::start_with_options(
         server_data.path(),
         ServerProcessOptions {

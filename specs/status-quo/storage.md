@@ -1,124 +1,144 @@
 # Storage — Status Quo
 
-The Storage trait is the platform abstraction boundary. Everything above it — [Object Manager](object_manager.md), [Query Manager](query_manager.md), [Sync Manager](sync_manager.md) — is platform-agnostic Rust. Everything below it is platform-specific: file I/O on native, OPFS in the browser.
+Storage is the synchronous substrate underneath the Jazz runtime.
 
-The critical design choice is that Storage is **synchronous**. The query engine needs immediate answers — when a query asks "what rows match this filter?", the index lookup returns right now, not via a callback. This eliminates an entire class of complexity: no Loading states, no pending queues, no "data might not be ready yet" checks. The insight that made this possible is OPFS's `FileSystemSyncAccessHandle`, which provides synchronous file I/O in Dedicated Workers.
+Everything above it assumes reads and writes happen immediately:
 
-## Storage Trait
+- queries settle synchronously
+- local mutations update subscriptions in the same call stack
+- sync replay can apply row versions without waiting for an async database callback
 
-Synchronous, single-threaded interface (no Send + Sync bounds). All methods return results immediately — no Loading states, no async gaps.
+That is why the `Storage` trait is synchronous even in the browser. The browser gets there by putting durable storage in a dedicated worker, where OPFS exposes synchronous file access.
 
-Operations:
+## What Storage Owns
 
-- **Objects**: `create_object()`, `load_object_metadata()`, `load_branch()`, `append_commit()`, `delete_commit()`, `set_branch_tails()`
-- **Indices**: `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`
-- **Lifecycle**: `flush()`, `flush_wal()`, `close()`
+The current storage layer is responsible for five kinds of data:
 
-`close()` is a trait-level hook with default no-op. Persistent backends override it to release resources
-(for example, file locks), while in-memory backends keep the default no-op behavior.
+### 1. Raw tables
 
-> `crates/groove/src/storage/mod.rs:67-195` (trait definition)
+Application tables are stored as raw keyed tables. This is the lowest-level "table first" surface: storage knows how to put, get, delete, and scan raw rows by table name and encoded key.
 
-## Implementations
+### 2. Indices
+
+Queries are index-first, so storage also owns index persistence:
+
+- point lookups
+- range scans
+- full scans by prefix/order
+- insert/remove maintenance
+
+### 3. Row locators and metadata
+
+The engine keeps a row locator that maps a logical row id back to its owning table. That lets query and sync code start from a row id and still find the correct raw table without a separate object catalog.
+
+Storage also owns small engine metadata rows used for runtime bookkeeping.
+
+### 4. Row histories and visible entries
+
+For user data, storage persists both:
+
+- the append-friendly history region for row versions
+- the compact visible region for current reads
+
+Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` columns plus the
+table's user columns. Storage exposes them through dedicated helpers such as history scans,
+visible-row loads, and row-state patch operations.
+
+### 5. Catalogue entries
+
+Schemas and lenses live in a separate `catalogue` table. They do not reuse the user-row history path, but they do reuse the same underlying storage and row encoding machinery.
+
+## The Current Table-First Layout
+
+At a high level, the durable model looks like this:
+
+```text
+raw user tables
+  -> application rows and index keys
+
+row-history regions
+  -> flat history rows keyed by (row_id, version_id)
+  -> flat visible rows keyed by (branch, row_id)
+
+system tables
+  -> __metadata
+  -> __row_locator
+  -> catalogue
+```
+
+That is the core architectural shift to keep in mind while reading the rest of the runtime docs: the engine is organized around raw tables and engine-managed row metadata, not around a second abstraction layer that later gets reinterpreted as rows.
+
+## Shared Row Encoding
+
+Storage does not invent its own payload format. It relies on `row_format` for:
+
+- encoding application rows
+- encoding flat history and visible rows
+- reprojection into column subsets
+- deterministic decoding for engine-managed rows
+- validating values against column descriptors
+
+This shared binary format is what lets user rows, visible rows, history rows, and catalogue rows
+all move through the system without every layer inventing a different shape.
+
+## Durable Backends
 
 ### MemoryStorage
 
-HashMap-backed, used for tests and the browser main thread (acts as cache of worker state).
+Used heavily in tests and for ephemeral runtimes. It gives the full storage surface without on-disk persistence.
 
-> `crates/groove/src/storage/mod.rs:200+`
+### OpfsBTreeStorage
 
-### FjallStorage (native)
+Used by browser workers. It stores durable state in OPFS through `opfs-btree`, which gives Jazz synchronous storage inside a dedicated worker.
 
-Native server/CLI/client processes use Fjall for durable local storage.
+This is why the browser runtime is split in two:
 
-> `crates/groove/src/storage/fjall.rs`
+- main thread: in-memory runtime for UI-facing work
+- worker: persistent runtime that owns OPFS and upstream sync
 
-### OpfsBTreeStorage (browser worker)
+### SqliteStorage
 
-Browser workers use `opfs-btree` with `FileSystemSyncAccessHandle` for synchronous OPFS durability.
+Used by the native bindings that want a simple embedded durable store, including the current NAPI and React Native runtimes.
 
-This replaced the earlier browser persistence path that depended on WAL + snapshot behavior in worker contexts. The current browser durability path is `OpfsBTreeStorage` only.
+### RocksDBStorage
 
-The key insight is using composite keys so that B-tree range scans naturally give us index lookups:
+Used by the cloud/server side where high write volume and durable restart behavior matter most.
 
-```
-idx:{table}:{column}:{branch}:{encoded_value}:{row_id}
-```
+## Browser Topology
 
-A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`.
+```text
+Main thread runtime
+  -> MemoryStorage
+  -> immediate UI-facing queries and callbacks
+  -> forwards durable sync traffic to worker
 
-`opfs-btree` persistence is checkpoint-based with double superblock slots (A/B). Each checkpoint writes dirty data pages, flushes, then swaps the active superblock generation. On reopen, the highest valid generation wins, so torn/corrupt latest-slot writes recover to the previous valid checkpoint.
-
-> `crates/groove/src/storage/opfs_btree.rs`
-> `crates/opfs-btree/` (underlying synchronous OPFS B-tree crate)
-> `crates/opfs-btree/src/db.rs` (checkpoint + superblock slot swap)
-> `crates/opfs-btree/src/superblock.rs` (superblock codec + validation)
-
-## Benchmark Artifacts
-
-Storage performance tracking currently lives with the storage crates:
-
-- `crates/opfs-btree/BENCHMARK_OVERVIEW.md` consolidates current OPFS/native benchmark baselines and engine comparisons.
-- `crates/opfs-btree/src/wasm_bench.rs` + `crates/opfs-btree/wasm-bench/run-opfs-bench.cjs` cover browser OPFS scenarios.
-- `crates/opfs-btree/benches/compare_native.rs` runs cross-engine native comparisons (including `fjall` and `fjall` columns when enabled).
-
-## Deployment Topology
-
-The browser case is the interesting one. We can't block the main thread on storage I/O, but we need synchronous storage for the query engine. The solution: run the persistent groove instance in a Dedicated Worker (where `SyncAccessHandle` gives us sync I/O), and keep a lightweight MemoryStorage cache on the main thread for instant reads.
-
-### Browser
-
-```
-┌──────────────────────────────────────────────────────┐
-│ MAIN THREAD: Groove (MemoryStorage)                   │
-│  - All operations sync, in-memory cache               │
-└──────────────────┬───────────────────────────────────┘
-              postMessage (sync protocol)
-┌──────────────────┴───────────────────────────────────┐
-│ DEDICATED WORKER: Groove (OpfsBTreeStorage/OPFS)      │
-│  - Durable via FileSystemSyncAccessHandle             │
-│  - Upstream server connection                         │
-└──────────────────┬───────────────────────────────────┘
-                   │ HTTP/SSE
-                   ▼
-           Edge Server (Groove + FjallStorage)
+Dedicated worker runtime
+  -> OpfsBTreeStorage
+  -> upstream /sync and /events ownership
+  -> durable local row histories and visible entries
 ```
 
-OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
+The important point is that both runtimes still use the same synchronous `Storage` trait. The browser-specific complexity lives in the worker split, not in two different storage APIs.
 
-> `crates/jazz-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
-> `packages/jazz-tools/src/worker/jazz-worker.ts` (worker entry point)
+## Flushing and Durability
 
-### Native (Node.js / Rust)
+`RuntimeCore` now tracks whether a tick actually wrote to storage before asking the backend to flush its WAL/checkpoint state.
 
-Single process, no worker needed. FjallStorage backed by regular files.
+That means:
 
-> `crates/groove-tokio/src/lib.rs` (TokioRuntime with FjallStorage)
+- read-only ticks stay cheap
+- write-heavy ticks still get durable progress
+- backends are free to map "flush" to the right durability primitive for that engine
 
-## Platform Bindings
+## Key Files
 
-### jazz-napi (Node.js)
-
-NAPI bindings exposing RuntimeCore to Node.js via TokioRuntime.
-
-Current runtime modes:
-
-- `new NapiRuntime(..., dataPath, ...)` for persistent Fjall storage.
-- `NapiRuntime.inMemory(...)` for non-persistent in-memory storage.
-
-> `crates/jazz-napi/`
-
-### jazz-wasm (Browser)
-
-WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_local`; JsSyncSender serializes messages to JSON for JS callbacks.
-
-> `crates/jazz-wasm/`
-
-## Design Decisions
-
-| Decision            | Choice                                        | Rationale                                                               |
-| ------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| Index encoding      | Composite key prefixes across storage engines | Range queries give index scans naturally                                |
-| Durability default  | Fire-and-forget                               | Optimistic local-first; `_persisted()` variants for explicit durability |
-| Native architecture | Single process                                | No worker overhead needed                                               |
-| Tab coordination    | Single tab owns OPFS (leader election future) | `SyncAccessHandle` is an exclusive lock                                 |
+| File                                          | Purpose                                                        |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `crates/jazz-tools/src/storage/mod.rs`        | Storage trait plus in-memory implementation and shared helpers |
+| `crates/jazz-tools/src/storage/opfs_btree.rs` | Browser worker durable backend                                 |
+| `crates/jazz-tools/src/storage/sqlite.rs`     | SQLite durable backend                                         |
+| `crates/jazz-tools/src/storage/rocksdb.rs`    | RocksDB durable backend                                        |
+| `crates/jazz-tools/src/row_format.rs`         | Shared row encoding                                            |
+| `crates/jazz-wasm/src/runtime.rs`             | Browser runtime bridge into storage                            |
+| `crates/jazz-napi/src/lib.rs`                 | SQLite-backed NAPI runtime                                     |
+| `crates/jazz-cloud-server/src/server.rs`      | RocksDB-backed server runtime                                  |

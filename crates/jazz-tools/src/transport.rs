@@ -2,6 +2,7 @@
 
 use crate::jazz_transport::SyncBatchRequest;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::{ClientId, SyncPayload};
 use base64::Engine;
 use reqwest::Client;
@@ -117,9 +118,12 @@ impl ServerConnection {
     /// Build auth headers for the binary streaming connection.
     ///
     /// Same auth as `build_headers` but without Content-Type.
-    pub fn build_stream_headers(&self) -> HeaderMap {
+    pub fn build_stream_headers(&self, schema_hash: SchemaHash) -> HeaderMap {
         let mut headers = self.build_headers(None);
         headers.remove(CONTENT_TYPE);
+        if let Ok(schema_hash) = HeaderValue::from_str(&schema_hash.to_string()) {
+            headers.insert("X-Jazz-Client-Schema-Hash", schema_hash);
+        }
         headers
     }
 
@@ -192,17 +196,5 @@ fn normalize_route_prefix(path: &str) -> String {
 
 /// Check if a sync payload is for a catalogue object.
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
-    match payload {
-        SyncPayload::ObjectUpdated { metadata, .. } => {
-            if let Some(meta) = metadata
-                && let Some(type_str) = meta
-                    .metadata
-                    .get(crate::metadata::MetadataKey::Type.as_str())
-            {
-                return crate::metadata::ObjectType::is_catalogue_type_str(type_str);
-            }
-            false
-        }
-        _ => false,
-    }
+    matches!(payload, SyncPayload::CatalogueEntryUpdated { entry } if entry.is_catalogue())
 }

@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use ahash::AHashSet;
+use smolset::SmolSet;
 
 use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
@@ -19,11 +19,11 @@ use super::*;
 pub enum TupleElement {
     /// Just the ID - row data not yet loaded.
     Id(ObjectId),
-    /// Fully materialized row with ID, content, and commit reference.
+    /// Fully materialized row with ID, content, and version reference.
     Row {
         id: ObjectId,
-        content: Vec<u8>,
-        commit_id: CommitId,
+        content: RowBytes,
+        version_id: CommitId,
         row_provenance: RowProvenance,
     },
 }
@@ -50,11 +50,11 @@ impl TupleElement {
         }
     }
 
-    /// Get the commit ID if materialized.
-    pub fn commit_id(&self) -> Option<CommitId> {
+    /// Get the row version ID if materialized.
+    pub fn version_id(&self) -> Option<CommitId> {
         match self {
             TupleElement::Id(_) => None,
-            TupleElement::Row { commit_id, .. } => Some(*commit_id),
+            TupleElement::Row { version_id, .. } => Some(*version_id),
         }
     }
 
@@ -71,7 +71,7 @@ impl TupleElement {
         TupleElement::Row {
             id: row.id,
             content: row.data.clone(),
-            commit_id: row.commit_id,
+            version_id: row.version_id,
             row_provenance: row.provenance.clone(),
         }
     }
@@ -83,12 +83,12 @@ impl TupleElement {
             TupleElement::Row {
                 id,
                 content,
-                commit_id,
+                version_id,
                 row_provenance,
             } => Some(Row::new(
                 *id,
                 content.clone(),
-                *commit_id,
+                *version_id,
                 row_provenance.clone(),
             )),
         }
@@ -101,26 +101,26 @@ impl TupleElement {
 pub struct Tuple(pub Vec<TupleElement>, pub TupleProvenance);
 
 pub type ScopedObject = (ObjectId, BranchName);
-pub type TupleProvenance = AHashSet<ScopedObject>;
+pub type TupleProvenance = SmolSet<[ScopedObject; 4]>;
 
 #[derive(Clone, Debug)]
 pub struct LoadedRow {
-    pub data: Vec<u8>,
-    pub commit_id: CommitId,
+    pub data: RowBytes,
+    pub version_id: CommitId,
     pub row_provenance: RowProvenance,
     pub provenance: TupleProvenance,
 }
 
 impl LoadedRow {
     pub fn new(
-        data: Vec<u8>,
-        commit_id: CommitId,
+        data: impl Into<RowBytes>,
+        version_id: CommitId,
         row_provenance: RowProvenance,
         provenance: TupleProvenance,
     ) -> Self {
         Self {
-            data,
-            commit_id,
+            data: data.into(),
+            version_id,
             row_provenance,
             provenance,
         }
@@ -231,7 +231,7 @@ impl Tuple {
             all_values.extend(values);
 
             if first_commit_id.is_none() {
-                first_commit_id = elem.commit_id();
+                first_commit_id = elem.version_id();
             }
         }
 
@@ -240,14 +240,14 @@ impl Tuple {
 
         // Use first element's ID as the "primary" ID for the flattened row
         let first_id = self.first_id()?;
-        let commit_id = first_commit_id.unwrap_or(CommitId([0; 32]));
+        let version_id = first_commit_id.unwrap_or(CommitId([0; 32]));
         let row_provenance = self.0.first()?.row_provenance()?.clone();
 
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id: first_id,
-                content: combined_content,
-                commit_id,
+                content: combined_content.into(),
+                version_id,
                 row_provenance,
             }])
             .with_provenance(self.provenance().clone()),
@@ -277,12 +277,16 @@ impl Tuple {
 
     /// Merge another tuple's provenance into this tuple.
     pub fn merge_provenance_from(&mut self, other: &Tuple) {
-        self.1.extend(other.1.iter().copied());
+        for scoped_object in other.1.iter().copied() {
+            self.1.insert(scoped_object);
+        }
     }
 
     /// Merge an explicit provenance set into this tuple.
     pub fn merge_provenance(&mut self, provenance: &TupleProvenance) {
-        self.1.extend(provenance.iter().copied());
+        for scoped_object in provenance.iter().copied() {
+            self.1.insert(scoped_object);
+        }
     }
 }
 

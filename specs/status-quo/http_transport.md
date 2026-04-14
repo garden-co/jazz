@@ -1,146 +1,99 @@
 # HTTP/SSE Transport Protocol — Status Quo
 
-This is the concrete wire protocol that carries the abstract sync messages defined by the [Sync Manager](sync_manager.md) over the network. The design prioritizes simplicity: SSE (Server-Sent Events) for server→client push, a single POST endpoint for client→server mutations. No WebSocket complexity, no custom protocol — just HTTP with binary framing for efficiency.
+Jazz uses a deliberately small HTTP transport surface:
 
-The client opens a persistent `/events` SSE connection for receiving updates, and sends mutations via `POST /sync`. For admin flows, the transport also exposes schema catalogue read endpoints (`GET /schemas`, `GET /schema/:hash`). This asymmetry matches the sync model: the server pushes data matching the client's subscriptions, while the client pushes mutations and subscription changes.
+- `POST /sync` for client-to-server batches
+- `GET /events` for server-to-client streaming updates
 
-## Architecture
+That is enough because the interesting structure lives inside the typed sync payloads, not in a sprawling list of special-purpose endpoints.
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                         CLIENT                              │
-│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │ JazzClient   │  │ HTTP POST     │  │ Binary Stream   │  │
-│  │ (jazz-tools) │──▶│ (/sync)       │  │ (/events)       │  │
-│  └──────────────┘  └───────────────┘  └─────────────────┘  │
-└────────────────────┬────────────────────┬──────────────────┘
-                     │                    │
-┌────────────────────┴────────────────────┴──────────────────┐
-│                         SERVER                              │
-│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │ JazzRuntime  │◀─│  Axum Router  │◀─│ Broadcast       │  │
-│  │ (jazz-tools) │  │  (jazz-tools) │  │ Channel         │  │
-│  └──────────────┘  └───────────────┘  └─────────────────┘  │
-└────────────────────────────────────────────────────────────┘
-```
+## The Two Channels
 
-## Endpoints
+### `/sync`
 
-| Route           | Method | Description                                                |
-| --------------- | ------ | ---------------------------------------------------------- |
-| `/events`       | GET    | Binary streaming for push updates                          |
-| `/sync`         | POST   | Unified sync endpoint (all mutations, subscriptions)       |
-| `/schemas`      | GET    | List known schema hashes from catalogue state (admin)      |
-| `/schema/:hash` | GET    | Fetch catalogue schema payload for a specific hash (admin) |
-| `/health`       | GET    | Health check                                               |
+Clients POST a `SyncBatchRequest`:
 
-Note: The original spec described separate endpoints (`/sync/subscribe`, `/sync/object`, etc.). These were consolidated into a single `/sync` endpoint that accepts polymorphic `SyncPayload` variants — simpler routing, unified auth/logging. Schema catalogue reads remain separate GET endpoints.
+- one `client_id`
+- an ordered list of `SyncPayload`s
 
-> `crates/jazz-tools/src/routes.rs:62-287`
+The server applies them in order and returns a `SyncBatchResponse` with one success/error result per payload.
 
-## Tenancy Model
+### `/events`
 
-The in-repo `jazz-tools server` process is single-app per process: `app_id` is fixed at startup and shared by that runtime/storage instance. There is no app-scoped route prefix inside this server (`/events`, `/sync`, `/schemas`, and `/schema/:hash` are process-local routes).
+Clients open a long-lived stream and receive `ServerEvent`s such as:
 
-Hosted onboarding currently provisions app IDs out-of-band; clients still use the same transport protocol against their assigned server URL.
+- `Connected`
+- `SyncUpdate`
+- `Error`
+- `Heartbeat`
 
-The multi-tenant cloud server uses app-scoped equivalents under `/apps/:app_id/*` (for example `/apps/:app_id/schemas` and `/apps/:app_id/schema/:hash`), while preserving the same auth and response semantics.
+The stream uses length-prefixed binary frames containing JSON payloads. That keeps parsing simple without turning the SSE body into newline-escaped JSON soup.
 
-> `crates/jazz-tools/src/main.rs` (server CLI args)
-> `crates/jazz-tools/src/commands/server.rs` (fixed `app_id` runtime initialization)
+## What Actually Travels
 
-## Wire Format
+The transport does not invent a second data model. It carries the same sync payloads the runtime already understands:
 
-**Binary length-prefixed frames** instead of raw JSON over SSE. Standard SSE sends newline-delimited text, which means every message needs escaping and parsing overhead. Binary framing is simpler: read 4 bytes for length, read that many bytes for the JSON payload.
+- row versions
+- row state changes
+- catalogue entries
+- query subscriptions and unsubscriptions
+- query-settled signals
+- errors and warnings
 
-```
-[4 bytes u32 BE length][JSON payload]
-```
+That means transport code can stay thin. It does not need to understand relational semantics beyond "deserialize this payload and hand it to the runtime".
 
-Both the `/events` stream and individual sync messages use this format.
+## Connection Identity
 
-> `crates/jazz-tools/src/transport_protocol.rs:174-202` (encode_frame, decode_frame)
+Clients use a stable `ClientId` across reconnects.
 
-## Client Identity
+That matters for two reasons:
 
-Clients generate a persistent `ClientId` (UUIDv7) on first connection, stored locally at `data_dir/client_id`. The same ID is used for both `/events` stream (`?client_id=<uuid>` query param) and `/sync` requests (`client_id` field in body).
+- the server can continue reasoning about the same logical client
+- reconnect can resume with better anti-entropy instead of pretending every reconnect is a brand-new peer with no prior state
 
-This persistence matters for reconnection efficiency: when a client reconnects with the same ID, the server's `sent_tips` tracking means it only sends new data since the last connection, not everything from scratch.
+The `Connected` event also carries stream bookkeeping such as the connection id and, when available, the server's current catalogue digest.
 
-> `crates/jazz-tools/src/client.rs:65-84`
+## Auth
 
-## SSE Events Endpoint
+The current transport supports three main auth shapes:
 
-`GET /events?client_id=<uuid>` — requires valid session (JWT or backend secret).
+- JWT bearer auth for normal client sessions
+- backend-secret impersonation for trusted server-side callers
+- admin-secret auth for administrative or catalogue-specific flows
 
-Server calls `ensure_client_with_session(client_id, session)` on connect.
+The important idea is that auth is checked at the HTTP boundary, while row-level visibility still lives in the runtime's query/policy machinery.
 
-### Event Types
+## Why There Is No Separate "Query Transport"
 
-| Event        | Purpose                                                      |
-| ------------ | ------------------------------------------------------------ |
-| `Connected`  | Confirms connection, returns `connection_id` and `client_id` |
-| `SyncUpdate` | Push sync data (wraps `SyncPayload`)                         |
-| `Heartbeat`  | Keep-alive every 30s                                         |
+A query subscription is just another sync payload.
 
-> `crates/jazz-tools/src/routes.rs:132-166`
+That is a very intentional design choice. It means:
 
-### Reconnection
+- browser worker links
+- native client/server links
+- server/server links
 
-Reconnection behavior currently differs by client implementation:
+can all use the same transport vocabulary instead of inventing a query-only side protocol.
 
-- `jazz-tools` Rust client module: fixed 5s retry loop for `/events`.
-- `jazz-tools` runtime + worker bridge: exponential backoff with jitter (`base=300ms`, cap `10s`, random `0-199ms` jitter).
-- Both reconnect to `/events` with a `client_id` query parameter and preserve logical client identity across reconnects.
-- In `jazz-tools`, stream disconnect detaches upstream from runtime, and `Connected` re-attaches it; this intentionally replays active query subscriptions as anti-entropy.
+## Current Route Surface
 
-> `crates/jazz-tools/src/client.rs:157-257`
-> `packages/jazz-tools/src/runtime/client.ts:572-663`
-> `packages/jazz-tools/src/worker/jazz-worker.ts:152-241`
+The in-repo server keeps a small route set:
 
-## Authentication
+- `/events`
+- `/sync`
+- `/schemas`
+- `/schema/:hash`
+- `/health`
 
-Three independent mechanisms, resolved in priority order:
-
-| Priority | Mechanism             | Headers                                    | Purpose                        |
-| -------- | --------------------- | ------------------------------------------ | ------------------------------ |
-| 1        | Backend impersonation | `X-Jazz-Backend-Secret` + `X-Jazz-Session` | Backend apps impersonate users |
-| 2        | JWT                   | `Authorization: Bearer <JWT>`              | Frontend/mobile clients        |
-| 3        | No session            | —                                          | Anonymous (limited)            |
-
-Admin auth (`X-Jazz-Admin-Secret`) is required for catalogue sync writes and schema catalogue reads (`/schemas`, `/schema/:hash`).
-
-> `crates/jazz-tools/src/middleware/auth.rs:226-350` — extensive test coverage at lines 352-583
-
-### Client-Side Auth
-
-Client transports detect catalogue object payloads (`catalogue_schema`, `catalogue_lens`) and only send them when `X-Jazz-Admin-Secret` is available. If no admin secret is configured, catalogue payloads are dropped client-side and no `/sync` POST is attempted. Regular row/query payloads continue to use JWT/backend auth paths.
-
-> `crates/jazz-tools/src/transport.rs:66-181`
-> `packages/jazz-tools/src/runtime/sync-transport.ts`
-
-## Broadcast Channel
-
-Server uses `tokio::sync::broadcast` for SSE routing:
-
-1. Runtime produces SyncOutbox entries
-2. Event processor sends `(client_id, payload)` to broadcast channel
-3. Each SSE stream filters for its `client_id`
-
-## Sync Flow
-
-**Client → Server**: CRUD → RuntimeCore commits locally → SyncManager outbox → SyncSender callback → HTTP POST `/sync` → server inbox → broadcast to other clients.
-
-**Server → Client**: Server runtime outbox → broadcast channel → SSE stream filtered by client_id → client parses binary frames → local runtime inbox → indices update, subscriptions react.
+The cloud server exposes equivalent app-scoped routes under `/apps/:app_id/...` while preserving the same transport semantics.
 
 ## Key Files
 
-| File                                                | Purpose                                         |
-| --------------------------------------------------- | ----------------------------------------------- |
-| `crates/jazz-tools/src/routes.rs`                   | Server endpoints (events, sync, schema, health) |
-| `crates/jazz-tools/src/middleware/auth.rs`          | Authentication middleware                       |
-| `crates/jazz-tools/src/transport_protocol.rs`       | Shared types, frame encoding                    |
-| `crates/jazz-tools/src/client.rs`                   | Rust client (streaming, reconnection)           |
-| `crates/jazz-tools/src/transport.rs`                | Client-side HTTP transport                      |
-| `packages/jazz-tools/src/runtime/sync-transport.ts` | TS shared sync POST + stream parser             |
-| `packages/jazz-tools/src/runtime/schema-fetch.ts`   | TS schema hash + schema fetch helpers           |
+| File                                                | Purpose                                |
+| --------------------------------------------------- | -------------------------------------- |
+| `crates/jazz-tools/src/transport_protocol.rs`       | Shared request/event types and framing |
+| `crates/jazz-tools/src/routes.rs`                   | In-repo server routes                  |
+| `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling                     |
+| `crates/jazz-tools/src/transport.rs`                | Rust client-side transport             |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | TypeScript transport helpers           |
+| `crates/jazz-cloud-server/src/server.rs`            | Cloud server transport wiring          |

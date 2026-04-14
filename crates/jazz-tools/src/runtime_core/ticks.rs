@@ -169,14 +169,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .take_received_acks();
-        for (commit_id, acked_tier) in received_acks {
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
+            .take_received_row_version_acks();
+        for (row_version_key, acked_tier) in received_acks {
+            if let Some(watchers) = self.ack_watchers.remove(&row_version_key) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
                         tracing::debug!(
-                            ?commit_id,
+                            ?row_version_key,
                             ?acked_tier,
                             ?requested_tier,
                             "ack watcher resolved"
@@ -187,7 +187,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     }
                 }
                 if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
+                    self.ack_watchers.insert(row_version_key, remaining);
                 }
             }
         }
@@ -244,9 +244,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
-        {
+        if self.storage_write_pending_flush {
             let _span = tracing::debug_span!("flush_wal").entered();
             self.storage.flush_wal();
+            self.clear_storage_write_pending_flush();
         }
     }
 
@@ -262,6 +263,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             );
         }
         for msg in messages {
+            if msg.payload.writes_storage() {
+                self.mark_storage_write_pending_flush();
+            }
             self.push_sync_inbox(msg);
             applied_messages += 1;
         }
@@ -291,6 +295,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 .copied()
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
+                if msg.payload.writes_storage() {
+                    self.mark_storage_write_pending_flush();
+                }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
                 last_applied = sequence;

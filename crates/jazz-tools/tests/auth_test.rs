@@ -12,7 +12,13 @@ mod test_server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use jazz_tools::commit::CommitId;
+use jazz_tools::jazz_transport::SyncBatchRequest;
+use jazz_tools::metadata::RowProvenance;
+use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -48,23 +54,6 @@ fn make_jwt(sub: &str, claims: serde_json::Value, secret: &str) -> String {
     make_jwt_with_exp(sub, claims, secret, future_exp(), None, None)
 }
 
-fn make_jwt_with_issuer(
-    sub: &str,
-    claims: serde_json::Value,
-    secret: &str,
-    issuer: &str,
-    principal_id: Option<&str>,
-) -> String {
-    make_jwt_with_exp(
-        sub,
-        claims,
-        secret,
-        future_exp(),
-        Some(issuer),
-        principal_id,
-    )
-}
-
 fn make_jwt_with_exp(
     sub: &str,
     claims: serde_json::Value,
@@ -93,18 +82,26 @@ fn encode_session(session: &Session) -> String {
 
 /// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
-    json!({
-        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payloads": [{
-            "ObjectUpdated": {
-                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        }]
-    })
-    .to_string()
+    let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
+    let row = StoredRowVersion::new(
+        ObjectId::from_uuid(uuid::Uuid::parse_str(object_id_text).expect("parse test object id")),
+        "main",
+        Vec::<CommitId>::new(),
+        b"alice".to_vec(),
+        RowProvenance::for_insert(object_id_text.to_string(), 1_000),
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let request = SyncBatchRequest {
+        client_id: ClientId::new(),
+        payloads: vec![SyncPayload::RowVersionCreated {
+            metadata: None,
+            row,
+        }],
+    };
+
+    serde_json::to_string(&request).expect("serialize typed sync batch request")
 }
 
 // ============================================================================
@@ -392,128 +389,17 @@ mod integration_tests {
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Test link-external endpoint idempotency and conflict behavior.
-    #[tokio::test]
-    async fn test_link_external_idempotent_and_conflict() {
-        let server = TestServer::start().await;
-        let token = make_jwt_with_issuer(
-            "external-user",
-            json!({"role": "user"}),
-            JWT_SECRET,
-            "https://issuer.example",
-            None,
-        );
-
-        let first = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
-        let first_json: serde_json::Value = first.json().await.unwrap();
-        assert_eq!(first_json["created"], json!(true));
-
-        let second = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(second.status(), StatusCode::OK);
-        let second_json: serde_json::Value = second.json().await.unwrap();
-        assert_eq!(second_json["created"], json!(false));
-
-        let conflict = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-b")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn test_link_external_returns_expired_for_expired_jwt() {
-        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
-            "test-jwks-kid",
-            "secret-expired-link",
-        )])
-        .await;
-        let expired = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 60;
-        let token = make_jwt_with_exp(
-            "external-user",
-            json!({"role": "user"}),
-            "secret-expired-link",
-            expired,
-            Some("https://issuer.example"),
-            None,
-        );
-
-        let response = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "expired");
-    }
-
-    #[tokio::test]
-    async fn test_link_external_returns_disabled_when_jwt_auth_is_not_configured() {
-        let server = TestServer::start_without_jwks().await;
-        let token = make_jwt_with_issuer(
-            "external-user",
-            json!({"role": "user"}),
-            JWT_SECRET,
-            "https://issuer.example",
-            None,
-        );
-
-        let response = client()
-            .post(format!("{}/auth/link-external", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("X-Jazz-Local-Mode", "anonymous")
-            .header("X-Jazz-Local-Token", "device-token-a")
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "disabled");
-    }
-
     /// Create a valid catalogue sync body for testing admin auth.
     fn catalogue_sync_body() -> String {
         json!({
             "client_id": "01234567-89ab-cdef-0123-456789abcdef",
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                    "metadata": {
-                        "id": "01234567-89ab-cdef-0123-456789abcdef",
-                        "metadata": {"type": "catalogue_schema"}
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "metadata": {"type": "catalogue_schema"},
+                        "content": []
                     },
-                    "branch_name": "main",
-                    "commits": []
                 }
             }]
         })
@@ -934,22 +820,12 @@ mod integration_tests {
         let sync_payload = json!({
             "client_id": Uuid::new_v4().to_string(),
             "payloads": [{
-                "ObjectUpdated": {
-                    "object_id": object_id,
-                    "metadata": {
-                        "id": object_id,
-                        "metadata": metadata
+                "CatalogueEntryUpdated": {
+                    "entry": {
+                        "object_id": object_id,
+                        "metadata": metadata,
+                        "content": encoded_schema
                     },
-                    "branch_name": "main",
-                    "commits": [
-                        {
-                            "parents": [],
-                            "content": encoded_schema,
-                            "timestamp": 1,
-                            "author": Uuid::new_v4().to_string(),
-                            "metadata": null
-                        }
-                    ]
                 }
             }]
         });

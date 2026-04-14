@@ -1,9 +1,13 @@
-import { createDb, type Db } from "../../../packages/jazz-tools/src/runtime/index.js";
+import {
+  createDb,
+  type Db,
+  generateAuthSecret,
+} from "../../../packages/jazz-tools/src/runtime/index.js";
 import jazzWasmModule from "jazz-wasm/pkg/jazz_wasm_bg.wasm";
 import { app } from "./schema.js";
 
 const APP_ID = "cloudflare-worker-runtime-ts";
-const LOCAL_AUTH_TOKEN = "cloudflare-worker-runtime-ts";
+const LOCAL_FIRST_SECRET = generateAuthSecret();
 
 let dbPromise: Promise<Db> | null = null;
 
@@ -25,8 +29,7 @@ function getDb(): Promise<Db> {
     appId: APP_ID,
     env: "dev",
     userBranch: "main",
-    localAuthMode: "anonymous",
-    localAuthToken: LOCAL_AUTH_TOKEN,
+    auth: { localFirstSecret: LOCAL_FIRST_SECRET },
     runtimeSources: {
       wasmModule: jazzWasmModule,
     },

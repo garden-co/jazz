@@ -4,7 +4,6 @@ import type { DbConfig } from "./db.js";
 import { createJazzClient } from "./create-jazz-client.js";
 
 const mocks = vi.hoisted(() => {
-  const resolveLocalAuthDefaults = vi.fn();
   const createDb = vi.fn();
   const managerCtor = vi.fn();
   const managerInit = vi.fn();
@@ -21,7 +20,6 @@ const mocks = vi.hoisted(() => {
   }
 
   return {
-    resolveLocalAuthDefaults,
     createDb,
     managerCtor,
     managerInit,
@@ -29,10 +27,6 @@ const mocks = vi.hoisted(() => {
     MockSubscriptionsOrchestrator,
   };
 });
-
-vi.mock("../runtime/local-auth.js", () => ({
-  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
-}));
 
 vi.mock("./db.js", async () => {
   const actual = await vi.importActual<typeof import("./db.js")>("./db.js");
@@ -63,8 +57,6 @@ type SetupOptions = {
 async function setupCreateClient(options: SetupOptions = {}) {
   const resolvedConfig: DbConfig = options.resolvedConfig ?? {
     appId: "rn-create-client-resolved",
-    localAuthMode: "anonymous",
-    localAuthToken: "rn-local-token",
   };
 
   const dbShutdown = vi.fn(async () => {});
@@ -76,8 +68,6 @@ async function setupCreateClient(options: SetupOptions = {}) {
     onAuthChanged: vi.fn(() => () => {}),
     shutdown: dbShutdown,
   };
-
-  mocks.resolveLocalAuthDefaults.mockImplementation((_input: DbConfig) => resolvedConfig);
 
   mocks.createDb.mockImplementation(async (_config: DbConfig) => {
     if (options.dbError) {
@@ -96,7 +86,6 @@ async function setupCreateClient(options: SetupOptions = {}) {
   return {
     createJazzClient,
     createDb: mocks.createDb,
-    resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
     resolvedConfig,
     db,
     dbShutdown,
@@ -107,7 +96,6 @@ async function setupCreateClient(options: SetupOptions = {}) {
 }
 
 afterEach(() => {
-  mocks.resolveLocalAuthDefaults.mockReset();
   mocks.createDb.mockReset();
   mocks.managerCtor.mockReset();
   mocks.managerInit.mockReset();
@@ -119,17 +107,14 @@ describe("react-native/create-jazz-client", () => {
   it("RNC-U01 initializes client session + manager and shuts down cleanly", async () => {
     const session: Session = {
       user_id: "local:rn-user",
-      claims: { auth_mode: "local", local_mode: "anonymous" },
+      claims: { auth_mode: "local-first" },
     };
     const resolvedConfig: DbConfig = {
       appId: "rn-create-client-happy",
-      localAuthMode: "anonymous",
-      localAuthToken: "rn-token-1",
     };
     const {
       createJazzClient,
       createDb,
-      resolveLocalAuthDefaults,
       resolvedConfig: actualResolvedConfig,
       db,
       dbShutdown,
@@ -141,9 +126,8 @@ describe("react-native/create-jazz-client", () => {
 
     const client = await createJazzClient(config);
 
-    expect(resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
     expect(actualResolvedConfig).toEqual(resolvedConfig);
-    expect(createDb).toHaveBeenCalledWith(resolvedConfig);
+    expect(createDb).toHaveBeenCalledWith(config);
     expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
     expect(managerInit).toHaveBeenCalledTimes(1);
     expect(client.db).toBe(db);
@@ -159,16 +143,15 @@ describe("react-native/create-jazz-client", () => {
     const dbError = new Error("db creation failed");
     const resolvedConfig: DbConfig = {
       appId: "rn-create-client-db-failure",
-      localAuthMode: "demo",
-      localAuthToken: "rn-token-2",
     };
-    const { createJazzClient, createDb, resolveLocalAuthDefaults, managerCtor, managerInit } =
-      await setupCreateClient({ dbError, resolvedConfig });
+    const { createJazzClient, createDb, managerCtor, managerInit } = await setupCreateClient({
+      dbError,
+      resolvedConfig,
+    });
     const config: DbConfig = { appId: "rn-create-client-db-failure" };
 
     await expect(createJazzClient(config)).rejects.toBe(dbError);
-    expect(resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
-    expect(createDb).toHaveBeenCalledWith(resolvedConfig);
+    expect(createDb).toHaveBeenCalledWith(config);
     expect(managerCtor).not.toHaveBeenCalled();
     expect(managerInit).not.toHaveBeenCalled();
   });
@@ -177,12 +160,10 @@ describe("react-native/create-jazz-client", () => {
     const initError = new Error("orchestrator init failed");
     const resolvedConfig: DbConfig = {
       appId: "rn-create-client-manager-failure",
-      localAuthMode: "anonymous",
-      localAuthToken: "rn-token-4",
     };
     const session: Session = {
       user_id: "local:rn-user-4",
-      claims: { auth_mode: "local", local_mode: "anonymous" },
+      claims: { auth_mode: "local-first" },
     };
     const {
       createJazzClient,
@@ -200,7 +181,7 @@ describe("react-native/create-jazz-client", () => {
     const config: DbConfig = { appId: "rn-create-client-manager-failure" };
 
     await expect(createJazzClient(config)).rejects.toBe(initError);
-    expect(createDb).toHaveBeenCalledWith(resolvedConfig);
+    expect(createDb).toHaveBeenCalledWith(config);
     expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
     expect(managerInit).toHaveBeenCalledTimes(1);
     expect(managerShutdown).not.toHaveBeenCalled();

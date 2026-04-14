@@ -64,8 +64,6 @@ ensureVitestWorkerImportShim();
 let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
 let jwtToken: string | undefined;
-let localAuthMode: "anonymous" | "demo" | undefined;
-let localAuthToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
 let serverClientId: string = generateClientId();
@@ -102,8 +100,6 @@ const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
       payloads,
       {
         jwtToken,
-        localAuthMode,
-        localAuthToken,
         adminSecret,
         clientId: serverClientId,
         pathPrefix: activeServerPathPrefix,
@@ -304,8 +300,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Store auth
     jwtToken = msg.jwtToken;
-    localAuthMode = msg.localAuthMode;
-    localAuthToken = msg.localAuthToken;
     adminSecret = msg.adminSecret;
 
     // Register main thread as a Peer client
@@ -427,8 +421,6 @@ async function sendToServer(
       isCatalogue,
       {
         jwtToken,
-        localAuthMode,
-        localAuthToken,
         adminSecret,
         clientId: serverClientId,
         pathPrefix: activeServerPathPrefix,
@@ -493,7 +485,11 @@ async function connectStream(): Promise<void> {
   const headers: Record<string, string> = {
     Accept: "application/octet-stream",
   };
-  applyUserAuthHeaders(headers, { jwtToken, localAuthMode, localAuthToken });
+  applyUserAuthHeaders(headers, { jwtToken });
+  const schemaHash = runtime?.getSchemaHash?.();
+  if (schemaHash) {
+    headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
+  }
 
   streamAbortController = new AbortController();
   let streamConnectTimedOut = false;
@@ -685,8 +681,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "update-auth":
       jwtToken = msg.jwtToken;
-      localAuthMode = msg.localAuthMode;
-      localAuthToken = msg.localAuthToken;
       authPaused = false;
       // Reconnect stream to bind the new token.
       if (streamAbortController) {

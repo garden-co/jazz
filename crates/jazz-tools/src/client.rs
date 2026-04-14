@@ -10,9 +10,11 @@ use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{
+    OrderedRowDelta, RowDescriptor, Schema, SchemaHash, TableName, Value,
+};
 use crate::runtime_core::ReadDurabilityOptions;
-use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
@@ -81,7 +83,7 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     )
     .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
 
-    rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, context.app_id)
+    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
         .map_err(JazzError::Storage)?;
 
     Ok(schema_manager)
@@ -206,7 +208,7 @@ impl JazzClient {
             let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
-            let stream_headers = conn.build_stream_headers();
+            let stream_headers = conn.build_stream_headers(SchemaHash::compute(&declared_schema));
             let server_id_for_stream = server_id;
             let mut initial_stream_ready_tx = initial_stream_ready_tx;
             let tracer_for_incoming = context.sync_tracer.clone();
@@ -256,21 +258,15 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
-                                                    if matches!(
-                                                        &event,
-                                                        ServerEvent::Connected { .. }
-                                                    ) && let Some(tx) =
-                                                        initial_stream_ready_tx.take()
-                                                    {
-                                                        let catalogue_state_hash = match &event {
+                                                    let connected_catalogue_state_hash =
+                                                        match &event {
                                                             ServerEvent::Connected {
                                                                 catalogue_state_hash,
                                                                 ..
-                                                            } => catalogue_state_hash.clone(),
+                                                            } => Some(catalogue_state_hash.clone()),
                                                             _ => None,
                                                         };
-                                                        let _ = tx.send(catalogue_state_hash);
-                                                    }
+
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
@@ -281,6 +277,12 @@ impl JazzClient {
                                                             "Error handling server event: {}",
                                                             e
                                                         );
+                                                    } else if let Some(catalogue_state_hash) =
+                                                        connected_catalogue_state_hash
+                                                        && let Some(tx) =
+                                                            initial_stream_ready_tx.take()
+                                                    {
+                                                        let _ = tx.send(catalogue_state_hash);
                                                     }
                                                 }
                                                 Err(e) => {
@@ -455,6 +457,30 @@ impl JazzClient {
         Ok((object_id, row_values))
     }
 
+    /// Create a new row and wait until it reaches the requested durability tier.
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .runtime
+            .insert_persisted(table, values, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
     /// Update a row.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
@@ -462,11 +488,34 @@ impl JazzClient {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    /// Update a row and wait until it reaches the requested durability tier.
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .runtime
+            .update_persisted(object_id, updates, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
+    }
+
     /// Delete a row.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Delete a row and wait until it reaches the requested durability tier.
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .runtime
+            .delete_persisted(object_id, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     /// Unsubscribe from a subscription.
@@ -583,6 +632,30 @@ impl<'a> SessionClient<'a> {
         Ok((object_id, row_values))
     }
 
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .client
+            .runtime
+            .insert_persisted(table, values, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.client.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.client.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
             .runtime
@@ -590,11 +663,34 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .update_persisted(object_id, updates, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
+    }
+
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .delete_persisted(object_id, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     pub async fn query(
@@ -637,6 +733,19 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.recursive.is_none()
         && query.select_columns.is_none()
         && query.result_element_index.is_none()
+}
+
+async fn wait_for_persisted_write(
+    receiver: futures::channel::oneshot::Receiver<()>,
+    operation: &str,
+    tier: DurabilityTier,
+) -> Result<()> {
+    receiver.await.map_err(|_| {
+        JazzError::Sync(format!(
+            "{operation} was cancelled before reaching {tier:?} durability"
+        ))
+    })?;
+    Ok(())
 }
 
 fn align_row_values_to_declared_schema(
@@ -687,7 +796,6 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
-    use crate::storage::CatalogueManifestOp;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
@@ -784,13 +892,13 @@ mod tests {
         .expect("seed schema manager");
         let mut runtime =
             RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
-        let learned_schema_object_id = runtime.persist_schema();
-        let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
+        runtime.persist_schema();
+        runtime.publish_schema(bundled_schema.clone());
         let lens = runtime
             .schema_manager()
             .generate_lens(&bundled_schema, &learned_schema);
         assert!(!lens.is_draft(), "seed lens should be publishable");
-        let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
+        runtime.publish_lens(&lens).expect("persist learned lens");
 
         if publish_permissions {
             runtime
@@ -805,27 +913,7 @@ mod tests {
                 .expect("seed permissions bundle");
         }
 
-        let mut storage = runtime.into_storage();
-        storage
-            .append_catalogue_manifest_ops(
-                app_id.as_object_id(),
-                &[
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: learned_schema_object_id,
-                        schema_hash: learned_hash,
-                    },
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: bundled_schema_object_id,
-                        schema_hash: bundled_hash,
-                    },
-                    CatalogueManifestOp::LensSeen {
-                        object_id: lens_object_id,
-                        source_hash: bundled_hash,
-                        target_hash: learned_hash,
-                    },
-                ],
-            )
-            .expect("append seeded client catalogue manifest ops");
+        let storage = runtime.into_storage();
         storage.flush();
         storage.close().expect("close seeded client storage");
 
@@ -1071,7 +1159,12 @@ fn parse_delay_ms(raw: &str) -> Option<Duration> {
 }
 
 fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
-    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
+    if !matches!(
+        payload,
+        SyncPayload::RowVersionCreated { .. }
+            | SyncPayload::RowVersionNeeded { .. }
+            | SyncPayload::RowVersionStateChanged { .. }
+    ) {
         return None;
     }
 

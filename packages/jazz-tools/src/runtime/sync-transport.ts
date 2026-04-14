@@ -13,27 +13,10 @@ export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   backendSecret?: string;
   adminSecret?: string;
   clientId?: string;
   pathPrefix?: string;
-}
-
-export interface LinkExternalAuth {
-  jwtToken: string;
-  localAuthMode: "anonymous" | "demo";
-  localAuthToken: string;
-  pathPrefix?: string;
-}
-
-export interface LinkExternalResponse {
-  app_id?: string;
-  principal_id: string;
-  issuer: string;
-  subject: string;
-  created: boolean;
 }
 
 /** Callbacks for stream events. */
@@ -48,7 +31,8 @@ export interface StreamCallbacks {
 
 export interface SyncStreamControllerOptions {
   logPrefix?: string;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "backendSecret">;
+  getSchemaHash?(): string | undefined;
   getClientId(): string;
   setClientId(clientId: string): void;
   onConnected(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
@@ -69,9 +53,12 @@ export interface RuntimeSyncTarget {
 export interface RuntimeSyncStreamControllerOptions {
   logPrefix?: string;
   getRuntime(): RuntimeSyncTarget | null | undefined;
-  getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
+  getAuth(): Pick<SyncAuth, "jwtToken" | "backendSecret">;
+  getSchemaHash?(): string | undefined;
   getClientId(): string;
   setClientId(clientId: string): void;
+  onConnected?(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
+  onDisconnected?(): void;
   onAuthFailure?(reason: AuthFailureReason): void;
 }
 
@@ -123,26 +110,6 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   }
 
   return false;
-}
-
-function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
-  const warning = payload?.SchemaWarning;
-  if (!warning) return;
-
-  const rowCount = warning.rowCount ?? warning.row_count ?? 0;
-  const tableName = warning.tableName ?? warning.table_name ?? "unknown";
-  const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
-  const shortHash = (hash: string) =>
-    typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
-
-  const sourceHash = shortHash(fromHash);
-  console.warn(
-    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
-      `To ensure data visibility and forward/backward compatibility, run ` +
-      `\`npx jazz-tools@alpha schema export --schema-hash ${sourceHash}\`. ` +
-      `Then generate a migration with ` +
-      `\`npx jazz-tools@alpha migrations create --fromHash ${sourceHash} --toHash <targetHash>\``,
-  );
 }
 
 export async function readSyncAuthError(response: Response): Promise<SyncAuthError | null> {
@@ -308,6 +275,10 @@ export class SyncStreamController {
       Accept: "application/octet-stream",
     };
     applySyncAuthHeaders(headers, this.options.getAuth());
+    const schemaHash = this.options.getSchemaHash?.();
+    if (schemaHash) {
+      headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
+    }
 
     const abortController = new AbortController();
     this.streamAbortController = abortController;
@@ -379,11 +350,17 @@ export function createRuntimeSyncStreamController(
   return new SyncStreamController({
     logPrefix: options.logPrefix,
     getAuth: options.getAuth,
+    getSchemaHash: options.getSchemaHash,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
-    onConnected: (catalogueStateHash, nextSyncSeq) =>
-      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq),
-    onDisconnected: () => options.getRuntime()?.removeServer(),
+    onConnected: (catalogueStateHash, nextSyncSeq) => {
+      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq);
+      options.onConnected?.(catalogueStateHash, nextSyncSeq);
+    },
+    onDisconnected: () => {
+      options.getRuntime()?.removeServer();
+      options.onDisconnected?.();
+    },
     onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
     onAuthFailure: options.onAuthFailure,
   });
@@ -566,19 +543,11 @@ export function buildEventsUrl(serverUrl: string, clientId: string, pathPrefix?:
 /**
  * Apply end-user auth headers with stable precedence.
  *
- * Precedence:
- * 1. Authorization bearer token
- * 2. Local anonymous/demo token headers
+ * Sets `Authorization: Bearer <token>` when a JWT is available.
  */
 export function applyUserAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
   if (auth.jwtToken) {
     headers["Authorization"] = `Bearer ${auth.jwtToken}`;
-    return;
-  }
-
-  if (auth.localAuthMode && auth.localAuthToken) {
-    headers["X-Jazz-Local-Mode"] = auth.localAuthMode;
-    headers["X-Jazz-Local-Token"] = auth.localAuthToken;
   }
 }
 
@@ -636,6 +605,13 @@ async function postSyncBatch(
 function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
   try {
     const parsed = JSON.parse(payloadJson) as {
+      CatalogueEntryUpdated?: {
+        entry?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
       ObjectUpdated?: {
         metadata?: {
           metadata?: {
@@ -644,7 +620,9 @@ function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null 
         };
       };
     };
-    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    const kind =
+      parsed.CatalogueEntryUpdated?.entry?.metadata?.type ??
+      parsed.ObjectUpdated?.metadata?.metadata?.type;
     return typeof kind === "string" ? kind : null;
   } catch {
     return null;
@@ -670,14 +648,18 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  const isSchemaCatalogue = isCatalogue && isStructuralSchemaCataloguePayload(payloadJson);
+  const catalogueType = catalogueObjectTypeFromPayloadJson(payloadJson);
+  const effectiveIsCatalogue = isCatalogue || catalogueType !== null;
+  const isSchemaCatalogue =
+    effectiveIsCatalogue &&
+    (catalogueType === "catalogue_schema" || isStructuralSchemaCataloguePayload(payloadJson));
 
-  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
+  if (effectiveIsCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (isCatalogue && auth.adminSecret) {
+  if (effectiveIsCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);
@@ -718,60 +700,6 @@ export async function sendSyncPayloadBatch(
     body,
     logPrefix,
   );
-}
-
-/**
- * Link a local anonymous/demo identity to an external JWT identity.
- *
- * This endpoint requires both auth forms on the same request:
- * - `Authorization: Bearer <jwt>`
- * - `X-Jazz-Local-Mode` + `X-Jazz-Local-Token`
- */
-export async function linkExternalIdentity(
-  serverUrl: string,
-  auth: LinkExternalAuth,
-  logPrefix = "",
-): Promise<LinkExternalResponse> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${auth.jwtToken}`,
-    "X-Jazz-Local-Mode": auth.localAuthMode,
-    "X-Jazz-Local-Token": auth.localAuthToken,
-  };
-
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(
-      buildEndpointUrl(serverUrl, "/auth/link-external", auth.pathPrefix),
-      {
-        method: "POST",
-        headers,
-      },
-      SYNC_FETCH_TIMEOUT_MS,
-    );
-  } catch (e) {
-    if ((e as { name?: string })?.name === "AbortError") {
-      console.error(`${logPrefix}Link external timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-      throw new Error(`${logPrefix}Link external failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
-    }
-    if (isExpectedFetchAbortError(e)) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`${logPrefix}Link external failed: ${msg}`);
-    }
-    console.error(`${logPrefix}Link external fetch error:`, e);
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`${logPrefix}Link external failed: ${msg}`);
-  }
-
-  if (!response.ok) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    const body = await response.text().catch(() => "");
-    const bodySuffix = body ? `: ${body}` : "";
-    throw new Error(
-      `${logPrefix}Link external failed: ${response.status}${statusText}${bodySuffix}`,
-    );
-  }
-
-  return (await response.json()) as LinkExternalResponse;
 }
 
 /**
@@ -823,7 +751,6 @@ export async function readBinaryFrames(
             event.next_sync_seq ?? null,
           );
         } else if (event.type === "SyncUpdate") {
-          logSchemaWarningPayload(event.payload, logPrefix);
           callbacks.onSyncMessage(JSON.stringify(event.payload), event.seq ?? null);
         }
       } catch (error) {

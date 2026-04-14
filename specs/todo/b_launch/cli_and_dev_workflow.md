@@ -22,7 +22,7 @@ The generated client file should live **inside the project** (not in `node_modul
 
 ## Related
 
-- `ts_client_codegen.md` — the codegen that `jazz dev` drives
+- `ts_client.md` — the typed client/app surface that `jazz dev` ultimately feeds
 - Schema lenses / migrations — `schema_manager.md`
 
 ## Additional CLI Commands

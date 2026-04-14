@@ -1,3 +1,2 @@
-- `NODE_ENV=production`: local modes are disabled unless you explicitly pass `--allow-anonymous` or `--allow-demo`
-- non-production (`development`, unset, etc.): local anonymous + demo are enabled by default
-- external auth requires `--jwks-url`
+- Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production
+- External auth requires `--jwks-url`, and TypeScript backends using `forRequest()` also need `jwksUrl` on `createJazzContext(...)`

@@ -1,3 +1,4 @@
+import jazzRn from "jazz-rn";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import { Db as RuntimeDb, type DbConfig as RuntimeDbConfig } from "../runtime/db.js";
@@ -40,8 +41,6 @@ export class Db extends RuntimeDb {
           env: this.nativeConfig.env,
           userBranch: this.nativeConfig.userBranch,
           jwtToken: this.nativeConfig.jwtToken,
-          localAuthMode: this.nativeConfig.localAuthMode,
-          localAuthToken: this.nativeConfig.localAuthToken,
           adminSecret: this.nativeConfig.adminSecret,
           tier,
           defaultDurabilityTier: "worker",
@@ -78,5 +77,13 @@ export class Db extends RuntimeDb {
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
+  if (config.auth) {
+    const jwtToken = jazzRn.jazz_rn.mintLocalFirstToken(
+      config.auth.localFirstSecret,
+      config.appId,
+      BigInt(3600),
+    );
+    return new Db({ ...config, jwtToken });
+  }
   return new Db(config);
 }

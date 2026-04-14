@@ -3,17 +3,24 @@
 mod support;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
+    AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
+    SchemaBuilder, TableSchema, Value,
 };
 use support::{TestingClient, has_updated, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+static HISTORY_CONFLICT_SUITE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn lock_history_conflict_suite() -> tokio::sync::MutexGuard<'static, ()> {
+    HISTORY_CONFLICT_SUITE_LOCK.lock().await
+}
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -43,6 +50,7 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 /// ```
 #[tokio::test]
 async fn concurrent_updates_resolve_to_lww_winner() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -165,6 +173,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 /// ```
 #[tokio::test]
 async fn concurrent_creates_both_survive() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -251,6 +260,7 @@ async fn concurrent_creates_both_survive() {
 /// ```
 #[tokio::test]
 async fn rapid_concurrent_updates_converge() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -375,6 +385,7 @@ async fn rapid_concurrent_updates_converge() {
 /// ```
 #[tokio::test]
 async fn fresh_client_sees_lww_winner_after_conflict() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -530,6 +541,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 /// ```
 #[tokio::test]
 async fn subscription_reflects_concurrent_update() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -598,10 +610,11 @@ async fn subscription_reflects_concurrent_update() {
 ///
 /// ```text
 /// alice: create → update "v1" → update "v2" → update "v3"
-/// bob: queries → sees "v3"
+///   bob: connected the whole time ─────────────────────────► sees "v3"
 /// ```
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -613,11 +626,35 @@ async fn sequential_updates_preserve_latest() {
         .connect()
         .await;
 
-    // Alice creates and updates 3 times
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-seq")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates, Bob sees the shared starting point, then Alice updates 3 times.
     let (todo_id, _) = alice
         .create("todos", todo_values("v0"))
         .await
         .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees v0",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1[0] == Value::Text("v0".to_string()))
+            .then_some(())
+        },
+    )
+    .await;
 
     for version in ["v1", "v2", "v3"] {
         alice
@@ -629,8 +666,7 @@ async fn sequential_updates_preserve_latest() {
             .expect("update");
     }
 
-    // Wait for alice to see v3 at EdgeServer
-    let query = QueryBuilder::new("todos").build();
+    // Both connected participants should converge on the last sequential write.
     wait_for_query(
         &alice,
         query.clone(),
@@ -640,15 +676,6 @@ async fn sequential_updates_preserve_latest() {
         |rows| (rows.len() == 1 && rows[0].1[0] == Value::Text("v3".to_string())).then_some(()),
     )
     .await;
-
-    // Bob connects fresh, must see v3
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-seq")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
 
     let bob_rows = wait_for_query(
         &bob,
@@ -683,6 +710,7 @@ async fn sequential_updates_preserve_latest() {
 /// ```
 #[tokio::test]
 async fn concurrent_edits_on_different_fields() {
+    let _suite_guard = lock_history_conflict_suite().await;
     let server = TestingServer::start().await;
     let schema = test_schema();
 
@@ -802,62 +830,34 @@ async fn concurrent_edits_on_different_fields() {
     server.shutdown().await;
 }
 
-/// Offline user (Bob) wins: his edit has the highest timestamp because he
-/// edits last — after Alice has already finished her online chain.
-///
-/// 1. Both online. Alice creates a todo, updates to v1. Bob syncs, sees v1.
-/// 2. Bob goes offline (shutdown — Fjall persists his state at v1).
-/// 3. Alice makes 3 more updates while Bob is offline (v2, v3, v4).
-/// 4. Bob reconnects without server, makes 1 local edit from stale v1.
-///    Bob's edit timestamp is higher than Alice's v4 because it happens last.
-/// 5. Bob reconnects to the server. Sync resolves the conflict.
-/// 6. Both see bob-offline-edit (bob's edit happened last → highest timestamp → LWW winner).
-///
-/// ```text
-///  online:   create → alice-v1 ──► bob syncs, sees v1
-///                                   │
-///                                   ▼ bob.shutdown() (goes offline)
-///
-///  alice (online):  v1 → alice-v2 → alice-v3 → alice-v4
-///  bob   (offline): v1 → bob-offline-edit (local Fjall only)
-///
-///                                   ▼ bob reconnects to server
-///
-///  DAG after sync:
-///     create → v1 → alice-v2 → alice-v3 → alice-v4  (tip, ts=latest)
-///     create → v1 → bob-offline-edit                  (tip, ts=earlier)
-///
-///  LWW winner: bob-offline-edit (higher timestamp — bob edited last)
-/// ```
-///
-/// KNOWN BUG: `queue_full_sync_to_server` only iterates the in-memory
-/// `ObjectManager`. On fresh connect, Fjall is opened but objects are
-/// lazy-loaded on demand — so bob's offline commit is never seen by the
-/// outbox and is never pushed to the server.  Fix: either eagerly load all
-/// Fjall objects before adding the server, or hook `get_or_load` to trigger
-/// a sync push for newly-loaded objects.
-#[tokio::test]
-#[ignore = "architectural gap: offline Fjall commits are not pushed on reconnect \
-            (queue_full_sync_to_server only iterates in-memory objects; \
-            get_or_load has no sync hook)"]
-async fn offline_user_wins_on_reconnect() {
+struct OfflineReconnectBaseline {
+    server: TestingServer,
+    alice: JazzClient,
+    bob: JazzClient,
+    bob_ctx: AppContext,
+    todo_id: ObjectId,
+    query: Query,
+}
+
+async fn establish_offline_reconnect_baseline(
+    alice_user_id: &str,
+    bob_user_id: &str,
+) -> OfflineReconnectBaseline {
     let server = TestingServer::start().await;
     let schema = test_schema();
-
-    // --- Phase 1: Both online. Alice creates + updates to v1. Bob sees v1. ---
 
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("alice-offline-test")
+        .with_user_id(alice_user_id)
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
 
-    let (mut bob_ctx, bob) = TestingClient::builder()
+    let (bob_ctx, bob) = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
-        .with_user_id("bob-offline-test")
+        .with_user_id(bob_user_id)
         .with_persistent_storage()
         .ready_on("todos", READY_TIMEOUT)
         .connect_with_context()
@@ -869,6 +869,21 @@ async fn offline_user_wins_on_reconnect() {
         .expect("alice creates todo");
 
     let query = QueryBuilder::new("todos").build();
+
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees created todo before alice-v1",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1[0] == Value::Text("create".to_string()))
+            .then_some(())
+        },
+    )
+    .await;
 
     alice
         .update(
@@ -893,11 +908,95 @@ async fn offline_user_wins_on_reconnect() {
     )
     .await;
 
-    // --- Phase 2: Bob goes offline. ---
+    OfflineReconnectBaseline {
+        server,
+        alice,
+        bob,
+        bob_ctx,
+        todo_id,
+        query,
+    }
+}
+
+/// Baseline for offline reconnect coverage: before any offline divergence,
+/// a persistent peer must first hydrate and persist the online `alice-v1`
+/// state that later reconnect tests rely on.
+///
+/// ```text
+/// alice (online): create → alice-v1
+/// bob   (online):           syncs to alice-v1
+/// bob.shutdown()
+/// bob   (offline reopen):   queries local Fjall/OPFS and still sees alice-v1
+/// ```
+#[tokio::test]
+async fn persistent_peer_reloads_synced_state_before_offline_editing() {
+    let _suite_guard = lock_history_conflict_suite().await;
+    let OfflineReconnectBaseline {
+        server,
+        alice,
+        bob,
+        mut bob_ctx,
+        query,
+        ..
+    } = establish_offline_reconnect_baseline("alice-offline-baseline", "bob-offline-baseline")
+        .await;
 
     bob.shutdown().await.expect("bob shutdown for offline");
 
-    // --- Phase 3: Alice makes 3 more updates while Bob is offline. ---
+    bob_ctx.server_url = String::new();
+    let bob_offline = JazzClient::connect(bob_ctx)
+        .await
+        .expect("bob reconnects offline");
+
+    let bob_rows = bob_offline
+        .query(query, None)
+        .await
+        .expect("bob offline query from persistent storage");
+    assert_eq!(bob_rows.len(), 1, "bob should have 1 persisted todo");
+    assert_eq!(
+        bob_rows[0].1[0],
+        Value::Text("alice-v1".to_string()),
+        "bob's persisted local state should reflect the last synced online version"
+    );
+
+    bob_offline
+        .shutdown()
+        .await
+        .expect("shutdown bob offline runtime");
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
+/// Focused offline reconnect replay scenario.
+///
+/// The online baseline (`alice-v1` syncing and persisting locally) is covered
+/// by `persistent_peer_reloads_synced_state_before_offline_editing`. This test
+/// then verifies the real reconnect behavior: Bob can make a stale local edit
+/// offline and still replay it after he rejoins the server.
+///
+/// ```text
+/// baseline: create → alice-v1 ──► bob syncs, persists v1 locally
+/// bob.shutdown()
+///
+/// alice (online):  v1 → alice-v2 → alice-v3 → alice-v4
+/// bob   (offline): v1 → bob-offline-edit
+///
+/// bob reconnects online
+/// both should converge to bob-offline-edit
+/// ```
+#[tokio::test]
+async fn offline_reconnect_replays_local_edit_after_rejoin() {
+    let _suite_guard = lock_history_conflict_suite().await;
+    let OfflineReconnectBaseline {
+        server,
+        alice,
+        bob,
+        mut bob_ctx,
+        todo_id,
+        query,
+    } = establish_offline_reconnect_baseline("alice-offline-replay", "bob-offline-replay").await;
+
+    bob.shutdown().await.expect("bob shutdown for offline");
 
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
@@ -921,14 +1020,11 @@ async fn offline_user_wins_on_reconnect() {
     )
     .await;
 
-    // --- Phase 4: Bob reconnects WITHOUT server, makes 1 local edit. ---
-
     bob_ctx.server_url = String::new();
     let bob_offline = JazzClient::connect(bob_ctx.clone())
         .await
         .expect("bob connects offline");
 
-    // Hydrate the object from Fjall into memory by querying first
     let bob_stale = bob_offline
         .query(query.clone(), None)
         .await
@@ -964,14 +1060,10 @@ async fn offline_user_wins_on_reconnect() {
 
     bob_offline.shutdown().await.expect("bob offline shutdown");
 
-    // --- Phase 5: Bob reconnects to the real server. ---
-
     bob_ctx.server_url = server.base_url();
     let bob_online = JazzClient::connect(bob_ctx)
         .await
         .expect("bob reconnects online");
-
-    // --- Phase 6: Both converge. Bob wins (his edit happened last → higher ts). ---
 
     let alice = Arc::new(alice);
     let bob_online = Arc::new(bob_online);
@@ -1025,7 +1117,8 @@ async fn offline_user_wins_on_reconnect() {
 ///
 /// Bob goes offline, makes one stale edit, then reconnects. But Alice has
 /// been online making further updates — so Alice's latest commit has a higher
-/// timestamp and wins.  Unlike `offline_user_wins_on_reconnect`, Alice's
+/// timestamp and wins. Unlike `offline_reconnect_replays_local_edit_after_rejoin`,
+/// Alice's
 /// commits are already on the server when Bob reconnects, so this scenario
 /// does not exercise the "push offline Fjall commits" path.
 ///
@@ -1047,57 +1140,15 @@ async fn offline_user_wins_on_reconnect() {
 /// ```
 #[tokio::test]
 async fn online_user_wins_on_reconnect() {
-    let server = TestingServer::start().await;
-    let schema = test_schema();
-
-    // --- Phase 1: Both online. Alice creates + updates to v1. Bob sees v1. ---
-
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice-alice-wins")
-        .ready_on("todos", READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let (mut bob_ctx, bob) = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob-alice-wins")
-        .with_persistent_storage()
-        .ready_on("todos", READY_TIMEOUT)
-        .connect_with_context()
-        .await;
-
-    let (todo_id, _) = alice
-        .create("todos", todo_values("create"))
-        .await
-        .expect("alice creates todo");
-
-    let query = QueryBuilder::new("todos").build();
-
-    alice
-        .update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("alice-v1".to_string()))],
-        )
-        .await
-        .expect("alice updates to v1");
-
-    wait_for_query(
-        &bob,
-        query.clone(),
-        Some(DurabilityTier::EdgeServer),
-        QUERY_TIMEOUT,
-        "bob sees alice-v1",
-        |rows| {
-            (rows.len() == 1
-                && rows[0].0 == todo_id
-                && rows[0].1[0] == Value::Text("alice-v1".to_string()))
-            .then_some(())
-        },
-    )
-    .await;
+    let _suite_guard = lock_history_conflict_suite().await;
+    let OfflineReconnectBaseline {
+        server,
+        alice,
+        bob,
+        mut bob_ctx,
+        todo_id,
+        query,
+    } = establish_offline_reconnect_baseline("alice-alice-wins", "bob-alice-wins").await;
 
     // --- Phase 2: Bob goes offline. ---
 

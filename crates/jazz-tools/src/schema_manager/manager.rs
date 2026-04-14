@@ -7,12 +7,15 @@
 //! - Integrated QueryManager for query/insert/update/delete operations
 //! - Catalogue persistence for schema/lens discovery via sync
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use blake3::Hasher;
 
+use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
@@ -20,9 +23,10 @@ use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+use crate::row_format::decode_row;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
@@ -107,6 +111,7 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    catalogue_publish_timestamps: HashMap<ObjectId, u64>,
     current_permissions_head: Option<PermissionsHeadState>,
     known_permissions_bundles: HashMap<ObjectId, PermissionsBundleState>,
     pending_permissions_head: Option<PermissionsHeadState>,
@@ -134,7 +139,6 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let schema = normalize_schema(schema);
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -152,6 +156,7 @@ impl SchemaManager {
             context,
             query_manager,
             app_id,
+            catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
             pending_permissions_head: None,
@@ -184,6 +189,7 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
+            catalogue_publish_timestamps: HashMap::new(),
             current_permissions_head: None,
             known_permissions_bundles: HashMap::new(),
             pending_permissions_head: None,
@@ -206,7 +212,7 @@ impl SchemaManager {
     ///
     /// Also creates indices for all env/user_branch combinations if known.
     pub fn add_known_schema(&mut self, schema: Schema) {
-        let schema = strip_schema_policies(&normalize_schema(schema));
+        let schema = strip_schema_policies(&schema);
         let hash = SchemaHash::compute(&schema);
 
         // Skip if already known
@@ -325,7 +331,7 @@ impl SchemaManager {
     ///
     /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
-        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
+        let old_schema = strip_schema_policies(&old_schema);
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
         if lens.is_draft() {
@@ -365,7 +371,7 @@ impl SchemaManager {
         old_schema: Schema,
         lens: Lens,
     ) -> Result<(), SchemaError> {
-        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
+        let old_schema = strip_schema_policies(&old_schema);
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
                 source: lens.source_hash,
@@ -539,6 +545,68 @@ impl SchemaManager {
             })
     }
 
+    pub fn connection_schema_diagnostics(
+        &self,
+        client_schema_hash: SchemaHash,
+    ) -> ConnectionSchemaDiagnostics {
+        let active_permissions_hash = self
+            .current_permissions_head
+            .map(|head| head.schema_hash)
+            .or_else(|| self.has_current_schema().then_some(self.current_hash()));
+        let reachable_hashes = self.non_draft_reachable_hashes(client_schema_hash);
+        let disconnected_permissions_schema_hash = active_permissions_hash
+            .filter(|permissions_hash| !reachable_hashes.contains(permissions_hash));
+
+        let mut unreachable_schema_hashes: Vec<_> = self
+            .known_schema_hashes()
+            .into_iter()
+            .filter(|hash| *hash != client_schema_hash)
+            .filter(|hash| !reachable_hashes.contains(hash))
+            .filter(|hash| Some(*hash) != disconnected_permissions_schema_hash)
+            .collect();
+        unreachable_schema_hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        ConnectionSchemaDiagnostics {
+            client_schema_hash,
+            disconnected_permissions_schema_hash,
+            unreachable_schema_hashes,
+        }
+    }
+
+    fn non_draft_reachable_hashes(&self, start_hash: SchemaHash) -> HashSet<SchemaHash> {
+        if !self.is_schema_known(&start_hash) {
+            return HashSet::new();
+        }
+
+        let mut reachable = HashSet::from([start_hash]);
+        let mut queue = VecDeque::from([start_hash]);
+
+        while let Some(current) = queue.pop_front() {
+            for (&(source_hash, target_hash), lens) in &self.context.lenses {
+                if lens.is_draft() {
+                    continue;
+                }
+
+                let next_hash = if source_hash == current {
+                    Some(target_hash)
+                } else if target_hash == current {
+                    Some(source_hash)
+                } else {
+                    None
+                };
+
+                if let Some(next_hash) = next_hash
+                    && self.is_schema_known(&next_hash)
+                    && reachable.insert(next_hash)
+                {
+                    queue.push_back(next_hash);
+                }
+            }
+        }
+
+        reachable
+    }
+
     // =========================================================================
     // Multi-Schema Query Support
     // =========================================================================
@@ -601,12 +669,10 @@ impl SchemaManager {
 
     /// Return the timestamp when a schema was published.
     ///
-    /// If the schema was published multiple times, returns the most recent timestamp.
-    /// If the schema has not been published, returns `None`.
+    /// Tracks the most recent publish timestamp observed by this manager.
     pub fn schema_published_at(&self, schema_hash: &SchemaHash) -> Option<u64> {
         let object_id = schema_hash.to_object_id();
-        self.query_manager
-            .load_object_commit_timestamp_on_branch(object_id, "main")
+        self.catalogue_publish_timestamps.get(&object_id).copied()
     }
 
     // =========================================================================
@@ -619,17 +685,34 @@ impl SchemaManager {
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
-    ) {
+    ) -> bool {
         if latest_catalogue_content_matches(storage, object_id, &content) {
-            self.query_manager
-                .sync_manager_mut()
-                .load_catalogue_object_from_storage(storage, object_id, &metadata);
-            return;
+            return false;
         }
 
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
+        true
+    }
+
+    pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
+        let schema_hash = self.context.current_hash;
+        let object_id = schema_hash.to_object_id();
+        let metadata = self.schema_metadata(&schema_hash);
+        let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
+
+        self.persist_catalogue_object_if_changed(storage, object_id, metadata, content)
     }
 
     /// Persist the current schema to the catalogue as an Object.
@@ -645,9 +728,19 @@ impl SchemaManager {
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
         let metadata = self.schema_metadata(&schema_hash);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -666,9 +759,19 @@ impl SchemaManager {
         let content = encode_schema(&schema);
 
         let metadata = self.schema_metadata(&schema_hash);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -685,9 +788,19 @@ impl SchemaManager {
         let content = encode_lens_transform(&lens.forward);
 
         let metadata = self.lens_metadata(lens);
+        let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(object_id, timestamp);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -705,13 +818,18 @@ impl SchemaManager {
             bundle.parent_bundle_object_id,
             &bundle.permissions,
         );
+        let bundle_timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        self.catalogue_publish_timestamps
+            .insert(head.bundle_object_id, bundle_timestamp);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(
+            .upsert_catalogue_entry(
                 storage,
-                head.bundle_object_id,
-                bundle_metadata,
-                bundle_content,
+                CatalogueEntry {
+                    object_id: head.bundle_object_id,
+                    metadata: bundle_metadata,
+                    content: bundle_content,
+                },
             );
 
         let head_content = encode_permissions_head(
@@ -785,36 +903,6 @@ impl SchemaManager {
         self.register_lens(lens.clone())?;
         self.activate_pending_and_sync_to_query_manager();
         Ok(self.persist_lens(storage, lens))
-    }
-
-    /// Materialize known schema/lens catalogue objects into object storage for sync replay.
-    ///
-    /// Rehydration restores schema/lens knowledge into memory, but downstream sync replay
-    /// needs the corresponding catalogue objects present in ObjectManager.
-    pub fn materialize_catalogue_objects<H: Storage>(&mut self, storage: &mut H) {
-        let current_hash = self.context.current_hash;
-        let historical_schemas: Vec<Schema> = self
-            .known_schemas
-            .iter()
-            .filter_map(|(hash, schema)| {
-                if *hash == current_hash {
-                    None
-                } else {
-                    Some(schema.clone())
-                }
-            })
-            .collect();
-
-        for schema in historical_schemas {
-            self.persist_schema_object(storage, &schema);
-        }
-
-        let lenses: Vec<Lens> = self.context.lenses.values().cloned().collect();
-        for lens in lenses {
-            self.persist_lens(storage, &lens);
-        }
-
-        self.persist_current_permissions(storage);
     }
 
     /// Build metadata for a schema catalogue object.
@@ -1352,6 +1440,7 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let aligned_values = self.get_insert_values_with_defaults(table, values)?;
         self.query_manager.insert_on_branch_with_write_context(
             storage,
@@ -1382,6 +1471,7 @@ impl SchemaManager {
         values: &[(String, Value)],
         write_context: Option<&WriteContext>,
     ) -> Result<crate::commit::CommitId, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
@@ -1455,6 +1545,7 @@ impl SchemaManager {
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
@@ -1524,7 +1615,8 @@ impl SchemaManager {
         self.activate_pending_and_sync_to_query_manager();
 
         // Retry any pending row updates that might now be processable
-        self.query_manager.retry_pending_row_updates(storage);
+        self.query_manager
+            .retry_pending_row_visibility_changes(storage);
     }
 }
 
@@ -1594,23 +1686,9 @@ fn strip_schema_policies(schema: &Schema) -> Schema {
         })
         .collect()
 }
-fn normalize_schema(mut schema: Schema) -> Schema {
-    for table_schema in schema.values_mut() {
-        normalize_table_schema(table_schema);
-    }
-    schema
-}
-
 fn hash_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-}
-
-fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableSchema) {
-    table_schema
-        .columns
-        .columns
-        .sort_unstable_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 }
 
 /// Parse a hex-encoded SchemaHash string.
@@ -1686,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_manager_new_normalizes_table_columns_by_name() {
+    fn schema_manager_new_preserves_declared_table_column_order() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1707,11 +1785,11 @@ mod tests {
             .map(|column| column.name_str())
             .collect();
 
-        assert_eq!(column_names, vec!["email", "id", "name"]);
+        assert_eq!(column_names, vec!["name", "id", "email"]);
     }
 
     #[test]
-    fn schema_manager_new_hashes_equivalent_column_orderings_identically() {
+    fn schema_manager_new_hashes_reordered_schemas_differently() {
         let schema_a = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1734,7 +1812,7 @@ mod tests {
         let manager_b =
             SchemaManager::new(SyncManager::new(), schema_b, test_app_id(), "dev", "main").unwrap();
 
-        assert_eq!(manager_a.current_hash(), manager_b.current_hash());
+        assert_ne!(manager_a.current_hash(), manager_b.current_hash());
     }
 
     #[test]
@@ -1947,6 +2025,84 @@ mod tests {
     }
 
     #[test]
+    fn connection_schema_diagnostics_treat_unknown_client_schema_as_disconnected() {
+        let schema = make_schema_v2();
+        let current_hash = SchemaHash::compute(&schema);
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let diagnostics = manager.connection_schema_diagnostics(SchemaHash::from_bytes([7; 32]));
+
+        assert_eq!(
+            diagnostics.client_schema_hash,
+            SchemaHash::from_bytes([7; 32])
+        );
+        assert_eq!(
+            diagnostics.disconnected_permissions_schema_hash,
+            Some(current_hash)
+        );
+        assert!(diagnostics.unreachable_schema_hashes.is_empty());
+    }
+
+    #[test]
+    fn connection_schema_diagnostics_reports_other_unreachable_server_schemas() {
+        let v1 = make_schema_v1();
+        let v2 = make_schema_v2();
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text)
+                    .nullable_column("nickname", ColumnType::Text),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        manager.add_live_schema(v1).unwrap();
+        manager.add_known_schema(v3);
+
+        let diagnostics = manager.connection_schema_diagnostics(v1_hash);
+
+        assert_eq!(diagnostics.disconnected_permissions_schema_hash, None);
+        assert_eq!(diagnostics.unreachable_schema_hashes, vec![v3_hash]);
+    }
+
+    #[test]
+    fn connection_schema_diagnostics_ignore_draft_lenses() {
+        let v1 = make_schema_v1();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let draft_lens = generate_lens(&v1, &v2);
+
+        assert!(draft_lens.is_draft());
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        manager.add_known_schema(v1);
+        manager.context.register_lens(draft_lens);
+
+        let diagnostics = manager.connection_schema_diagnostics(v1_hash);
+
+        assert_eq!(
+            diagnostics.disconnected_permissions_schema_hash,
+            Some(v2_hash)
+        );
+        assert!(diagnostics.unreachable_schema_hashes.is_empty());
+    }
+
+    #[test]
     fn permissions_head_waits_for_bundle_then_applies() {
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
@@ -2010,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_catalogue_objects_does_not_append_duplicate_permissions_head_commit() {
+    fn repersisting_rehydrated_permissions_keeps_unchanged_entries_stable() {
         let app_id = test_app_id();
         let schema = make_schema_v2();
         let schema_hash = SchemaHash::compute(&schema);
@@ -2029,35 +2185,54 @@ mod tests {
         previous_run.process(&mut storage);
 
         let head_object_id = SchemaManager::permissions_head_object_id_for(app_id);
-        let branch = crate::object::BranchName::new("main");
-        let commit_count_before = storage
-            .load_branch(head_object_id, &branch)
-            .expect("head branch should load")
-            .expect("head branch should exist")
-            .commits
-            .len();
-        assert_eq!(commit_count_before, 1);
+        let head_entry_before = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load")
+            .expect("head entry should exist");
+        let bundle_entry_before = storage
+            .load_catalogue_entry(
+                previous_run
+                    .current_permissions_head
+                    .expect("permissions head should exist")
+                    .bundle_object_id,
+            )
+            .expect("bundle entry should load")
+            .expect("bundle entry should exist");
 
         let mut restarted =
             SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-        crate::schema_manager::rehydrate_schema_manager_from_manifest(
+        crate::schema_manager::rehydrate_schema_manager_from_catalogue(
             &mut restarted,
             &storage,
             app_id,
         )
         .expect("rehydrate should succeed");
 
-        restarted.materialize_catalogue_objects(&mut storage);
+        let republished_head_object_id = restarted
+            .persist_current_permissions(&mut storage)
+            .expect("rehydrated permissions should republish");
+        assert_eq!(republished_head_object_id, head_object_id);
 
-        let commit_count_after = storage
-            .load_branch(head_object_id, &branch)
-            .expect("head branch should load after materialize")
-            .expect("head branch should still exist")
-            .commits
-            .len();
+        let head_entry_after = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load after materialize")
+            .expect("head entry should still exist");
+        let bundle_entry_after = storage
+            .load_catalogue_entry(
+                restarted
+                    .current_permissions_head
+                    .expect("rehydrated permissions head should exist")
+                    .bundle_object_id,
+            )
+            .expect("bundle entry should load after materialize")
+            .expect("bundle entry should still exist");
         assert_eq!(
-            commit_count_after, commit_count_before,
-            "materializing unchanged permissions head should not append a duplicate commit"
+            head_entry_after, head_entry_before,
+            "materializing unchanged permissions head should not rewrite the stored head entry"
+        );
+        assert_eq!(
+            bundle_entry_after, bundle_entry_before,
+            "materializing unchanged permissions head should not rewrite the stored bundle entry"
         );
     }
 
@@ -2206,7 +2381,7 @@ mod tests {
         manager.process(&mut storage);
         let stored = manager
             .query_manager_mut()
-            .get_row(handle.row_id)
+            .get_row(&storage, handle.row_id)
             .expect("inserted row should be readable")
             .1;
 

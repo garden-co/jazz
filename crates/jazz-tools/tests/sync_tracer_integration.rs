@@ -23,8 +23,8 @@ fn test_schema() -> jazz_tools::Schema {
 /// Alice creates a todo, bob sees it. The tracer captures the full flow.
 ///
 /// ```text
-/// alice ──ObjectUpdated──► server ──ObjectUpdated──► bob
-///       ◄──PersistenceAck──
+/// alice ──RowVersionCreated────► server ──RowVersionNeeded────► bob
+///       ◄──RowVersionStateChanged──
 /// ```
 #[tokio::test]
 async fn alice_write_bob_read() {
@@ -78,14 +78,14 @@ async fn alice_write_bob_read() {
     .await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : ObjectUpdated (1)
-    alice    => server  : ObjectUpdated (1)
+    alice    -> server  : RowVersionCreated (1)
+    alice    => server  : RowVersionCreated (1)
     bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
     bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
-    server   -> alice   : PersistenceAck (2)
-    server   -> bob     : ObjectUpdated (1), QuerySettled (2)
-    server   => alice   : PersistenceAck (2)
-    server   => bob     : ObjectUpdated (1), QuerySettled (2)
+    server   -> alice   : RowVersionStateChanged (2)
+    server   -> bob     : QuerySettled (1), RowVersionNeeded (1)
+    server   => alice   : RowVersionStateChanged (2)
+    server   => bob     : QuerySettled (1), RowVersionNeeded (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -178,41 +178,40 @@ async fn bob_updates_alice_todo() {
 
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
-    // Assert message flow shape (types present, not exact counts — the server
-    // may batch ObjectUpdated messages non-deterministically).
+    // Assert message flow shape (types present, not exact counts).
     tracer.expect_contains(
         "
         alice    -> server   QuerySubscription
-        server   -> alice    ObjectUpdated
+        server   -> alice    RowVersionNeeded
         server   -> alice    QuerySettled
     ",
     );
     tracer.expect_contains(
         "
-        bob      -> server   ObjectUpdated
-        server   -> bob      PersistenceAck
+        bob      -> server   RowVersionCreated
+        server   -> bob      RowVersionStateChanged
     ",
     );
 
-    // Bob sent an ObjectUpdated to server
+    // Bob sent a row update to the server.
     let bob_sent = tracer.from("bob");
     assert!(
         bob_sent.iter().any(|m| m.is_object_updated()),
-        "bob should have sent ObjectUpdated"
+        "bob should have sent a row update"
     );
 
-    // Alice received at least one ObjectUpdated from server
+    // Alice received at least one row update from server.
     let alice_recv = tracer.to("alice");
     assert!(
         alice_recv.iter().any(|m| m.is_object_updated()),
-        "alice should have received ObjectUpdated from server"
+        "alice should have received a row update from server"
     );
 
-    // Bob received PersistenceAck from server
+    // Bob received a durability-state update from server.
     let bob_recv = tracer.to("bob");
     assert!(
         bob_recv.iter().any(|m| m.is_persistence_ack()),
-        "bob should have received PersistenceAck"
+        "bob should have received a row state update"
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -220,7 +219,7 @@ async fn bob_updates_alice_todo() {
     server.shutdown().await;
 }
 
-/// Single-writer flow: alice writes, server acks.
+/// Single-writer flow: alice writes, server confirms durability.
 #[tokio::test]
 async fn single_writer_flow() {
     let tracer = SyncTracer::new();
@@ -255,10 +254,10 @@ async fn single_writer_flow() {
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : ObjectUpdated (1), QueryUnsubscription (1)
-    alice    => server  : ObjectUpdated (1)
-    server   -> alice   : PersistenceAck (2)
-    server   => alice   : PersistenceAck (2)
+    alice    -> server  : QueryUnsubscription (1), RowVersionCreated (1)
+    alice    => server  : RowVersionCreated (1)
+    server   -> alice   : RowVersionStateChanged (2)
+    server   => alice   : RowVersionStateChanged (2)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -305,13 +304,13 @@ async fn named_object_trace() {
 
     insta::assert_snapshot!(tracer.trace_normalized(), @"
     # => sent, -> received
-    alice    => server    ObjectUpdated        obj:my-todo branch:main commits:[C1]
-    alice    -> server    ObjectUpdated        obj:my-todo branch:main commits:[C1]
     alice    -> server    QueryUnsubscription  query:0
-    server   => alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:EdgeServer
-    server   -> alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:EdgeServer
-    server   => alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:GlobalServer
-    server   -> alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:GlobalServer
+    alice    => server    RowVersionCreated    created row:my-todo branch:main version:C1
+    alice    -> server    RowVersionCreated    created row:my-todo branch:main version:C1
+    server   => alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
+    server   -> alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
+    server   => alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
+    server   -> alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

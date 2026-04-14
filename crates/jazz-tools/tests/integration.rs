@@ -15,6 +15,11 @@ use jazz_tools::jazz_transport::ServerEvent;
 use reqwest::Client;
 use tempfile::TempDir;
 
+fn mint_test_token(audience: &str) -> String {
+    let seed = [42u8; 32];
+    jazz_tools::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+}
+
 /// Test server handle - kills process on drop.
 struct TestServer {
     process: Child,
@@ -54,7 +59,7 @@ impl TestServer {
                 )
             });
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             data_dir,
@@ -95,7 +100,7 @@ impl TestServer {
                 )
             });
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             data_dir,
@@ -129,22 +134,25 @@ impl TestServer {
         );
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let client = Client::new();
         let url = format!("{}/health", self.base_url());
 
-        for i in 0..50 {
+        for i in 0..200 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!("jazz-tools server exited before becoming ready: {status}");
+            }
             match client.get(&url).send().await {
                 Ok(_) => return,
                 Err(e) => {
-                    if i == 49 {
+                    if i == 199 {
                         eprintln!("Last error: {:?}", e);
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("Server failed to become ready within 5 seconds");
+        panic!("Server failed to become ready within 20 seconds");
     }
 }
 
@@ -231,8 +239,13 @@ async fn test_stream_connection_receives_connected_event() {
     // Connect to events endpoint with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-test-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");
@@ -276,8 +289,13 @@ async fn test_stream_heartbeat() {
 
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-heartbeat-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");
@@ -310,8 +328,13 @@ async fn test_sync_payload_broadcast_to_stream_client() {
     // Connect to binary stream with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-broadcast-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");
