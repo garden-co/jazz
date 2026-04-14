@@ -79,6 +79,10 @@
       "react-native": "./dist/expo/auth-secret-store.js",
       "default": "./dist/expo/auth-secret-store.js"
     },
+    "./passphrase": {
+      "types": "./dist/passphrase.d.ts",
+      "default": "./dist/passphrase.js"
+    },
     "./passkey-backup": {
       "types": "./dist/passkey-backup.d.ts",
       "default": "./dist/passkey-backup.js"
@@ -102,6 +106,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
     "jazz-rn": "workspace:*",
