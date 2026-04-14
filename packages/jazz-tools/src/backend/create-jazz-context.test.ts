@@ -6,7 +6,6 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
-  const resolveLocalAuthDefaults = vi.fn();
   const resolveRequestSession = vi.fn();
   const runtimeCtor = vi.fn();
   const inMemoryRuntimeCtor = vi.fn();
@@ -79,7 +78,6 @@ const mocks = vi.hoisted(() => {
   return {
     MockNapiRuntime,
     MockJazzClient,
-    resolveLocalAuthDefaults,
     resolveRequestSession,
     runtimeCtor,
     inMemoryRuntimeCtor,
@@ -89,7 +87,6 @@ const mocks = vi.hoisted(() => {
     createDbFromClient,
     createdDbs,
     reset() {
-      resolveLocalAuthDefaults.mockReset();
       resolveRequestSession.mockReset();
       runtimeCtor.mockReset();
       inMemoryRuntimeCtor.mockReset();
@@ -113,10 +110,6 @@ vi.mock("../runtime/client.js", async () => {
     JazzClient: mocks.MockJazzClient,
   };
 });
-
-vi.mock("../runtime/local-auth.js", () => ({
-  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
-}));
 
 vi.mock("./request-auth.js", () => ({
   resolveRequestSession: mocks.resolveRequestSession,
@@ -194,7 +187,6 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
-    mocks.resolveLocalAuthDefaults.mockImplementation((config) => config);
     mocks.resolveRequestSession.mockResolvedValue({
       user_id: "u1",
       claims: {},

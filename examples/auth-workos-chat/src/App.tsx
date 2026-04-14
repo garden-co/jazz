@@ -1,7 +1,7 @@
 import * as React from "react";
 import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
+import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
+import { JazzProvider, useDb } from "jazz-tools/react";
 import {
   ANNOUNCEMENTS_CHAT_ID,
   CHAT_ID,
@@ -97,10 +97,7 @@ function JazzApp() {
   const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
   const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(false);
-  const localAuth = React.useMemo(
-    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
-    [],
-  );
+  const localFirstSecret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
 
   React.useEffect(() => {
     let cancelled = false;
@@ -149,14 +146,11 @@ function JazzApp() {
 
     return {
       ...sharedConfig,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
+      auth: { localFirstSecret },
     };
-  }, [initialJwtToken, localAuth.localAuthMode, localAuth.localAuthToken]);
+  }, [initialJwtToken, localFirstSecret]);
 
-  const providerKey = initialJwtToken
-    ? "external"
-    : `local:${localAuth.localAuthMode}:${localAuth.localAuthToken}`;
+  const providerKey = initialJwtToken ? "external" : `local:${localFirstSecret}`;
 
   if (isLoading || tokenPending) {
     return <p className="loading-state">Connecting to WorkOS...</p>;

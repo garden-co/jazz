@@ -39,16 +39,3 @@ describe("getLocalFirstIdentityProof", () => {
     await db.shutdown();
   });
 });
-
-describe("resolveLocalAuthDefaults with auth", () => {
-  it("skips local auth defaults when auth is set", async () => {
-    const { resolveLocalAuthDefaults } = await import("./local-auth.js");
-    const config = {
-      appId: "test-app",
-      auth: { localFirstSecret: "test-seed" },
-    };
-    const result = resolveLocalAuthDefaults(config);
-    expect(result.localAuthMode).toBeUndefined();
-    expect(result.localAuthToken).toBeUndefined();
-  });
-});

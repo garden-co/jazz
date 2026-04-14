@@ -37,8 +37,6 @@ import {
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
-import { resolveLocalAuthDefaults } from "./local-auth.js";
-
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
@@ -78,19 +76,6 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
-  /**
-   * Local auth mode for client-generated identities.
-   *
-   * Browser clients default to `"anonymous"` when no other auth is configured.
-   */
-  localAuthMode?: "anonymous" | "demo";
-  /**
-   * Client-generated auth token for anonymous/demo identity.
-   *
-   * If omitted while local auth is active in browser, Jazz generates and
-   * persists a per-app device token in localStorage.
-   */
-  localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -469,8 +454,6 @@ export class Db {
 
     this.workerBridge?.updateAuth({
       jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
     });
 
     return true;
@@ -578,8 +561,6 @@ export class Db {
           env: this.config.env,
           userBranch: this.config.userBranch,
           jwtToken: this.config.jwtToken,
-          localAuthMode: this.config.localAuthMode,
-          localAuthToken: this.config.localAuthToken,
           adminSecret: this.config.adminSecret,
           tier: this.worker ? undefined : "worker",
           // Keep worker-bridged browser clients on worker durability by default.
@@ -670,8 +651,6 @@ export class Db {
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
       runtimeSources: this.config.runtimeSources,
       logLevel: this.config.logLevel,
@@ -1234,7 +1213,7 @@ export class Db {
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
    * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
-   * localStorage-based auth or synthetic-user state.
+   * localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
@@ -1785,7 +1764,6 @@ export async function createDb(config: DbConfig): Promise<Db> {
     resolvedConfig = { ...resolvedConfig, jwtToken };
   }
 
-  resolvedConfig = resolveLocalAuthDefaults(resolvedConfig);
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
   if (driver.type === "memory" && !resolvedConfig.serverUrl) {
@@ -1812,5 +1790,5 @@ export function createDbFromClient(
   session?: Session,
   attribution?: string,
 ): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
+  return new ClientBackedDb(config, client, session, attribution);
 }

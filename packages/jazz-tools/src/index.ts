@@ -194,23 +194,3 @@ export * from "./runtime/index.js";
 // Permissions DSL
 export * from "./permissions/index.js";
 export * from "./dev-tools/index.js";
-
-// Local synthetic users and vanilla switcher UI
-export {
-  createSyntheticUserProfile,
-  getActiveSyntheticAuth,
-  loadSyntheticUserStore,
-  saveSyntheticUserStore,
-  setActiveSyntheticProfile,
-  syntheticUserStorageKey,
-  type ActiveSyntheticAuth,
-  type StorageLike,
-  type SyntheticUserProfile,
-  type SyntheticUserStorageOptions,
-  type SyntheticUserStore,
-} from "./synthetic-users.js";
-export {
-  createSyntheticUserSwitcher,
-  type SyntheticUserSwitcherHandle,
-  type SyntheticUserSwitcherOptions,
-} from "./synthetic-user-switcher.js";

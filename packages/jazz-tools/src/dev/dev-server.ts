@@ -24,8 +24,6 @@ export interface StartLocalJazzServerOptions {
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
-  allowAnonymous?: boolean;
-  allowDemo?: boolean;
   backendSecret?: string;
   adminSecret?: string;
   allowLocalFirstAuth?: boolean;
@@ -108,8 +106,6 @@ export async function startLocalJazzServer(
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
-      allowAnonymous: options.allowAnonymous,
-      allowDemo: options.allowDemo,
       backendSecret: options.backendSecret,
       adminSecret: options.adminSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,

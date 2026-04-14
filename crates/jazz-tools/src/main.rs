@@ -78,18 +78,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
 
-        /// Enable anonymous local auth (X-Jazz-Local-Mode: anonymous).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_ANONYMOUS")]
-        allow_anonymous: bool,
-
-        /// Enable demo local auth (X-Jazz-Local-Mode: demo).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_DEMO")]
-        allow_demo: bool,
-
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
         /// Required in NODE_ENV=production.
@@ -147,8 +135,6 @@ async fn main() {
             data_dir,
             in_memory,
             jwks_url,
-            allow_anonymous,
-            allow_demo,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
@@ -157,15 +143,11 @@ async fn main() {
             catalogue_authority_admin_secret,
         } => {
             let node_env_mode = resolve_node_env_mode();
-            let allow_anonymous = resolve_dev_default_flag(node_env_mode, allow_anonymous);
-            let allow_demo = resolve_dev_default_flag(node_env_mode, allow_demo);
             let allow_local_first_auth =
                 resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
 
             let auth_config = AuthConfig {
                 jwks_url,
-                allow_anonymous,
-                allow_demo,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,

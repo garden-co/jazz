@@ -275,51 +275,6 @@ body {
   gap: 8px;
 }
 
-/* ─── Change 3: SyntheticUserSwitcher styling ─── */
-.control-bar label {
-  font-size: 0;
-  line-height: 0;
-  display: inline-flex;
-  align-items: center;
-}
-
-.control-bar select {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 4px 24px 4px 8px;
-  cursor: pointer;
-  outline: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a09da6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  transition:
-    border-color var(--duration-fast) var(--ease-smooth),
-    box-shadow var(--duration-fast) var(--ease-smooth);
-}
-
-.control-bar select:hover {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 8px rgba(255, 45, 123, 0.15);
-}
-
-.control-bar select:focus {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 2px rgba(255, 45, 123, 0.2);
-}
-
-/* Hide Add / Remove buttons from SyntheticUserSwitcher */
-.control-bar label + button,
-.control-bar label ~ button:not(.btn-auth) {
-  display: none;
-}
-
 /* ─── Public label with live dot ─── */
 .public-label {
   font-family: var(--font-mono);

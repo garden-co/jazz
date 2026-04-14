@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { Toaster } from "../../src/components/ui/sonner.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
 
@@ -86,6 +87,7 @@ describe("Upload E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());

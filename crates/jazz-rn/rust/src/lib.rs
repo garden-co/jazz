@@ -984,3 +984,27 @@ pub fn generate_id() -> String {
 pub fn current_timestamp_ms() -> i64 {
     binding_current_timestamp_ms()
 }
+
+/// Mint a local-first JWT from a base64url-encoded 32-byte seed.
+///
+/// Returns a signed JWT that can be used as a bearer token for local-first auth.
+/// `audience` should be the app ID (UUID) or a human-readable app name.
+/// `ttl_seconds` controls token lifetime (e.g. 3600 for one hour).
+#[uniffi::export]
+pub fn mint_local_first_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: i64,
+) -> Result<String, JazzRnError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&seed_b64)
+        .map_err(|e| JazzRnError::Internal {
+            message: format!("invalid base64 seed: {e}"),
+        })?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| JazzRnError::Internal {
+        message: "seed must be exactly 32 bytes".to_string(),
+    })?;
+    jazz_tools::identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
+        .map_err(|e| JazzRnError::Internal { message: e })
+}

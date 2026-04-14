@@ -19,7 +19,7 @@ Call `db.deleteClientStorage()` to delete the local OPFS database for the curren
 - Browser worker-backed `Db` only.
 - Must be called from the leader tab; otherwise it logs an error and returns without deleting. Close other tabs first.
 - Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
-- Does not clear `localStorage` auth/synthetic-user data.
+- Does not clear `localStorage` local-first auth data.
 - Reopens a clean worker runtime, so the same `db` instance remains usable.
 
 This is useful when iterating on your schema during development.

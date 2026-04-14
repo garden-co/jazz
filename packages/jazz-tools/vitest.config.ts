@@ -44,6 +44,10 @@ export default defineConfig({
       // Node-side Vitest runs should not load the real RN native bridge package.
       // Stubbing jazz-rn keeps Vite 8 from traversing React Native and UniFFI internals.
       "jazz-rn": jazzRnVitestStub,
+      "expo-crypto": fileURLToPath(new URL("./test-support/expo-crypto-stub.ts", import.meta.url)),
+      "expo-secure-store": fileURLToPath(
+        new URL("./test-support/expo-secure-store-stub.ts", import.meta.url),
+      ),
     },
   },
   test: {

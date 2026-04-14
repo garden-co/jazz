@@ -8,7 +8,7 @@ What it demonstrates:
 - Pointing the Jazz sync server at WorkOS's hosted JWKS endpoint — no local auth server needed
 - Calling `getAccessToken()` from the AuthKit hook and passing the WorkOS access token directly to `JazzProvider`
 - Recreating `JazzProvider` on login and logout, while reserving `db.updateAuthToken(...)` for same-user JWT refresh after auth expiry
-- Falling back to anonymous `localAuth` when no WorkOS session exists
+- Falling back to local-first auth when no WorkOS session exists
 - Role-based UI gating derived from JWT claims (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `permissions.ts`
 
 There is no local auth server in this example. WorkOS issues and signs all tokens;
@@ -108,12 +108,12 @@ React.useEffect(() => {
 ```
 
 Once the token is available, `JazzProvider` is mounted in JWT mode. When the user signs out,
-`signOut` ends the WorkOS session and Jazz is recreated in anonymous mode.
+`signOut` ends the WorkOS session and Jazz is recreated in local-first mode.
 
 ```tsx
 const config: DbConfig = initialJwtToken
   ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
-  : { appId, ...getActiveSyntheticAuth(appId, { defaultMode: "anonymous" }), ... };
+  : { appId, auth: { localFirstSecret }, serverUrl, ... };
 
 <JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
   <ChatShell user={user} onSignIn={signIn} onSignOut={signOut} />
