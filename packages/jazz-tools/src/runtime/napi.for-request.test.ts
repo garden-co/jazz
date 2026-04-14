@@ -108,6 +108,37 @@ async function createTestContext(
   return context;
 }
 
+/**
+ * Full concurrent-test environment: server, context, alice+bob identities,
+ * and pre-opened Db handles for both users.  Registers all cleanup via
+ * `onTestFinished`; callers need no teardown boilerplate.
+ */
+async function createConcurrentTestEnv() {
+  const appId = randomUUID();
+  const backendSecret = "napi-concurrent-backend-secret";
+  const adminSecret = "napi-concurrent-admin-secret";
+  const scopeTag = `concurrent-scope-${randomUUID()}`;
+
+  const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+  const context = await createTestContext(server, appId, backendSecret, adminSecret);
+
+  onTestFinished(async () => {
+    await server.stop();
+  });
+
+  const [alice, bob] = await Promise.all([
+    createLocalFirstIdentity("alice", appId),
+    createLocalFirstIdentity("bob", appId),
+  ]);
+
+  const [aliceDb, bobDb] = await Promise.all([
+    context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
+    context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
+  ]);
+
+  return { context, appId, alice, bob, aliceDb, bobDb, scopeTag };
+}
+
 // ---------------------------------------------------------------------------
 // Standalone (non-concurrent) forRequest scenarios
 // ---------------------------------------------------------------------------
@@ -216,16 +247,43 @@ describe("forRequest auth and policy", () => {
   });
 
   /**
+   * A garbage bearer token is rejected before any DB interaction occurs.
+   *
+   *   forRequest({ authorization: "Bearer not-a-valid-jwt" }) ──► REJECT
+   */
+  it("rejects a malformed bearer token", async () => {
+    const appId = randomUUID();
+    const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-bad-token-"));
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app: todoApp,
+      permissions: todoAppPermissions,
+      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+    });
+
+    onTestFinished(async () => {
+      await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    });
+
+    await expect(
+      context.forRequest({ headers: { authorization: "Bearer not-a-valid-jwt" } }),
+    ).rejects.toThrow();
+  });
+
+  /**
    * Two contexts share the same server. One writes rows for alice, bob, and
    * carol as backend. The other reads back through backend, forSession, and
-   * forRequest — verifying that backend sees everything while user-scoped
-   * handles each see only their own rows.
+   * forRequest — verifying that backend sees everything while each user-scoped
+   * handle sees only that user's rows.
    *
    *   writerContext ──asBackend──► insert alice-item, bob-item, carol-item
    *
    *   readerContext ──asBackend──────► all() ──► [alice-item, bob-item, carol-item]
    *                ──forSession(alice)──► all() ──► [alice-item]
    *                ──forRequest(alice)──► all() ──► [alice-item]
+   *                ──forSession(bob)───► all() ──► [bob-item]
    */
   it("backend sees all rows; forSession and forRequest Db filter to the authenticated user", async () => {
     const appId = randomUUID();
@@ -290,6 +348,7 @@ describe("forRequest auth and policy", () => {
     const aliceRequestDb = await readerContext.forRequest({
       headers: { authorization: `Bearer ${alice.token}` },
     });
+    const bobSessionDb = readerContext.forSession({ user_id: bob.userId, claims: {} });
 
     // Backend reader sees all three rows.
     await vi.waitFor(
@@ -302,15 +361,17 @@ describe("forRequest auth and policy", () => {
       { timeout: 10_000 },
     );
 
-    // Both alice handles surface only alice's row.
+    // Each user-scoped handle surfaces only that user's rows.
     await vi.waitFor(
       async () => {
-        const [sessionRows, requestRows] = await Promise.all([
+        const [aliceSession, aliceRequest, bobSession] = await Promise.all([
           aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
           aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
+          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
         ]);
-        expect(sessionRows.map((r) => r.title)).toEqual(["alice-item"]);
-        expect(requestRows.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(aliceSession.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(aliceRequest.map((r) => r.title)).toEqual(["alice-item"]);
+        expect(bobSession.map((r) => r.title)).toEqual(["bob-item"]);
       },
       { timeout: 10_000 },
     );
@@ -321,7 +382,8 @@ describe("forRequest concurrent session isolation", () => {
   /**
    * Two forRequest sessions run concurrently on the same context. Each user
    * can insert their own row; each query sees only their own row; cross-user
-   * inserts are rejected. A later fresh session for alice also stays isolated.
+   * inserts are rejected. A later additional Db handle for alice (simulating a
+   * subsequent HTTP request from the same user) also stays isolated.
    *
    *   alice ──forRequest──┐
    *                       ├──► context ──► server
@@ -333,34 +395,10 @@ describe("forRequest concurrent session isolation", () => {
    *   bob:   insertDurable({ owner_id: alice })  ──► REJECT
    *   alice: all()  ──► [alice-todo]
    *   bob:   all()  ──► [bob-todo]
-   *   alice2 (fresh session): all() ──► [alice-todo]
+   *   aliceAgain (new Db handle, same user): all() ──► [alice-todo]
    */
   it("isolates concurrent forRequest sessions on the same context — alice and bob see only their own rows", async () => {
-    const appId = randomUUID();
-    const backendSecret = "napi-concurrent-backend-secret";
-    const adminSecret = "napi-concurrent-admin-secret";
-    const scopeTag = `concurrent-scope-${randomUUID()}`;
-
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const context = await createTestContext(server, appId, backendSecret, adminSecret);
-
-    onTestFinished(async () => {
-      await server.stop();
-    });
-
-    // Mint local-first tokens for alice and bob. No JWKS server needed —
-    // forRequest verifies these directly via the NAPI module.
-    const [alice, bob] = await Promise.all([
-      createLocalFirstIdentity("alice", appId),
-      createLocalFirstIdentity("bob", appId),
-    ]);
-
-    // Obtain session-scoped Db handles for alice and bob concurrently from
-    // the same shared context — this is the pattern a real server would use.
-    const [aliceDb, bobDb] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
-    ]);
+    const { context, alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     // Fire writes for both users in parallel.
     await Promise.all([
@@ -382,7 +420,7 @@ describe("forRequest concurrent session isolation", () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
           tier: "edge",
         });
-        expect(rows.map((r) => r.title).sort()).toEqual(["alice-todo"]);
+        expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
       { timeout: 10_000 },
     );
@@ -393,7 +431,7 @@ describe("forRequest concurrent session isolation", () => {
         const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
           tier: "edge",
         });
-        expect(rows.map((r) => r.title).sort()).toEqual(["bob-todo"]);
+        expect(rows.map((r) => r.title)).toEqual(["bob-todo"]);
       },
       { timeout: 10_000 },
     );
@@ -417,18 +455,17 @@ describe("forRequest concurrent session isolation", () => {
       ).rejects.toThrow(),
     ]);
 
-    // A fresh forRequest call for alice (simulating a later HTTP request)
-    // must still be isolated from bob's data.
-    const freshAlice = await createLocalFirstIdentity("alice", appId);
-    const aliceDb2 = await context.forRequest({
-      headers: { authorization: `Bearer ${freshAlice.token}` },
+    // A new Db handle for alice (same identity, new forRequest call — simulating
+    // a subsequent HTTP request from the same user) must stay isolated from bob's data.
+    const aliceAgain = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
     });
     await vi.waitFor(
       async () => {
-        const rows = await aliceDb2.all(todoApp.todos.where({ description: scopeTag }), {
+        const rows = await aliceAgain.all(todoApp.todos.where({ description: scopeTag }), {
           tier: "edge",
         });
-        expect(rows.map((r) => r.title).sort()).toEqual(["alice-todo"]);
+        expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
       { timeout: 10_000 },
     );
@@ -448,26 +485,7 @@ describe("forRequest concurrent session isolation", () => {
    *   bob:   updateDurable(aliceRow) ──► REJECT
    */
   it("concurrent updateDurable respects per-user ownership — cross-user update is rejected", async () => {
-    const appId = randomUUID();
-    const backendSecret = "napi-concurrent-backend-secret";
-    const adminSecret = "napi-concurrent-admin-secret";
-    const scopeTag = `concurrent-scope-${randomUUID()}`;
-
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const context = await createTestContext(server, appId, backendSecret, adminSecret);
-
-    onTestFinished(async () => {
-      await server.stop();
-    });
-
-    const [alice, bob] = await Promise.all([
-      createLocalFirstIdentity("alice", appId),
-      createLocalFirstIdentity("bob", appId),
-    ]);
-    const [aliceDb, bobDb] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
-    ]);
+    const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     const [aliceRow, bobRow] = await Promise.all([
       aliceDb.insertDurable(
@@ -541,26 +559,7 @@ describe("forRequest concurrent session isolation", () => {
    *   bob:   deleteDurable(bobRow)   ──► OK    bob:   all() ──► []
    */
   it("concurrent deleteDurable respects per-user ownership — cross-user delete is rejected", async () => {
-    const appId = randomUUID();
-    const backendSecret = "napi-concurrent-backend-secret";
-    const adminSecret = "napi-concurrent-admin-secret";
-    const scopeTag = `concurrent-scope-${randomUUID()}`;
-
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const context = await createTestContext(server, appId, backendSecret, adminSecret);
-
-    onTestFinished(async () => {
-      await server.stop();
-    });
-
-    const [alice, bob] = await Promise.all([
-      createLocalFirstIdentity("alice", appId),
-      createLocalFirstIdentity("bob", appId),
-    ]);
-    const [aliceDb, bobDb] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
-    ]);
+    const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     const [aliceRow, bobRow] = await Promise.all([
       aliceDb.insertDurable(
@@ -601,13 +600,13 @@ describe("forRequest concurrent session isolation", () => {
   }, 30_000);
 
   /**
-   * Two independent forRequest sessions for the same user (alice) are created
-   * concurrently alongside a session for bob. Alice's row is visible to both
-   * her sessions; bob's row, inserted after, is invisible to both.
+   * Two independent forRequest Db handles for the same user (alice) are
+   * opened concurrently alongside a handle for bob. Both alice handles see
+   * alice's row; bob's row, inserted after, is invisible to both.
    *
-   *   alice  ──forRequest──► aliceDb1 ─┐
-   *   alice  ──forRequest──► aliceDb2 ─┼──► context
-   *   bob    ──forRequest──► bobDb    ─┘
+   *   alice ──forRequest──► aliceDb1 ─┐
+   *   alice ──forRequest──► aliceDb2 ─┼──► context
+   *   bob   ──forRequest──► bobDb    ─┘
    *
    *   aliceDb1: insert alice-todo
    *   aliceDb1: all() ──► [alice-todo]
@@ -619,28 +618,19 @@ describe("forRequest concurrent session isolation", () => {
    *   aliceDb2: all() ──► [alice-todo]  (bob's row invisible)
    */
   it("two concurrent forRequest sessions for the same user both see only that user's rows", async () => {
-    const appId = randomUUID();
-    const backendSecret = "napi-concurrent-backend-secret";
-    const adminSecret = "napi-concurrent-admin-secret";
-    const scopeTag = `concurrent-scope-${randomUUID()}`;
+    const {
+      context,
+      alice,
+      bob,
+      aliceDb: aliceDb1,
+      bobDb,
+      scopeTag,
+    } = await createConcurrentTestEnv();
 
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const context = await createTestContext(server, appId, backendSecret, adminSecret);
-
-    onTestFinished(async () => {
-      await server.stop();
+    // Second Db handle for alice — same identity, independent forRequest call.
+    const aliceDb2 = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
     });
-
-    const alice = await createLocalFirstIdentity("alice", appId);
-    const alice2 = await createLocalFirstIdentity("alice", appId);
-    const bob = await createLocalFirstIdentity("bob", appId);
-
-    // Two independent forRequest handles for alice (simulating two concurrent HTTP requests).
-    const [aliceDb1, aliceDb2, bobDb] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${alice2.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
-    ]);
 
     await aliceDb1.insertDurable(
       todoApp.todos,
@@ -648,7 +638,7 @@ describe("forRequest concurrent session isolation", () => {
       { tier: "edge" },
     );
 
-    // Both alice sessions surface the row; neither should see bob's (not yet inserted).
+    // Both alice handles surface the row; neither should see bob's (not yet inserted).
     await vi.waitFor(
       async () => {
         const [rows1, rows2] = await Promise.all([
@@ -667,7 +657,7 @@ describe("forRequest concurrent session isolation", () => {
       { tier: "edge" },
     );
 
-    // After bob's insert lands, neither alice session should see bob's row.
+    // After bob's insert lands, neither alice handle should see bob's row.
     await vi.waitFor(
       async () => {
         const bobRows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
@@ -694,24 +684,12 @@ describe("forRequest concurrent session isolation", () => {
    *   carol ──forRequest──► carolDb ──► all() ──► []
    */
   it("forRequest user with no rows gets empty results, not another user's rows", async () => {
-    const appId = randomUUID();
-    const backendSecret = "napi-concurrent-backend-secret";
-    const adminSecret = "napi-concurrent-admin-secret";
-    const scopeTag = `concurrent-scope-${randomUUID()}`;
+    const { context, alice, aliceDb, scopeTag, appId } = await createConcurrentTestEnv();
 
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const context = await createTestContext(server, appId, backendSecret, adminSecret);
-
-    onTestFinished(async () => {
-      await server.stop();
-    });
-
-    const alice = await createLocalFirstIdentity("alice", appId);
     const carol = await createLocalFirstIdentity("carol", appId);
-    const [aliceDb, carolDb] = await Promise.all([
-      context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
-      context.forRequest({ headers: { authorization: `Bearer ${carol.token}` } }),
-    ]);
+    const carolDb = await context.forRequest({
+      headers: { authorization: `Bearer ${carol.token}` },
+    });
 
     await aliceDb.insertDurable(
       todoApp.todos,
