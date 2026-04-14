@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path, Query, State},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
@@ -70,6 +71,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 
     Router::new()
         .route("/events", get(events_handler))
+        .route("/ws", axum::routing::any(ws_handler))
         .merge(traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -1461,6 +1463,151 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy"
     }))
+}
+
+// ============================================================================
+// WebSocket transport — Task 9
+// ============================================================================
+
+/// WebSocket upgrade endpoint.
+///
+/// Clients send an `AuthHandshake` binary frame (4-byte length prefix + JSON),
+/// receive a `ConnectedResponse` frame, then exchange binary frames
+/// bidirectionally until the connection closes.
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<ServerState>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+}
+
+async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
+    // 1. Read the first binary frame — expected to be AuthHandshake.
+    let first = match socket.recv().await {
+        Some(Ok(Message::Binary(b))) => b,
+        _ => {
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let payload = match crate::transport_manager::frame_decode(&first) {
+        Some(p) => p.to_vec(),
+        None => {
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let handshake =
+        match serde_json::from_slice::<crate::transport_manager::AuthHandshake>(&payload) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = socket.close().await;
+                return;
+            }
+        };
+
+    // 2. Authenticate.
+    if let Err(_e) = authenticate_ws_handshake(&handshake, &state).await {
+        let _ = socket.close().await;
+        return;
+    }
+
+    // 3. Determine client_id.
+    let client_id = parse_client_id_from_handshake(&handshake)
+        .unwrap_or_default();
+
+    // 4. Register the outbound channel.
+    let (outbound_tx, mut outbound_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::jazz_transport::ServerEvent>();
+    state
+        .register_ws_connection(client_id, outbound_tx.clone())
+        .await;
+
+    // 5. Send the Connected response.
+    let resp = crate::transport_manager::ConnectedResponse {
+        connection_id: uuid::Uuid::new_v4().to_string(),
+        client_id: client_id.to_string(),
+        next_sync_seq: None,
+        catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
+    };
+    let resp_bytes = match serde_json::to_vec(&resp) {
+        Ok(b) => b,
+        Err(_) => {
+            state.unregister_ws_connection(client_id).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    if socket
+        .send(Message::Binary(
+            crate::transport_manager::frame_encode(&resp_bytes),
+        ))
+        .await
+        .is_err()
+    {
+        state.unregister_ws_connection(client_id).await;
+        return;
+    }
+
+    // 6. Bidirectional loop.
+    loop {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(data))) => {
+                    let Some(inner) = crate::transport_manager::frame_decode(&data) else {
+                        continue;
+                    };
+                    let inner = inner.to_vec();
+                    if let Err(e) = state.process_ws_client_frame(client_id, &inner).await {
+                        tracing::warn!(error = ?e, "ws client frame rejected");
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                _ => continue,
+            },
+            evt = outbound_rx.recv() => {
+                let Some(event) = evt else { break };
+                let bytes = match serde_json::to_vec(&event) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if socket
+                    .send(Message::Binary(
+                        crate::transport_manager::frame_encode(&bytes),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    state.unregister_ws_connection(client_id).await;
+    let _ = socket.close().await;
+}
+
+/// Authenticate a WebSocket handshake.
+///
+/// TODO(auth): this is a stub — it accepts any non-empty client_id.
+/// Full JWT / backend-secret validation (mirroring events_handler) is deferred
+/// to a later task once the WS session flow is wired into extract_session.
+async fn authenticate_ws_handshake(
+    handshake: &crate::transport_manager::AuthHandshake,
+    _state: &Arc<ServerState>,
+) -> Result<(), String> {
+    if handshake.client_id.is_empty() {
+        return Err("missing client_id".into());
+    }
+    Ok(())
+}
+
+/// Parse the `ClientId` carried in an `AuthHandshake`.
+fn parse_client_id_from_handshake(
+    handshake: &crate::transport_manager::AuthHandshake,
+) -> Option<crate::sync_manager::ClientId> {
+    crate::sync_manager::ClientId::parse(&handshake.client_id)
 }
 
 #[cfg(test)]

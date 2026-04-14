@@ -189,6 +189,10 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    /// Active WebSocket connections: client_id → outbound sender.
+    pub(crate) ws_connections: tokio::sync::Mutex<
+        HashMap<ClientId, mpsc::UnboundedSender<crate::jazz_transport::ServerEvent>>,
+    >,
 }
 
 /// State for a single SSE connection.
@@ -306,6 +310,33 @@ impl ServerState {
     /// Update the client state TTL. Takes effect on the next sweep tick.
     pub async fn set_client_ttl(&self, ttl: Duration) {
         *self.client_ttl.write().await = ttl;
+    }
+
+    /// Register a WebSocket connection's outbound channel.
+    pub async fn register_ws_connection(
+        &self,
+        client_id: ClientId,
+        tx: mpsc::UnboundedSender<crate::jazz_transport::ServerEvent>,
+    ) {
+        self.ws_connections.lock().await.insert(client_id, tx);
+    }
+
+    /// Remove a WebSocket connection's outbound channel.
+    pub async fn unregister_ws_connection(&self, client_id: ClientId) {
+        self.ws_connections.lock().await.remove(&client_id);
+    }
+
+    /// Process a raw binary payload received from a WebSocket client.
+    ///
+    /// MVP stub — accepts and drops the frame. Task 10 / 14 will wire this
+    /// into the existing sync processing pipeline.
+    pub async fn process_ws_client_frame(
+        &self,
+        _client_id: ClientId,
+        _payload: &[u8],
+    ) -> Result<(), String> {
+        tracing::debug!(payload_len = _payload.len(), "received ws client sync frame (stub)");
+        Ok(())
     }
 }
 
