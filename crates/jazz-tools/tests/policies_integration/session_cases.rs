@@ -24,25 +24,20 @@ const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
 fn join_select_policy_schema() -> Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("orgs")
-                .column("name", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
-        )
+        .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
-                .fk_column("org_id", "orgs")
-                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
+                .fk_column("org_id", "orgs"),
         )
         .table(
             TableSchema::builder("team_memberships")
                 .column("owner_id", ColumnType::Text)
                 .fk_column("team_id", "teams")
-                .policies(super::explicit_allow_all_policies(
+                .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                )),
+                ),
         )
         .build()
 }
@@ -57,12 +52,12 @@ fn write_policy_schema() -> Schema {
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
+                .policies(
                     TablePolicies::new()
                         .with_insert(owner_policy.clone())
                         .with_update(Some(owner_policy.clone()), PolicyExpr::True)
                         .with_delete(owner_policy),
-                )),
+                ),
         )
         .build()
 }
@@ -78,9 +73,7 @@ fn write_check_policy_schema() -> Schema {
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy),
-                )),
+                .policies(TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy)),
         )
         .build()
 }
@@ -91,12 +84,10 @@ fn in_session_array_policy_schema() -> Schema {
             TableSchema::builder("team_documents")
                 .column("team_id", ColumnType::Uuid)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new().with_select(PolicyExpr::in_session(
-                        "team_id",
-                        vec!["claims".into(), "team_ids".into()],
-                    )),
-                )),
+                .policies(TablePolicies::new().with_select(PolicyExpr::in_session(
+                    "team_id",
+                    vec!["claims".into(), "team_ids".into()],
+                ))),
         )
         .build()
 }
@@ -106,7 +97,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .policies(super::explicit_allow_all_policies(policies))
+        .policies(policies)
 }
 
 // -- Value constructors --
@@ -1673,7 +1664,6 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 ///   broken:   owner="bob", title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "TODO: sync transport does not guarantee delivery order - writes from the same client can arrive at the server out of sequence"]
 async fn single_client_operations_reach_server_in_causal_order() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()

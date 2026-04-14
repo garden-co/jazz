@@ -27,9 +27,18 @@ web-time = "1.1"
 getrandom = { version = "0.2", features = ["js"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
+futures = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+web-sys = { version = "0.3", features = [
+  "WebSocket",
+  "MessageEvent",
+  "BinaryType",
+  "CloseEvent",
+  "EventTarget",
+  "ErrorEvent",
+] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

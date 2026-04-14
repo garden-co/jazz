@@ -7,25 +7,13 @@
  */
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
-import {
-  sendSyncPayload,
-  sendSyncPayloadBatch,
-  readBinaryFrames,
-  generateClientId,
-  buildEventsUrl,
-  applyUserAuthHeaders,
-  isExpectedFetchAbortError,
-  OutboxDestinationKind,
-  SyncAuthError,
-  readSyncAuthError,
-} from "../runtime/sync-transport.js";
+import { OutboxDestinationKind, normalizePathPrefix } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 import {
   readWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
-import { ServerPayloadBatcher } from "./server-payload-batcher.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -65,17 +53,10 @@ let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
 let jwtToken: string | undefined;
 let adminSecret: string | undefined;
-let streamAbortController: AbortController | null = null;
-let serverClientId: string = generateClientId();
 let activeServerUrl: string | null = null;
 let activeServerPathPrefix: string | undefined;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempt = 0;
-let streamConnecting = false;
-let streamAttached = false;
-let authPaused = false;
-const streamConnectTimeoutMs = 10_000;
 let isShuttingDown = false;
+let authFailurePoller: ReturnType<typeof setInterval> | null = null;
 let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
@@ -84,41 +65,6 @@ let initComplete = false;
 let wasmInitialized = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let bootstrapCatalogueForwarding = false;
-
-function abortActiveStreamForReconnect(): void {
-  if (!streamAbortController || streamAbortController.signal.aborted) return;
-  streamAbortController.abort();
-}
-
-// Accumulates non-catalogue server-bound payloads within a microtask boundary
-// and flushes them as a single ordered batch POST.
-const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
-  if (!activeServerUrl) return;
-  try {
-    await sendSyncPayloadBatch(
-      activeServerUrl,
-      payloads,
-      {
-        jwtToken,
-        adminSecret,
-        clientId: serverClientId,
-        pathPrefix: activeServerPathPrefix,
-      },
-      "[worker] ",
-    );
-  } catch (error) {
-    if (error instanceof SyncAuthError) {
-      handleAuthFailure(error.reason);
-      return;
-    }
-    if (!isExpectedFetchAbortError(error)) {
-      console.error("[worker] Sync batch POST error:", error);
-    }
-    abortActiveStreamForReconnect();
-    detachServer();
-    scheduleReconnect();
-  }
-});
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
@@ -270,21 +216,11 @@ async function handleInit(msg: InitMessage): Promise<void> {
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
     activeServerPathPrefix = msg.serverPathPrefix;
-    reconnectAttempt = 0;
-    streamAttached = false;
-    streamConnecting = false;
-    authPaused = false;
-    serverClientId = generateClientId();
     peerRuntimeClientByPeerId.clear();
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    if (streamAbortController) {
-      streamAbortController.abort();
-      streamAbortController = null;
+    if (runtime) {
+      runtime.disconnect();
     }
 
     // Open persistent OPFS-backed runtime with Worker tier
@@ -306,7 +242,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
     mainClientId = runtime.addClient();
     runtime.setClientRole(mainClientId, "peer");
 
-    // Set up outbox routing
+    // Set up outbox routing for peer/client destinations.
+    // Server-bound messages are now handled internally by the Rust transport.
     runtime.onSyncMessageToSend(
       (
         destinationKind: OutboxDestinationKind,
@@ -335,28 +272,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
             payload: [payload as Uint8Array],
           });
         } else if (destinationKind === "server") {
-          if (bootstrapCatalogueForwarding) {
-            if (isCatalogue) {
-              enqueueSyncMessageForMain(payload);
-            }
-            return;
+          // During bootstrap catalogue forwarding only: forward catalogue payloads
+          // to the main thread so it can learn schema/lens objects from persisted state.
+          if (bootstrapCatalogueForwarding && isCatalogue) {
+            enqueueSyncMessageForMain(payload);
           }
-
-          // Server-bound → HTTP POST to upstream
-          if (activeServerUrl) {
-            if (isCatalogue) {
-              sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
-                if (!isExpectedFetchAbortError(error)) {
-                  console.error("[worker] Sync POST error:", error);
-                }
-                abortActiveStreamForReconnect();
-                detachServer();
-                scheduleReconnect();
-              });
-            } else {
-              serverPayloadBatcher.enqueue(payload as string);
-            }
-          }
+          // All other server-bound traffic is handled by Rust's WebSocket transport.
         }
       },
     );
@@ -395,190 +316,90 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     post({ type: "init-ok", clientId: mainClientId! });
 
-    // Connect upstream in background (do not block init).
+    // Connect upstream via Rust-owned WebSocket transport.
     if (activeServerUrl) {
-      void connectStream();
+      const wsUrl = buildWsUrl(activeServerUrl, activeServerPathPrefix);
+      const authJson = buildAuthJson(jwtToken, adminSecret);
+      try {
+        runtime.connect(wsUrl, authJson);
+        console.log("[worker] WebSocket transport started", { wsUrl });
+      } catch (e: any) {
+        console.error("[worker] runtime.connect() failed:", e);
+      }
     }
+
+    startAuthFailurePoller();
   } catch (e: any) {
     post({ type: "error", message: `Init failed: ${e.message}` });
   }
 }
 
 // ============================================================================
-// Upstream server communication
+// Auth-failure surfacing
 // ============================================================================
 
-/** POST a sync payload to the upstream server. */
-async function sendToServer(
-  serverUrl: string,
-  payloadJson: string,
-  isCatalogue: boolean,
-): Promise<void> {
-  try {
-    await sendSyncPayload(
-      serverUrl,
-      payloadJson,
-      isCatalogue,
-      {
-        jwtToken,
-        adminSecret,
-        clientId: serverClientId,
-        pathPrefix: activeServerPathPrefix,
-      },
-      "[worker] ",
-    );
-  } catch (error) {
-    if (error instanceof SyncAuthError) {
-      handleAuthFailure(error.reason);
+/**
+ * Poll the runtime for transport-side auth rejections and forward them to
+ * the main thread as `auth-failed` postMessages. The Rust transport stops
+ * reconnecting permanently after a 401/403 from the server, so the host
+ * needs to find out and refresh credentials.
+ */
+function startAuthFailurePoller(): void {
+  if (authFailurePoller !== null) return;
+  if (!runtime || typeof runtime.takeAuthFailure !== "function") return;
+  authFailurePoller = setInterval(() => {
+    if (!runtime || isShuttingDown) {
+      stopAuthFailurePoller();
       return;
     }
-    throw error;
-  }
-}
-
-function attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
-  if (!runtime) return;
-  runtime.addServer(catalogueStateHash ?? null, nextSyncSeq ?? null);
-  streamAttached = true;
-  reconnectAttempt = 0;
-  post({ type: "upstream-connected" });
-}
-
-function detachServer(): void {
-  if (!runtime || !streamAttached) return;
-  runtime.removeServer();
-  streamAttached = false;
-  post({ type: "upstream-disconnected" });
-}
-
-function handleAuthFailure(reason: SyncAuthError["reason"]): void {
-  authPaused = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  detachServer();
-  post({ type: "auth-failed", reason });
-}
-
-function scheduleReconnect(): void {
-  if (isShuttingDown || !activeServerUrl || authPaused) return;
-  if (reconnectTimer) return;
-
-  const baseMs = 300;
-  const maxMs = 10_000;
-  const jitterMs = Math.floor(Math.random() * 200);
-  const delayMs = Math.min(maxMs, baseMs * 2 ** reconnectAttempt) + jitterMs;
-  reconnectAttempt += 1;
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    void connectStream();
-  }, delayMs);
-}
-
-/** Connect to the server's binary streaming endpoint. */
-async function connectStream(): Promise<void> {
-  if (streamConnecting || !activeServerUrl || isShuttingDown || authPaused) return;
-  streamConnecting = true;
-
-  const headers: Record<string, string> = {
-    Accept: "application/octet-stream",
-  };
-  applyUserAuthHeaders(headers, { jwtToken });
-  const schemaHash = runtime?.getSchemaHash?.();
-  if (schemaHash) {
-    headers["X-Jazz-Client-Schema-Hash"] = schemaHash;
-  }
-
-  streamAbortController = new AbortController();
-  let streamConnectTimedOut = false;
-  const streamConnectTimeout = setTimeout(() => {
-    if (streamAbortController && !streamAbortController.signal.aborted) {
-      streamConnectTimedOut = true;
-      streamAbortController.abort();
+    const reason = runtime.takeAuthFailure();
+    if (reason) {
+      post({ type: "auth-failed", reason });
     }
-  }, streamConnectTimeoutMs);
+  }, 500);
+}
 
-  try {
-    const eventsUrl = buildEventsUrl(activeServerUrl, serverClientId, activeServerPathPrefix);
-    console.log("[worker] Stream connect attempt", { eventsUrl });
-
-    const response = await fetch(eventsUrl, {
-      headers,
-      signal: streamAbortController.signal,
-    });
-    clearTimeout(streamConnectTimeout);
-
-    if (!response.ok) {
-      const authError = await readSyncAuthError(response);
-      if (authError) {
-        handleAuthFailure(authError.reason);
-        streamConnecting = false;
-        return;
-      }
-      console.error(`[worker] Stream connect failed: ${response.status}`);
-      detachServer();
-      streamConnecting = false;
-      scheduleReconnect();
-      return;
-    }
-
-    if (!response.body || typeof response.body.getReader !== "function") {
-      console.error("[worker] Stream connect failed: fetch response body stream unavailable", {
-        hasBody: Boolean(response.body),
-        bodyType: response.body ? typeof response.body : "undefined",
-        url: eventsUrl,
-      });
-      detachServer();
-      streamConnecting = false;
-      scheduleReconnect();
-      return;
-    }
-
-    const reader = response.body.getReader();
-    let connected = false;
-    await readBinaryFrames(
-      reader,
-      {
-        onSyncMessage: (payload, seq) => runtime?.onSyncMessageReceived(payload, seq ?? null),
-        onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
-          console.log("[worker] Stream connected", { clientId, nextSyncSeq });
-          serverClientId = clientId;
-          if (!connected) {
-            connected = true;
-            attachServer(catalogueStateHash, nextSyncSeq);
-          }
-        },
-      },
-      "[worker] ",
-    );
-  } catch (e: any) {
-    if (e?.name === "AbortError") {
-      if (streamConnectTimedOut) {
-        console.error(`[worker] Stream connect timeout after ${streamConnectTimeoutMs}ms`);
-        const fetchBaseHint = (globalThis.fetch as { __jazzRnFetchBaseHint?: string } | undefined)
-          ?.__jazzRnFetchBaseHint;
-        if (fetchBaseHint === "whatwg-fetch/xhr") {
-          console.error(
-            "[worker] Stream connect likely stalled because fetch is backed by whatwg-fetch/XHR, which does not handle long-lived binary streams.",
-          );
-        }
-      }
-      detachServer();
-      scheduleReconnect();
-      return;
-    }
-    console.error("[worker] Stream connect error:", e);
-  } finally {
-    clearTimeout(streamConnectTimeout);
-    streamConnecting = false;
+function stopAuthFailurePoller(): void {
+  if (authFailurePoller !== null) {
+    clearInterval(authFailurePoller);
+    authFailurePoller = null;
   }
+}
 
-  if (streamAbortController && !streamAbortController.signal.aborted) {
-    detachServer();
-    scheduleReconnect();
-  }
+// ============================================================================
+// Upstream server communication (Rust-owned WebSocket transport)
+// ============================================================================
+
+/**
+ * Convert an HTTP(S) server URL to a WebSocket URL for the /ws endpoint.
+ *
+ * Examples:
+ *   "http://localhost:4000"        → "ws://localhost:4000/ws"
+ *   "https://example.com"         → "wss://example.com/ws"
+ *   "http://localhost:4000/prefix" → "ws://localhost:4000/prefix/ws"
+ */
+function buildWsUrl(httpUrl: string, pathPrefix?: string): string {
+  const wsBase = httpUrl
+    .replace(/^https:\/\//i, "wss://")
+    .replace(/^http:\/\//i, "ws://")
+    .replace(/\/+$/, "");
+  const prefix = normalizePathPrefix(pathPrefix);
+  return `${wsBase}${prefix}/ws`;
+}
+
+/**
+ * Serialize auth credentials into the JSON string expected by runtime.connect().
+ *
+ * Maps to the Rust AuthConfig struct:
+ *   { jwt_token, backend_secret, admin_secret, backend_session }
+ */
+function buildAuthJson(jwtToken?: string, adminSecret?: string): string {
+  return JSON.stringify({
+    jwt_token: jwtToken ?? null,
+    backend_secret: null,
+    admin_secret: adminSecret ?? null,
+    backend_session: null,
+  });
 }
 
 function ensurePeerClient(peerId: string): string | null {
@@ -611,11 +432,8 @@ function flushWalBestEffort(): void {
 }
 
 function nudgeReconnectAfterResume(): void {
-  if (!activeServerUrl || isShuttingDown) return;
-  if (streamAttached || streamConnecting) return;
-  if (reconnectTimer) return;
-  reconnectAttempt = 0;
-  scheduleReconnect();
+  // Reconnection is now handled internally by the Rust transport manager.
+  // No-op: kept as a placeholder if a re-connect hint API is added later.
 }
 
 // ============================================================================
@@ -681,34 +499,27 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "update-auth":
       jwtToken = msg.jwtToken;
-      authPaused = false;
-      // Reconnect stream to bind the new token.
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
-      detachServer();
-      if (activeServerUrl && !isShuttingDown) {
-        scheduleReconnect();
+      // Reconnect with new credentials by stopping and restarting the transport.
+      if (runtime && activeServerUrl && !isShuttingDown) {
+        runtime.disconnect();
+        const wsUrl = buildWsUrl(activeServerUrl, activeServerPathPrefix);
+        const authJson = buildAuthJson(jwtToken, adminSecret);
+        try {
+          runtime.connect(wsUrl, authJson);
+        } catch (e: any) {
+          console.error("[worker] runtime.connect() on auth update failed:", e);
+        }
       }
       break;
 
     case "shutdown":
       isShuttingDown = true;
       initComplete = false;
-      authPaused = false;
       activeServerUrl = null;
       activeServerPathPrefix = undefined;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
+      stopAuthFailurePoller();
       if (runtime) {
-        detachServer();
+        runtime.disconnect();
         runtime.flush();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
@@ -727,19 +538,11 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       // clean checkpoint happened. Recovery must replay the WAL.
       isShuttingDown = true;
       initComplete = false;
-      authPaused = false;
       activeServerUrl = null;
       activeServerPathPrefix = undefined;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (streamAbortController) {
-        streamAbortController.abort();
-        streamAbortController = null;
-      }
+      stopAuthFailurePoller();
       if (runtime) {
-        detachServer();
+        runtime.disconnect();
         runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
         runtime.free(); // Drop → releases OPFS exclusive handles
         runtime = null;

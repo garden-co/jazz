@@ -49,7 +49,7 @@ use serde::Deserialize;
 ))]
 use tempfile::TempDir;
 
-type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
+type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
 const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 const STORAGE_BENCH_CACHE_SIZE_BYTES: usize = 32 * 1024 * 1024;
@@ -346,7 +346,7 @@ impl Lcg {
 }
 
 struct R1State<S: Storage = MemoryStorage> {
-    runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: RuntimeCore<S, NoopScheduler>,
     rng: Lcg,
     users: Vec<ObjectId>,
     organizations: Vec<ObjectId>,
@@ -433,7 +433,7 @@ impl R1State<MemoryStorage> {
 
 impl<S: Storage> R1State<S> {
     fn with_runtime(
-        runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+        runtime: RuntimeCore<S, NoopScheduler>,
         profile: &ProfileConfig,
         seed: u64,
     ) -> Self {
@@ -822,7 +822,7 @@ impl<S: Storage> R1State<S> {
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 fn seed_project_board_dataset<S: Storage>(
-    runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: &mut RuntimeCore<S, NoopScheduler>,
     profile: &ProfileConfig,
     seed: u64,
 ) -> SeededProjectBoard {
@@ -1121,7 +1121,7 @@ impl<S: Storage> SingleHopR1State<S> {
         let mut server_to_client = 0usize;
 
         self.client.runtime.batched_tick();
-        for entry in self.client.runtime.sync_sender().take() {
+        for entry in self.client.runtime.take_peer_messages() {
             if entry.destination == Destination::Server(self.server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.client_id_on_server),
@@ -1132,7 +1132,7 @@ impl<S: Storage> SingleHopR1State<S> {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self.server.take_peer_messages() {
             if entry.destination == Destination::Client(self.client_id_on_server) {
                 self.client.runtime.park_sync_message(InboxEntry {
                     source: Source::Server(self.server_id_on_client),
@@ -1289,7 +1289,7 @@ impl<S: Storage> FanoutR4State<S> {
         let mut routed = 0usize;
 
         self.writer.runtime.batched_tick();
-        for entry in self.writer.runtime.sync_sender().take() {
+        for entry in self.writer.runtime.take_peer_messages() {
             if entry.destination == Destination::Server(self.writer_server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.writer_client_id_on_server),
@@ -1301,7 +1301,7 @@ impl<S: Storage> FanoutR4State<S> {
 
         for reader in &mut self.readers {
             reader.runtime.batched_tick();
-            for entry in reader.runtime.sync_sender().take() {
+            for entry in reader.runtime.take_peer_messages() {
                 if entry.destination == Destination::Server(reader.server_id_on_client) {
                     self.server.park_sync_message(InboxEntry {
                         source: Source::Client(reader.client_id_on_server),
@@ -1313,7 +1313,7 @@ impl<S: Storage> FanoutR4State<S> {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self.server.take_peer_messages() {
             match entry.destination {
                 Destination::Client(client_id) if client_id == self.writer_client_id_on_server => {
                     self.writer.runtime.park_sync_message(InboxEntry {
@@ -3901,7 +3901,9 @@ fn create_runtime_with_storage<S: Storage>(schema: Schema, storage: S) -> BenchR
     )
     .expect("create schema manager");
 
-    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler);
+    core.set_peer_sender(Box::new(VecSyncSender::new()));
+    core
 }
 
 fn create_runtime(schema: Schema) -> BenchRuntime {
@@ -3913,7 +3915,7 @@ fn create_rocksdb_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<RocksDBStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<RocksDBStorage, NoopScheduler> {
     create_runtime_with_storage(
         schema,
         RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
@@ -3924,7 +3926,7 @@ fn create_rocksdb_runtime(
 fn create_sqlite_runtime(
     schema: Schema,
     db_path: &Path,
-) -> RuntimeCore<SqliteStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<SqliteStorage, NoopScheduler> {
     create_runtime_with_storage(
         schema,
         SqliteStorage::open(db_path).expect("open sqlite for benchmark"),

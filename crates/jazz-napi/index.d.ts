@@ -52,6 +52,29 @@ export declare class NapiRuntime {
   static deriveUserId(seedB64: string): string
   static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
   static getPublicKeyBase64url(seedB64: string): string
+  /**
+   * Connect to a remote server via WebSocket.
+   *
+   * `auth_json` must be a JSON-serialised `AuthConfig`.
+   * Spawns a background transport task; inbound events drive `batched_tick`
+   * via `NapiTickNotifier`.
+   */
+  connect(url: string, authJson: string): void
+  /** Disconnect from the server by dropping the transport handle. */
+  disconnect(): void
+  /**
+   * Returns true once the current transport has successfully completed
+   * at least one auth handshake with the server.
+   */
+  transportEverConnected(): boolean
+  /**
+   * Consume and return the most recent auth-rejection reason from the
+   * transport, if any. The string matches the JS `AuthFailureReason`
+   * union ("expired" | "missing" | "invalid" | "disabled"). After this
+   * returns Some, the transport is permanently stopped — host JS must
+   * refresh credentials and call `connect()` again.
+   */
+  takeAuthFailure(): string | null
 }
 
 export declare class TestingServer {

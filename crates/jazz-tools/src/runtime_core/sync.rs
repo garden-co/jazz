@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     // =========================================================================
     // Sync Operations
     // =========================================================================

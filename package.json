@@ -20,8 +20,7 @@
     "bench:realistic:build-site": "node benchmarks/realistic/build_site.mjs",
     "bench:realistic:render": "node benchmarks/realistic/render_deltas.mjs",
     "bench:realistic:export-criterion": "node benchmarks/realistic/export_criterion.mjs",
-    "bench:realistic:profile-browser": "node benchmarks/realistic/profile_browser.mjs",
-    "postinstall": "lefthook install"
+    "bench:realistic:profile-browser": "node benchmarks/realistic/profile_browser.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",

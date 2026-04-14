@@ -67,7 +67,7 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{SchemaHash, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
@@ -291,7 +291,7 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 
 // ============================================================================
 // WasmScheduler
@@ -301,6 +301,7 @@ type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
 ///
 /// Uses `wasm_bindgen_futures::spawn_local` to schedule a batched tick.
 /// Debounced: only one task is scheduled at a time.
+#[derive(Clone)]
 pub struct WasmScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Rc<RefCell<bool>>,
@@ -434,6 +435,28 @@ pub struct WasmRuntime {
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
     tier_label: &'static str,
+    /// Whether to use binary encoding for outgoing sync payloads.
+    use_binary_encoding: bool,
+}
+
+// ============================================================================
+// WasmTickNotifier
+// ============================================================================
+
+/// TickNotifier for WASM: holds a cloned WasmScheduler and calls
+/// schedule_batched_tick() when the transport layer has new inbound events.
+///
+/// Intentionally !Send — WASM is single-threaded; all Rc-based state is safe.
+#[cfg(target_arch = "wasm32")]
+struct WasmTickNotifier {
+    scheduler: WasmScheduler,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl jazz_tools::transport_manager::TickNotifier for WasmTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
 }
 
 #[wasm_bindgen]
@@ -476,9 +499,10 @@ impl WasmRuntime {
         info!("creating in-memory runtime");
 
         // Parse schema
-        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema = runtime_schema.schema;
+
+        let schema: Schema = wasm_schema;
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -491,27 +515,17 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let schema_manager = SchemaManager::new_with_policy_mode(
-            sync_manager,
-            schema,
-            app_id,
-            env,
-            user_branch,
-            if runtime_schema.loaded_policy_bundle {
-                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
-            } else {
-                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
-            },
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
-
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+        core.set_peer_sender(Box::new(JsSyncSender::new(
+            use_binary_encoding.unwrap_or(false),
+        )));
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
@@ -532,6 +546,7 @@ impl WasmRuntime {
             core: core_rc,
             upstream_server_id: RefCell::new(None),
             tier_label,
+            use_binary_encoding: use_binary_encoding.unwrap_or(false),
         })
     }
 
@@ -642,7 +657,66 @@ impl WasmRuntime {
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core.borrow().sync_sender().set_callback(callback);
+        let sender = JsSyncSender::new(self.use_binary_encoding);
+        sender.set_callback(callback);
+        self.core.borrow_mut().set_peer_sender(Box::new(sender));
+    }
+
+    // =========================================================================
+    // Transport (WebSocket connect/disconnect)
+    // =========================================================================
+
+    /// Connect to a Jazz server via WebSocket.
+    ///
+    /// Spawns a background transport task on the WASM microtask queue.
+    /// Inbound events wake the scheduler to run `batched_tick()`.
+    ///
+    /// # Arguments
+    /// * `url` - WebSocket URL (e.g. `"ws://localhost:4000/ws"`)
+    /// * `auth_json` - JSON-encoded `AuthConfig`
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JsValue> {
+        use crate::ws_stream::WasmWsStream;
+        use jazz_tools::transport_manager::AuthConfig;
+
+        let auth: AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| JsValue::from_str(&format!("invalid auth JSON: {e}")))?;
+
+        let scheduler = self.core.borrow().scheduler().clone();
+        let tick = WasmTickNotifier { scheduler };
+
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            WasmWsStream,
+            WasmTickNotifier,
+        >(url, auth, tick);
+
+        self.core.borrow_mut().set_transport(handle);
+
+        wasm_bindgen_futures::spawn_local(manager.run());
+
+        Ok(())
+    }
+
+    /// Disconnect from the server by dropping the transport handle.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn disconnect(&self) {
+        self.core.borrow_mut().clear_transport();
+    }
+
+    /// Consume and return the most recent auth-rejection reason from the
+    /// transport, if any. The returned string matches the JS
+    /// `AuthFailureReason` union ("expired" | "missing" | "invalid" |
+    /// "disabled"). After this returns a non-null value the transport is
+    /// permanently stopped — refresh credentials and call `connect()` again.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = takeAuthFailure)]
+    pub fn take_auth_failure(&self) -> Option<String> {
+        self.core
+            .borrow_mut()
+            .take_auth_failure()
+            .map(|r| r.as_str().to_string())
     }
 
     // =========================================================================
@@ -1308,9 +1382,9 @@ impl WasmRuntime {
     /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
     #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
     pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
-            .schema;
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        let schema: Schema = wasm_schema;
 
         let mut core = self.core.borrow_mut();
         core.add_live_schema_and_persist_catalogue(schema)
@@ -1369,9 +1443,10 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+        let wasm_schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema = runtime_schema.schema;
+
+        let schema: Schema = wasm_schema;
         // Parse optional node durability tiers
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -1384,19 +1459,8 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let mut schema_manager = SchemaManager::new_with_policy_mode(
-            sync_manager,
-            schema,
-            app_id,
-            env,
-            user_branch,
-            if runtime_schema.loaded_policy_bundle {
-                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
-            } else {
-                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
-            },
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let mut schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
+            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
         let mut storage: Box<dyn Storage> = Box::new(
@@ -1415,10 +1479,10 @@ impl WasmRuntime {
         }
 
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+        core.set_peer_sender(Box::new(JsSyncSender::new(use_binary_encoding)));
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
@@ -1439,6 +1503,7 @@ impl WasmRuntime {
             core: core_rc,
             upstream_server_id: RefCell::new(None),
             tier_label,
+            use_binary_encoding,
         })
     }
 }

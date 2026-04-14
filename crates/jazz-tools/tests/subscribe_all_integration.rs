@@ -508,7 +508,6 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 /// Bob last stream delta != title-500
 /// ```
 #[tokio::test]
-#[ignore = "TODO: fix the sync reliability gaps specs/todo/a_mvp/sync_protocol_reliability_gaps.md"]
 async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     const RAPID_UPDATES: usize = 500;
 

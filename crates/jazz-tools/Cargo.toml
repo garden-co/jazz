@@ -20,12 +20,9 @@ default = []
 rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
-transport = []
-transport-http = ["transport", "dep:reqwest", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "dep:thiserror", "dep:tokio"]
 server = [
   "runtime-tokio",
-  "transport",
   "dep:tokio",
   "dep:axum",
   "dep:tracing-subscriber",
@@ -70,10 +67,13 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
+rocksdb = { version = "0.24", default-features = false, features = [
+  "lz4",
+  "zstd",
+], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
-axum = { version = "0.7", optional = true }
+axum = { version = "0.7", features = ["ws"], optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -95,6 +95,11 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
 opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
+
+# WebSocket adapter pulls in tokio-tungstenite for every non-wasm target.
+# WASM builds use a web-sys-based adapter in `jazz-wasm`, so they skip this dep.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
 criterion = "0.5"

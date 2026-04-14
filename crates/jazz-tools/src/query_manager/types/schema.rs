@@ -326,9 +326,7 @@ fn table_policies_are_default(policies: &TablePolicies) -> bool {
 }
 
 impl TableSchema {
-    /// Create a new table schema with no explicit policies.
-    ///
-    /// Runtime behavior depends on whether a compiled policy bundle is loaded.
+    /// Create a new table schema with no policies (allow all).
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,

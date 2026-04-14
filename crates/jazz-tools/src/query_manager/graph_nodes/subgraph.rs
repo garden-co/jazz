@@ -158,14 +158,9 @@ impl SubgraphTemplate {
         }
 
         let query = query_builder.try_build().ok()?;
-        let graph = QueryGraph::try_compile_with_schema_context(
-            &query,
-            schema,
-            None,
-            &self.schema_context,
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
-        )
-        .ok()?;
+        let graph =
+            QueryGraph::try_compile_with_schema_context(&query, schema, None, &self.schema_context)
+                .ok()?;
 
         Some(SubgraphInstance {
             graph,

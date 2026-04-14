@@ -214,15 +214,20 @@ impl ServerBuilder {
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                // Record outgoing server message to tracer if present
-                if let Some(ref tracer) = tracer_for_outgoing {
-                    tracer.record_outgoing("server", &entry.destination, &entry.payload);
-                }
-                dispatch_hub.dispatch_payload(client_id, entry.payload);
-            }
-        });
+        let runtime = TokioRuntime::new(schema_manager, storage);
+        runtime
+            .set_peer_sender(Box::new(crate::runtime_core::CallbackSyncSender::new(
+                move |entry| {
+                    if let Destination::Client(client_id) = entry.destination {
+                        // Record outgoing server message to tracer if present
+                        if let Some(ref tracer) = tracer_for_outgoing {
+                            tracer.record_outgoing("server", &entry.destination, &entry.payload);
+                        }
+                        dispatch_hub.dispatch_payload(client_id, entry.payload);
+                    }
+                },
+            )))
+            .map_err(|e| format!("failed to set peer sender: {e}"))?;
 
         Ok((runtime, connection_event_hub))
     }

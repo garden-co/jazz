@@ -20,8 +20,7 @@ use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, Quer
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
-    Value,
+    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
@@ -140,29 +139,6 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let row_policy_mode = if QueryManager::schema_has_any_explicit_policies(&schema) {
-            RowPolicyMode::Enforcing
-        } else {
-            RowPolicyMode::PermissiveLocal
-        };
-        Self::new_with_policy_mode(
-            sync_manager,
-            schema,
-            app_id,
-            env,
-            user_branch,
-            row_policy_mode,
-        )
-    }
-
-    pub fn new_with_policy_mode(
-        sync_manager: SyncManager,
-        schema: Schema,
-        app_id: AppId,
-        env: &str,
-        user_branch: &str,
-        row_policy_mode: RowPolicyMode,
-    ) -> Result<Self, SchemaError> {
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -170,12 +146,7 @@ impl SchemaManager {
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_current_schema_with_policy_mode(
-            schema.clone(),
-            env,
-            user_branch,
-            row_policy_mode,
-        );
+        query_manager.set_current_schema(schema.clone(), env, user_branch);
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();

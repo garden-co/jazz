@@ -3,21 +3,25 @@
 //! E2E integration tests for jazz-tools server.
 //!
 //! These tests spawn the actual `jazz-tools` binary and interact via HTTP
-//! with binary length-prefixed streaming.
+//! or WebSocket.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use bytes::BytesMut;
-use futures::StreamExt;
-use jazz_tools::jazz_transport::ServerEvent;
+use futures::StreamExt as _;
+use jazz_tools::transport_manager::{AuthConfig, TransportInbound};
 use reqwest::Client;
 use tempfile::TempDir;
 
 fn mint_test_token(audience: &str) -> String {
     let seed = [42u8; 32];
     jazz_tools::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+}
+
+struct NoopTickNotifier;
+impl jazz_tools::transport_manager::TickNotifier for NoopTickNotifier {
+    fn notify(&self) {}
 }
 
 /// Test server handle - kills process on drop.
@@ -169,31 +173,6 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Read the next complete ServerEvent from a binary stream.
-async fn read_next_event(
-    body: &mut (impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin),
-    buffer: &mut BytesMut,
-) -> Option<ServerEvent> {
-    loop {
-        // Try to decode a frame from the buffer
-        if buffer.len() >= 4 {
-            let len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
-            if buffer.len() >= 4 + len {
-                let json = &buffer[4..4 + len];
-                let event: ServerEvent = serde_json::from_slice(json).ok()?;
-                let _ = buffer.split_to(4 + len);
-                return Some(event);
-            }
-        }
-
-        // Need more data
-        match body.next().await {
-            Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
-            _ => return None,
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_server_health_check() {
     let port = get_free_port();
@@ -235,50 +214,40 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
 async fn test_stream_connection_receives_connected_event() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
+    let _ = &server;
 
-    // Connect to events endpoint with local auth headers.
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header(
-            "Authorization",
-            format!(
-                "Bearer {}",
-                mint_test_token("00000000-0000-0000-0000-000000000001")
-            ),
-        )
-        .send()
+    let auth = AuthConfig {
+        jwt_token: Some(mint_test_token("00000000-0000-0000-0000-000000000001")),
+        backend_secret: None,
+        admin_secret: None,
+        backend_session: None,
+    };
+
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+
+    let (mut handle, manager) = jazz_tools::transport_manager::create::<
+        jazz_tools::ws_stream::NativeWsStream,
+        NoopTickNotifier,
+    >(ws_url, auth, NoopTickNotifier);
+
+    tokio::spawn(manager.run());
+
+    let event = tokio::time::timeout(Duration::from_secs(5), handle.inbound_rx.next())
         .await
-        .expect("connect to events");
-
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
-
-    // First event should be Connected
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
-    .await
-    .expect("timeout waiting for event")
-    .expect("no event received");
+        .expect("timed out waiting for Connected event")
+        .expect("transport channel closed");
 
     match event {
-        ServerEvent::Connected {
-            connection_id,
-            client_id,
+        TransportInbound::Connected {
             catalogue_state_hash,
             ..
         } => {
-            assert!(connection_id.0 > 0);
-            assert!(!client_id.is_empty());
             assert!(
                 catalogue_state_hash.is_some(),
                 "Connected event should advertise the server catalogue digest"
             );
         }
-        other => panic!("Expected Connected event, got {:?}", other.variant_name()),
+        other => panic!("Expected Connected event, got: {other:?}"),
     }
 }
 
@@ -286,77 +255,69 @@ async fn test_stream_connection_receives_connected_event() {
 async fn test_stream_heartbeat() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
+    let _ = &server;
 
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header(
-            "Authorization",
-            format!(
-                "Bearer {}",
-                mint_test_token("00000000-0000-0000-0000-000000000001")
-            ),
-        )
-        .send()
+    let auth = AuthConfig {
+        jwt_token: Some(mint_test_token("00000000-0000-0000-0000-000000000001")),
+        backend_secret: None,
+        admin_secret: None,
+        backend_session: None,
+    };
+
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+
+    let (mut handle, manager) = jazz_tools::transport_manager::create::<
+        jazz_tools::ws_stream::NativeWsStream,
+        NoopTickNotifier,
+    >(ws_url, auth, NoopTickNotifier);
+
+    tokio::spawn(manager.run());
+
+    // Read the Connected event to confirm the stream is live.
+    let event = tokio::time::timeout(Duration::from_secs(5), handle.inbound_rx.next())
         .await
-        .expect("connect to events");
+        .expect("timed out waiting for Connected event")
+        .expect("transport channel closed");
 
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
-
-    // Read the Connected event
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
-    .await
-    .expect("timeout")
-    .expect("no event");
-
-    assert!(matches!(event, ServerEvent::Connected { .. }));
+    assert!(
+        matches!(event, TransportInbound::Connected { .. }),
+        "Expected Connected event, got: {event:?}"
+    );
 
     // The heartbeat interval is 30s which is too long for a test.
-    // Verify the Connected event was received and the stream stays open.
+    // Verifying Connected is enough to confirm the stream stays open.
 }
 
 #[tokio::test]
 async fn test_sync_payload_broadcast_to_stream_client() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
+    let _ = &server;
 
-    // Connect to binary stream with local auth headers.
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header(
-            "Authorization",
-            format!(
-                "Bearer {}",
-                mint_test_token("00000000-0000-0000-0000-000000000001")
-            ),
-        )
-        .send()
+    let auth = AuthConfig {
+        jwt_token: Some(mint_test_token("00000000-0000-0000-0000-000000000001")),
+        backend_secret: None,
+        admin_secret: None,
+        backend_session: None,
+    };
+
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+
+    let (mut handle, manager) = jazz_tools::transport_manager::create::<
+        jazz_tools::ws_stream::NativeWsStream,
+        NoopTickNotifier,
+    >(ws_url, auth, NoopTickNotifier);
+
+    tokio::spawn(manager.run());
+
+    // Wait for Connected event to verify connection works.
+    let event = tokio::time::timeout(Duration::from_secs(5), handle.inbound_rx.next())
         .await
-        .expect("connect to events");
+        .expect("timed out waiting for Connected event")
+        .expect("transport channel closed");
 
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
-
-    // Wait for Connected event to verify connection works
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
-    .await
-    .expect("timeout waiting for Connected")
-    .expect("no event");
-
-    match event {
-        ServerEvent::Connected { connection_id, .. } => {
-            assert!(connection_id.0 > 0, "Should receive valid connection_id");
-        }
-        other => panic!("Expected Connected, got {:?}", other.variant_name()),
-    }
+    assert!(
+        matches!(event, TransportInbound::Connected { .. }),
+        "Expected Connected event, got: {event:?}"
+    );
 }

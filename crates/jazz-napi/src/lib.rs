@@ -26,8 +26,8 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -175,7 +175,7 @@ fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -317,9 +317,8 @@ fn build_napi_runtime(
     tier: Option<String>,
 ) -> napi::Result<NapiRuntime> {
     // Parse schema
-    let runtime_schema = parse_runtime_schema_input(&schema_json)
+    let schema: Schema = serde_json::from_str(&schema_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-    let schema = runtime_schema.schema;
     let declared_schema = schema.clone();
 
     // Parse optional tier
@@ -332,26 +331,21 @@ fn build_napi_runtime(
     }
 
     // Create schema manager
-    let schema_manager = SchemaManager::new_with_policy_mode(
+    let schema_manager = SchemaManager::new(
         sync_manager,
         schema,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,
-        if runtime_schema.loaded_policy_bundle {
-            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
-        } else {
-            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
-        },
     )
     .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+    core.set_peer_sender(Box::new(NapiSyncSender::new()));
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -397,6 +391,22 @@ fn build_napi_runtime(
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
     })
+}
+
+// ============================================================================
+// NapiTickNotifier
+// ============================================================================
+
+/// TickNotifier for the NAPI runtime.
+/// Bridges the async transport task back to the synchronous RuntimeCore scheduler.
+struct NapiTickNotifier {
+    schedule_fn: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for NapiTickNotifier {
+    fn notify(&self) {
+        (self.schedule_fn)();
+    }
 }
 
 // ============================================================================
@@ -1055,11 +1065,13 @@ impl NapiRuntime {
             SyncCallbackParams,
         >,
     ) -> napi::Result<()> {
-        let core = self
+        let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(callback);
+        let sender = NapiSyncSender::new();
+        sender.set_callback(callback);
+        core.set_peer_sender(Box::new(sender));
         Ok(())
     }
 
@@ -1224,6 +1236,89 @@ impl NapiRuntime {
         let seed = napi_decode_seed(&seed_b64)?;
         let verifying_key = identity::derive_verifying_key(&seed);
         Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+    }
+
+    // =========================================================================
+    // Transport (WebSocket connect/disconnect)
+    // =========================================================================
+
+    /// Connect to a remote server via WebSocket.
+    ///
+    /// `auth_json` must be a JSON-serialised `AuthConfig`.
+    /// Spawns a background transport task; inbound events drive `batched_tick`
+    /// via `NapiTickNotifier`.
+    #[napi]
+    pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
+        use jazz_tools::transport_manager::AuthConfig;
+        use jazz_tools::ws_stream::NativeWsStream;
+
+        let auth: AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid auth JSON: {e}")))?;
+
+        let core_weak = std::sync::Arc::downgrade(&self.core);
+        let schedule_fn = std::sync::Arc::new(move || {
+            if let Some(core_arc) = core_weak.upgrade()
+                && let Ok(core) = core_arc.lock()
+            {
+                core.scheduler().schedule_batched_tick();
+            }
+        }) as std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
+        let tick = NapiTickNotifier { schedule_fn };
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            NativeWsStream,
+            NapiTickNotifier,
+        >(url, auth, tick);
+
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?
+            .set_transport(handle);
+
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime for transport")
+                .block_on(manager.run());
+        });
+
+        Ok(())
+    }
+
+    /// Disconnect from the server by dropping the transport handle.
+    #[napi]
+    pub fn disconnect(&self) -> napi::Result<()> {
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?
+            .clear_transport();
+        Ok(())
+    }
+
+    /// Returns true once the current transport has successfully completed
+    /// at least one auth handshake with the server.
+    #[napi]
+    pub fn transport_ever_connected(&self) -> napi::Result<bool> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?;
+        Ok(core.transport_ever_connected())
+    }
+
+    /// Consume and return the most recent auth-rejection reason from the
+    /// transport, if any. The string matches the JS `AuthFailureReason`
+    /// union ("expired" | "missing" | "invalid" | "disabled"). After this
+    /// returns Some, the transport is permanently stopped — host JS must
+    /// refresh credentials and call `connect()` again.
+    #[napi]
+    pub fn take_auth_failure(&self) -> napi::Result<Option<String>> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock poisoned"))?;
+        Ok(core.take_auth_failure().map(|r| r.as_str().to_string()))
     }
 }
 

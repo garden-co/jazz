@@ -212,13 +212,8 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
     expect(mocks.createDbFromClient).toHaveBeenCalledTimes(2);
     expect(mocks.createdDbs[0]?.client).toBe(mocks.createdDbs[1]?.client);
-    expect(JSON.parse(mocks.runtimeCtor.mock.calls[0]![0] as string)).toEqual({
-      __jazzRuntimeSchema: 1,
-      schema: SCHEMA_A,
-      loadedPolicyBundle: true,
-    });
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      expect.any(String),
+      serializeRuntimeSchema(SCHEMA_A),
       "server-app",
       "dev",
       "main",
@@ -363,15 +358,12 @@ describe("backend/create-jazz-context", () => {
     context.db();
 
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(
-        {
-          todos: {
-            columns: [],
-            policies: TODO_PERMISSIONS.todos as any,
-          },
+      serializeRuntimeSchema({
+        todos: {
+          columns: [],
+          policies: TODO_PERMISSIONS.todos as any,
         },
-        { loadedPolicyBundle: true },
-      ),
+      }),
       "server-app",
       "dev",
       "main",
@@ -397,55 +389,53 @@ describe("backend/create-jazz-context", () => {
     context.db();
 
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(
-        {
-          resources: {
-            columns: [],
-            policies: {
-              select: {
-                using: {
-                  type: "ExistsRel",
-                  rel: {
-                    Filter: {
-                      input: {
-                        TableScan: {
-                          table: "resource_access_edges",
+      serializeRuntimeSchema({
+        resources: {
+          columns: [],
+          policies: {
+            select: {
+              using: {
+                type: "ExistsRel",
+                rel: {
+                  Filter: {
+                    input: {
+                      TableScan: {
+                        table: "resource_access_edges",
+                      },
+                    },
+                    predicate: {
+                      And: [
+                        {
+                          Cmp: {
+                            left: {
+                              scope: "resource_access_edges",
+                              column: "kind",
+                            },
+                            op: "Eq",
+                            right: {
+                              Literal: {
+                                type: "Text",
+                                value: "individual",
+                              },
+                            },
+                          },
                         },
-                      },
-                      predicate: {
-                        And: [
-                          {
-                            Cmp: {
-                              left: {
-                                scope: "resource_access_edges",
-                                column: "kind",
-                              },
-                              op: "Eq",
-                              right: {
-                                Literal: {
-                                  type: "Text",
-                                  value: "individual",
-                                },
+                        {
+                          Cmp: {
+                            left: {
+                              scope: "resource_access_edges",
+                              column: "grant_role",
+                            },
+                            op: "Eq",
+                            right: {
+                              Literal: {
+                                type: "Text",
+                                value: "viewer",
                               },
                             },
                           },
-                          {
-                            Cmp: {
-                              left: {
-                                scope: "resource_access_edges",
-                                column: "grant_role",
-                              },
-                              op: "Eq",
-                              right: {
-                                Literal: {
-                                  type: "Text",
-                                  value: "viewer",
-                                },
-                              },
-                            },
-                          },
-                        ],
-                      },
+                        },
+                      ],
                     },
                   },
                 },
@@ -453,8 +443,7 @@ describe("backend/create-jazz-context", () => {
             },
           },
         },
-        { loadedPolicyBundle: true },
-      ),
+      }),
       "server-app",
       "dev",
       "main",
@@ -533,7 +522,7 @@ describe("backend/create-jazz-context", () => {
 
     expect(mocks.inMemoryRuntimeCtor).toHaveBeenCalledTimes(1);
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(SCHEMA_A, { loadedPolicyBundle: true }),
+      serializeRuntimeSchema(SCHEMA_A),
       "server-app",
       "dev",
       "main",

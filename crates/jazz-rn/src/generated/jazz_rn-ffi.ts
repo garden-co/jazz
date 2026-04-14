@@ -60,6 +60,12 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
+    ptr: bigint,
+    url: Uint8Array,
+    authJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
     ptr: bigint,
     queryJson: Uint8Array,
@@ -76,6 +82,10 @@ interface NativeModuleInterface {
     ptr: bigint,
     objectId: Uint8Array,
     writeContextJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
+    ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
@@ -151,6 +161,10 @@ interface NativeModuleInterface {
     tier: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_take_auth_failure(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_unsubscribe(
     ptr: bigint,
     handle: bigint,
@@ -197,9 +211,11 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
@@ -213,6 +229,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_take_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(): number;

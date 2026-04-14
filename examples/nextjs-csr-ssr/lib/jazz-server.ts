@@ -19,6 +19,7 @@ const context = createJazzContext({
   driver: { type: "memory" },
   serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
   backendSecret: process.env.BACKEND_SECRET!,
+  tier: "worker",
 });
 
 export const db = context.asBackend();

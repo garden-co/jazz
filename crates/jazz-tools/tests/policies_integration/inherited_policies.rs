@@ -32,7 +32,7 @@ fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchema
             },
         )
         .column("archived", ColumnType::Boolean)
-        .policies(super::explicit_allow_all_policies(policies))
+        .policies(policies)
 }
 
 fn make_folder_documents_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
@@ -41,7 +41,7 @@ fn make_folder_documents_schema(table_name: &str, policies: TablePolicies) -> Ta
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
         .nullable_fk_column("folder_id", "folders")
-        .policies(super::explicit_allow_all_policies(policies))
+        .policies(policies)
 }
 
 fn make_multi_folder_documents_schema(
@@ -54,18 +54,17 @@ fn make_multi_folder_documents_schema(
         .column("archived", ColumnType::Boolean)
         .nullable_fk_column("primary_folder_id", "primary_folders")
         .nullable_fk_column("secondary_folder_id", "secondary_folders")
-        .policies(super::explicit_allow_all_policies(policies))
+        .policies(policies)
 }
 
 fn file_referencing_schema(array_edge: bool) -> Schema {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let via_column = if array_edge { "images" } else { "image" };
 
-    let files_policies =
-        super::explicit_allow_all_policies(TablePolicies::new().with_select(PolicyExpr::or(vec![
-            owner_policy.clone(),
-            PolicyExpr::inherits_referencing(Operation::Select, "todos", via_column),
-        ])));
+    let files_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
+        owner_policy.clone(),
+        PolicyExpr::inherits_referencing(Operation::Select, "todos", via_column),
+    ]));
 
     let mut schema = Schema::new();
     schema.insert(
@@ -77,13 +76,11 @@ fn file_referencing_schema(array_edge: bool) -> Schema {
             .build(),
     );
 
-    let todos_policies = super::explicit_allow_all_policies(
-        TablePolicies::new()
-            .with_select(owner_policy.clone())
-            .with_insert(owner_policy.clone())
-            .with_update(Some(owner_policy.clone()), PolicyExpr::True)
-            .with_delete(owner_policy),
-    );
+    let todos_policies = TablePolicies::new()
+        .with_select(owner_policy.clone())
+        .with_insert(owner_policy.clone())
+        .with_update(Some(owner_policy.clone()), PolicyExpr::True)
+        .with_delete(owner_policy);
 
     let todos_schema = if array_edge {
         let descriptor = RowDescriptor::new(vec![

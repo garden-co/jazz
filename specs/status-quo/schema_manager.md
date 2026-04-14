@@ -84,42 +84,15 @@ That means:
 
 This separation keeps schema discovery explicit and prevents system metadata from pretending to be user table data.
 
-Permissions ride alongside that catalogue state instead of being baked into the
-structural schema snapshot. The runtime keeps:
-
-- structural schemas for branch/lens resolution
-- immutable permissions bundles keyed by object id
-- a current permissions head that selects the active bundle for a schema hash
-
-When the Schema Manager can resolve both the structural schema and the current
-permissions bundle, it merges them into an authorization schema and installs
-that into `QueryManager`.
-
 ## Client Mode and Server Mode
 
 ### Client mode
 
-A client usually has one current schema baked into the app bundle. The Schema
-Manager starts from that schema and keeps any reachable older schemas available
-for reads.
-
-If the client only boots with structural schema, it starts in
-`PermissiveLocal`. If its runtime schema envelope or rehydrated catalogue state
-includes a loaded permissions bundle, the manager switches the query layer into
-`Enforcing`.
+A client usually has one current schema baked into the app bundle. The Schema Manager starts from that schema and keeps any reachable older schemas available for reads.
 
 ### Server mode
 
-A server may learn schemas gradually from connected clients through catalogue
-sync. It can then answer queries for several client schema hashes at once
-without restarting or rebuilding the runtime from scratch.
-
-Backends and sync runtimes are normally enforcing runtimes because they load or
-receive permissions bundles explicitly. An empty loaded bundle is still distinct
-from "no bundle loaded" and still means explicit grants only.
-
-The JS/native runtime schema wire payload now carries that loaded-bundle bit so
-an empty loaded bundle stays distinguishable from a structural-schema-only boot.
+A server may learn schemas gradually from connected clients through catalogue sync. It can then answer queries for several client schema hashes at once without restarting or rebuilding the runtime from scratch.
 
 ## Copy-on-Write Updates
 

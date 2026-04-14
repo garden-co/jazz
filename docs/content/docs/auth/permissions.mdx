@@ -8,11 +8,6 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
-Locally, Jazz distinguishes between two runtime states:
-
-- no compiled policy bundle loaded: local session-scoped reads and writes stay permissive
-- compiled policy bundle loaded: every read, insert, update, and delete needs an explicit grant, or it is denied
-
 ## Authoring workflow
 
 Permissions are authored in TypeScript.
@@ -36,7 +31,7 @@ Run `npx jazz-tools@alpha validate` before publishing to identify any issues. Yo
 
 </Callout>
 
-Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
 
 ## Basic policies
 
@@ -140,9 +135,9 @@ Every policy is evaluated against a session. On the frontend, this is the authen
 See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for backend context setup details.
 
 <Callout type="info">
-  Structural-only client runtimes stay permissive locally so offline reads and writes keep working.
-  Once a compiled bundle is loaded, Jazz enforces explicit grants locally too. Sync servers still
-  reject violating writes, and server-scoped reads are filtered before data is sent to the client.
+  Policies are enforced on the sync server, not on the client. A client can write any data locally,
+  but the server will reject writes that violate policies when they sync. Reads are filtered
+  server-side before data is sent to the client.
 </Callout>
 
 ## Magic columns

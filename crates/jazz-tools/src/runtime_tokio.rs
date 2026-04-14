@@ -1,14 +1,13 @@
 //! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
-//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
+//! `RuntimeCore<S, TokioScheduler<S>>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
 //!
 //! - `S: Storage + Send + 'static` provides synchronous storage
 //! - `TokioScheduler<S>` implements `Scheduler` using tokio::spawn for batched ticks
-//! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
@@ -23,21 +22,19 @@ use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
-    SubscriptionDelta, SyncSender,
+    SubscriptionDelta,
 };
 use crate::schema_manager::manager::PermissionsHeadSummary;
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
-};
+use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId};
 
 // ============================================================================
 // TokioScheduler
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 type PersistedWriteAck = futures::channel::oneshot::Receiver<()>;
 type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteAck);
 
@@ -97,28 +94,29 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
 }
 
 // ============================================================================
-// CallbackSyncSender
+// NativeTickNotifier
 // ============================================================================
 
-/// SyncSender implementation using a callback.
-pub struct CallbackSyncSender {
-    callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
+/// TickNotifier implementation for native (tokio) runtimes.
+/// Bridges the async transport task back to the synchronous RuntimeCore scheduler.
+pub struct NativeTickNotifier {
+    schedule_fn: Arc<dyn Fn() + Send + Sync + 'static>,
 }
 
-impl CallbackSyncSender {
-    fn new<F>(callback: F) -> Self
+impl NativeTickNotifier {
+    pub fn new<F>(schedule_fn: F) -> Self
     where
-        F: Fn(OutboxEntry) + Send + Sync + 'static,
+        F: Fn() + Send + Sync + 'static,
     {
         Self {
-            callback: Arc::new(callback),
+            schedule_fn: Arc::new(schedule_fn),
         }
     }
 }
 
-impl SyncSender for CallbackSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        (self.callback)(message);
+impl crate::transport_manager::TickNotifier for NativeTickNotifier {
+    fn notify(&self) {
+        (self.schedule_fn)();
     }
 }
 
@@ -164,7 +162,7 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Jazz, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
@@ -186,16 +184,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
     /// - `storage` - The storage backend (e.g., MemoryStorage, FjallStorage)
-    /// - `sync_callback` - Called when sync messages need to be sent
-    pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
-    where
-        F: Fn(OutboxEntry) + Send + Sync + 'static,
-    {
+    pub fn new(schema_manager: SchemaManager, storage: S) -> Self {
         let scheduler = TokioScheduler::new();
-        let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let core = RuntimeCore::new(schema_manager, storage, scheduler);
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
@@ -209,6 +202,16 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         }
 
         Self { core: core_arc }
+    }
+
+    /// Set the peer/worker-bridge sender on the underlying RuntimeCore.
+    pub fn set_peer_sender(
+        &self,
+        sender: Box<dyn crate::runtime_core::SyncSender + Send>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_peer_sender(sender);
+        Ok(())
     }
 
     /// Persist the current schema to the catalogue for server sync.
@@ -277,6 +280,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
         let result = core.insert_persisted(table, values, owned.as_ref(), tier)?;
+        Ok(result)
+    }
+
+    /// Insert a row with an explicit write context (for backend/attribution use).
+    pub fn insert_with_write_context(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let result = core.insert(table, values, write_context)?;
         Ok(result)
     }
 
@@ -427,13 +442,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // =========================================================================
 
     /// Push a sync message to the inbox (from network).
+    ///
+    /// Schedules a batched_tick so the parked message is processed promptly.
     pub fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.park_sync_message(entry);
+        core.scheduler().schedule_batched_tick();
         Ok(())
     }
 
     /// Push a sync message with an explicit stream sequence (from network).
+    ///
+    /// Schedules a batched_tick so the parked message is processed promptly.
     pub fn push_sync_inbox_with_sequence(
         &self,
         entry: InboxEntry,
@@ -441,6 +461,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.park_sync_message_with_sequence(entry, sequence);
+        core.scheduler().schedule_batched_tick();
         Ok(())
     }
 
@@ -539,6 +560,97 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.set_client_backend(client_id);
         Ok(())
+    }
+
+    // =========================================================================
+    // Transport (WebSocket connect/disconnect)
+    // =========================================================================
+
+    /// Connect to a remote server via WebSocket.
+    ///
+    /// Spawns a background transport task; inbound events drive `batched_tick`
+    /// via `NativeTickNotifier`.
+    pub fn connect(
+        &self,
+        url: String,
+        auth: crate::transport_manager::AuthConfig,
+    ) -> Result<crate::sync_manager::types::ClientId, RuntimeError> {
+        let core_weak = Arc::downgrade(&self.core);
+        let tick = NativeTickNotifier::new(move || {
+            if let Some(core_arc) = core_weak.upgrade()
+                && let Ok(core) = core_arc.lock()
+            {
+                core.scheduler().schedule_batched_tick();
+            }
+        });
+        let (handle, manager) = crate::transport_manager::create::<
+            crate::ws_stream::NativeWsStream,
+            NativeTickNotifier,
+        >(url, auth, tick);
+        let client_id = handle.client_id;
+        self.core
+            .lock()
+            .map_err(|_| RuntimeError::LockError)?
+            .set_transport(handle);
+        tokio::spawn(manager.run());
+        Ok(client_id)
+    }
+
+    /// Disconnect from the server by dropping the transport handle.
+    pub fn disconnect(&self) -> Result<(), RuntimeError> {
+        self.core
+            .lock()
+            .map_err(|_| RuntimeError::LockError)?
+            .clear_transport();
+        Ok(())
+    }
+
+    /// Install an observer closure called for every outbox entry just before
+    /// it is dispatched. Used by the SyncTracer to record outgoing messages
+    /// with a human-readable client name.
+    pub fn set_outbox_observer(
+        &self,
+        observer: crate::runtime_core::OutboxObserverBox,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_outbox_observer(observer);
+        Ok(())
+    }
+
+    /// Install an observer closure called for every inbound sync entry
+    /// drained from the transport. Used by the SyncTracer to record incoming
+    /// messages with a human-readable client name.
+    pub fn set_inbox_observer(
+        &self,
+        observer: crate::runtime_core::InboxObserverBox,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_inbox_observer(observer);
+        Ok(())
+    }
+
+    /// Returns true once the current transport has successfully completed
+    /// at least one auth handshake with the server.
+    pub fn transport_ever_connected(&self) -> Result<bool, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.transport_ever_connected())
+    }
+
+    /// Wait until the transport has completed its first auth handshake, or the
+    /// timeout elapses. Returns `Ok(true)` if connected, `Ok(false)` if the
+    /// timeout was hit.
+    pub async fn wait_until_transport_connected(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, RuntimeError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if self.transport_ever_connected()? {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        self.transport_ever_connected()
     }
 
     // =========================================================================
@@ -646,7 +758,6 @@ mod tests {
     use crate::schema_manager::AppId;
     use crate::storage::MemoryStorage;
     use crate::sync_manager::SyncManager;
-    use std::sync::atomic::AtomicUsize;
 
     fn test_schema() -> Schema {
         SchemaBuilder::new()
@@ -677,12 +788,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let sync_count = Arc::new(AtomicUsize::new(0));
-        let sync_count_clone = sync_count.clone();
-
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), move |_msg| {
-            sync_count_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Insert a row
         let user_id = ObjectId::new();
@@ -711,7 +817,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Insert
         let (object_id, _row_values) = runtime
@@ -752,7 +858,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new());
 
         // Track callback invocations
         let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));

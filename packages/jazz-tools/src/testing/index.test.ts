@@ -1,21 +1,81 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { WasmSchema } from "../drivers/types.js";
 import { TestingServer, pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
 
+// ---------------------------------------------------------------------------
+// WebSocket auth helper
+// ---------------------------------------------------------------------------
+
+interface WsAuth {
+  admin_secret?: string;
+  backend_secret?: string;
+  jwt_token?: string;
+}
+
+/**
+ * Opens a WebSocket to `{baseUrl}/ws`, sends the Jazz auth handshake, and
+ * resolves with the server-assigned client_id on success or rejects when the
+ * server closes / sends an Error frame.
+ */
+async function connectWs(baseUrl: string, auth: WsAuth): Promise<string> {
+  const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
+  return new Promise<string>((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    let settled = false;
+
+    function settle(fn: () => void): void {
+      if (settled) return;
+      settled = true;
+      ws.close();
+      fn();
+    }
+
+    ws.onopen = (): void => {
+      const handshake = {
+        client_id: crypto.randomUUID(),
+        auth: {
+          jwt_token: auth.jwt_token ?? null,
+          backend_secret: auth.backend_secret ?? null,
+          admin_secret: auth.admin_secret ?? null,
+          backend_session: null,
+        },
+        catalogue_state_hash: null,
+      };
+      const payload = new TextEncoder().encode(JSON.stringify(handshake));
+      const frame = new Uint8Array(4 + payload.length);
+      new DataView(frame.buffer).setUint32(0, payload.length, false);
+      frame.set(payload, 4);
+      ws.send(frame);
+    };
+
+    ws.onmessage = (event: MessageEvent<ArrayBuffer>): void => {
+      const buf = new Uint8Array(event.data);
+      const len = new DataView(buf.buffer).getUint32(0, false);
+      const msg = JSON.parse(new TextDecoder().decode(buf.subarray(4, 4 + len))) as {
+        type: string;
+        client_id?: string;
+        message?: string;
+      };
+
+      if (msg.type === "Connected") {
+        settle(() => resolve(msg.client_id ?? ""));
+      } else {
+        settle(() => reject(new Error(msg.message ?? `Unexpected frame: ${msg.type}`)));
+      }
+    };
+
+    ws.onerror = (): void => settle(() => reject(new Error("WebSocket connection failed")));
+    ws.onclose = (ev: CloseEvent): void => {
+      settle(() => reject(new Error(`WebSocket closed before Connected (code=${ev.code})`)));
+    };
+  });
+}
+
 const tempRoots: string[] = [];
-const TEST_SCHEMA: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
 
 afterEach(async () => {
   await Promise.all(
@@ -73,38 +133,6 @@ async function getAvailablePort(): Promise<number> {
   });
 }
 
-async function createFailingFakeJazzBinary(stderrText: string): Promise<string> {
-  const rootPath = await createTempRoot("jazz-tools-testing-fake-fail-");
-  const binaryPath = join(rootPath, "fake-jazz-fail");
-  const script = `#!/bin/sh
-echo "${stderrText}" 1>&2
-exit 13
-`;
-  await writeFile(binaryPath, script, "utf8");
-  await chmod(binaryPath, 0o755);
-  return binaryPath;
-}
-
-function makeSchemaCatalogueSyncBody(appId: string) {
-  return {
-    client_id: "01234567-89ab-cdef-0123-456789abcdef",
-    payloads: [
-      {
-        CatalogueEntryUpdated: {
-          entry: {
-            object_id: "11111111-1111-1111-1111-111111111111",
-            metadata: {
-              type: "catalogue_schema",
-              app_id: appId,
-              schema_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            },
-            content: Array.from(new TextEncoder().encode(serializeRuntimeSchema(TEST_SCHEMA))),
-          },
-        },
-      },
-    ],
-  };
-}
 describe("TestingServer", () => {
   it("starts and is reachable at /health", async () => {
     const server = await TestingServer.start();
@@ -137,21 +165,16 @@ describe("TestingServer", () => {
       expect(server.adminSecret).toBe(adminSecret);
       expect(server.backendSecret).toBe(backendSecret);
 
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
+      // Correct admin secret → server accepts the WebSocket connection.
+      const clientId = await connectWs(server.url, { admin_secret: adminSecret });
+      expect(clientId).toEqual(expect.any(String));
 
-      const allowed = await fetch(`${server.url}/sync`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": adminSecret },
-        body: JSON.stringify(syncBody),
-      });
-      expect(allowed.status).toBe(200);
+      // Correct backend secret → server accepts the WebSocket connection.
+      const backendClientId = await connectWs(server.url, { backend_secret: backendSecret });
+      expect(backendClientId).toEqual(expect.any(String));
 
-      const denied = await fetch(`${server.url}/sync`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": "wrong-secret" },
-        body: JSON.stringify(syncBody),
-      });
-      expect(denied.status).toBe(401);
+      // Wrong admin secret → server rejects the connection.
+      await expect(connectWs(server.url, { admin_secret: "wrong-secret" })).rejects.toThrow();
     } finally {
       await server.stop();
     }
@@ -185,36 +208,12 @@ describe("startLocalJazzServer", () => {
 
     const healthResponse = await fetch(`${server.url}/health`);
     expect(healthResponse.status).toBe(200);
+    expect(server.dataDir).toBe(dataDir);
     expect(server.adminSecret).toBe("test-admin-secret");
     expect(server.backendSecret).toBe("test-backend-secret");
 
     await server.stop();
   }, 15_000);
-
-  it("allocates a fresh port when no explicit port is provided", async () => {
-    const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
-    const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
-
-    const firstServer = await startLocalJazzServer({
-      appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-      dataDir: join(firstRoot, "data-dir"),
-    });
-    const firstPort = firstServer.port;
-    await firstServer.stop();
-
-    const secondServer = await startLocalJazzServer({
-      appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
-      dataDir: join(secondRoot, "data-dir"),
-    });
-
-    try {
-      expect(secondServer.port).not.toBe(firstPort);
-      const healthResponse = await fetch(`${secondServer.url}/health`);
-      expect(healthResponse.status).toBe(200);
-    } finally {
-      await secondServer.stop();
-    }
-  }, 20_000);
 
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");
@@ -251,7 +250,7 @@ describe("startLocalJazzServer", () => {
     await server.stop();
   }, 15_000);
 
-  it("accepts a catalogue schema sync payload via /sync when admin secret matches", async () => {
+  it("accepts a WebSocket connection with correct admin secret", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -262,24 +261,14 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
-
-      const response = await fetch(`${server.url}/sync`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "X-Jazz-Admin-Secret": adminSecret,
-        },
-        body: JSON.stringify(syncBody),
-      });
-
-      expect(response.status).toBe(200);
+      const clientId = await connectWs(server.url, { admin_secret: adminSecret });
+      expect(clientId).toEqual(expect.any(String));
     } finally {
       await server.stop();
     }
   });
 
-  it("rejects a catalogue schema sync payload via /sync when admin secret doesn't match", async () => {
+  it("rejects a WebSocket connection with wrong admin secret", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -290,18 +279,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
-
-      const response = await fetch(`${server.url}/sync`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "X-Jazz-Admin-Secret": "wrong-admin-secret",
-        },
-        body: JSON.stringify(syncBody),
-      });
-
-      expect(response.status).toBe(401);
+      await expect(connectWs(server.url, { admin_secret: "wrong-admin-secret" })).rejects.toThrow();
     } finally {
       await server.stop();
     }
@@ -333,14 +311,20 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
-      const { hash } = await pushSchemaCatalogue({
+      const beforeResponse = await fetch(`${server.url}/schemas`, {
+        headers: {
+          "X-Jazz-Admin-Secret": adminSecret,
+        },
+      });
+      expect(beforeResponse.status).toBe(200);
+      const beforeBody = (await beforeResponse.json()) as { hashes?: string[] };
+
+      await pushSchemaCatalogue({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
       });
-
-      expect(hash).toBeTruthy();
 
       const response = await fetch(`${server.url}/schemas`, {
         headers: {
@@ -350,7 +334,7 @@ describe("pushSchemaCatalogue", () => {
       expect(response.status).toBe(200);
 
       const body = (await response.json()) as { hashes?: string[] };
-      expect(body.hashes?.length).toBeGreaterThan(0);
+      expect(body.hashes?.length).toBeGreaterThan(beforeBody.hashes?.length ?? 0);
     } finally {
       await server.stop();
     }

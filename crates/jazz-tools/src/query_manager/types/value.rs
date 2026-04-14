@@ -462,8 +462,8 @@ mod tests {
 
     #[test]
     fn from_f64() {
-        let v: Value = std::f64::consts::PI.into();
-        assert_eq!(v, Value::Double(std::f64::consts::PI));
+        let v: Value = 3.14f64.into();
+        assert_eq!(v, Value::Double(3.14));
     }
 
     // ── From<&str> ──────────────────────────────────────────────────

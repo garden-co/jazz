@@ -21,6 +21,7 @@ pub mod sync_manager;
 pub mod sync_tracer;
 #[cfg(test)]
 mod test_row_history;
+pub mod transport_manager;
 pub mod wire_types;
 
 #[cfg(feature = "runtime-tokio")]
@@ -28,15 +29,16 @@ pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
 pub use runtime_tokio as jazz_tokio;
 
-#[cfg(feature = "transport")]
 pub mod transport_protocol;
-#[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
+
+// The native stream adapter is pulled in on every non-wasm target.
+// WASM consumers use `jazz-wasm`'s `WasmWsStream` instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
-mod transport;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;
@@ -47,7 +49,7 @@ use thiserror::Error;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, SessionClient};
 
-#[cfg(all(feature = "client", feature = "transport"))]
+#[cfg(feature = "client")]
 pub use jazz_transport::ServerEvent;
 #[cfg(feature = "client")]
 pub use object::ObjectId;
@@ -134,9 +136,6 @@ pub enum JazzError {
 
     #[error("Schema error: {0}")]
     Schema(String),
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

@@ -8,25 +8,6 @@ export function isWasmSchema(value: unknown): value is WasmSchema {
   return isRecord(value);
 }
 
-interface RuntimeSchemaEnvelope {
-  __jazzRuntimeSchema: 1;
-  schema: WasmSchema;
-  loadedPolicyBundle: boolean;
-}
-
-interface SerializeRuntimeSchemaOptions {
-  loadedPolicyBundle?: boolean;
-}
-
-function isRuntimeSchemaEnvelope(value: unknown): value is RuntimeSchemaEnvelope {
-  return (
-    isRecord(value) &&
-    value.__jazzRuntimeSchema === 1 &&
-    isWasmSchema(value.schema) &&
-    typeof value.loadedPolicyBundle === "boolean"
-  );
-}
-
 export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
   if (schema instanceof Map) {
     return Object.fromEntries(schema.entries()) as WasmSchema;
@@ -49,25 +30,14 @@ function runtimeSchemaJsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-export function serializeRuntimeSchema(
-  schema: WasmSchema,
-  options?: SerializeRuntimeSchemaOptions,
-): string {
-  const envelope: RuntimeSchemaEnvelope = {
-    __jazzRuntimeSchema: 1,
-    schema,
-    loadedPolicyBundle: options?.loadedPolicyBundle ?? false,
-  };
-  return JSON.stringify(envelope, runtimeSchemaJsonReplacer);
+export function serializeRuntimeSchema(schema: WasmSchema): string {
+  return JSON.stringify(schema, runtimeSchemaJsonReplacer);
 }
 
 export function normalizeRuntimeSchemaJson(schemaJson: string): string {
   const parsed = JSON.parse(schemaJson) as unknown;
-  if (isRuntimeSchemaEnvelope(parsed)) {
-    return JSON.stringify(parsed);
-  }
   if (!isWasmSchema(parsed)) {
     throw new Error("Invalid schema JSON payload.");
   }
-  return serializeRuntimeSchema(parsed);
+  return JSON.stringify(parsed);
 }

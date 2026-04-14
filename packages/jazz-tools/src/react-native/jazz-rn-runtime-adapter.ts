@@ -74,6 +74,8 @@ export interface JazzRnRuntimeBinding {
     writeContextJson: string | undefined,
   ): void;
   uniffiDestroy?(): void;
+  connect?(url: string, authJson: string): void;
+  disconnect?(): void;
 }
 
 function assertWorkerTier(tier: string): void {
@@ -473,6 +475,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
   onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
     if (this.closed) return;
     this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
+  }
+
+  connect(wsUrl: string, authJson: string): void {
+    this.binding.connect?.(wsUrl, authJson);
+  }
+
+  disconnect(): void {
+    this.binding.disconnect?.();
   }
 
   close(): void {

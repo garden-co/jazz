@@ -1,22 +1,18 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::TestingServer;
 use jazz_tools::storage::MemoryStorage;
-use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz_tools::sync_manager::SyncManager;
+use jazz_tools::transport_manager::AuthConfig;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
-use reqwest::Client;
-use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -31,58 +27,6 @@ const TEST_JWT_KID: &str = "test-jwks-kid";
 
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
-
-struct SyncServerClient {
-    http_client: Client,
-    base_url: String,
-    route_prefix: String,
-    admin_secret: String,
-}
-
-impl SyncServerClient {
-    async fn connect(
-        server_url: &str,
-        admin_secret: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let http_client = Client::new();
-        let (base_url, route_prefix) = split_base_url(server_url)?;
-
-        let health_url = format!("{base_url}/health");
-        http_client
-            .get(health_url)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(Self {
-            http_client,
-            base_url,
-            route_prefix,
-            admin_secret: admin_secret.to_string(),
-        })
-    }
-
-    async fn push_sync(
-        &self,
-        payload: jazz_tools::sync_manager::SyncPayload,
-        client_id: ClientId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let request = SyncBatchRequest {
-            payloads: vec![payload],
-            client_id,
-        };
-        let sync_url = format!("{}{}/sync", self.base_url, self.route_prefix);
-        self.http_client
-            .post(sync_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header("X-Jazz-Admin-Secret", &self.admin_secret)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
@@ -341,68 +285,12 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn split_base_url(input: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let parsed = reqwest::Url::parse(input)?;
-
-    let mut origin = parsed.clone();
-    origin.set_path("");
-    origin.set_query(None);
-    origin.set_fragment(None);
-
-    let base_url = origin.as_str().trim_end_matches('/').to_string();
-    let route_prefix = normalize_route_prefix(parsed.path());
-
-    Ok((base_url, route_prefix))
-}
-
-fn normalize_route_prefix(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return String::new();
-    }
-
-    let trimmed = trimmed.trim_end_matches('/');
-    if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
-}
-
-fn build_catalogue_runtime(
-    schema_manager: SchemaManager,
-    storage: MemoryStorage,
-    connection: Arc<SyncServerClient>,
-    client_id: ClientId,
-    in_flight_pushes: Arc<AtomicUsize>,
-    push_errors: Arc<Mutex<Vec<String>>>,
-) -> TokioRuntime<MemoryStorage> {
-    TokioRuntime::new(schema_manager, storage, move |entry: OutboxEntry| {
-        let OutboxEntry {
-            destination,
-            payload,
-        } = entry;
-        if let Destination::Server(_) = destination {
-            in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let connection = connection.clone();
-            let push_errors = push_errors.clone();
-            let in_flight_pushes = in_flight_pushes.clone();
-            tokio::spawn(async move {
-                if let Err(error) = connection.push_sync(payload, client_id).await
-                    && let Ok(mut errors) = push_errors.lock()
-                {
-                    errors.push(error.to_string());
-                }
-                in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
-            });
-        }
-    })
-}
-
-async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
-    while in_flight_pushes.load(Ordering::Acquire) > 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+fn build_ws_url(http_url: &str) -> String {
+    let ws_base = http_url
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+    let ws_base = ws_base.trim_end_matches('/');
+    format!("{ws_base}/ws")
 }
 
 pub async fn push_catalogue_in_memory(
@@ -414,10 +302,11 @@ pub async fn push_catalogue_in_memory(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Arc::new(SyncServerClient::connect(server_url, admin_secret).await?);
-    let client_id = ClientId::new();
-    let in_flight_pushes = Arc::new(AtomicUsize::new(0));
-    let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ws_url = build_ws_url(server_url);
+    let auth = AuthConfig {
+        admin_secret: Some(admin_secret.to_string()),
+        ..Default::default()
+    };
 
     let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
         std::collections::HashMap::with_capacity(schemas.len());
@@ -428,18 +317,16 @@ pub async fn push_catalogue_in_memory(
                 .map_err(|error| {
                     format!("Failed to initialize schema manager for schema push: {error:?}")
                 })?;
-        let runtime = build_catalogue_runtime(
-            schema_manager,
-            MemoryStorage::default(),
-            connection.clone(),
-            client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::default());
         runtime.persist_schema()?;
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
+        runtime.connect(ws_url.clone(), auth.clone())?;
+
+        // Flush repeatedly to give the transport time to connect and deliver the
+        // catalogue objects to the server.
+        for _ in 0..20 {
+            runtime.flush().await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     for lens in lenses {
@@ -460,29 +347,15 @@ pub async fn push_catalogue_in_memory(
         )
         .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
         schema_manager.persist_lens(&mut storage, lens);
-        let runtime = build_catalogue_runtime(
-            schema_manager,
-            storage,
-            connection.clone(),
-            client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
+        let runtime = TokioRuntime::new(schema_manager, storage);
+        runtime.connect(ws_url.clone(), auth.clone())?;
 
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
-    }
-
-    wait_for_in_flight_pushes(&in_flight_pushes).await;
-
-    let errors = push_errors.lock().unwrap().clone();
-    if !errors.is_empty() {
-        return Err(format!(
-            "Schema push encountered {} sync error(s): {}",
-            errors.len(),
-            errors.join("; ")
-        )
-        .into());
+        // Flush repeatedly to give the transport time to connect and deliver the
+        // lens to the server.
+        for _ in 0..20 {
+            runtime.flush().await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     Ok(())
