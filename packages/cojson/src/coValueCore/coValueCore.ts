@@ -1226,7 +1226,7 @@ export class CoValueCore {
         keyID,
         keySecret,
         meta,
-        madeAt ?? Date.now(),
+        madeAt ?? this.node.stampNow(),
       );
     } else {
       result = this.verified.makeNewTrustingTransaction(
@@ -1234,7 +1234,7 @@ export class CoValueCore {
         signerAgent,
         changes,
         meta,
-        madeAt ?? Date.now(),
+        madeAt ?? this.node.stampNow(),
       );
     }
 
