@@ -79,7 +79,32 @@ export class BrowserPasskeyBackup {
       throw new PasskeyBackupError("invalid-secret");
     }
 
-    // credentials.create call will be added in Task 3
+    const challenge = new Uint8Array(16);
+    crypto.getRandomValues(challenge);
+
+    try {
+      await navigator.credentials.create({
+        publicKey: {
+          rp: { id: this.rpId, name: this.appName },
+          user: {
+            id: secretBytes,
+            name: this.appName,
+            displayName: this.appName,
+          },
+          challenge,
+          pubKeyCredParams: [
+            { alg: -7, type: "public-key" },
+            { alg: -257, type: "public-key" },
+          ],
+          authenticatorSelection: {
+            residentKey: "required",
+            requireResidentKey: true,
+          },
+        },
+      });
+    } catch (err) {
+      throw new PasskeyBackupError("create-failed", err);
+    }
   }
 
   async restore(): Promise<string> {
