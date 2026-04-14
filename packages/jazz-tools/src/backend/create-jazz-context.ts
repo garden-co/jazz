@@ -5,7 +5,6 @@ import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, type RequestLike } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { resolveRequestSession } from "./request-auth.js";
 
@@ -53,8 +52,6 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   allowLocalFirstAuth: boolean;
 };
 
@@ -115,7 +112,7 @@ export class JazzContext {
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
     this.config = {
-      ...resolveLocalAuthDefaults(config),
+      ...config,
       allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
     };
     this.defaultSchemaInput = config.app;
@@ -135,7 +132,9 @@ export class JazzContext {
   }
 
   private createClient(schema: WasmSchema): JazzClient {
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
 
@@ -166,8 +165,6 @@ export class JazzContext {
       env: this.config.env,
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
       tier: nodeTier,
@@ -187,8 +184,6 @@ export class JazzContext {
       env: this.config.env,
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
     };
   }
@@ -202,7 +197,9 @@ export class JazzContext {
    */
   private getClient(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
 
     if (!this.clientInstance) {
       return this.createClient(schema);

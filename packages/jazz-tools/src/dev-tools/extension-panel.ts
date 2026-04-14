@@ -16,7 +16,6 @@ import {
   WasmSchema,
 } from "../index.js";
 import { Db, DbConfig } from "../runtime/db.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
@@ -424,8 +423,7 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
 
 export async function createDbFromInspectedPage(): Promise<DevToolsDb> {
   const bootstrap = await waitForDevToolsBootstrap();
-  const resolvedConfig = resolveLocalAuthDefaults(bootstrap.dbConfig);
-  return new DevToolsDb(resolvedConfig, null);
+  return new DevToolsDb(bootstrap.dbConfig, null);
 }
 
 export function getRegisteredWasmSchema(): WasmSchema | null {

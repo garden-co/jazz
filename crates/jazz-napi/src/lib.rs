@@ -26,8 +26,8 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_outbox_entry, subscription_delta_to_json,
+    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -197,8 +197,6 @@ struct DevServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
-    allow_anonymous: Option<bool>,
-    allow_demo: Option<bool>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
@@ -319,8 +317,9 @@ fn build_napi_runtime(
     tier: Option<String>,
 ) -> napi::Result<NapiRuntime> {
     // Parse schema
-    let schema: Schema = serde_json::from_str(&schema_json)
+    let runtime_schema = parse_runtime_schema_input(&schema_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
+    let schema = runtime_schema.schema;
     let declared_schema = schema.clone();
 
     // Parse optional tier
@@ -333,12 +332,17 @@ fn build_napi_runtime(
     }
 
     // Create schema manager
-    let schema_manager = SchemaManager::new(
+    let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         schema,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,
+        if runtime_schema.loaded_policy_bundle {
+            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+        } else {
+            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+        },
     )
     .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
 
@@ -1386,7 +1390,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowAnonymous?: boolean; allowDemo?: boolean; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1417,8 +1421,6 @@ impl DevServer {
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
-            allow_anonymous: opts.allow_anonymous.unwrap_or(false),
-            allow_demo: opts.allow_demo.unwrap_or(false),
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),

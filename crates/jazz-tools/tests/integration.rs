@@ -15,6 +15,11 @@ use jazz_tools::jazz_transport::ServerEvent;
 use reqwest::Client;
 use tempfile::TempDir;
 
+fn mint_test_token(audience: &str) -> String {
+    let seed = [42u8; 32];
+    jazz_tools::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+}
+
 /// Test server handle - kills process on drop.
 struct TestServer {
     process: Child,
@@ -234,8 +239,13 @@ async fn test_stream_connection_receives_connected_event() {
     // Connect to events endpoint with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-test-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");
@@ -279,8 +289,13 @@ async fn test_stream_heartbeat() {
 
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-heartbeat-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");
@@ -313,8 +328,13 @@ async fn test_sync_payload_broadcast_to_stream_client() {
     // Connect to binary stream with local auth headers.
     let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-broadcast-user")
+        .header(
+            "Authorization",
+            format!(
+                "Bearer {}",
+                mint_test_token("00000000-0000-0000-0000-000000000001")
+            ),
+        )
         .send()
         .await
         .expect("connect to events");

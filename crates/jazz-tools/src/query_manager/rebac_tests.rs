@@ -34,8 +34,8 @@ use crate::query_manager::relation_ir::{
 };
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 use crate::row_histories::{RowState, StoredRowVersion};
 
@@ -43,6 +43,16 @@ use crate::row_histories::{RowState, StoredRowVersion};
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
+    qm
+}
+
+fn create_query_manager_with_policy_mode(
+    sync_manager: SyncManager,
+    schema: Schema,
+    row_policy_mode: RowPolicyMode,
+) -> QueryManager {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema_with_policy_mode(schema, "dev", "main", row_policy_mode);
     qm
 }
 
@@ -141,7 +151,6 @@ fn row_version_id_for_commit(
 }
 
 fn add_row_commit(
-    _qm: &mut QueryManager,
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
@@ -233,12 +242,16 @@ fn magic_introspection_schema() -> Schema {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor),
+        TableSchema::with_policies(
+            admins_descriptor,
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let protected_descriptor =
         RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new()
+        .with_select(PolicyExpr::True)
         .with_update(
             Some(PolicyExpr::Exists {
                 table: "admins".into(),
@@ -470,7 +483,6 @@ fn seed_folder_on_branch(
     let folder_id = create_test_row(storage, Some(folder_metadata()));
     let folder_content = encode_folder(owner_id, name);
     add_row_commit(
-        qm,
         storage,
         folder_id,
         branch,
@@ -693,7 +705,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     qm.process(&mut storage);
 
     // Commit should be applied (owner matches session user)
-    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
     assert!(
         tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
         "Insert should be approved when owner matches session"
@@ -1148,7 +1160,6 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         &folders_descriptor,
     );
     add_row_commit(
-        &mut seed_qm,
         &mut storage,
         folder_id,
         &branch,
@@ -1552,7 +1563,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 }
 
 #[test]
-fn rebac_table_without_policy_allows_all_writes() {
+fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy() {
     // Schema with no policies
     let mut schema = Schema::new();
     schema.insert(
@@ -1607,14 +1618,86 @@ fn rebac_table_without_policy_allows_all_writes() {
         ),
     });
 
-    // Process - table without policy should allow
+    // Process - policy-less local runtimes should remain permissive.
     qm.process(&mut storage);
 
     // Commit should be applied
-    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
     assert!(
         tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
-        "Table without policy should allow all writes"
+        "policy-less local runtimes should keep allowing sync-pending writes before a compiled bundle is loaded"
+    );
+}
+
+#[test]
+fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("notes"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]).into(),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema.clone());
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.set_authorization_schema(schema);
+
+    let client_id = ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "notes".to_string());
+    let obj_id = create_test_row(&mut storage, Some(metadata.clone()));
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let notes_desc = RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
+    let content = encode_row(&notes_desc, &[Value::Text("A note".into())]).unwrap();
+    let commit = stored_row_commit(
+        smallvec![],
+        content,
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(RowMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            &commit,
+        ),
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| {
+            matches!(
+                (&entry.destination, &entry.payload),
+                (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
+                    if *id == client_id
+            )
+        }),
+        "loaded empty permissions bundle should reject sync writes without explicit permission"
+    );
+
+    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
+    assert!(
+        !tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+        "denied sync write should not persist"
     );
 }
 
@@ -1731,7 +1814,10 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor),
+        TableSchema::with_policies(
+            admins_descriptor,
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     // Protected table: only admins can insert
@@ -1828,6 +1914,92 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     );
 }
 
+#[test]
+fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Text),
+        ])),
+    );
+    schema.insert(
+        TableName::new("team_memberships"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("team_id", ColumnType::Text),
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+        ])),
+    );
+
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
+        table: "admins".into(),
+        condition: Box::new(PolicyExpr::And(vec![
+            PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+            PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("team_memberships"),
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("team_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::OuterColumn(ColumnRef::unscoped("team_id")),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                    ]),
+                },
+            },
+        ])),
+    });
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.insert(
+        &mut storage,
+        "admins",
+        &[Value::Text("alice".into()), Value::Text("team-a".into())],
+    )
+    .expect("seed admin row");
+    qm.insert(
+        &mut storage,
+        "team_memberships",
+        &[Value::Text("team-a".into()), Value::Text("alice".into())],
+    )
+    .expect("seed membership row");
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "projects",
+            &[Value::Text("alice project".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err(
+            "enforcing mode should deny nested EXISTS_REL checks when the probed table lacks an explicit SELECT policy",
+        );
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("projects")
+    ));
+}
+
 /// Test that UPDATE checks USING policy (can session see the old row?).
 ///
 /// Scenario: Alice owns a document. Bob tries to update it.
@@ -1879,7 +2051,6 @@ fn rebac_update_denied_by_using_policy() {
     .unwrap();
     let author = ObjectId::new();
     let initial_commit = add_row_commit(
-        &mut qm,
         &mut storage,
         obj_id,
         "main",
@@ -2042,7 +2213,6 @@ fn rebac_inherits_filters_select_query_results() {
     .unwrap();
     let author = ObjectId::new();
     add_row_commit(
-        &mut qm,
         &mut storage,
         folder_id,
         "main",
@@ -2067,7 +2237,6 @@ fn rebac_inherits_filters_select_query_results() {
     )
     .unwrap();
     add_row_commit(
-        &mut qm,
         &mut storage,
         doc_id,
         "main",
@@ -2103,6 +2272,72 @@ fn rebac_inherits_filters_select_query_results() {
         !has_rows,
         "Charlie should not see Bob's document - he owns neither the doc nor the folder. \
          INHERITS should have denied access, but currently it always returns true."
+    );
+}
+
+#[test]
+fn inherits_select_denies_when_parent_operation_policy_is_missing() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("folders"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let documents_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
+        operation: Operation::Select,
+        via_column: "folder_id".into(),
+        max_depth: None,
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice".into()), Value::Text("Shared".into())],
+        )
+        .expect("folder insert should succeed");
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Inherited doc".into()),
+            Value::Uuid(folder.row_id),
+        ],
+    )
+    .expect("document insert should succeed");
+
+    let rows = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("documents").select(&["title"]).build(),
+        Some(Session::new("alice")),
+    );
+
+    assert!(
+        rows.is_empty(),
+        "child rows should be denied when INHERITS reaches a parent table with no explicit SELECT policy"
     );
 }
 
@@ -2363,7 +2598,10 @@ fn rebac_update_denied_by_using_exists_policy() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     // Protected table: only admins can update (via EXISTS in USING)
@@ -2563,7 +2801,10 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let projects_descriptor =
@@ -2615,6 +2856,179 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
         Some(&Session::new("alice")),
     )
     .expect("admin insert should be allowed");
+}
+
+#[test]
+fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+            "user_id",
+            ColumnType::Text,
+        )])),
+    );
+
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "projects",
+            &[Value::Text("alice project".into())],
+            Some(&Session::new("alice")),
+        )
+        .expect_err(
+            "enforcing mode should deny EXISTS_REL scans when the scanned table lacks an explicit SELECT policy",
+        );
+    assert!(matches!(
+        err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("projects")
+    ));
+}
+
+#[test]
+fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
+    let mut schema = Schema::new();
+    let folders_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::new(folders_descriptor.clone()),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::Inherits {
+        operation: Operation::Insert,
+        via_column: "folder_id".into(),
+        max_depth: None,
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm =
+        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let folder = qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[Value::Text("alice folder".into())],
+        )
+        .expect("seed folder row");
+
+    qm.insert_with_session(
+        &mut storage,
+        "documents",
+        &[Value::Text("draft doc".into()), Value::Uuid(folder.row_id)],
+        Some(&Session::new("alice")),
+    )
+    .expect(
+        "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
+    );
+}
+
+#[test]
+fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
+    let mut schema = Schema::new();
+    let files_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let files_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::InheritsReferencing {
+            operation: Operation::Update,
+            source_table: "todos".into(),
+            via_column: "file_id".into(),
+            max_depth: None,
+        }),
+        PolicyExpr::True,
+    );
+    schema.insert(
+        TableName::new("files"),
+        TableSchema::with_policies(files_descriptor, files_policies),
+    );
+
+    let todos_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("file_id", ColumnType::Uuid)
+            .nullable()
+            .references("files"),
+    ]);
+    schema.insert(TableName::new("todos"), TableSchema::new(todos_descriptor));
+
+    let sync_manager = SyncManager::new();
+    let mut qm =
+        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let file = qm
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Text("bob".into()), Value::Text("shared-file".into())],
+        )
+        .expect("seed file row");
+    qm.insert(
+        &mut storage,
+        "todos",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("todo referencing file".into()),
+            Value::Uuid(file.row_id),
+        ],
+    )
+    .expect("seed referencing todo row");
+
+    qm.update_with_session(
+        &mut storage,
+        file.row_id,
+        &[
+            Value::Text("bob".into()),
+            Value::Text("updated by alice".into()),
+        ],
+        Some(&Session::new("alice")),
+    )
+    .expect(
+        "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
+    );
 }
 
 #[test]
@@ -2672,7 +3086,10 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     ]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let projects_descriptor =
@@ -3032,7 +3449,10 @@ fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let protected_descriptor =
@@ -3091,7 +3511,10 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let protected_descriptor =
@@ -3146,7 +3569,10 @@ fn synced_soft_delete_should_use_delete_policy() {
         RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
     schema.insert(
         TableName::new("admins"),
-        TableSchema::new(admins_descriptor.clone()),
+        TableSchema::with_policies(
+            admins_descriptor.clone(),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        ),
     );
 
     let protected_descriptor =

@@ -6,7 +6,6 @@ use super::support::{
     has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
@@ -25,20 +24,25 @@ const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
 fn join_select_policy_schema() -> Schema {
     SchemaBuilder::new()
-        .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("orgs")
+                .column("name", ColumnType::Text)
+                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
+        )
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
-                .fk_column("org_id", "orgs"),
+                .fk_column("org_id", "orgs")
+                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
         )
         .table(
             TableSchema::builder("team_memberships")
                 .column("owner_id", ColumnType::Text)
                 .fk_column("team_id", "teams")
-                .policies(
+                .policies(super::explicit_allow_all_policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                ),
+                )),
         )
         .build()
 }
@@ -53,12 +57,12 @@ fn write_policy_schema() -> Schema {
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(
+                .policies(super::explicit_allow_all_policies(
                     TablePolicies::new()
                         .with_insert(owner_policy.clone())
                         .with_update(Some(owner_policy.clone()), PolicyExpr::True)
                         .with_delete(owner_policy),
-                ),
+                )),
         )
         .build()
 }
@@ -74,7 +78,9 @@ fn write_check_policy_schema() -> Schema {
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy)),
+                .policies(super::explicit_allow_all_policies(
+                    TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy),
+                )),
         )
         .build()
 }
@@ -85,10 +91,12 @@ fn in_session_array_policy_schema() -> Schema {
             TableSchema::builder("team_documents")
                 .column("team_id", ColumnType::Uuid)
                 .column("title", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::in_session(
-                    "team_id",
-                    vec!["claims".into(), "team_ids".into()],
-                ))),
+                .policies(super::explicit_allow_all_policies(
+                    TablePolicies::new().with_select(PolicyExpr::in_session(
+                        "team_id",
+                        vec!["claims".into(), "team_ids".into()],
+                    )),
+                )),
         )
         .build()
 }
@@ -98,7 +106,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 // -- Value constructors --
@@ -466,36 +474,31 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
         boolean_policy_document_values("bob", "Bob Only", false)
     );
 
-    let anonymous_user_id = derive_local_principal_id(
-        server.app_id(),
-        LocalAuthMode::Anonymous,
-        "anonymous-owner-restricted-device",
-    );
-    let anonymous = connect_ready_claims(
+    let charlie_user_id = "charlie-bystander";
+    let charlie = connect_ready_claims(
         &server,
         &schema,
-        &anonymous_user_id,
+        charlie_user_id,
         json!({
-            "auth_mode": "local",
-            "local_mode": "anonymous"
+            "auth_mode": "external",
         }),
         "documents",
         READY_TIMEOUT,
     )
     .await;
 
-    let anonymous_rows = wait_for_query(
-        &anonymous,
+    let charlie_rows = wait_for_query(
+        &charlie,
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(3),
-        "anonymous sees no owner-restricted rows",
+        "charlie sees no owner-restricted rows",
         Some,
     )
     .await;
-    assert!(anonymous_rows.is_empty());
+    assert!(charlie_rows.is_empty());
 
-    anonymous.shutdown().await.expect("shutdown anonymous");
+    charlie.shutdown().await.expect("shutdown charlie");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;

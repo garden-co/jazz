@@ -16,15 +16,12 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   isExpectedFetchAbortError,
-  linkExternalIdentity as sendLinkExternalIdentityRequest,
   SyncAuthError,
   type SyncStreamController,
   type SyncAuth,
   type AuthFailureReason,
-  type LinkExternalResponse,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
-import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
@@ -156,14 +153,6 @@ interface WriteContextPayload {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
-
-export interface LinkExternalIdentityOptions {
-  jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
-}
-
-export type LinkExternalIdentityResult = LinkExternalResponse;
 
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
@@ -636,8 +625,6 @@ export class JazzClient {
     this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
-      localAuthMode: context.localAuthMode,
-      localAuthToken: context.localAuthToken,
     }).session;
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
@@ -672,31 +659,29 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): Promise<JazzClient> {
-    const resolvedContext = resolveLocalAuthDefaults(context);
-
     // Load WASM module dynamically
-    const wasmModule = await loadWasmModule(resolvedContext.runtimeSources);
+    const wasmModule = await loadWasmModule(context.runtimeSources);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(context.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      resolvedContext.appId,
-      resolvedContext.env ?? "dev",
-      resolvedContext.userBranch ?? "main",
-      resolveNodeTier(resolvedContext.tier),
+      context.appId,
+      context.env ?? "dev",
+      context.userBranch ?? "main",
+      resolveNodeTier(context.tier),
     );
 
     const client = new JazzClient(
       runtime,
-      resolvedContext,
-      resolveDefaultDurabilityTier(resolvedContext),
+      context,
+      resolveDefaultDurabilityTier(context),
       runtimeOptions,
     );
 
     // Set up sync if server URL provided
-    if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -717,29 +702,27 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    const resolvedContext = resolveLocalAuthDefaults(context);
-
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(context.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      resolvedContext.appId,
-      resolvedContext.env ?? "dev",
-      resolvedContext.userBranch ?? "main",
-      resolveNodeTier(resolvedContext.tier),
+      context.appId,
+      context.env ?? "dev",
+      context.userBranch ?? "main",
+      resolveNodeTier(context.tier),
       runtimeOptions?.useBinaryEncoding ?? false,
     );
 
     const client = new JazzClient(
       runtime,
-      resolvedContext,
-      resolveDefaultDurabilityTier(resolvedContext),
+      context,
+      resolveDefaultDurabilityTier(context),
       runtimeOptions,
     );
 
     // Set up sync if server URL provided
-    if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -842,8 +825,6 @@ export class JazzClient {
     this.resolvedSession = resolveClientSessionStateSync({
       appId: this.context.appId,
       jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
     }).session;
     this.streamController.updateAuth();
   }
@@ -858,8 +839,6 @@ export class JazzClient {
 
     return {
       jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
     };
   }
@@ -1457,12 +1436,10 @@ export class JazzClient {
       headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
       headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
     }
-    // Priority 2: frontend auth (JWT or local anonymous/demo token headers)
+    // Priority 2: frontend auth (JWT bearer token)
     else {
       applyUserAuthHeaders(headers, {
         jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
       });
     }
 
@@ -1471,49 +1448,6 @@ export class JazzClient {
       headers,
       body: JSON.stringify(body),
     });
-  }
-
-  /**
-   * Link an anonymous/demo local principal to an external JWT identity.
-   *
-   * Requires all three auth fields:
-   * - `jwtToken`
-   * - `localAuthMode`
-   * - `localAuthToken`
-   *
-   * Values default to the current AppContext auth fields unless overridden.
-   */
-  async linkExternalIdentity(
-    options: LinkExternalIdentityOptions = {},
-  ): Promise<LinkExternalIdentityResult> {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-
-    const jwtToken = options.jwtToken ?? this.context.jwtToken;
-    const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
-    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
-
-    if (!jwtToken) {
-      throw new Error("linkExternalIdentity requires jwtToken");
-    }
-    if (!localAuthMode) {
-      throw new Error("linkExternalIdentity requires localAuthMode");
-    }
-    if (!localAuthToken) {
-      throw new Error("linkExternalIdentity requires localAuthToken");
-    }
-
-    return sendLinkExternalIdentityRequest(
-      this.context.serverUrl,
-      {
-        jwtToken,
-        localAuthMode,
-        localAuthToken,
-        pathPrefix: this.context.serverPathPrefix,
-      },
-      "[client] ",
-    );
   }
 
   /**

@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient } from "../runtime/client.js";
-import { Db, type DbConfig } from "./db.js";
+import { Db, type DbConfig, createDb } from "./db.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
 
 vi.mock("./create-jazz-rn-runtime.js", () => ({
   createJazzRnRuntime: vi.fn(),
+}));
+
+vi.mock("jazz-rn", () => ({
+  default: {
+    jazz_rn: {
+      mintLocalFirstToken: vi.fn(),
+    },
+  },
 }));
 
 class TestDb extends Db {
@@ -32,6 +40,38 @@ function makeClientStub() {
   };
 }
 
+describe("createDb", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("RNDB-U06 mints a JWT from localFirstSecret and passes it to Db when auth is set", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+    mintMock.mockReturnValue("minted-jwt");
+
+    const config: DbConfig = {
+      appId: "test-app",
+      auth: { localFirstSecret: "base64url-seed-32bytes" },
+    };
+    const db = await createDb(config);
+
+    expect(mintMock).toHaveBeenCalledWith("base64url-seed-32bytes", "test-app", BigInt(3600));
+    expect(db).toBeInstanceOf(Db);
+  });
+
+  it("RNDB-U07 skips JWT minting and returns a plain Db when auth is absent", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+
+    const config: DbConfig = { appId: "test-app" };
+    const db = await createDb(config);
+
+    expect(mintMock).not.toHaveBeenCalled();
+    expect(db).toBeInstanceOf(Db);
+  });
+});
+
 describe("react-native Db", () => {
   const createJazzRnRuntimeMock = vi.mocked(createJazzRnRuntime);
 
@@ -55,8 +95,6 @@ describe("react-native Db", () => {
       env: "prod",
       userBranch: "user-branch",
       jwtToken: "jwt-token",
-      localAuthMode: "demo",
-      localAuthToken: "local-token",
       adminSecret: "admin-secret",
       tier: "worker",
       dataPath: "/tmp/rn-data",
@@ -87,8 +125,6 @@ describe("react-native Db", () => {
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
-        localAuthMode: config.localAuthMode,
-        localAuthToken: config.localAuthToken,
         adminSecret: config.adminSecret,
         tier: config.tier,
         defaultDurabilityTier: config.tier,

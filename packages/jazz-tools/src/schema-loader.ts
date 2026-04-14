@@ -1,9 +1,8 @@
 import { existsSync } from "fs";
-import { access } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { access, rm } from "fs/promises";
+import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
-import { register as registerCjs } from "tsx/cjs/api";
-import { register as registerEsm } from "tsx/esm/api";
+import { build } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
@@ -11,8 +10,6 @@ import type { ColumnDescriptor, ColumnType, TableSchema, WasmSchema } from "./dr
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
-
-registerEsm();
 
 let importCounter = 0;
 
@@ -25,19 +22,30 @@ export interface LoadedSchemaProject {
   wasmSchema: WasmSchema;
 }
 
-function requireTsModule<T>(filePath: string, namespace: string): T {
-  const loader = registerCjs({ namespace: `${namespace}-${++importCounter}` });
-  try {
-    return loader.require(resolve(filePath), import.meta.url) as T;
-  } finally {
-    loader.unregister();
-  }
+async function bundleToTempFile(filePath: string): Promise<string> {
+  const sourceDir = dirname(resolve(filePath));
+  const outFile = join(sourceDir, `.jazz-schema-${++importCounter}.mjs`);
+
+  await build({
+    entryPoints: [resolve(filePath)],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: outFile,
+    packages: "external",
+  });
+
+  return outFile;
 }
 
 async function loadTsModule(filePath: string): Promise<Record<string, unknown>> {
   resetCollectedState();
-  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
-  return (await import(url)) as Record<string, unknown>;
+  const outFile = await bundleToTempFile(filePath);
+  try {
+    return (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+  } finally {
+    await rm(outFile, { force: true }).catch(() => undefined);
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -145,13 +153,6 @@ async function loadSchemaAst(filePath: string): Promise<Schema> {
     return directSchema;
   }
 
-  resetCollectedState();
-  const required = requireTsModule<Record<string, unknown>>(filePath, "jazz-tools-schema");
-  const requiredSchema = schemaFromLoadedModule(required);
-  if (requiredSchema) {
-    return requiredSchema;
-  }
-
   throw new Error(
     `Could not find a schema export in ${basename(filePath)}. ` +
       "Use side-effect table(...) declarations, or export schema/app/default from schema.ts.",
@@ -188,7 +189,7 @@ function isPermissionsMap(input: unknown): input is Record<string, TablePolicies
 }
 
 async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {
-  const module = requireTsModule<Record<string, unknown>>(filePath, "jazz-tools-permissions");
+  const module = await loadTsModule(filePath);
   const candidate = module.default ?? module.permissions ?? null;
   if (!candidate) {
     throw new Error(

@@ -154,7 +154,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         {
           title: body.title,
           done: false,
-          owner_id: body.owner_id ?? "anonymous",
+          owner_id: body.owner_id ?? "unknown",
         },
         remoteWriteDurability,
       );

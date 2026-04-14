@@ -6,7 +6,6 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
-  const resolveLocalAuthDefaults = vi.fn();
   const resolveRequestSession = vi.fn();
   const runtimeCtor = vi.fn();
   const inMemoryRuntimeCtor = vi.fn();
@@ -79,7 +78,6 @@ const mocks = vi.hoisted(() => {
   return {
     MockNapiRuntime,
     MockJazzClient,
-    resolveLocalAuthDefaults,
     resolveRequestSession,
     runtimeCtor,
     inMemoryRuntimeCtor,
@@ -89,7 +87,6 @@ const mocks = vi.hoisted(() => {
     createDbFromClient,
     createdDbs,
     reset() {
-      resolveLocalAuthDefaults.mockReset();
       resolveRequestSession.mockReset();
       runtimeCtor.mockReset();
       inMemoryRuntimeCtor.mockReset();
@@ -113,10 +110,6 @@ vi.mock("../runtime/client.js", async () => {
     JazzClient: mocks.MockJazzClient,
   };
 });
-
-vi.mock("../runtime/local-auth.js", () => ({
-  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
-}));
 
 vi.mock("./request-auth.js", () => ({
   resolveRequestSession: mocks.resolveRequestSession,
@@ -194,7 +187,6 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
-    mocks.resolveLocalAuthDefaults.mockImplementation((config) => config);
     mocks.resolveRequestSession.mockResolvedValue({
       user_id: "u1",
       claims: {},
@@ -220,8 +212,13 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
     expect(mocks.createDbFromClient).toHaveBeenCalledTimes(2);
     expect(mocks.createdDbs[0]?.client).toBe(mocks.createdDbs[1]?.client);
+    expect(JSON.parse(mocks.runtimeCtor.mock.calls[0]![0] as string)).toEqual({
+      __jazzRuntimeSchema: 1,
+      schema: SCHEMA_A,
+      loadedPolicyBundle: true,
+    });
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(SCHEMA_A),
+      expect.any(String),
       "server-app",
       "dev",
       "main",
@@ -366,12 +363,15 @@ describe("backend/create-jazz-context", () => {
     context.db();
 
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema({
-        todos: {
-          columns: [],
-          policies: TODO_PERMISSIONS.todos as any,
+      serializeRuntimeSchema(
+        {
+          todos: {
+            columns: [],
+            policies: TODO_PERMISSIONS.todos as any,
+          },
         },
-      }),
+        { loadedPolicyBundle: true },
+      ),
       "server-app",
       "dev",
       "main",
@@ -397,53 +397,55 @@ describe("backend/create-jazz-context", () => {
     context.db();
 
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema({
-        resources: {
-          columns: [],
-          policies: {
-            select: {
-              using: {
-                type: "ExistsRel",
-                rel: {
-                  Filter: {
-                    input: {
-                      TableScan: {
-                        table: "resource_access_edges",
+      serializeRuntimeSchema(
+        {
+          resources: {
+            columns: [],
+            policies: {
+              select: {
+                using: {
+                  type: "ExistsRel",
+                  rel: {
+                    Filter: {
+                      input: {
+                        TableScan: {
+                          table: "resource_access_edges",
+                        },
                       },
-                    },
-                    predicate: {
-                      And: [
-                        {
-                          Cmp: {
-                            left: {
-                              scope: "resource_access_edges",
-                              column: "kind",
-                            },
-                            op: "Eq",
-                            right: {
-                              Literal: {
-                                type: "Text",
-                                value: "individual",
+                      predicate: {
+                        And: [
+                          {
+                            Cmp: {
+                              left: {
+                                scope: "resource_access_edges",
+                                column: "kind",
+                              },
+                              op: "Eq",
+                              right: {
+                                Literal: {
+                                  type: "Text",
+                                  value: "individual",
+                                },
                               },
                             },
                           },
-                        },
-                        {
-                          Cmp: {
-                            left: {
-                              scope: "resource_access_edges",
-                              column: "grant_role",
-                            },
-                            op: "Eq",
-                            right: {
-                              Literal: {
-                                type: "Text",
-                                value: "viewer",
+                          {
+                            Cmp: {
+                              left: {
+                                scope: "resource_access_edges",
+                                column: "grant_role",
+                              },
+                              op: "Eq",
+                              right: {
+                                Literal: {
+                                  type: "Text",
+                                  value: "viewer",
+                                },
                               },
                             },
                           },
-                        },
-                      ],
+                        ],
+                      },
                     },
                   },
                 },
@@ -451,7 +453,8 @@ describe("backend/create-jazz-context", () => {
             },
           },
         },
-      }),
+        { loadedPolicyBundle: true },
+      ),
       "server-app",
       "dev",
       "main",
@@ -530,7 +533,7 @@ describe("backend/create-jazz-context", () => {
 
     expect(mocks.inMemoryRuntimeCtor).toHaveBeenCalledTimes(1);
     expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(SCHEMA_A),
+      serializeRuntimeSchema(SCHEMA_A, { loadedPolicyBundle: true }),
       "server-app",
       "dev",
       "main",

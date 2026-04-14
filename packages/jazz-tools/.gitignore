@@ -1,2 +1,3 @@
 bin/native/*
 !bin/native/.gitkeep
+.test-tmp/
