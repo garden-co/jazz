@@ -1,6 +1,5 @@
 use super::*;
 use crate::batch_fate::{CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission};
-use crate::commit::CommitId;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
@@ -8,6 +7,7 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::row_format::encode_row;
+use crate::row_histories::BatchId;
 use crate::schema_manager::AppId;
 use crate::storage::{
     MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, RowLocator, Storage, StorageError,
@@ -16,7 +16,6 @@ use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
 };
-use crate::test_row_history::load_test_row_tip_ids;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -175,7 +174,7 @@ impl Storage for RowRegionReadFailingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_histories::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowBatch],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -211,7 +210,7 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -220,37 +219,37 @@ impl Storage for RowRegionReadFailingStorage {
         _table: &str,
         _branch: &str,
         _row_id: ObjectId,
-    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
         Err(StorageError::IoError(
             "row-history reads deliberately disabled in this test".to_string(),
         ))
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_visible_region_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_visible_region_row_batches(table, row_id)
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_history_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_history_row_batches(table, row_id)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, branch, row_id, version_id)
+            .load_history_row_batch_bytes(table, branch, row_id, batch_id)
     }
 
     fn scan_history_region_bytes(
@@ -266,7 +265,7 @@ impl Storage for RowRegionReadFailingStorage {
         table: &str,
         branch: &str,
         scan: crate::row_histories::HistoryScan,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -417,7 +416,7 @@ impl Storage for LegacyPersistenceObservingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_histories::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowBatch],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -453,7 +452,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -462,35 +461,35 @@ impl Storage for LegacyPersistenceObservingStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_visible_region_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_visible_region_row_batches(table, row_id)
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_history_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_history_row_batches(table, row_id)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, branch, row_id, version_id)
+            .load_history_row_batch_bytes(table, branch, row_id, batch_id)
     }
 
     fn scan_history_region_bytes(
@@ -506,7 +505,7 @@ impl Storage for LegacyPersistenceObservingStorage {
         table: &str,
         branch: &str,
         scan: crate::row_histories::HistoryScan,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -657,7 +656,7 @@ impl Storage for RowMutationObservingStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[crate::row_histories::StoredRowVersion],
+        rows: &[crate::row_histories::StoredRowBatch],
     ) -> Result<(), StorageError> {
         self.inner.append_history_region_rows(table, rows)
     }
@@ -681,7 +680,7 @@ impl Storage for RowMutationObservingStorage {
     fn apply_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[crate::row_histories::StoredRowVersion],
+        history_rows: &[crate::row_histories::StoredRowBatch],
         visible_entries: &[crate::row_histories::VisibleRowEntry],
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(), StorageError> {
@@ -705,7 +704,7 @@ impl Storage for RowMutationObservingStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_visible_region(table, branch)
     }
 
@@ -714,35 +713,35 @@ impl Storage for RowMutationObservingStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_visible_region_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_visible_region_row_batches(table, row_id)
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
-        self.inner.scan_history_row_versions(table, row_id)
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_history_row_batches(table, row_id)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner
-            .load_history_row_version_bytes(table, branch, row_id, version_id)
+            .load_history_row_batch_bytes(table, branch, row_id, batch_id)
     }
 
     fn scan_history_region_bytes(
@@ -758,7 +757,7 @@ impl Storage for RowMutationObservingStorage {
         table: &str,
         branch: &str,
         scan: crate::row_histories::HistoryScan,
-    ) -> Result<Vec<crate::row_histories::StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_region(table, branch, scan)
     }
 
@@ -910,12 +909,12 @@ fn staged_user_row(
     batch_id: BatchId,
     updated_at: u64,
     name: &str,
-) -> crate::row_histories::StoredRowVersion {
-    crate::row_histories::StoredRowVersion::new_with_batch_id(
+) -> crate::row_histories::StoredRowBatch {
+    crate::row_histories::StoredRowBatch::new_with_batch_id(
         batch_id,
         row_id,
         "main",
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         encode_row(
             &test_schema()[&TableName::new("users")].columns,
             &user_row_values(row_id, name),
@@ -1248,8 +1247,9 @@ fn outbox_has_object_update_for_client(
             &entry.destination,
             Destination::Client(dest_client_id) if *dest_client_id == client_id
         ) && match &entry.payload {
-            SyncPayload::RowVersionNeeded { row, .. }
-            | SyncPayload::RowVersionCreated { row, .. } => row.row_id == object_id,
+            SyncPayload::RowBatchNeeded { row, .. } | SyncPayload::RowBatchCreated { row, .. } => {
+                row.row_id == object_id
+            }
             _ => false,
         }
     })
@@ -1301,7 +1301,7 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
 
     let messages = restarted.sync_sender().take();
     let synced_row = messages.iter().find(|message| match &message.payload {
-        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        SyncPayload::RowBatchCreated { row, .. } => row.row_id == row_object_id,
         _ => false,
     });
 
@@ -1796,9 +1796,9 @@ fn test_park_sync_message() {
 
     let message = InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
-            row: crate::row_histories::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowBatch::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
@@ -2274,10 +2274,10 @@ fn rc_insert_data_syncs_to_server() {
 }
 
 #[test]
-fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
+fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
     let mut core = create_runtime_with_boxed_storage(
         test_schema(),
-        "row-version-direct-sync-test",
+        "row-batch-direct-sync-test",
         Box::new(RowRegionReadFailingStorage::new()),
     );
     let server_id = ServerId::new();
@@ -2293,15 +2293,17 @@ fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
     let messages = core.sync_sender().take();
     let row_sync = messages
         .iter()
-        .find(|entry| matches!(&entry.payload, SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_id))
+        .find(|entry| matches!(&entry.payload, SyncPayload::RowBatchCreated { row, .. } if row.row_id == row_id))
         .expect("insert should still sync the row upstream");
 
     match &row_sync.payload {
-        SyncPayload::RowVersionCreated { row, .. } => {
+        SyncPayload::RowBatchCreated { row, .. } => {
             assert_eq!(row.row_id, row_id);
         }
         other => {
-            panic!("local row writes should sync using the authored row version, got {other:?}")
+            panic!(
+                "local row writes should sync using the authored row batch member, got {other:?}"
+            )
         }
     }
 }
@@ -2537,19 +2539,19 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
         .unwrap();
 
     let branch_name = core.schema_manager().branch_name();
-    let version_id = core
+    let batch_id = core
         .storage
         .load_visible_region_row("users", branch_name.as_str(), row_id)
         .unwrap()
         .expect("persisted insert should materialize a visible row")
-        .version_id();
+        .batch_id;
 
     core.push_sync_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowVersionStateChanged {
+        payload: SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name,
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -2559,7 +2561,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
     assert_eq!(
         receiver.try_recv(),
         Ok(Some(())),
-        "row persisted receiver should resolve from row-version state changes alone"
+        "row persisted receiver should resolve from row-batch state changes alone"
     );
     assert_eq!(
         *calls.lock().unwrap(),
@@ -2569,7 +2571,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 }
 
 #[test]
-fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_id() {
+fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) =
         s.a.insert_persisted(
@@ -2581,18 +2583,19 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
         .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
-    let row_version_id = *load_test_row_tip_ids(s.a.storage(), row_id, branch_name)
-        .unwrap()
-        .iter()
-        .next()
-        .expect("insert should create one visible tip");
+    let row_batch_id =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row")
+            .batch_id;
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowVersionStateChanged {
+        payload: SyncPayload::RowBatchStateChanged {
             row_id: ObjectId::new(),
             branch_name,
-            version_id: row_version_id,
+            batch_id: row_batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -2602,7 +2605,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_
     assert_eq!(
         receiver.try_recv(),
         Ok(None),
-        "row persisted receivers should ignore row-version acks for a different row, even if the raw version id matches"
+        "row persisted receivers should ignore row-state acks for a different row, even if the batch id matches"
     );
 }
 
@@ -2677,7 +2680,6 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .unwrap()
             .expect("insert should create one visible row");
     let batch_id = visible_row.batch_id;
-    let version_id = visible_row.version_id();
 
     let initial_record =
         s.a.storage()
@@ -2694,10 +2696,10 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowVersionStateChanged {
+        payload: SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name,
-            version_id,
+            batch_id,
             state: None,
             confirmed_tier: Some(DurabilityTier::Worker),
         },
@@ -2764,8 +2766,114 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
     assert_eq!(
         receiver.try_recv(),
         Ok(Some(())),
-        "persisted receivers should resolve from replayable batch settlement even when a live row-version ack was missed"
+        "persisted receivers should resolve from replayable batch settlement even when a live row-batch ack was missed"
     );
+}
+
+#[test]
+fn rc_same_row_direct_batch_overwrites_in_place() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    let (row_id, _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.update(
+        row_id,
+        vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+        Some(&write_context),
+    )
+    .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(
+        history_rows.len(),
+        1,
+        "rewriting the same row inside one direct batch should overwrite the batch member instead of appending a second history row"
+    );
+    assert_eq!(history_rows[0].batch_id, batch_id);
+    assert_eq!(history_rows[0].batch_id(), batch_id);
+
+    let visible_row = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("direct batch row should stay visible");
+    assert_eq!(visible_row.batch_id, batch_id);
+    assert_eq!(visible_row.batch_id(), batch_id);
+}
+
+#[test]
+fn rc_worker_direct_batch_retains_all_visible_members() {
+    let mut s = create_3tier_rc();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    let ((first_row_id, _), mut first_receiver) =
+        s.b.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+    let ((second_row_id, _), mut second_receiver) =
+        s.b.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    assert_eq!(first_receiver.try_recv(), Ok(Some(())));
+    assert_eq!(second_receiver.try_recv(), Ok(Some(())));
+
+    let branch_name = s.b.schema_manager().branch_name();
+    let local_record =
+        s.b.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("worker should retain one direct batch record for shared writes");
+
+    match local_record.latest_settlement {
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id: settled_batch_id,
+            confirmed_tier,
+            visible_members,
+        }) => {
+            assert_eq!(settled_batch_id, batch_id);
+            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(
+                visible_members.len(),
+                2,
+                "shared direct batches should retain all current members under one settlement"
+            );
+            assert!(visible_members.iter().any(|member| {
+                member.object_id == first_row_id
+                    && member.branch_name == branch_name
+                    && member.batch_id == batch_id
+            }));
+            assert!(visible_members.iter().any(|member| {
+                member.object_id == second_row_id
+                    && member.branch_name == branch_name
+                    && member.batch_id == batch_id
+            }));
+        }
+        other => panic!("expected durable direct settlement, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2870,7 +2978,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
 
     let history_rows =
         s.b.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert!(
         history_rows.is_empty(),
@@ -2904,7 +3012,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
 
     assert!(
         s.b.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap()
             .is_empty(),
         "disconnected upstream should not receive staged history yet"
@@ -2913,7 +3021,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     s.a.add_server(s.b_server_for_a);
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -2922,18 +3030,15 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
 
     let history_rows =
         s.b.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
-    assert_eq!(history_rows.len(), 2);
-    assert!(history_rows.iter().any(|row| {
-        row.state == crate::row_histories::RowState::Superseded
-            && row.confirmed_tier == Some(DurabilityTier::Worker)
-    }));
-    assert!(history_rows.iter().any(|row| {
-        row.state == crate::row_histories::RowState::VisibleTransactional
-            && row.confirmed_tier == Some(DurabilityTier::Worker)
-            && row.version_id() == batch_id.accepted_version_id()
-    }));
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(history_rows[0].batch_id(), batch_id);
 
     let worker_row =
         s.b.storage()
@@ -2944,7 +3049,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(worker_row.version_id(), batch_id.accepted_version_id());
+    assert_eq!(worker_row.batch_id(), batch_id);
 }
 
 #[test]
@@ -2971,7 +3076,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         .unwrap();
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -2989,7 +3094,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
-    assert_eq!(worker_row.version_id(), batch_id.accepted_version_id());
+    assert_eq!(worker_row.batch_id(), batch_id);
 
     assert_eq!(
         s.a.storage()
@@ -3011,7 +3116,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Worker));
-    assert_eq!(client_row.version_id(), batch_id.accepted_version_id());
+    assert_eq!(client_row.batch_id(), batch_id);
 }
 
 #[test]
@@ -3040,7 +3145,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3118,7 +3223,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
 
     let history_rows = core
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     let latest_staged = history_rows
         .iter()
@@ -3126,7 +3231,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
             row.batch_id == batch_id
                 && matches!(row.state, crate::row_histories::RowState::StagingPending)
         })
-        .max_by_key(|row| (row.updated_at, row.version_id()))
+        .max_by_key(|row| (row.updated_at, row.batch_id()))
         .expect("transaction should keep one staged member for the row");
     assert!(
         latest_staged.parents.is_empty(),
@@ -3157,7 +3262,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
         .expect("seed visible todo");
     let base_visible = core
         .storage()
-        .scan_history_row_versions("todos", row_id)
+        .scan_history_row_batches("todos", row_id)
         .unwrap()
         .into_iter()
         .find(|row| matches!(row.state, crate::row_histories::RowState::VisibleDirect))
@@ -3187,17 +3292,17 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
 
     let history_rows = core
         .storage()
-        .scan_history_row_versions("todos", row_id)
+        .scan_history_row_batches("todos", row_id)
         .unwrap();
     let transactional_rows: Vec<_> = history_rows
         .iter()
         .filter(|row| row.batch_id == batch_id)
         .collect();
-    assert_eq!(transactional_rows.len(), 2);
+    assert_eq!(transactional_rows.len(), 1);
     assert!(
         transactional_rows
             .iter()
-            .all(|row| { row.parents.as_slice() == [base_visible.version_id()] })
+            .all(|row| { row.parents.as_slice() == [base_visible.batch_id()] })
     );
     let live_staged_rows: Vec<_> = history_rows
         .iter()
@@ -3213,7 +3318,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
     );
     assert_eq!(
         live_staged_rows[0].parents.as_slice(),
-        [base_visible.version_id()]
+        [base_visible.batch_id()]
     );
     let values = decode_row(
         &defaulted_todos_schema()[&TableName::new("todos")].columns,
@@ -3248,7 +3353,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3312,12 +3417,12 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
 
     let history_rows_after =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(
         history_rows_after.len(),
         1,
-        "sealed batches should reject follow-up writes before new row versions are created"
+        "sealed batches should reject follow-up writes before new row batch members are created"
     );
 }
 
@@ -3348,7 +3453,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3426,7 +3531,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3504,11 +3609,11 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
 
     let first_history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", first_row_id)
+            .scan_history_row_batches("users", first_row_id)
             .unwrap();
     let second_history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", second_row_id)
+            .scan_history_row_batches("users", second_row_id)
             .unwrap();
     assert_eq!(first_history_rows.len(), 1);
     assert_eq!(second_history_rows.len(), 1);
@@ -3616,7 +3721,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3663,7 +3768,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3755,10 +3860,9 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
 
     let history_rows = alice
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(history_rows.len(), 1);
-    let version_id = history_rows[0].version_id();
     let batch_id = history_rows[0].batch_id;
 
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
@@ -3812,10 +3916,10 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
 
     let alice_history_rows = alice
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(alice_history_rows.len(), 1);
-    assert_eq!(alice_history_rows[0].version_id(), version_id);
+    assert_eq!(alice_history_rows[0].batch_id(), batch_id);
     assert_eq!(
         alice_history_rows[0].state,
         crate::row_histories::RowState::Rejected
@@ -3870,7 +3974,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
 
     let history_rows = alice
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -3912,7 +4016,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
 
     let alice_history_rows = alice
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(alice_history_rows.len(), 1);
     assert_eq!(
@@ -3968,7 +4072,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 
     let history_rows = alice
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -4013,7 +4117,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 
     let restarted_history_rows = restarted
         .storage()
-        .scan_history_row_versions("users", row_id)
+        .scan_history_row_batches("users", row_id)
         .unwrap();
     assert_eq!(restarted_history_rows.len(), 1);
     assert_eq!(
@@ -4057,7 +4161,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
             vec![SealedBatchMember {
                 object_id: row_id,
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: staged_row.version_id(),
+                row_digest: staged_row.content_digest(),
             }],
             Vec::new(),
         ))
@@ -4118,11 +4222,11 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     let main_row_id = ObjectId::new();
     let draft_row_id = ObjectId::new();
     let main_row = staged_user_row(main_row_id, batch_id, 1_000, "Alice");
-    let draft_row = crate::row_histories::StoredRowVersion::new_with_batch_id(
+    let draft_row = crate::row_histories::StoredRowBatch::new_with_batch_id(
         batch_id,
         draft_row_id,
         "draft",
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         encode_row(
             &test_schema()[&TableName::new("users")].columns,
             &user_row_values(draft_row_id, "Bob"),
@@ -4164,12 +4268,12 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
                 SealedBatchMember {
                     object_id: main_row_id,
                     branch_name: crate::object::BranchName::new("main"),
-                    version_id: main_row.version_id(),
+                    row_digest: main_row.content_digest(),
                 },
                 SealedBatchMember {
                     object_id: draft_row_id,
                     branch_name: crate::object::BranchName::new("draft"),
-                    version_id: draft_row.version_id(),
+                    row_digest: draft_row.content_digest(),
                 },
             ],
             Vec::new(),
@@ -4208,10 +4312,10 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
     let staged_row_id = ObjectId::new();
     let target_branch = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
     let sibling_branch = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
-    let existing_row = crate::row_histories::StoredRowVersion::new(
+    let existing_row = crate::row_histories::StoredRowBatch::new(
         existing_row_id,
         target_branch.as_str(),
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         encode_row(
             &test_schema()[&TableName::new("users")].columns,
             &user_row_values(existing_row_id, "Seen"),
@@ -4222,10 +4326,10 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
         crate::row_histories::RowState::VisibleDirect,
         None,
     );
-    let conflicting_row = crate::row_histories::StoredRowVersion::new(
+    let conflicting_row = crate::row_histories::StoredRowBatch::new(
         conflicting_row_id,
         sibling_branch.as_str(),
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         encode_row(
             &test_schema()[&TableName::new("users")].columns,
             &user_row_values(conflicting_row_id, "Bob"),
@@ -4236,11 +4340,11 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
         crate::row_histories::RowState::VisibleDirect,
         None,
     );
-    let staged_row = crate::row_histories::StoredRowVersion::new_with_batch_id(
+    let staged_row = crate::row_histories::StoredRowBatch::new_with_batch_id(
         batch_id,
         staged_row_id,
         target_branch.as_str(),
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         encode_row(
             &test_schema()[&TableName::new("users")].columns,
             &user_row_values(staged_row_id, "Alice"),
@@ -4304,12 +4408,12 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
             vec![SealedBatchMember {
                 object_id: staged_row_id,
                 branch_name: target_branch,
-                version_id: staged_row.version_id(),
+                row_digest: staged_row.content_digest(),
             }],
             vec![CapturedFrontierMember {
                 object_id: existing_row_id,
                 branch_name: target_branch,
-                version_id: existing_row.version_id(),
+                batch_id: existing_row.batch_id(),
             }],
         ))
         .unwrap();
@@ -4343,7 +4447,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
     assert_eq!(
         restarted
             .storage()
-            .scan_history_row_versions("users", staged_row_id)
+            .scan_history_row_batches("users", staged_row_id)
             .unwrap()[0]
             .state,
         crate::row_histories::RowState::Rejected
@@ -4385,12 +4489,12 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
     let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
-    let version_id = history_rows[0].version_id();
+    let row_digest = history_rows[0].content_digest();
     s.a.seal_batch(batch_id).unwrap();
 
     s.a.batched_tick();
@@ -4400,8 +4504,8 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             &entry,
             OutboxEntry {
                 destination: Destination::Server(server_id),
-                payload: SyncPayload::RowVersionCreated { row, .. }
-                    | SyncPayload::RowVersionNeeded { row, .. },
+                payload: SyncPayload::RowBatchCreated { row, .. }
+                    | SyncPayload::RowBatchNeeded { row, .. },
             } if *server_id == s.b_server_for_a && row.row_id == row_id && row.batch_id == batch_id
         )
     }), "expected initial outbound row for batch replay test, got {dropped_outbox:?}");
@@ -4417,7 +4521,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
                 && submission.members == vec![SealedBatchMember {
                     object_id: row_id,
                     branch_name: branch_name.clone(),
-                    version_id,
+                    row_digest,
                 }]
                 && submission.captured_frontier.is_empty()
         )),
@@ -4438,8 +4542,8 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             &entry,
             OutboxEntry {
                 destination: Destination::Server(server_id),
-                payload: SyncPayload::RowVersionCreated { row, .. }
-                    | SyncPayload::RowVersionNeeded { row, .. },
+                payload: SyncPayload::RowBatchCreated { row, .. }
+                    | SyncPayload::RowBatchNeeded { row, .. },
             } if *server_id == s.b_server_for_a && row.row_id == row_id && row.batch_id == batch_id
         )
     }), "expected replayed outbound row after Missing settlement, got {replay_outbox:?}");
@@ -4455,7 +4559,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
                 && submission.members == vec![SealedBatchMember {
                     object_id: row_id,
                     branch_name: branch_name.clone(),
-                    version_id,
+                    row_digest,
                 }]
                 && submission.captured_frontier.is_empty()
         )),
@@ -4492,11 +4596,11 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
             .unwrap();
     let existing_history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", existing_row_id)
+            .scan_history_row_batches("users", existing_row_id)
             .unwrap();
     let existing_branch_name =
         crate::object::BranchName::new(existing_history_rows[0].branch.as_str());
-    let existing_version_id = existing_history_rows[0].version_id();
+    let existing_batch_id = existing_history_rows[0].batch_id();
 
     let ((row_id, _row_values), _receiver) =
         s.a.insert_persisted(
@@ -4509,11 +4613,11 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     let batch_id = history_rows[0].batch_id;
     let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
-    let version_id = history_rows[0].version_id();
+    let row_digest = history_rows[0].content_digest();
     s.a.seal_batch(batch_id).unwrap();
 
     let sealed_submission =
@@ -4528,7 +4632,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
         vec![CapturedFrontierMember {
             object_id: existing_row_id,
             branch_name: existing_branch_name,
-            version_id: existing_version_id,
+            batch_id: existing_batch_id,
         }]
     );
 
@@ -4575,7 +4679,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
             && submission.members == vec![SealedBatchMember {
                 object_id: row_id,
                 branch_name: branch_name.clone(),
-                version_id,
+                row_digest,
             }]
             && submission.captured_frontier.iter().any(|member| member.object_id == later_row_id)
     )), "replayed seal should not recapture rows written after the batch was sealed");
@@ -4817,7 +4921,7 @@ fn rc_query_settled_tier_empty_resolves() {
 }
 
 #[test]
-fn query_reads_pick_row_versions_by_required_durability_tier() {
+fn query_reads_pick_row_batches_by_required_durability_tier() {
     let mut core = create_runtime_with_schema_and_sync_manager(
         test_schema(),
         "tier-aware-visible-row",
@@ -4954,8 +5058,8 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         }
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
-            payload @ SyncPayload::RowVersionNeeded { .. } => rows_to_a.push(payload),
-            payload @ SyncPayload::RowVersionStateChanged { .. } => row_state_to_a.push(payload),
+            payload @ SyncPayload::RowBatchNeeded { .. } => rows_to_a.push(payload),
+            payload @ SyncPayload::RowBatchStateChanged { .. } => row_state_to_a.push(payload),
             _ => {}
         }
     }
@@ -5307,7 +5411,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
 
     let history_rows =
         s.a.storage()
-            .scan_history_row_versions("users", row_id)
+            .scan_history_row_batches("users", row_id)
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
@@ -5451,9 +5555,9 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
         }
 
         match entry.payload {
-            SyncPayload::RowVersionNeeded { metadata, row } => {
+            SyncPayload::RowBatchNeeded { metadata, row } => {
                 let row_id = row.row_id;
-                let payload = SyncPayload::RowVersionNeeded { metadata, row };
+                let payload = SyncPayload::RowBatchNeeded { metadata, row };
                 if row_id == first_id && first_row_payload.is_none() {
                     first_row_payload = Some(payload);
                 } else if row_id == second_id || row_id == first_id {
@@ -5463,7 +5567,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
             payload @ SyncPayload::QueryScopeSnapshot { .. }
             | payload @ SyncPayload::BatchSettlement { .. }
             | payload @ SyncPayload::QuerySettled { .. }
-            | payload @ SyncPayload::RowVersionStateChanged { .. } => {
+            | payload @ SyncPayload::RowBatchStateChanged { .. } => {
                 control_payloads.push(payload);
             }
             _ => {}
@@ -6043,7 +6147,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
         )
     });
     let row_msg = messages.iter().find(|m| match &m.payload {
-        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        SyncPayload::RowBatchCreated { row, .. } => row.row_id == row_object_id,
         _ => false,
     });
 
@@ -6224,9 +6328,9 @@ fn remove_client_blocked_by_parked_sync_messages() {
     // Park a message from alice (simulates push_sync_inbox before batched_tick)
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
-            row: crate::row_histories::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowBatch::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
@@ -6268,9 +6372,9 @@ fn remove_client_succeeds_after_parked_messages_drained() {
 
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
-            row: crate::row_histories::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowBatch::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),
@@ -6318,9 +6422,9 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
     // Park a message from bob
     core.park_sync_message(InboxEntry {
         source: Source::Client(bob),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
-            row: crate::row_histories::StoredRowVersion::new(
+            row: crate::row_histories::StoredRowBatch::new(
                 ObjectId::new(),
                 "main",
                 Vec::new(),

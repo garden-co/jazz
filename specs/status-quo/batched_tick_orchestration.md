@@ -103,11 +103,11 @@ without changing the relational logic itself.
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/runtime_core.rs` | RuntimeCore definition and top-level API |
-| `crates/jazz-tools/src/runtime_core/ticks.rs` | Tick orchestration |
-| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers |
-| `crates/jazz-tools/src/monotonic_clock.rs` | Monotonic timestamp allocation |
-| `crates/jazz-wasm/src/runtime.rs` | Browser scheduler/runtime bridge |
-| `crates/jazz-napi/src/lib.rs` | Native embedded runtime bridge |
+| File                                           | Purpose                                  |
+| ---------------------------------------------- | ---------------------------------------- |
+| `crates/jazz-tools/src/runtime_core.rs`        | RuntimeCore definition and top-level API |
+| `crates/jazz-tools/src/runtime_core/ticks.rs`  | Tick orchestration                       |
+| `crates/jazz-tools/src/runtime_core/writes.rs` | Local write helpers                      |
+| `crates/jazz-tools/src/monotonic_clock.rs`     | Monotonic timestamp allocation           |
+| `crates/jazz-wasm/src/runtime.rs`              | Browser scheduler/runtime bridge         |
+| `crates/jazz-napi/src/lib.rs`                  | Native embedded runtime bridge           |

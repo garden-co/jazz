@@ -43,7 +43,7 @@ use crate::query_manager::types::{
 };
 use crate::row_format::{decode_row, encode_row};
 use crate::row_histories::{
-    BatchId, HistoryScan, QueryRowVersion, RowState, StoredRowVersion, VisibleRowEntry,
+    BatchId, HistoryScan, QueryRowBatch, RowState, StoredRowBatch, VisibleRowEntry,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -51,7 +51,7 @@ use crate::sync_manager::DurabilityTier;
 // Storage Types
 // ============================================================================
 
-type EncodedHistoryRowKey = (ObjectId, SharedString, CommitId);
+type EncodedHistoryRowKey = (ObjectId, SharedString, BatchId);
 type EncodedTableRowHistories = BTreeMap<EncodedHistoryRowKey, Vec<u8>>;
 
 /// Errors from storage operations.
@@ -141,28 +141,28 @@ pub enum IndexMutation<'a> {
 pub struct HistoryRowBytes<'a> {
     pub branch: &'a str,
     pub row_id: ObjectId,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
     pub bytes: &'a [u8],
 }
 
 pub(crate) struct OwnedHistoryRowBytes {
     pub branch: String,
     pub row_id: ObjectId,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
     pub bytes: Vec<u8>,
 }
 
 pub struct VisibleRowBytes<'a> {
     pub branch: &'a str,
     pub row_id: ObjectId,
-    pub current_version_id: CommitId,
+    pub current_batch_id: BatchId,
     pub bytes: &'a [u8],
 }
 
 pub(crate) struct OwnedVisibleRowBytes {
     pub branch: String,
     pub row_id: ObjectId,
-    pub current_version_id: CommitId,
+    pub current_batch_id: BatchId,
     pub bytes: Vec<u8>,
 }
 
@@ -219,7 +219,7 @@ fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
 }
 
 fn local_batch_record_key(batch_id: BatchId) -> String {
-    format!("batch:{}", hex::encode(batch_id.0.as_bytes()))
+    format!("batch:{}", hex::encode(batch_id.as_bytes()))
 }
 
 fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
@@ -231,10 +231,13 @@ fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
     let bytes = hex::decode(hex_id).map_err(|err| {
         StorageError::IoError(format!("invalid local batch record key '{key}': {err}"))
     })?;
-    let uuid = uuid::Uuid::from_slice(&bytes).map_err(|err| {
-        StorageError::IoError(format!("invalid local batch record uuid '{key}': {err}"))
+    let bytes: [u8; 16] = bytes.try_into().map_err(|_| {
+        StorageError::IoError(format!(
+            "invalid local batch record batch id '{key}': expected 16 bytes, got {}",
+            hex_id.len() / 2
+        ))
     })?;
-    Ok(BatchId(uuid))
+    Ok(BatchId(bytes))
 }
 
 fn branch_ord_key(branch_ord: BranchOrd) -> String {
@@ -269,13 +272,14 @@ fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescripto
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::Bytea),
         ColumnDescriptor::new("target_branch_ord", ColumnType::Integer),
+        ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
             "members",
             ColumnType::Array {
                 element: Box::new(ColumnType::Row {
                     columns: Box::new(RowDescriptor::new(vec![
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
-                        ColumnDescriptor::new("version_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
                     ])),
                 }),
             },
@@ -287,7 +291,7 @@ fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescripto
                     columns: Box::new(RowDescriptor::new(vec![
                         ColumnDescriptor::new("object_id", ColumnType::Bytea),
                         ColumnDescriptor::new("branch_ord", ColumnType::Integer),
-                        ColumnDescriptor::new("version_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("batch_id", ColumnType::Bytea),
                     ])),
                 }),
             },
@@ -469,7 +473,7 @@ fn schema_hash_for_branch<H: Storage + ?Sized>(
 fn history_user_descriptor_candidates_for_row<H: Storage + ?Sized>(
     storage: &H,
     table_hint: &str,
-    row: &StoredRowVersion,
+    row: &StoredRowBatch,
 ) -> Result<Vec<crate::query_manager::types::RowDescriptor>, StorageError> {
     let mut descriptors = Vec::new();
     let mut push_descriptor = |descriptor: crate::query_manager::types::RowDescriptor| {
@@ -516,7 +520,7 @@ fn history_user_descriptor_candidates_for_row<H: Storage + ?Sized>(
 fn required_history_user_descriptor_for_row<H: Storage + ?Sized>(
     storage: &H,
     table_hint: &str,
-    row: &StoredRowVersion,
+    row: &StoredRowBatch,
 ) -> Result<crate::query_manager::types::RowDescriptor, StorageError> {
     let row_data_matches = |descriptor: &crate::query_manager::types::RowDescriptor| {
         row.data.is_empty() || crate::row_format::decode_row(descriptor, &row.data).is_ok()
@@ -590,7 +594,7 @@ fn required_history_user_descriptor_for_row<H: Storage + ?Sized>(
 pub(crate) fn encode_history_row_bytes_for_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
-    rows: &[StoredRowVersion],
+    rows: &[StoredRowBatch],
 ) -> Result<Vec<OwnedHistoryRowBytes>, StorageError> {
     rows.iter()
         .map(|row| {
@@ -601,7 +605,7 @@ pub(crate) fn encode_history_row_bytes_for_storage<H: Storage + ?Sized>(
             Ok(OwnedHistoryRowBytes {
                 branch: row.branch.to_string(),
                 row_id: row.row_id,
-                version_id: row.version_id(),
+                batch_id: row.batch_id(),
                 bytes,
             })
         })
@@ -627,7 +631,7 @@ pub(crate) fn encode_visible_row_bytes_for_storage<H: Storage + ?Sized>(
             Ok(OwnedVisibleRowBytes {
                 branch: entry.current_row.branch.to_string(),
                 row_id: entry.current_row.row_id,
-                current_version_id: entry.current_row.version_id(),
+                current_batch_id: entry.current_row.batch_id(),
                 bytes,
             })
         })
@@ -639,7 +643,7 @@ fn decode_history_row_bytes_with_storage<H: Storage + ?Sized>(
     table: &str,
     row_id: ObjectId,
     bytes: &[u8],
-) -> Result<StoredRowVersion, StorageError> {
+) -> Result<StoredRowBatch, StorageError> {
     if crate::row_histories::is_flat_history_row(bytes) {
         let mut last_error = None;
         for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
@@ -667,16 +671,16 @@ fn decode_query_row_bytes_with_storage<H: Storage + ?Sized>(
     table: &str,
     row_id: ObjectId,
     bytes: &[u8],
-) -> Result<QueryRowVersion, StorageError> {
+) -> Result<QueryRowBatch, StorageError> {
     decode_history_row_bytes_with_storage(storage, table, row_id, bytes)
-        .map(|row| QueryRowVersion::from(&row))
+        .map(|row| QueryRowBatch::from(&row))
 }
 
 fn decode_scanned_history_row_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
     bytes: &[u8],
-) -> Result<StoredRowVersion, StorageError> {
+) -> Result<StoredRowBatch, StorageError> {
     if crate::row_histories::is_flat_history_row(bytes) {
         let row_id = crate::row_histories::flat_history_row_id(bytes)
             .map_err(|err| StorageError::IoError(format!("decode flat history row id: {err}")))?;
@@ -730,7 +734,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut patched_history = Vec::new();
-    let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowVersion>>::new();
+    let mut history_by_visible_row = HashMap::<(String, ObjectId), Vec<StoredRowBatch>>::new();
     let mut affected_visible_rows = HashSet::<(String, ObjectId)>::new();
 
     for mut row in history_rows {
@@ -769,7 +773,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
             .unwrap_or_default();
         let current_row = history_rows
             .iter()
-            .find(|row| row.version_id() == existing_entry.current_row.version_id())
+            .find(|row| row.batch_id() == existing_entry.current_row.batch_id())
             .cloned()
             .unwrap_or_else(|| {
                 let mut current = existing_entry.current_row.clone();
@@ -830,7 +834,7 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                 id: None,
                 values: vec![
                     Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
-                    Value::Bytea(member.version_id.0.to_vec()),
+                    Value::Bytea(member.row_digest.0.to_vec()),
                 ],
             })
         })
@@ -845,7 +849,7 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                 values: vec![
                     Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
                     Value::Integer(branch_ord),
-                    Value::Bytea(member.version_id.0.to_vec()),
+                    Value::Bytea(member.batch_id.0.to_vec()),
                 ],
             })
         })
@@ -853,8 +857,9 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     encode_row(
         &sealed_batch_submission_storage_descriptor_with_branch_ords(),
         &[
-            Value::Bytea(submission.batch_id.0.as_bytes().to_vec()),
+            Value::Bytea(submission.batch_id.as_bytes().to_vec()),
             Value::Integer(target_branch_ord),
+            Value::Bytea(submission.batch_digest.0.to_vec()),
             Value::Array(member_values),
             Value::Array(frontier_values),
         ],
@@ -871,7 +876,14 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         bytes,
     )
     .map_err(|err| StorageError::IoError(format!("decode sealed batch submission: {err}")))?;
-    let [batch_id, target_branch_ord, members, captured_frontier] = values.as_slice() else {
+    let [
+        batch_id,
+        target_branch_ord,
+        batch_digest,
+        members,
+        captured_frontier,
+    ] = values.as_slice()
+    else {
         return Err(StorageError::IoError(
             "unexpected sealed batch submission shape".to_string(),
         ));
@@ -879,14 +891,17 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
 
     let batch_id = match batch_id {
         Value::Bytea(bytes) => {
-            let uuid = uuid::Uuid::from_slice(bytes).map_err(|err| {
-                StorageError::IoError(format!("decode sealed batch batch id uuid: {err}"))
+            let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                StorageError::IoError(format!(
+                    "decode sealed batch id: expected 16 bytes, got {}",
+                    bytes.len()
+                ))
             })?;
-            BatchId(uuid)
+            BatchId(bytes)
         }
         other => {
             return Err(StorageError::IoError(format!(
-                "expected sealed batch batch id bytes, got {other:?}"
+                "expected sealed batch id bytes, got {other:?}"
             )));
         }
     };
@@ -905,13 +920,26 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                 "missing branch name for target branch ord {target_branch_ord}"
             ))
         })?;
+    let batch_digest = match batch_digest {
+        Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(|_| {
+            StorageError::IoError(format!(
+                "expected sealed batch digest to be 32 bytes, got {}",
+                bytes.len()
+            ))
+        })?),
+        other => {
+            return Err(StorageError::IoError(format!(
+                "expected sealed batch digest bytes, got {other:?}"
+            )));
+        }
+    };
 
     let members = match members {
         Value::Array(elements) => elements
             .iter()
             .map(|element| match element {
                 Value::Row { values, .. } => {
-                    let [object_id, version_id] = values.as_slice() else {
+                    let [object_id, row_digest] = values.as_slice() else {
                         return Err(StorageError::IoError(
                             "expected sealed batch member row to have two values".to_string(),
                         ));
@@ -930,25 +958,25 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                             )));
                         }
                     };
-                    let version_id = match version_id {
+                    let row_digest = match row_digest {
                         Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(
                             |_| {
                                 StorageError::IoError(format!(
-                                    "expected sealed batch member version id to be 32 bytes, got {}",
+                                    "expected sealed batch member row digest to be 32 bytes, got {}",
                                     bytes.len()
                                 ))
                             },
                         )?),
                         other => {
                             return Err(StorageError::IoError(format!(
-                                "expected sealed batch member version id bytes, got {other:?}"
+                                "expected sealed batch member row digest bytes, got {other:?}"
                             )));
                         }
                     };
                     Ok(crate::batch_fate::SealedBatchMember {
                         object_id,
                         branch_name: target_branch_name,
-                        version_id,
+                        row_digest,
                     })
                 }
                 other => Err(StorageError::IoError(format!(
@@ -968,7 +996,7 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
             .iter()
             .map(|element| match element {
                 Value::Row { values, .. } => {
-                    let [object_id, branch_ord, version_id] = values.as_slice() else {
+                    let [object_id, branch_ord, batch_id] = values.as_slice() else {
                         return Err(StorageError::IoError(
                             "expected captured frontier row to have three values".to_string(),
                         ));
@@ -1003,25 +1031,25 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                                     "missing branch name for captured frontier ord {branch_ord}"
                                 ))
                             })?;
-                    let version_id = match version_id {
+                    let batch_id = match batch_id {
                         Value::Bytea(bytes) => {
-                            CommitId(bytes.as_slice().try_into().map_err(|_| {
+                            BatchId(bytes.as_slice().try_into().map_err(|_| {
                                 StorageError::IoError(format!(
-                                    "expected captured frontier version id to be 32 bytes, got {}",
+                                    "expected captured frontier batch id to be 16 bytes, got {}",
                                     bytes.len()
                                 ))
                             })?)
                         }
                         other => {
                             return Err(StorageError::IoError(format!(
-                                "expected captured frontier version id bytes, got {other:?}"
+                                "expected captured frontier batch id bytes, got {other:?}"
                             )));
                         }
                     };
                     Ok(CapturedFrontierMember {
                         object_id,
                         branch_name,
-                        version_id,
+                        batch_id,
                     })
                 }
                 other => Err(StorageError::IoError(format!(
@@ -1036,12 +1064,15 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         }
     };
 
-    Ok(SealedBatchSubmission::new(
-        batch_id,
-        target_branch_name,
-        members,
-        captured_frontier,
-    ))
+    let submission =
+        SealedBatchSubmission::new(batch_id, target_branch_name, members, captured_frontier);
+    if submission.batch_digest != batch_digest {
+        return Err(StorageError::IoError(format!(
+            "sealed batch digest mismatch: expected {batch_digest:?}, computed {:?}",
+            submission.batch_digest
+        )));
+    }
+    Ok(submission)
 }
 
 fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
@@ -1062,7 +1093,7 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     encode_row(
         &local_batch_record_storage_descriptor_with_branch_ords(),
         &[
-            Value::Bytea(record.batch_id.0.as_bytes().to_vec()),
+            Value::Bytea(record.batch_id.as_bytes().to_vec()),
             Value::Text(encode_batch_mode(record.mode).to_string()),
             Value::Text(encode_durability_tier(record.requested_tier).to_string()),
             Value::Boolean(record.sealed),
@@ -1098,9 +1129,13 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
 
     let batch_id = match batch_id {
         Value::Bytea(bytes) => {
-            let uuid = uuid::Uuid::from_slice(bytes)
-                .map_err(|err| StorageError::IoError(format!("decode batch id uuid: {err}")))?;
-            BatchId(uuid)
+            let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                StorageError::IoError(format!(
+                    "decode batch id: expected 16 bytes, got {}",
+                    bytes.len()
+                ))
+            })?;
+            BatchId(bytes)
         }
         other => {
             return Err(StorageError::IoError(format!(
@@ -1437,7 +1472,7 @@ pub trait Storage {
             }
             records.push(record);
         }
-        records.sort_by_key(|record| record.batch_id.0);
+        records.sort_by_key(|record| record.batch_id);
         Ok(records)
     }
 
@@ -1485,7 +1520,7 @@ pub trait Storage {
             }
             submissions.push(submission);
         }
-        submissions.sort_by_key(|submission| submission.batch_id.0);
+        submissions.sort_by_key(|submission| submission.batch_id);
         Ok(submissions)
     }
 
@@ -1554,12 +1589,12 @@ pub trait Storage {
         ))
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         _table: &str,
         _branch: &str,
         _row_id: ObjectId,
-        _version_id: CommitId,
+        _batch_id: BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         Err(StorageError::IoError(
             "raw row-history lookups are not implemented for this backend yet".to_string(),
@@ -1579,7 +1614,7 @@ pub trait Storage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        rows: &[StoredRowBatch],
     ) -> Result<(), StorageError> {
         let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
         let borrowed_rows = encoded_rows
@@ -1587,7 +1622,7 @@ pub trait Storage {
             .map(|row| HistoryRowBytes {
                 branch: row.branch.as_str(),
                 row_id: row.row_id,
-                version_id: row.version_id,
+                batch_id: row.batch_id,
                 bytes: &row.bytes,
             })
             .collect::<Vec<_>>();
@@ -1636,7 +1671,7 @@ pub trait Storage {
             .map(|row| VisibleRowBytes {
                 branch: row.branch.as_str(),
                 row_id: row.row_id,
-                current_version_id: row.current_version_id,
+                current_batch_id: row.current_batch_id,
                 bytes: &row.bytes,
             })
             .collect::<Vec<_>>();
@@ -1658,7 +1693,7 @@ pub trait Storage {
     fn apply_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[StoredRowVersion],
+        history_rows: &[StoredRowBatch],
         visible_entries: &[VisibleRowEntry],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
@@ -1678,7 +1713,7 @@ pub trait Storage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let mut rows = self
             .scan_visible_region_bytes(table, branch)?
             .into_iter()
@@ -1699,7 +1734,7 @@ pub trait Storage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         self.load_visible_region_row_bytes(table, branch, row_id)?
             .map(|bytes| {
                 decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes)
@@ -1713,11 +1748,11 @@ pub trait Storage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         Ok(self
             .load_visible_region_row(table, branch, row_id)?
             .as_ref()
-            .map(QueryRowVersion::from))
+            .map(QueryRowBatch::from))
     }
 
     fn load_visible_region_row_for_tier(
@@ -1726,19 +1761,19 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         let Some(entry) = self.load_visible_region_entry(table, branch, row_id)? else {
             return Ok(None);
         };
 
-        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
             return Ok(None);
         };
-        if version_id == entry.current_version_id() {
+        if batch_id == entry.current_batch_id() {
             return Ok(Some(entry.current_row));
         }
 
-        self.load_history_row_version(table, branch, row_id, version_id)
+        self.load_history_row_batch(table, branch, row_id, batch_id)
     }
 
     fn load_visible_query_row_for_tier(
@@ -1747,11 +1782,11 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         Ok(self
             .load_visible_region_row_for_tier(table, branch, row_id, required_tier)?
             .as_ref()
-            .map(QueryRowVersion::from))
+            .map(QueryRowBatch::from))
     }
 
     fn load_visible_region_entry(
@@ -1770,7 +1805,7 @@ pub trait Storage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+    ) -> Result<Option<Vec<BatchId>>, StorageError> {
         Ok(self
             .load_visible_region_entry(table, branch, row_id)?
             .map(|entry| entry.branch_frontier))
@@ -1784,8 +1819,7 @@ pub trait Storage {
         let mut frontier = Vec::new();
 
         for (row_id, row_locator) in row_locators {
-            let history_rows =
-                self.scan_history_row_versions(row_locator.table.as_str(), row_id)?;
+            let history_rows = self.scan_history_row_batches(row_locator.table.as_str(), row_id)?;
             let mut branch_names: Vec<_> = history_rows
                 .into_iter()
                 .map(|row| BranchName::new(&row.branch))
@@ -1809,7 +1843,7 @@ pub trait Storage {
                 frontier.push(CapturedFrontierMember {
                     object_id: row_id,
                     branch_name,
-                    version_id: current_row.version_id(),
+                    batch_id: current_row.batch_id(),
                 });
             }
         }
@@ -1820,79 +1854,79 @@ pub trait Storage {
                 .as_bytes()
                 .cmp(right.object_id.uuid().as_bytes())
                 .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| left.version_id.0.cmp(&right.version_id.0))
+                .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
         });
         frontier.dedup();
         Ok(frontier)
     }
 
-    fn load_history_row_version(
+    fn load_history_row_batch(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
-        self.load_history_row_version_bytes(table, branch, row_id, version_id)?
+        batch_id: BatchId,
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
+        self.load_history_row_batch_bytes(table, branch, row_id, batch_id)?
             .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
             .transpose()
     }
 
-    fn load_history_query_row_version(
+    fn load_history_query_row_batch(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        self.load_history_row_version_bytes(table, branch, row_id, version_id)?
+        batch_id: BatchId,
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
+        self.load_history_row_batch_bytes(table, branch, row_id, batch_id)?
             .map(|bytes| decode_query_row_bytes_with_storage(self, table, row_id, &bytes))
             .transpose()
     }
 
-    fn load_history_row_version_any_branch(
+    fn load_history_row_batch_any_branch(
         &self,
         table: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        batch_id: BatchId,
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         let mut matches = self
-            .scan_history_row_versions(table, row_id)?
+            .scan_history_row_batches(table, row_id)?
             .into_iter()
-            .filter(|row| row.version_id() == version_id);
+            .filter(|row| row.batch_id() == batch_id);
         let Some(first_match) = matches.next() else {
             return Ok(None);
         };
         if let Some(second_match) = matches.next() {
             return Err(StorageError::IoError(format!(
-                "ambiguous row history version {version_id:?} for row {row_id}: found branches {} and {}",
+                "ambiguous row history version {batch_id:?} for row {row_id}: found branches {} and {}",
                 first_match.branch, second_match.branch
             )));
         }
         Ok(Some(first_match))
     }
 
-    fn load_history_query_row_version_any_branch(
+    fn load_history_query_row_batch_any_branch(
         &self,
         table: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        batch_id: BatchId,
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         Ok(self
-            .load_history_row_version_any_branch(table, row_id, version_id)?
+            .load_history_row_batch_any_branch(table, row_id, batch_id)?
             .as_ref()
-            .map(QueryRowVersion::from))
+            .map(QueryRowBatch::from))
     }
 
-    fn row_version_exists(
+    fn row_batch_exists(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: BatchId,
     ) -> Result<bool, StorageError> {
         Ok(self
-            .load_history_row_version(table, branch, row_id, version_id)?
+            .load_history_row_batch(table, branch, row_id, batch_id)?
             .is_some())
     }
 
@@ -1901,18 +1935,18 @@ pub trait Storage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<CommitId>, StorageError> {
+    ) -> Result<Vec<BatchId>, StorageError> {
         if let Some(frontier) = self.load_visible_region_frontier(table, branch, row_id)? {
             return Ok(frontier);
         }
 
         let branch_rows = self
-            .scan_history_row_versions(table, row_id)?
+            .scan_history_row_batches(table, row_id)?
             .into_iter()
             .filter(|row| row.branch == branch)
             .collect::<Vec<_>>();
 
-        let mut non_tips = SmolSet::<[CommitId; 2]>::new();
+        let mut non_tips = SmolSet::<[BatchId; 2]>::new();
         for row in &branch_rows {
             for parent in &row.parents {
                 non_tips.insert(*parent);
@@ -1921,35 +1955,35 @@ pub trait Storage {
 
         let mut tips: Vec<_> = branch_rows
             .into_iter()
-            .map(|row| row.version_id())
-            .filter(|version_id| !non_tips.contains(version_id))
+            .map(|row| row.batch_id())
+            .filter(|batch_id| !non_tips.contains(batch_id))
             .collect();
         tips.sort();
         tips.dedup();
         Ok(tips)
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         _table: &str,
         _row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         Err(StorageError::IoError(
             "visible-row history scans are not implemented for this backend yet".to_string(),
         ))
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let mut rows: Vec<StoredRowVersion> = self
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        let mut rows: Vec<StoredRowBatch> = self
             .scan_history_region_bytes(table, HistoryScan::Row { row_id })?
             .into_iter()
             .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
             .collect::<Result<_, _>>()?;
-        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
         Ok(rows)
     }
 
@@ -1958,28 +1992,28 @@ pub trait Storage {
         table: &str,
         branch: &str,
         scan: HistoryScan,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let scanned: Vec<StoredRowVersion> = self
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        let scanned: Vec<StoredRowBatch> = self
             .scan_history_region_bytes(table, scan)?
             .into_iter()
             .map(|bytes| decode_scanned_history_row_with_storage(self, table, &bytes))
             .collect::<Result<_, _>>()?;
 
-        let mut rows: Vec<StoredRowVersion> = match scan {
+        let mut rows: Vec<StoredRowBatch> = match scan {
             HistoryScan::Branch | HistoryScan::Row { .. } => scanned
                 .into_iter()
                 .filter(|row| row.branch == branch)
                 .collect(),
             HistoryScan::AsOf { ts } => {
-                let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
+                let mut latest_per_row: BTreeMap<ObjectId, StoredRowBatch> = BTreeMap::new();
                 for row in scanned {
                     if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
                         continue;
                     }
                     match latest_per_row.get(&row.row_id) {
                         Some(existing)
-                            if (existing.updated_at, existing.version_id())
-                                >= (row.updated_at, row.version_id()) => {}
+                            if (existing.updated_at, existing.batch_id())
+                                >= (row.updated_at, row.batch_id()) => {}
                         _ => {
                             latest_per_row.insert(row.row_id, row);
                         }
@@ -1988,7 +2022,7 @@ pub trait Storage {
                 latest_per_row.into_values().collect()
             }
         };
-        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
         Ok(rows)
     }
 
@@ -2297,14 +2331,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).append_history_region_row_bytes(table, rows)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        (**self).load_history_row_version_bytes(table, branch, row_id, version_id)
+        (**self).load_history_row_batch_bytes(table, branch, row_id, batch_id)
     }
 
     fn scan_history_region_bytes(
@@ -2318,7 +2352,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        rows: &[StoredRowBatch],
     ) -> Result<(), StorageError> {
         (**self).append_history_region_rows(table, rows)
     }
@@ -2369,7 +2403,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn apply_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[StoredRowVersion],
+        history_rows: &[StoredRowBatch],
         visible_entries: &[VisibleRowEntry],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
@@ -2380,7 +2414,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         (**self).scan_visible_region(table, branch)
     }
 
@@ -2389,7 +2423,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         (**self).load_visible_region_row(table, branch, row_id)
     }
 
@@ -2398,7 +2432,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         (**self).load_visible_query_row(table, branch, row_id)
     }
 
@@ -2408,7 +2442,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         (**self).load_visible_region_row_for_tier(table, branch, row_id, required_tier)
     }
 
@@ -2418,34 +2452,34 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         (**self).load_visible_query_row_for_tier(table, branch, row_id, required_tier)
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        (**self).scan_visible_region_row_versions(table, row_id)
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        (**self).scan_visible_region_row_batches(table, row_id)
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        (**self).scan_history_row_versions(table, row_id)
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        (**self).scan_history_row_batches(table, row_id)
     }
 
-    fn load_history_query_row_version(
+    fn load_history_query_row_batch(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
-        (**self).load_history_query_row_version(table, branch, row_id, version_id)
+        batch_id: BatchId,
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
+        (**self).load_history_query_row_batch(table, branch, row_id, batch_id)
     }
 
     fn scan_history_region(
@@ -2453,7 +2487,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         table: &str,
         branch: &str,
         scan: HistoryScan,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         (**self).scan_history_region(table, branch, scan)
     }
 
@@ -2534,11 +2568,11 @@ type RawTableEntries = BTreeMap<String, Vec<u8>>;
 #[derive(Debug, Clone, Default)]
 struct TableRowHistories {
     visible: BTreeMap<SharedString, BTreeMap<ObjectId, VisibleRowEntry>>,
-    history: BTreeMap<(ObjectId, SharedString, CommitId), StoredRowVersion>,
+    history: BTreeMap<(ObjectId, SharedString, BatchId), StoredRowBatch>,
 }
 
 impl TableRowHistories {
-    fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowVersion> {
+    fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowBatch> {
         let mut rows: Vec<_> = self
             .history
             .iter()
@@ -2547,7 +2581,7 @@ impl TableRowHistories {
             })
             .map(|(_, row)| row.clone())
             .collect();
-        rows.sort_by_key(|row| (row.updated_at, row.version_id()));
+        rows.sort_by_key(|row| (row.updated_at, row.batch_id()));
         rows
     }
 
@@ -2565,7 +2599,7 @@ impl TableRowHistories {
         let mut history_rows = self.history_rows_for(branch, row_id);
         if !history_rows
             .iter()
-            .any(|row| row.version_id() == current_row.version_id())
+            .any(|row| row.batch_id() == current_row.batch_id())
         {
             history_rows.push(current_row.clone());
         }
@@ -2592,7 +2626,7 @@ pub struct MemoryStorage {
     row_locators: HashMap<ObjectId, RowLocator>,
     /// Row-history storage keyed by table.
     row_histories: HashMap<String, TableRowHistories>,
-    /// Raw encoded row-history bytes keyed by table, row id, branch, and version id.
+    /// Raw encoded row-history bytes keyed by table, row id, branch, and batch id.
     row_history_bytes: HashMap<String, EncodedTableRowHistories>,
 }
 
@@ -2866,20 +2900,20 @@ impl Storage for MemoryStorage {
     fn append_history_region_rows(
         &mut self,
         table: &str,
-        rows: &[StoredRowVersion],
+        rows: &[StoredRowBatch],
     ) -> Result<(), StorageError> {
         let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
         let regions = self.row_histories.entry(table.to_string()).or_default();
         let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in rows {
             regions.history.insert(
-                (row.row_id, row.branch.clone(), row.version_id()),
+                (row.row_id, row.branch.clone(), row.batch_id()),
                 row.clone(),
             );
         }
         for row in encoded_rows {
             raw_regions.insert(
-                (row.row_id, row.branch.clone().into(), row.version_id),
+                (row.row_id, row.branch.clone().into(), row.batch_id),
                 row.bytes,
             );
         }
@@ -2894,7 +2928,7 @@ impl Storage for MemoryStorage {
         let regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in rows {
             regions.insert(
-                (row.row_id, row.branch.to_string().into(), row.version_id),
+                (row.row_id, row.branch.to_string().into(), row.batch_id),
                 row.bytes.to_vec(),
             );
         }
@@ -2971,7 +3005,7 @@ impl Storage for MemoryStorage {
         &self,
         table: &str,
         branch: &str,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
@@ -2992,7 +3026,7 @@ impl Storage for MemoryStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
@@ -3007,13 +3041,13 @@ impl Storage for MemoryStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
                 .get(branch)
                 .and_then(|rows| rows.get(&row_id))
-                .map(|entry| QueryRowVersion::from(&entry.current_row))
+                .map(|entry| QueryRowBatch::from(&entry.current_row))
         }))
     }
 
@@ -3035,7 +3069,7 @@ impl Storage for MemoryStorage {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-    ) -> Result<Option<Vec<CommitId>>, StorageError> {
+    ) -> Result<Option<Vec<BatchId>>, StorageError> {
         Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .visible
@@ -3051,7 +3085,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(None);
         };
@@ -3063,17 +3097,17 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
 
-        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
             return Ok(None);
         };
-        if version_id == entry.current_version_id() {
+        if batch_id == entry.current_batch_id() {
             return Ok(Some(entry.current_row.clone()));
         }
 
         Ok(regions
             .history_rows_for(branch, row_id)
             .into_iter()
-            .find(|row| row.version_id() == version_id))
+            .find(|row| row.batch_id() == batch_id))
     }
 
     fn load_visible_query_row_for_tier(
@@ -3082,7 +3116,7 @@ impl Storage for MemoryStorage {
         branch: &str,
         row_id: ObjectId,
         required_tier: DurabilityTier,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(None);
         };
@@ -3094,25 +3128,25 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
 
-        let Some(version_id) = entry.version_id_for_tier(required_tier) else {
+        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
             return Ok(None);
         };
-        if version_id == entry.current_version_id() {
-            return Ok(Some(QueryRowVersion::from(&entry.current_row)));
+        if batch_id == entry.current_batch_id() {
+            return Ok(Some(QueryRowBatch::from(&entry.current_row)));
         }
 
         Ok(regions
             .history_rows_for(branch, row_id)
             .into_iter()
-            .find(|row| row.version_id() == version_id)
-            .map(|row| QueryRowVersion::from(&row)))
+            .find(|row| row.batch_id() == batch_id)
+            .map(|row| QueryRowBatch::from(&row)))
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
@@ -3127,11 +3161,11 @@ impl Storage for MemoryStorage {
         Ok(rows)
     }
 
-    fn scan_history_row_versions(
+    fn scan_history_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
@@ -3142,20 +3176,20 @@ impl Storage for MemoryStorage {
             .filter(|((history_row_id, _, _), _)| *history_row_id == row_id)
             .map(|(_, row)| row.clone())
             .collect();
-        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.version_id()));
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
         Ok(rows)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.row_history_bytes.get(table).and_then(|regions| {
             regions
-                .get(&(row_id, branch.to_string().into(), version_id))
+                .get(&(row_id, branch.to_string().into(), batch_id))
                 .cloned()
         }))
     }
@@ -3222,37 +3256,37 @@ impl Storage for MemoryStorage {
             .collect())
     }
 
-    fn load_history_row_version(
+    fn load_history_row_batch(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        batch_id: BatchId,
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
         Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .history
-                .get(&(row_id, branch.to_string().into(), version_id))
+                .get(&(row_id, branch.to_string().into(), batch_id))
                 .cloned()
         }))
     }
 
-    fn load_history_query_row_version(
+    fn load_history_query_row_batch(
         &self,
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
-    ) -> Result<Option<QueryRowVersion>, StorageError> {
+        batch_id: BatchId,
+    ) -> Result<Option<QueryRowBatch>, StorageError> {
         Ok(self
             .row_histories
             .get(table)
             .and_then(|regions| {
                 regions
                     .history
-                    .get(&(row_id, branch.to_string().into(), version_id))
+                    .get(&(row_id, branch.to_string().into(), batch_id))
             })
-            .map(QueryRowVersion::from))
+            .map(QueryRowBatch::from))
     }
 
     fn scan_history_region(
@@ -3260,12 +3294,12 @@ impl Storage for MemoryStorage {
         table: &str,
         branch: &str,
         scan: HistoryScan,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
         let Some(regions) = self.row_histories.get(table) else {
             return Ok(Vec::new());
         };
 
-        let mut rows: Vec<StoredRowVersion> = match scan {
+        let mut rows: Vec<StoredRowBatch> = match scan {
             HistoryScan::Branch => regions
                 .history
                 .iter()
@@ -3281,15 +3315,15 @@ impl Storage for MemoryStorage {
                 .map(|(_, row)| row.clone())
                 .collect(),
             HistoryScan::AsOf { ts } => {
-                let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
+                let mut latest_per_row: BTreeMap<ObjectId, StoredRowBatch> = BTreeMap::new();
                 for ((row_id, _, _), row) in &regions.history {
                     if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
                         continue;
                     }
                     match latest_per_row.get(row_id) {
                         Some(existing)
-                            if (existing.updated_at, existing.version_id())
-                                >= (row.updated_at, row.version_id()) => {}
+                            if (existing.updated_at, existing.batch_id())
+                                >= (row.updated_at, row.batch_id()) => {}
                         _ => {
                             latest_per_row.insert(*row_id, row.clone());
                         }
@@ -3304,7 +3338,7 @@ impl Storage for MemoryStorage {
                 row.branch.clone(),
                 row.row_id,
                 row.updated_at,
-                row.version_id(),
+                row.batch_id(),
             )
         });
         Ok(rows)
@@ -3352,16 +3386,16 @@ mod tests {
             .unwrap();
     }
 
-    fn make_users_row_version(
+    fn make_users_row_batch(
         row_id: ObjectId,
         branch: &str,
         value: &str,
         provenance: RowProvenance,
         state: crate::row_histories::RowState,
         durability: Option<DurabilityTier>,
-        parents: Vec<crate::commit::CommitId>,
-    ) -> crate::row_histories::StoredRowVersion {
-        crate::row_histories::StoredRowVersion::new(
+        parents: Vec<BatchId>,
+    ) -> crate::row_histories::StoredRowBatch {
+        crate::row_histories::StoredRowBatch::new(
             row_id,
             branch,
             parents,
@@ -3592,7 +3626,7 @@ mod tests {
         let schema_hash = seed_users_schema(&mut storage);
         let row_id = ObjectId::new();
         seed_users_row(&mut storage, row_id, schema_hash);
-        let version = make_users_row_version(
+        let version = make_users_row_batch(
             row_id,
             "dev/main",
             "alice",
@@ -3616,7 +3650,7 @@ mod tests {
             .unwrap();
 
         let visible = storage.scan_visible_region("users", "dev/main").unwrap();
-        let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
+        let history_by_row = storage.scan_history_row_batches("users", row_id).unwrap();
         let history = storage
             .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
             .unwrap();
@@ -3635,7 +3669,7 @@ mod tests {
         let row_id = ObjectId::new();
         seed_users_row(&mut storage, row_id, schema_hash);
 
-        let globally_confirmed = make_users_row_version(
+        let globally_confirmed = make_users_row_batch(
             row_id,
             "dev/main",
             "v1",
@@ -3644,7 +3678,7 @@ mod tests {
             Some(DurabilityTier::GlobalServer),
             Vec::new(),
         );
-        let current_worker = make_users_row_version(
+        let current_worker = make_users_row_batch(
             row_id,
             "dev/main",
             "v2",
@@ -3656,7 +3690,7 @@ mod tests {
             },
             RowState::VisibleDirect,
             Some(DurabilityTier::Worker),
-            vec![globally_confirmed.version_id()],
+            vec![globally_confirmed.batch_id()],
         );
 
         storage
@@ -3688,12 +3722,9 @@ mod tests {
 
         assert_eq!(visible, Some(current_worker.clone()));
         assert_eq!(entry.current_row, current_worker);
-        assert_eq!(entry.worker_version_id, None);
-        assert_eq!(entry.edge_version_id, Some(globally_confirmed.version_id()));
-        assert_eq!(
-            entry.global_version_id,
-            Some(globally_confirmed.version_id())
-        );
+        assert_eq!(entry.worker_batch_id, None);
+        assert_eq!(entry.edge_batch_id, Some(globally_confirmed.batch_id()));
+        assert_eq!(entry.global_batch_id, Some(globally_confirmed.batch_id()));
     }
 
     #[test]
@@ -3704,7 +3735,7 @@ mod tests {
             ColumnDescriptor::new("done", ColumnType::Boolean),
         ]);
         let row_id = ObjectId::new();
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
             Vec::new(),
@@ -3726,14 +3757,14 @@ mod tests {
                 &[HistoryRowBytes {
                     branch: row.branch.as_str(),
                     row_id,
-                    version_id: row.version_id(),
+                    batch_id: row.batch_id(),
                     bytes: &encoded,
                 }],
             )
             .unwrap();
 
         let loaded = storage
-            .load_history_row_version_bytes("tasks", row.branch.as_str(), row_id, row.version_id())
+            .load_history_row_batch_bytes("tasks", row.branch.as_str(), row_id, row.batch_id())
             .unwrap()
             .expect("history bytes should load");
         assert_eq!(
@@ -3786,7 +3817,7 @@ mod tests {
             .unwrap();
         storage.put_row_locator(row_id, Some(&row_locator)).unwrap();
 
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
             Vec::new(),
@@ -3806,7 +3837,7 @@ mod tests {
             .unwrap();
 
         let encoded = storage
-            .load_history_row_version_bytes("tasks", row.branch.as_str(), row_id, row.version_id())
+            .load_history_row_batch_bytes("tasks", row.branch.as_str(), row_id, row.batch_id())
             .unwrap()
             .expect("history bytes should load");
         assert_eq!(
@@ -3825,7 +3856,7 @@ mod tests {
             .build();
         let user_descriptor = schema[&"tasks".into()].columns.clone();
         let row_id = ObjectId::new();
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
             Vec::new(),

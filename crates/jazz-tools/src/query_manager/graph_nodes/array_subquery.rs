@@ -465,7 +465,7 @@ impl ArraySubqueryNode {
         let element = outer_tuple.get(0)?;
         let outer_id = element.id();
         let outer_content = element.content()?;
-        let version_id = element.version_id()?;
+        let batch_id = element.batch_id()?;
         let row_provenance = element.row_provenance()?.clone();
 
         // Decode outer values
@@ -491,7 +491,7 @@ impl ArraySubqueryNode {
             vec![TupleElement::Row {
                 id: outer_id,
                 content: output_content.into(),
-                version_id,
+                batch_id,
                 row_provenance,
             }],
             provenance,
@@ -677,7 +677,6 @@ impl RowNode for ArraySubqueryNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::query_manager::graph_nodes::subgraph::SubgraphBuilder;
     use crate::query_manager::types::TableName;
 
@@ -774,7 +773,7 @@ mod tests {
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
             content: user_data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
@@ -817,7 +816,7 @@ mod tests {
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,
             content: user_data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 

@@ -6,7 +6,7 @@ Everything above it assumes reads and writes happen immediately:
 
 - queries settle synchronously
 - local mutations update subscriptions in the same call stack
-- sync replay can apply row versions without waiting for an async database callback
+- sync replay can apply row batch members without waiting for an async database callback
 
 That is why the `Storage` trait is synchronous even in the browser. The browser gets there by putting durable storage in a dedicated worker, where OPFS exposes synchronous file access.
 
@@ -37,7 +37,7 @@ Storage also owns small engine metadata rows used for runtime bookkeeping.
 
 For user data, storage persists both:
 
-- the append-friendly history region for row versions
+- the append-friendly history region for row batch members
 - the compact visible region for current reads
 
 Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` columns plus the
@@ -57,7 +57,7 @@ raw user tables
   -> application rows and index keys
 
 row-history regions
-  -> flat history rows keyed by (row_id, version_id)
+  -> flat history rows keyed by (row_id, batch_id)
   -> flat visible rows keyed by (branch, row_id)
 
 system tables
@@ -132,13 +132,13 @@ That means:
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/storage/mod.rs` | Storage trait plus in-memory implementation and shared helpers |
-| `crates/jazz-tools/src/storage/opfs_btree.rs` | Browser worker durable backend |
-| `crates/jazz-tools/src/storage/sqlite.rs` | SQLite durable backend |
-| `crates/jazz-tools/src/storage/rocksdb.rs` | RocksDB durable backend |
-| `crates/jazz-tools/src/row_format.rs` | Shared row encoding |
-| `crates/jazz-wasm/src/runtime.rs` | Browser runtime bridge into storage |
-| `crates/jazz-napi/src/lib.rs` | SQLite-backed NAPI runtime |
-| `crates/jazz-cloud-server/src/server.rs` | RocksDB-backed server runtime |
+| File                                          | Purpose                                                        |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| `crates/jazz-tools/src/storage/mod.rs`        | Storage trait plus in-memory implementation and shared helpers |
+| `crates/jazz-tools/src/storage/opfs_btree.rs` | Browser worker durable backend                                 |
+| `crates/jazz-tools/src/storage/sqlite.rs`     | SQLite durable backend                                         |
+| `crates/jazz-tools/src/storage/rocksdb.rs`    | RocksDB durable backend                                        |
+| `crates/jazz-tools/src/row_format.rs`         | Shared row encoding                                            |
+| `crates/jazz-wasm/src/runtime.rs`             | Browser runtime bridge into storage                            |
+| `crates/jazz-napi/src/lib.rs`                 | SQLite-backed NAPI runtime                                     |
+| `crates/jazz-cloud-server/src/server.rs`      | RocksDB-backed server runtime                                  |

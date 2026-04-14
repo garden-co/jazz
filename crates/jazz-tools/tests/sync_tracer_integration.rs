@@ -23,8 +23,8 @@ fn test_schema() -> jazz_tools::Schema {
 /// Alice creates a todo, bob sees it. The tracer captures the full flow.
 ///
 /// ```text
-/// alice ──RowVersionCreated────► server ──RowVersionNeeded────► bob
-///       ◄──RowVersionStateChanged──
+/// alice ──RowBatchCreated────► server ──RowBatchNeeded────► bob
+///       ◄──RowBatchStateChanged──
 /// ```
 #[tokio::test]
 async fn alice_write_bob_read() {
@@ -78,14 +78,14 @@ async fn alice_write_bob_read() {
     .await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : RowVersionCreated (1)
-    alice    => server  : RowVersionCreated (1)
+    alice    -> server  : RowBatchCreated (1)
+    alice    => server  : RowBatchCreated (1)
     bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
     bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
-    server   -> alice   : RowVersionStateChanged (2)
-    server   -> bob     : QuerySettled (1), RowVersionNeeded (1)
-    server   => alice   : RowVersionStateChanged (2)
-    server   => bob     : QuerySettled (1), RowVersionNeeded (1)
+    server   -> alice   : RowBatchStateChanged (2)
+    server   -> bob     : QuerySettled (1), RowBatchNeeded (1)
+    server   => alice   : RowBatchStateChanged (2)
+    server   => bob     : QuerySettled (1), RowBatchNeeded (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -182,14 +182,14 @@ async fn bob_updates_alice_todo() {
     tracer.expect_contains(
         "
         alice    -> server   QuerySubscription
-        server   -> alice    RowVersionNeeded
+        server   -> alice    RowBatchNeeded
         server   -> alice    QuerySettled
     ",
     );
     tracer.expect_contains(
         "
-        bob      -> server   RowVersionCreated
-        server   -> bob      RowVersionStateChanged
+        bob      -> server   RowBatchCreated
+        server   -> bob      RowBatchStateChanged
     ",
     );
 
@@ -254,10 +254,10 @@ async fn single_writer_flow() {
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : QueryUnsubscription (1), RowVersionCreated (1)
-    alice    => server  : RowVersionCreated (1)
-    server   -> alice   : RowVersionStateChanged (2)
-    server   => alice   : RowVersionStateChanged (2)
+    alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1)
+    alice    => server  : RowBatchCreated (1)
+    server   -> alice   : RowBatchStateChanged (2)
+    server   => alice   : RowBatchStateChanged (2)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -305,12 +305,12 @@ async fn named_object_trace() {
     insta::assert_snapshot!(tracer.trace_normalized(), @"
     # => sent, -> received
     alice    -> server    QueryUnsubscription  query:0
-    alice    => server    RowVersionCreated    created row:my-todo branch:main version:C1
-    alice    -> server    RowVersionCreated    created row:my-todo branch:main version:C1
-    server   => alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
-    server   -> alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
-    server   => alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
-    server   -> alice     RowVersionStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
+    alice    => server    RowBatchCreated      created row:my-todo branch:main version:C1
+    alice    -> server    RowBatchCreated      created row:my-todo branch:main version:C1
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(EdgeServer)
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main version:C1 state:None tier:Some(GlobalServer)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

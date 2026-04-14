@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
+use crate::row_histories::BatchId;
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{
@@ -29,7 +29,7 @@ enum WriteSchemaResolution {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
     pub content: Vec<u8>,
 }
 
@@ -75,7 +75,7 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (_, row) = self.load_best_visible_row_version(
+        let (_, row) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -88,8 +88,9 @@ impl QueryManager {
 
     fn payload_row_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
         match payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_provenance()),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.row_provenance())
+            }
             _ => None,
         }
     }
@@ -231,7 +232,7 @@ impl QueryManager {
         &self,
         table: &str,
         content: &[u8],
-        version_id: CommitId,
+        batch_id: BatchId,
         branch_name: BranchName,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
@@ -259,7 +260,7 @@ impl QueryManager {
 
         let transformer = LensTransformer::new(auth_context, table);
         transformer
-            .transform(content, version_id, source_hash)
+            .transform(content, batch_id, source_hash)
             .ok()
             .map(|result| result.data)
     }
@@ -273,7 +274,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, row) = self.load_best_visible_row_version(
+        let (table, row) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -285,14 +286,14 @@ impl QueryManager {
             return None;
         }
 
-        let tip_commit_id = row.version_id();
+        let tip_batch_id = row.batch_id;
         let tip_content = row.data.clone();
         let tip_provenance = row.row_provenance();
 
         let transformed = self.transform_content_to_authorization_schema(
             &table,
             &tip_content,
-            tip_commit_id,
+            tip_batch_id,
             branch_name,
             source_branch_schema_map,
             auth_context,
@@ -300,7 +301,6 @@ impl QueryManager {
 
         Some(LoadedRow::new(
             transformed,
-            tip_commit_id,
             tip_provenance,
             [(object_id, branch_name)].into_iter().collect(),
             row.batch_id,
@@ -332,7 +332,7 @@ impl QueryManager {
         let Some(transformed) = self.transform_content_to_authorization_schema(
             table_name.as_str(),
             content,
-            CommitId([0; 32]),
+            BatchId([0; 16]),
             branch_name,
             source_branch_schema_map,
             auth_context,
@@ -340,12 +340,7 @@ impl QueryManager {
             return false;
         };
 
-        let row = Row::new(
-            object_id,
-            transformed,
-            CommitId([0; 32]),
-            provenance.clone(),
-        );
+        let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
@@ -383,7 +378,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) = self.load_best_visible_row_version(
+        let Some((table, row)) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -542,7 +537,7 @@ impl QueryManager {
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
-        version_id: CommitId,
+        batch_id: BatchId,
         branch_name: BranchName,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
@@ -552,11 +547,11 @@ impl QueryManager {
             && source_hash != context.schema_context.current_hash
         {
             let transformer = LensTransformer::new(context.schema_context, context.table);
-            match transformer.transform(&content, version_id, source_hash) {
+            match transformer.transform(&content, batch_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
-                        version_id,
+                        batch_id: result.batch_id,
                         content: result.data,
                     });
                 }
@@ -582,7 +577,7 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
-            version_id,
+            batch_id,
             content,
         })
     }
@@ -1565,7 +1560,7 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
             let mut row_loader =
                 |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                    let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
+                    let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
                         storage,
                         id,
                         table_hint.as_ref().map(TableName::as_str),
@@ -1577,15 +1572,14 @@ impl QueryManager {
                     if row.is_hard_deleted() {
                         return None;
                     }
-                    let version_id = row.version_id();
+                    let batch_id = row.batch_id;
                     let provenance = row.row_provenance();
                     let source_branch = BranchName::new(&row.branch);
                     Some(LoadedRow::new(
                         row.data,
-                        version_id,
                         provenance,
                         [(id, source_branch)].into_iter().collect(),
-                        row.batch_id,
+                        batch_id,
                     ))
                 };
 

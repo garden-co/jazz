@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 };
 use crate::row_format::encode_row;
 use crate::row_histories::{
-    HistoryScan, RowState, StoredRowVersion, VisibleRowEntry, decode_flat_history_row,
+    BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry, decode_flat_history_row,
     decode_flat_visible_row_entry,
 };
 use crate::schema_manager::encoding::encode_schema;
@@ -64,13 +64,8 @@ fn seed_row_history_locator(
         .unwrap();
 }
 
-fn make_row_version(
-    row_id: ObjectId,
-    branch: &str,
-    updated_at: u64,
-    value: &str,
-) -> StoredRowVersion {
-    StoredRowVersion::new(
+fn make_row_batch(row_id: ObjectId, branch: &str, updated_at: u64, value: &str) -> StoredRowBatch {
+    StoredRowBatch::new(
         row_id,
         branch,
         Vec::new(),
@@ -87,8 +82,8 @@ fn make_row_version(
 }
 
 fn make_visible_entry(
-    current_row: StoredRowVersion,
-    history_rows: &[StoredRowVersion],
+    current_row: StoredRowBatch,
+    history_rows: &[StoredRowBatch],
 ) -> VisibleRowEntry {
     VisibleRowEntry::rebuild(current_row, history_rows)
 }
@@ -333,8 +328,8 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
-    let version = make_row_version(row_id, "main", 10, "alice");
-    let version_id = version.version_id();
+    let version = make_row_batch(row_id, "main", 10, "alice");
+    let batch_id = version.batch_id();
 
     storage
         .append_history_region_rows("users", std::slice::from_ref(&version))
@@ -369,11 +364,11 @@ pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
         storage
             .load_visible_region_frontier("users", "main", row_id)
             .unwrap(),
-        Some(vec![version_id])
+        Some(vec![batch_id])
     );
 }
 
-pub fn test_row_region_keeps_same_version_id_distinct_across_branches(
+pub fn test_row_region_keeps_same_batch_id_distinct_across_branches(
     factory: &dyn Fn() -> Box<dyn Storage>,
 ) {
     let mut storage = factory();
@@ -381,17 +376,17 @@ pub fn test_row_region_keeps_same_version_id_distinct_across_branches(
     let row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
 
-    let shared_version_id = CommitId([0x5a; 32]);
-    let mut main = make_row_version(row_id, "dev/main", 10, "alice");
-    main.version_id = shared_version_id;
-    let mut draft = make_row_version(row_id, "dev/draft", 20, "alice draft");
-    draft.version_id = shared_version_id;
+    let shared_batch_id = BatchId([0x5a; 16]);
+    let mut main = make_row_batch(row_id, "dev/main", 10, "alice");
+    main.batch_id = shared_batch_id;
+    let mut draft = make_row_batch(row_id, "dev/draft", 20, "alice draft");
+    draft.batch_id = shared_batch_id;
 
     storage
         .append_history_region_rows("users", &[main.clone(), draft.clone()])
         .unwrap();
 
-    let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
+    let history_by_row = storage.scan_history_row_batches("users", row_id).unwrap();
     let main_history = storage
         .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
         .unwrap();
@@ -399,13 +394,13 @@ pub fn test_row_region_keeps_same_version_id_distinct_across_branches(
         .scan_history_region("users", "dev/draft", HistoryScan::Row { row_id })
         .unwrap();
     let main_loaded = storage
-        .load_history_row_version("users", "dev/main", row_id, shared_version_id)
+        .load_history_row_batch("users", "dev/main", row_id, shared_batch_id)
         .unwrap();
     let draft_loaded = storage
-        .load_history_row_version("users", "dev/draft", row_id, shared_version_id)
+        .load_history_row_batch("users", "dev/draft", row_id, shared_batch_id)
         .unwrap();
     let ambiguous_lookup =
-        storage.load_history_row_version_any_branch("users", row_id, shared_version_id);
+        storage.load_history_row_batch_any_branch("users", row_id, shared_batch_id);
 
     assert_eq!(history_by_row, vec![draft.clone(), main.clone()]);
     assert_eq!(main_history, vec![main]);
@@ -432,7 +427,7 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
     let schema_hash = SchemaHash::compute(&schema);
     let descriptor = schema[&"tasks".into()].columns.clone();
     let row_id = ObjectId::new();
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         row_id,
         "main",
         Vec::new(),
@@ -471,7 +466,7 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
         .unwrap();
 
     let encoded = storage
-        .load_history_row_version_bytes("tasks", row.branch.as_str(), row_id, row.version_id())
+        .load_history_row_batch_bytes("tasks", row.branch.as_str(), row_id, row.batch_id())
         .unwrap()
         .expect("history row should persist");
 
@@ -492,7 +487,7 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(
     let schema_hash = SchemaHash::compute(&schema);
     let descriptor = schema[&"tasks".into()].columns.clone();
     let row_id = ObjectId::new();
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         row_id,
         "main",
         Vec::new(),
@@ -550,7 +545,7 @@ pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Stora
     let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
-    let version = make_row_version(row_id, "main", 10, "alice");
+    let version = make_row_batch(row_id, "main", 10, "alice");
 
     storage
         .append_history_region_rows("users", std::slice::from_ref(&version))
@@ -603,8 +598,8 @@ pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) 
     let draft_row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
     seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
-    let main_row = make_row_version(main_row_id, "main", 10, "main");
-    let draft_row = make_row_version(draft_row_id, "draft", 20, "draft");
+    let main_row = make_row_batch(main_row_id, "main", 10, "main");
+    let draft_row = make_row_batch(draft_row_id, "draft", 20, "draft");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -634,8 +629,8 @@ pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn 
     let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
-    let main_row = make_row_version(row_id, "main", 10, "main");
-    let draft_row = make_row_version(row_id, "draft", 20, "draft");
+    let main_row = make_row_batch(row_id, "main", 10, "main");
+    let draft_row = make_row_batch(row_id, "draft", 20, "draft");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -652,7 +647,7 @@ pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn 
 
     assert_eq!(
         storage
-            .scan_visible_region_row_versions("users", row_id)
+            .scan_visible_region_row_batches("users", row_id)
             .unwrap(),
         vec![draft_row, main_row]
     );
@@ -665,7 +660,7 @@ pub fn test_apply_row_mutation_combines_row_and_index_effects(
     let schema_hash = seed_row_history_table(storage.as_mut(), "users");
     let row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
-    let version = make_row_version(row_id, "main", 10, "alice");
+    let version = make_row_batch(row_id, "main", 10, "alice");
     let visible_entry = make_visible_entry(version.clone(), std::slice::from_ref(&version));
     let index_mutations = [IndexMutation::Insert {
         table: "users",
@@ -692,7 +687,7 @@ pub fn test_apply_row_mutation_combines_row_and_index_effects(
     );
     assert_eq!(
         storage
-            .load_history_row_version("users", "main", row_id, version.version_id())
+            .load_history_row_batch("users", "main", row_id, version.batch_id())
             .unwrap(),
         Some(version.clone())
     );
@@ -826,12 +821,12 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            version_id: CommitId([9; 32]),
+            row_digest: CommitId([9; 32]),
         }],
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(93)),
             branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
-            version_id: CommitId([10; 32]),
+            batch_id: BatchId([10; 16]),
         }],
     ));
 
@@ -857,8 +852,8 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
 
 pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let low = crate::row_histories::BatchId(uuid::Uuid::from_u128(1));
-    let high = crate::row_histories::BatchId(uuid::Uuid::from_u128(2));
+    let low = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(1));
+    let high = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 
     storage
         .upsert_local_batch_record(&LocalBatchRecord::new(
@@ -943,23 +938,23 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
             SealedBatchMember {
                 object_id: alice,
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: CommitId([1; 32]),
+                row_digest: CommitId([1; 32]),
             },
             SealedBatchMember {
                 object_id: bob,
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: CommitId([2; 32]),
+                row_digest: CommitId([2; 32]),
             },
             SealedBatchMember {
                 object_id: alice,
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: CommitId([1; 32]),
+                row_digest: CommitId([1; 32]),
             },
         ],
         vec![CapturedFrontierMember {
             object_id: bob,
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            version_id: CommitId([3; 32]),
+            batch_id: BatchId([3; 16]),
         }],
     );
 
@@ -974,18 +969,18 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
                 SealedBatchMember {
                     object_id: alice,
                     branch_name: crate::object::BranchName::new("main"),
-                    version_id: CommitId([1; 32]),
+                    row_digest: CommitId([1; 32]),
                 },
                 SealedBatchMember {
                     object_id: bob,
                     branch_name: crate::object::BranchName::new("main"),
-                    version_id: CommitId([2; 32]),
+                    row_digest: CommitId([2; 32]),
                 },
             ],
             vec![CapturedFrontierMember {
                 object_id: bob,
                 branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-                version_id: CommitId([3; 32]),
+                batch_id: BatchId([3; 16]),
             }],
         ))
     );
@@ -1013,7 +1008,7 @@ pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> 
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
             branch_name: crate::object::BranchName::new("main"),
-            version_id: CommitId([4; 32]),
+            row_digest: CommitId([4; 32]),
         }],
         Vec::new(),
     );
@@ -1042,7 +1037,7 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     let object_id = ObjectId::new();
     let row_id = ObjectId::new();
     let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
-    let version = make_row_version(row_id, "main", 10, "alice");
+    let version = make_row_batch(row_id, "main", 10, "alice");
 
     {
         let mut storage = factory(path);
@@ -1136,12 +1131,12 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            version_id: CommitId([11; 32]),
+            row_digest: CommitId([11; 32]),
         }],
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(113)),
             branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
-            version_id: CommitId([12; 32]),
+            batch_id: BatchId([12; 16]),
         }],
     ));
 
@@ -1216,18 +1211,18 @@ pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentSt
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(501)),
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: CommitId([5; 32]),
+                row_digest: CommitId([5; 32]),
             },
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(502)),
                 branch_name: crate::object::BranchName::new("main"),
-                version_id: CommitId([6; 32]),
+                row_digest: CommitId([6; 32]),
             },
         ],
         vec![CapturedFrontierMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(503)),
             branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
-            version_id: CommitId([7; 32]),
+            batch_id: BatchId([7; 16]),
         }],
     );
 
@@ -1303,8 +1298,8 @@ pub fn test_alice_bob_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let draft_row_id = ObjectId::new();
     seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
     seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
-    let main_row = make_row_version(main_row_id, "main", 10, "alice");
-    let draft_row = make_row_version(draft_row_id, "draft", 20, "bob");
+    let main_row = make_row_batch(main_row_id, "main", 10, "alice");
+    let draft_row = make_row_batch(draft_row_id, "draft", 20, "bob");
 
     storage
         .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
@@ -1427,8 +1422,8 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn row_region_keeps_same_version_id_distinct_across_branches() {
-                conformance::test_row_region_keeps_same_version_id_distinct_across_branches(
+            fn row_region_keeps_same_batch_id_distinct_across_branches() {
+                conformance::test_row_region_keeps_same_batch_id_distinct_across_branches(
                     &$factory,
                 );
             }

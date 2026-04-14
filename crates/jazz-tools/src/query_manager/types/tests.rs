@@ -157,8 +157,8 @@ fn value_rejects_fractional_float_timestamp() {
 // Tuple Model Tests
 // ========================================================================
 
-fn make_commit_id(n: u8) -> crate::commit::CommitId {
-    crate::commit::CommitId([n; 32])
+fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
+    crate::row_histories::BatchId([n; 16])
 }
 
 #[test]
@@ -169,25 +169,25 @@ fn tuple_element_id() {
     assert_eq!(elem.id(), id);
     assert!(!elem.is_materialized());
     assert!(elem.content().is_none());
-    assert!(elem.version_id().is_none());
+    assert!(elem.batch_id().is_none());
 }
 
 #[test]
 fn tuple_element_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
     let content = vec![1, 2, 3];
-    let version_id = make_commit_id(1);
+    let batch_id = make_commit_id(1);
     let elem = TupleElement::Row {
         id,
         content: content.clone().into(),
-        version_id,
+        batch_id,
         row_provenance: test_row_provenance(),
     };
 
     assert_eq!(elem.id(), id);
     assert!(elem.is_materialized());
     assert_eq!(elem.content(), Some(content.as_slice()));
-    assert_eq!(elem.version_id(), Some(version_id));
+    assert_eq!(elem.batch_id(), Some(batch_id));
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn tuple_equality_based_on_ids() {
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
         content: vec![1, 2, 3].into(),
-        version_id: make_commit_id(1),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -263,7 +263,7 @@ fn tuple_hash_based_on_ids() {
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
         content: vec![1, 2, 3].into(),
-        version_id: make_commit_id(1),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -288,7 +288,7 @@ fn tuple_in_hashset() {
     let tuple_with_content = Tuple::new(vec![TupleElement::Row {
         id: id1,
         content: vec![1, 2, 3].into(),
-        version_id: make_commit_id(1),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
     assert!(set.contains(&tuple_with_content));

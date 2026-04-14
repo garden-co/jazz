@@ -351,7 +351,7 @@ fn sync_body() -> SyncBatchRequest {
     );
 
     SyncBatchRequest {
-        payloads: vec![SyncPayload::RowVersionCreated {
+        payloads: vec![SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         }],

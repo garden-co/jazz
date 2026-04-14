@@ -100,7 +100,7 @@ If a client updates a row that was originally stored on an older schema branch, 
 
 1. load the row through the current schema view
 2. apply the user's update in the current schema
-3. write a new row version on the current schema branch
+3. write a new row batch member on the current schema branch
 
 The old stored row history remains intact. The new visible row is written as a fresh flat visible
 record on the current schema branch.
@@ -118,11 +118,11 @@ That is why schema evolution can be described as "which table image should we re
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/schema_manager/manager.rs` | SchemaManager orchestration |
-| `crates/jazz-tools/src/schema_manager/context.rs` | Live schema context and branch resolution |
-| `crates/jazz-tools/src/schema_manager/lens.rs` | Lens definitions and transforms |
-| `crates/jazz-tools/src/schema_manager/auto_lens.rs` | Auto-generated migration/lens helpers |
-| `crates/jazz-tools/src/catalogue.rs` | Catalogue entry model |
-| `crates/jazz-tools/src/query_manager/manager.rs` | Query execution with schema context |
+| File                                                | Purpose                                   |
+| --------------------------------------------------- | ----------------------------------------- |
+| `crates/jazz-tools/src/schema_manager/manager.rs`   | SchemaManager orchestration               |
+| `crates/jazz-tools/src/schema_manager/context.rs`   | Live schema context and branch resolution |
+| `crates/jazz-tools/src/schema_manager/lens.rs`      | Lens definitions and transforms           |
+| `crates/jazz-tools/src/schema_manager/auto_lens.rs` | Auto-generated migration/lens helpers     |
+| `crates/jazz-tools/src/catalogue.rs`                | Catalogue entry model                     |
+| `crates/jazz-tools/src/query_manager/manager.rs`    | Query execution with schema context       |

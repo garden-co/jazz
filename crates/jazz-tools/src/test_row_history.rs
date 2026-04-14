@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{Schema, SchemaHash};
 use crate::row_histories::{
-    ApplyRowVersionResult, RowHistoryError, StoredRowVersion, apply_row_version,
+    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch,
 };
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
@@ -67,13 +66,13 @@ pub fn put_test_row_metadata<H: Storage>(
         .expect("test row metadata should persist");
 }
 
-pub fn apply_test_row_version<H: Storage>(
+pub fn apply_test_row_batch<H: Storage>(
     storage: &mut H,
     object_id: ObjectId,
     branch: impl AsRef<str>,
-    row: StoredRowVersion,
-) -> Result<ApplyRowVersionResult, RowHistoryError> {
-    apply_row_version(
+    row: StoredRowBatch,
+) -> Result<ApplyRowBatchResult, RowHistoryError> {
+    apply_row_batch(
         storage,
         object_id,
         &BranchName::new(branch.as_ref()),
@@ -106,7 +105,7 @@ pub fn load_test_row_tip_ids<H: Storage>(
     storage: &H,
     object_id: ObjectId,
     branch: impl ToString,
-) -> Result<Vec<CommitId>, StorageError> {
+) -> Result<Vec<BatchId>, StorageError> {
     let branch = branch.to_string();
     let row_locator = storage.load_row_locator(object_id)?.ok_or_else(|| {
         StorageError::IoError(format!("missing row locator for test row {}", object_id))

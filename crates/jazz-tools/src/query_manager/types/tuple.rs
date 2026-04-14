@@ -2,7 +2,6 @@ use std::hash::{Hash, Hasher};
 
 use smolset::SmolSet;
 
-use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
@@ -20,11 +19,11 @@ use super::*;
 pub enum TupleElement {
     /// Just the ID - row data not yet loaded.
     Id(ObjectId),
-    /// Fully materialized row with ID, content, and version reference.
+    /// Fully materialized row with ID, content, and batch identity.
     Row {
         id: ObjectId,
         content: RowBytes,
-        version_id: CommitId,
+        batch_id: BatchId,
         row_provenance: RowProvenance,
     },
 }
@@ -51,11 +50,11 @@ impl TupleElement {
         }
     }
 
-    /// Get the row version ID if materialized.
-    pub fn version_id(&self) -> Option<CommitId> {
+    /// Get the row batch ID if materialized.
+    pub fn batch_id(&self) -> Option<BatchId> {
         match self {
             TupleElement::Id(_) => None,
-            TupleElement::Row { version_id, .. } => Some(*version_id),
+            TupleElement::Row { batch_id, .. } => Some(*batch_id),
         }
     }
 
@@ -72,7 +71,7 @@ impl TupleElement {
         TupleElement::Row {
             id: row.id,
             content: row.data.clone(),
-            version_id: row.version_id,
+            batch_id: row.batch_id,
             row_provenance: row.provenance.clone(),
         }
     }
@@ -84,12 +83,12 @@ impl TupleElement {
             TupleElement::Row {
                 id,
                 content,
-                version_id,
+                batch_id,
                 row_provenance,
             } => Some(Row::new(
                 *id,
                 content.clone(),
-                *version_id,
+                *batch_id,
                 row_provenance.clone(),
             )),
         }
@@ -112,7 +111,6 @@ pub type TupleBatchProvenance = SmolSet<[BatchId; 4]>;
 #[derive(Clone, Debug)]
 pub struct LoadedRow {
     pub data: RowBytes,
-    pub version_id: CommitId,
     pub row_provenance: RowProvenance,
     pub provenance: TupleProvenance,
     pub batch_id: BatchId,
@@ -121,14 +119,12 @@ pub struct LoadedRow {
 impl LoadedRow {
     pub fn new(
         data: impl Into<RowBytes>,
-        version_id: CommitId,
         row_provenance: RowProvenance,
         provenance: TupleProvenance,
         batch_id: BatchId,
     ) -> Self {
         Self {
             data: data.into(),
-            version_id,
             row_provenance,
             provenance,
             batch_id,
@@ -253,7 +249,7 @@ impl Tuple {
             all_values.extend(values);
 
             if first_commit_id.is_none() {
-                first_commit_id = elem.version_id();
+                first_commit_id = elem.batch_id();
             }
         }
 
@@ -262,14 +258,14 @@ impl Tuple {
 
         // Use first element's ID as the "primary" ID for the flattened row
         let first_id = self.first_id()?;
-        let version_id = first_commit_id.unwrap_or(CommitId([0; 32]));
+        let batch_id = first_commit_id.unwrap_or(BatchId([0; 16]));
         let row_provenance = self.0.first()?.row_provenance()?.clone();
 
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id: first_id,
                 content: combined_content.into(),
-                version_id,
+                batch_id,
                 row_provenance,
             }])
             .with_provenance(self.provenance().clone()),

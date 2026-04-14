@@ -1,16 +1,15 @@
 use std::collections::HashSet;
 
 use crate::batch_fate::BatchMode;
-use crate::commit::CommitId;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{
-    BatchId, QueryRowVersion, RowHistoryError, RowState, RowVisibilityChange, StoredRowVersion,
-    apply_row_version,
+    BatchId, QueryRowBatch, RowHistoryError, RowState, RowVisibilityChange, StoredRowBatch,
+    apply_row_batch,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
-use crate::sync_manager::RowVersionKey;
+use crate::sync_manager::RowBatchKey;
 
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
@@ -44,7 +43,7 @@ struct PreparedUpdateCommit<'a> {
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
 }
 
-struct RowVersionAuthoring<'a> {
+struct RowBatchAuthoring<'a> {
     provenance: &'a RowProvenance,
     delete_kind: Option<DeleteKind>,
     row_state: RowState,
@@ -105,13 +104,13 @@ impl QueryManager {
         }
     }
 
-    fn row_version_authoring<'a>(
+    fn row_batch_authoring<'a>(
         &self,
         provenance: &'a RowProvenance,
         delete_kind: Option<DeleteKind>,
         write_context: Option<&WriteContext>,
-    ) -> RowVersionAuthoring<'a> {
-        RowVersionAuthoring {
+    ) -> RowBatchAuthoring<'a> {
+        RowBatchAuthoring {
             provenance,
             delete_kind,
             row_state: Self::resolve_write_row_state(write_context),
@@ -119,20 +118,20 @@ impl QueryManager {
         }
     }
 
-    fn authored_row_version(
+    fn authored_row_batch(
         &self,
         row_id: ObjectId,
         branch_name: &str,
-        parents: impl IntoIterator<Item = CommitId>,
+        parents: impl IntoIterator<Item = BatchId>,
         data: Vec<u8>,
-        authoring: RowVersionAuthoring<'_>,
-    ) -> StoredRowVersion {
+        authoring: RowBatchAuthoring<'_>,
+    ) -> StoredRowBatch {
         let metadata = Self::row_commit_metadata(authoring.provenance, authoring.delete_kind)
             .into_iter()
             .collect();
 
         if let Some(batch_id) = authoring.batch_id {
-            StoredRowVersion::new_with_batch_id(
+            StoredRowBatch::new_with_batch_id(
                 batch_id,
                 row_id,
                 branch_name,
@@ -144,7 +143,7 @@ impl QueryManager {
                 self.sync_manager.max_local_durability_tier(),
             )
         } else {
-            StoredRowVersion::new(
+            StoredRowBatch::new(
                 row_id,
                 branch_name,
                 parents,
@@ -158,12 +157,12 @@ impl QueryManager {
     }
 
     #[cfg(test)]
-    fn stored_row_version_for_tip(
+    fn stored_row_batch_for_tip(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
-    ) -> Option<StoredRowVersion> {
+    ) -> Option<StoredRowBatch> {
         let table = self.load_row_table_name(storage, row_id)?;
         storage
             .load_visible_region_row(&table, branch_name, row_id)
@@ -178,8 +177,8 @@ impl QueryManager {
         table: &str,
         row_id: ObjectId,
         branch_name: &str,
-    ) -> Option<StoredRowVersion> {
-        let version = self.stored_row_version_for_tip(storage, row_id, branch_name)?;
+    ) -> Option<StoredRowBatch> {
+        let version = self.stored_row_batch_for_tip(storage, row_id, branch_name)?;
         let visible_entry = storage
             .load_visible_region_entry(table, branch_name, row_id)
             .ok()
@@ -212,11 +211,11 @@ impl QueryManager {
         Some(version)
     }
 
-    fn apply_local_row_version<H: Storage>(
+    fn apply_local_row_batch<H: Storage>(
         &mut self,
         storage: &mut H,
         update: RowVisibilityChange,
-    ) -> Result<StoredRowVersion, QueryError> {
+    ) -> Result<StoredRowBatch, QueryError> {
         let row = update.row.clone();
         self.handle_row_update_with_origin(storage, update, true, false);
         Ok(row)
@@ -225,7 +224,7 @@ impl QueryManager {
     fn maybe_track_local_pending_transaction_overlay(
         &mut self,
         table: &str,
-        row_version_key: RowVersionKey,
+        row_batch_key: RowBatchKey,
         write_context: Option<&WriteContext>,
         deleted: bool,
         visibility_change: &Option<RowVisibilityChange>,
@@ -239,13 +238,13 @@ impl QueryManager {
             return;
         }
 
-        self.pending_local_row_versions
-            .insert(row_version_key.row_id, row_version_key);
+        self.pending_local_row_batches
+            .insert(row_batch_key.row_id, row_batch_key);
         self.mark_subscriptions_dirty_local(table);
         if deleted {
-            self.mark_local_row_deleted_in_subscriptions(table, row_version_key.row_id);
+            self.mark_local_row_deleted_in_subscriptions(table, row_batch_key.row_id);
         } else {
-            self.mark_local_row_updated_in_subscriptions(table, row_version_key.row_id);
+            self.mark_local_row_updated_in_subscriptions(table, row_batch_key.row_id);
         }
     }
 
@@ -264,9 +263,9 @@ impl QueryManager {
         table: &str,
         branch_name: &BranchName,
         row_id: ObjectId,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
         index_mutations: &[crate::storage::IndexMutation<'_>],
-    ) -> Result<(CommitId, Option<RowVisibilityChange>), QueryError> {
+    ) -> Result<(BatchId, Option<RowVisibilityChange>), QueryError> {
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
 
@@ -280,25 +279,25 @@ impl QueryManager {
         }
 
         let forwarded_row = row.clone();
-        let applied = apply_row_version(storage, row_id, branch_name, row, index_mutations)
+        let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
             .map_err(|error| match error {
                 RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
                 RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
                     "missing row-history parent {parent:?} while applying local write for {row_id:?}"
                 )),
                 RowHistoryError::StorageError(error) => {
-                    QueryError::EncodingError(format!("apply row version: {error}"))
+                    QueryError::EncodingError(format!("apply row batch: {error}"))
                 }
             })?;
 
-        self.sync_manager.forward_row_version_to_servers(
+        self.sync_manager.forward_row_batch_to_servers(
             row_id,
             metadata_from_row_locator(&applied.row_locator),
             forwarded_row,
         );
 
-        let version_id = applied.version_id;
-        Ok((version_id, applied.visibility_change))
+        let batch_id = applied.batch_id;
+        Ok((batch_id, applied.visibility_change))
     }
 
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
@@ -347,9 +346,9 @@ impl QueryManager {
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        self.load_best_visible_row_version(
+        self.load_best_visible_row_batch(
             storage,
             row_id,
             &[branch_name.to_string()],
@@ -369,24 +368,20 @@ impl QueryManager {
         Some(row.row_provenance())
     }
 
-    fn load_latest_transactional_staged_history_row_on_branch(
+    fn load_latest_batch_history_row_on_branch(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
         batch_id: BatchId,
-    ) -> Option<(String, StoredRowVersion)> {
+    ) -> Option<(String, StoredRowBatch)> {
         let table = self.load_row_table_name(storage, row_id)?;
         let row = storage
-            .scan_history_row_versions(&table, row_id)
+            .scan_history_row_batches(&table, row_id)
             .ok()?
             .into_iter()
-            .filter(|row| {
-                row.batch_id == batch_id
-                    && row.branch.as_str() == branch_name
-                    && matches!(row.state, RowState::StagingPending)
-            })
-            .max_by_key(|row| (row.updated_at, row.version_id()))?;
+            .filter(|row| row.batch_id == batch_id && row.branch.as_str() == branch_name)
+            .max_by_key(|row| (row.updated_at, row.batch_id()))?;
         Some((table, row))
     }
 
@@ -396,33 +391,22 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
         batch_id: BatchId,
-    ) -> Option<(String, QueryRowVersion)> {
-        let (table, row) = self.load_latest_transactional_staged_history_row_on_branch(
-            storage,
-            row_id,
-            branch_name,
-            batch_id,
-        )?;
-        Some((table, QueryRowVersion::from(&row)))
+    ) -> Option<(String, QueryRowBatch)> {
+        let (table, row) =
+            self.load_latest_batch_history_row_on_branch(storage, row_id, branch_name, batch_id)?;
+        Some((table, QueryRowBatch::from(&row)))
     }
 
-    fn transactional_staged_history_row_for_write(
+    fn batch_history_row_for_write(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> Option<StoredRowVersion> {
-        let batch_id = write_context
-            .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
-            .and_then(WriteContext::batch_id)?;
-        self.load_latest_transactional_staged_history_row_on_branch(
-            storage,
-            row_id,
-            branch_name,
-            batch_id,
-        )
-        .map(|(_, row)| row)
+    ) -> Option<StoredRowBatch> {
+        let batch_id = write_context.and_then(WriteContext::batch_id)?;
+        self.load_latest_batch_history_row_on_branch(storage, row_id, branch_name, batch_id)
+            .map(|(_, row)| row)
     }
 
     fn parent_ids_for_write(
@@ -432,14 +416,11 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> Vec<CommitId> {
-        if let Some(staged_row) = self.transactional_staged_history_row_for_write(
-            storage,
-            row_id,
-            branch_name,
-            write_context,
-        ) {
-            return staged_row.parents.iter().copied().collect();
+    ) -> Vec<BatchId> {
+        if let Some(existing_batch_row) =
+            self.batch_history_row_for_write(storage, row_id, branch_name, write_context)
+        {
+            return existing_batch_row.parents.iter().copied().collect();
         }
         self.load_branch_tip_ids(storage, table, row_id, branch_name)
     }
@@ -450,7 +431,7 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> Option<QueryRowVersion> {
+    ) -> Option<QueryRowBatch> {
         let batch_id = write_context
             .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
             .and_then(WriteContext::batch_id)?;
@@ -464,7 +445,7 @@ impl QueryManager {
         table: &str,
         row_id: ObjectId,
         branch: &str,
-    ) -> Vec<CommitId> {
+    ) -> Vec<BatchId> {
         if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch, row_id) {
             return entry.branch_frontier;
         }
@@ -648,7 +629,7 @@ impl QueryManager {
         prepared: &PreparedUpdateWrite,
         provenance: &RowProvenance,
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let PreparedUpdateCommit {
             table,
             branch,
@@ -657,15 +638,15 @@ impl QueryManager {
         } = commit;
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
-        let row = self.authored_row_version(
+        let row = self.authored_row_batch(
             id,
             branch,
             parents,
             prepared.new_data.clone(),
-            self.row_version_authoring(provenance, None, write_context),
+            self.row_batch_authoring(provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (version_id, visibility_change) = self.apply_local_row_history_write(
+        let (batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -675,30 +656,30 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            RowVersionKey::new(id, branch_name, version_id),
+            RowBatchKey::new(id, branch_name, batch_id),
             write_context,
             false,
             &visibility_change,
         );
 
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
-        Ok(version_id)
+        Ok(batch_id)
     }
 
     /// Load a row for schema-aware updates.
     ///
     /// If the row exists on the current schema branch, use that version.
-    /// Otherwise, fall back to the newest visible version across sibling
+    /// Otherwise, fall back to the newest visible row across sibling
     /// schema-version branches for the same logical user branch.
     pub fn load_row_for_schema_update<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
         branches: &[String],
-    ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
+    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
         let schema_context = self.schema_context.clone();
         self.load_row_for_schema_update_in_context(storage, id, branches, &schema_context)
     }
@@ -709,9 +690,9 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
         schema_context: &SchemaContext,
-    ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
+    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
         let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
-        let (table, row) = self.load_best_visible_row_version(
+        let (table, row) = self.load_best_visible_row_batch(
             storage,
             id,
             branches,
@@ -733,7 +714,7 @@ impl QueryManager {
         Self::transform_row_with_schema(
             id,
             row.data.to_vec(),
-            row.version_id(),
+            row.batch_id(),
             BranchName::new(&row.branch),
             &mut transform_context,
         )
@@ -742,7 +723,7 @@ impl QueryManager {
                 table,
                 resolved.branch_name.as_str().to_string(),
                 resolved.content,
-                resolved.version_id,
+                resolved.batch_id,
                 row.row_provenance(),
             )
         })
@@ -867,15 +848,15 @@ impl QueryManager {
             &data,
             &descriptor,
         );
-        let row = self.authored_row_version(
+        let row = self.authored_row_batch(
             object_id,
             branch.as_str(),
             vec![],
             data.clone(),
-            self.row_version_authoring(&provenance, None, write_context),
+            self.row_batch_authoring(&provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -885,21 +866,21 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            RowVersionKey::new(object_id, branch_name, row_version_id),
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
             false,
             &visibility_change,
         );
 
-        tracing::trace!(%object_id, ?row_version_id, "apply local row insert");
+        tracing::trace!(%object_id, ?row_batch_id, "apply local row insert");
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
-        tracing::debug!(%object_id, ?row_version_id, branch = self.current_branch(), "row created");
+        tracing::debug!(%object_id, ?row_batch_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
             row_id: object_id,
-            row_version_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -1024,15 +1005,15 @@ impl QueryManager {
             &data,
             &descriptor,
         );
-        let row = self.authored_row_version(
+        let row = self.authored_row_batch(
             object_id,
             branch,
             vec![],
             data.clone(),
-            self.row_version_authoring(&provenance, None, write_context),
+            self.row_batch_authoring(&provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -1042,19 +1023,19 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            RowVersionKey::new(object_id, branch_name, row_version_id),
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
             false,
             &visibility_change,
         );
 
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(InsertResult {
             row_id: object_id,
-            row_version_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -1149,15 +1130,15 @@ impl QueryManager {
             &data,
             &descriptor,
         );
-        let row = self.authored_row_version(
+        let row = self.authored_row_batch(
             object_id,
             branch,
             vec![],
             data.clone(),
-            self.row_version_authoring(&provenance, None, write_context),
+            self.row_batch_authoring(&provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -1167,19 +1148,19 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            RowVersionKey::new(object_id, branch_name, row_version_id),
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
             write_context,
             false,
             &visibility_change,
         );
 
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(InsertResult {
             row_id: object_id,
-            row_version_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -1473,7 +1454,7 @@ impl QueryManager {
         let storage_ref: &dyn Storage = storage;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let mut row_loader = |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-            let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
+            let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
                 storage_ref,
                 id,
                 table_hint.as_ref().map(TableName::as_str),
@@ -1485,15 +1466,14 @@ impl QueryManager {
             if row.is_hard_deleted() {
                 return None;
             }
-            let version_id = row.version_id();
+            let batch_id = row.batch_id;
             let provenance = row.row_provenance();
             let source_branch = BranchName::new(&row.branch);
             Some(LoadedRow::new(
                 row.data,
-                version_id,
                 provenance,
                 [(id, source_branch)].into_iter().collect(),
-                row.batch_id,
+                batch_id,
             ))
         };
 
@@ -1717,7 +1697,7 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
         values: &[Value],
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         self.update_with_write_context(storage, id, values, None)
     }
 
@@ -1732,7 +1712,7 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
         let table = self
             .load_row_table_name(storage, id)
@@ -1776,7 +1756,7 @@ impl QueryManager {
             &prepared.new_data,
             &prepared.descriptor,
         );
-        let version_id = self.commit_prepared_update_write(
+        let batch_id = self.commit_prepared_update_write(
             storage,
             PreparedUpdateCommit {
                 table: &table,
@@ -1789,7 +1769,7 @@ impl QueryManager {
             write_context,
         )?;
 
-        Ok(version_id)
+        Ok(batch_id)
     }
 
     pub fn update_with_session<H: Storage>(
@@ -1798,7 +1778,7 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_with_write_context(storage, id, values, owned.as_ref())
     }
@@ -1813,7 +1793,7 @@ impl QueryManager {
         storage: &mut H,
         write: RowBranchWrite<'_>,
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let write_schema = self.schema.clone();
         self.write_existing_row_on_branch_with_schema_and_write_context(
             storage,
@@ -1829,7 +1809,7 @@ impl QueryManager {
         write: RowBranchWrite<'_>,
         write_schema: &Schema,
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let RowBranchWrite {
             table,
             branch,
@@ -1862,7 +1842,7 @@ impl QueryManager {
             });
         let was_soft_deleted = staged_branch_row
             .as_ref()
-            .map(QueryRowVersion::is_soft_deleted)
+            .map(QueryRowBatch::is_soft_deleted)
             .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id));
         let index_mutations = if was_soft_deleted {
             Self::index_mutations_for_undelete_on_branch(
@@ -1890,7 +1870,7 @@ impl QueryManager {
                 &prepared.descriptor,
             )
         };
-        let version_id = self.commit_prepared_update_write(
+        let batch_id = self.commit_prepared_update_write(
             storage,
             PreparedUpdateCommit {
                 table,
@@ -1906,7 +1886,7 @@ impl QueryManager {
         let _ = existing_branch_data;
         let _ = was_soft_deleted;
 
-        Ok(version_id)
+        Ok(batch_id)
     }
 
     pub fn write_existing_row_on_branch_with_session<H: Storage>(
@@ -1914,7 +1894,7 @@ impl QueryManager {
         storage: &mut H,
         write: RowBranchWrite<'_>,
         session: Option<&Session>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.write_existing_row_on_branch_with_write_context(storage, write, owned.as_ref())
     }
@@ -1961,7 +1941,7 @@ impl QueryManager {
             self.transactional_staged_row_for_write(storage, id, &current_branch, write_context);
         if staged_row
             .as_ref()
-            .map(QueryRowVersion::is_soft_deleted)
+            .map(QueryRowBatch::is_soft_deleted)
             .unwrap_or_else(|| self.row_is_deleted(storage, &table, id))
         {
             return Err(QueryError::RowAlreadyDeleted(id));
@@ -2054,12 +2034,12 @@ impl QueryManager {
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_row = self.authored_row_version(
+        let delete_row = self.authored_row_batch(
             id,
             branch.as_str(),
             parents,
             old_data.to_vec(),
-            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
         let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
             &table,
@@ -2069,7 +2049,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -2079,20 +2059,20 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            RowVersionKey::new(id, branch_name, delete_version_id),
+            RowBatchKey::new(id, branch_name, delete_batch_id),
             write_context,
             true,
             &visibility_change,
         );
 
-        tracing::trace!(%id, ?delete_version_id, "apply local soft delete");
+        tracing::trace!(%id, ?delete_batch_id, "apply local soft delete");
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_version_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -2146,7 +2126,7 @@ impl QueryManager {
         // Check if already soft-deleted on this branch
         if staged_branch_row
             .as_ref()
-            .map(QueryRowVersion::is_soft_deleted)
+            .map(QueryRowBatch::is_soft_deleted)
             .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id))
         {
             return Err(QueryError::RowAlreadyDeleted(id));
@@ -2231,12 +2211,12 @@ impl QueryManager {
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
-        let delete_row = self.authored_row_version(
+        let delete_row = self.authored_row_batch(
             id,
             branch,
             parents,
             old_data_for_policy.to_vec(),
-            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
         let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
             table,
@@ -2246,7 +2226,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch);
-        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
             &branch_name,
@@ -2256,7 +2236,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
-            RowVersionKey::new(id, branch_name, delete_version_id),
+            RowBatchKey::new(id, branch_name, delete_batch_id),
             write_context,
             true,
             &visibility_change,
@@ -2265,12 +2245,12 @@ impl QueryManager {
         let _ = old_branch_data;
         let _ = descriptor;
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_version_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -2348,12 +2328,12 @@ impl QueryManager {
         let row_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with row data (no delete metadata = undelete)
-        let row = self.authored_row_version(
+        let row = self.authored_row_batch(
             id,
             branch.as_str(),
             parents,
             new_data.clone(),
-            self.row_version_authoring(&row_provenance, None, None),
+            self.row_batch_authoring(&row_provenance, None, None),
         );
         let index_mutations = Self::index_mutations_for_undelete_on_branch(
             &table,
@@ -2363,7 +2343,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (row_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -2373,19 +2353,19 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            RowVersionKey::new(id, branch_name, row_version_id),
+            RowBatchKey::new(id, branch_name, row_batch_id),
             None,
             false,
             &visibility_change,
         );
 
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(InsertResult {
             row_id: id,
-            row_version_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -2437,12 +2417,12 @@ impl QueryManager {
         let delete_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with empty content + delete: hard metadata
-        let delete_row = self.authored_row_version(
+        let delete_row = self.authored_row_batch(
             id,
             branch.as_str(),
             parents,
             vec![],
-            self.row_version_authoring(&delete_provenance, Some(DeleteKind::Hard), None),
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Hard), None),
         );
         let index_mutations = Self::index_mutations_for_hard_delete_on_branch(
             &table,
@@ -2452,7 +2432,7 @@ impl QueryManager {
             &descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
-        let (delete_version_id, visibility_change) = self.apply_local_row_history_write(
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             &table,
             &branch_name,
@@ -2462,7 +2442,7 @@ impl QueryManager {
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
-            RowVersionKey::new(id, branch_name, delete_version_id),
+            RowBatchKey::new(id, branch_name, delete_batch_id),
             None,
             true,
             &visibility_change,
@@ -2471,12 +2451,12 @@ impl QueryManager {
         let _ = old_data;
         let _ = descriptor;
         if let Some(visibility_change) = visibility_change {
-            let _ = self.apply_local_row_version(storage, visibility_change)?;
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_version_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -2515,8 +2495,8 @@ impl QueryManager {
         let (data, _) = self
             .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
             .map(|(_, row)| {
-                let version_id = row.version_id();
-                (row.data, version_id)
+                let batch_id = row.batch_id();
+                (row.data, batch_id)
             })?;
 
         let table_schema = self.schema.get(&table_name)?;
@@ -2566,18 +2546,13 @@ impl QueryManager {
         &self,
         storage: &dyn Storage,
         object_id: ObjectId,
-        version_id: &CommitId,
+        batch_id: &BatchId,
     ) -> bool {
         let Some(table) = self.load_row_table_name(storage, object_id) else {
             return false;
         };
         storage
-            .row_version_exists(
-                &table,
-                self.current_branch().as_str(),
-                object_id,
-                *version_id,
-            )
+            .row_batch_exists(&table, self.current_branch().as_str(), object_id, *batch_id)
             .unwrap_or(false)
     }
 }

@@ -1,4 +1,5 @@
 export {
+  DirectBatch,
   type BatchMode,
   type BatchSettlement,
   JazzClient,
@@ -23,19 +24,12 @@ export {
   type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";
-export type {
-  AppContext,
-  LocalAuthMode,
-  RuntimeSourcesConfig,
-  Session,
-} from "./context.js";
-export {
-  linkExternalIdentity,
-  type LinkExternalResponse,
-} from "./sync-transport.js";
+export type { AppContext, LocalAuthMode, RuntimeSourcesConfig, Session } from "./context.js";
+export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
 export {
   createDb,
   Db,
+  DbDirectBatch,
   DbPersistedWrite,
   DbTransaction,
   type ActiveQuerySubscriptionTrace,
@@ -65,11 +59,7 @@ export {
 } from "./introspection-fetch.js";
 export { resolveLocalAuthDefaults } from "./local-auth.js";
 export { translateQuery } from "./query-adapter.js";
-export {
-  transformRows,
-  unwrapValue,
-  type WasmValue,
-} from "./row-transformer.js";
+export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
 export { toInsertRecord, toValue, toUpdateRecord } from "./value-converter.js";
 export {
   DEFAULT_FILE_CHUNK_SIZE_BYTES,

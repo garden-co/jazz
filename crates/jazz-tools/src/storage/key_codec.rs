@@ -1,14 +1,14 @@
 use std::ops::Bound;
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
+use crate::row_histories::BatchId;
 
 use super::{StorageError, encode_value};
 
 const INDEX_KEY_MAX_BYTES: usize = u16::MAX as usize;
 const INDEX_ENTRY_UUID_HEX_BYTES: usize = 32;
-const COMMIT_ID_HEX_BYTES: usize = 64;
+const BATCH_ID_HEX_BYTES: usize = 32;
 const OVERFLOW_INDEX_VALUE_MARKER: char = '~';
 const OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES: usize = 16;
 const OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES: usize = blake3::OUT_LEN * 2;
@@ -46,8 +46,8 @@ fn append_uuid_hex(dst: &mut String, id: ObjectId) {
     append_hex_bytes(dst, id.uuid().as_bytes());
 }
 
-fn append_commit_id_hex(dst: &mut String, version_id: CommitId) {
-    append_hex_bytes(dst, &version_id.0);
+fn append_batch_id_hex(dst: &mut String, batch_id: BatchId) {
+    append_hex_bytes(dst, batch_id.as_bytes());
 }
 
 fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
@@ -243,7 +243,7 @@ pub(super) fn visible_table_prefix(table: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn visible_row_versions_key(table: &str, row_id: ObjectId, branch: &str) -> String {
+pub(super) fn visible_row_batches_key(table: &str, row_id: ObjectId, branch: &str) -> String {
     let mut key =
         String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + branch.len());
     key.push_str("row:");
@@ -256,7 +256,7 @@ pub(super) fn visible_row_versions_key(table: &str, row_id: ObjectId, branch: &s
 }
 
 #[allow(dead_code)]
-pub(super) fn visible_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
+pub(super) fn visible_row_batches_prefix(table: &str, row_id: ObjectId) -> String {
     let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
     prefix.push_str("row:");
     prefix.push_str(table);
@@ -271,7 +271,7 @@ pub(super) fn history_row_key(
     table: &str,
     row_id: ObjectId,
     branch: &str,
-    version_id: CommitId,
+    batch_id: BatchId,
 ) -> String {
     let mut key = String::with_capacity(
         4 + table.len()
@@ -280,7 +280,7 @@ pub(super) fn history_row_key(
             + 1
             + branch.len()
             + 1
-            + COMMIT_ID_HEX_BYTES,
+            + BATCH_ID_HEX_BYTES,
     );
     key.push_str("row:");
     key.push_str(table);
@@ -289,7 +289,7 @@ pub(super) fn history_row_key(
     key.push(':');
     key.push_str(branch);
     key.push(':');
-    append_commit_id_hex(&mut key, version_id);
+    append_batch_id_hex(&mut key, batch_id);
     key
 }
 
@@ -303,7 +303,7 @@ pub(super) fn history_row_prefix(table: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(super) fn history_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
+pub(super) fn history_row_batches_prefix(table: &str, row_id: ObjectId) -> String {
     let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
     prefix.push_str("row:");
     prefix.push_str(table);

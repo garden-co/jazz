@@ -4,7 +4,6 @@
 mod tests {
     use std::collections::HashMap;
 
-    use crate::commit::CommitId;
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
@@ -14,15 +13,15 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
-    use crate::row_histories::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowBatch};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
     use crate::storage::{MemoryStorage, Storage};
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
-    fn make_commit_id(n: u8) -> CommitId {
-        CommitId([n; 32])
+    fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
+        crate::row_histories::BatchId([n; 16])
     }
 
     fn test_app_id() -> AppId {
@@ -30,24 +29,24 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    struct IncomingRowVersion {
+    struct IncomingRowBatch {
         content: Vec<u8>,
         timestamp: u64,
         author: String,
     }
 
-    impl IncomingRowVersion {
-        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowVersion {
+    impl IncomingRowBatch {
+        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowBatch {
             let metadata = row_provenance_metadata(
                 &RowProvenance::for_insert(self.author.clone(), self.timestamp),
                 None,
             )
             .into_iter()
             .collect::<HashMap<_, _>>();
-            StoredRowVersion::new(
+            StoredRowBatch::new(
                 object_id,
                 branch,
-                Vec::<CommitId>::new(),
+                Vec::<crate::row_histories::BatchId>::new(),
                 self.content.clone(),
                 RowProvenance::for_insert(self.author.clone(), self.timestamp),
                 metadata,
@@ -61,8 +60,8 @@ mod tests {
         content: Vec<u8>,
         timestamp: u64,
         author: impl Into<String>,
-    ) -> IncomingRowVersion {
-        IncomingRowVersion {
+    ) -> IncomingRowBatch {
+        IncomingRowBatch {
             content,
             timestamp,
             author: author.into(),
@@ -381,7 +380,7 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row version on a specific branch through the storage-backed sync path.
+    /// Ingest a remote row batch member on a specific branch through the storage-backed sync path.
     /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
@@ -405,7 +404,7 @@ mod tests {
         let row = commit.to_row(object_id, branch);
         qm.sync_manager_mut().push_inbox(InboxEntry {
             source: Source::Server(ServerId::new()),
-            payload: SyncPayload::RowVersionCreated {
+            payload: SyncPayload::RowBatchCreated {
                 metadata: None,
                 row,
             },
@@ -3360,10 +3359,10 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_handle.row_id
+                    SyncPayload::RowBatchCreated { row, .. } if row.row_id == row_handle.row_id
                 )
             })
-            .expect("Client A should emit RowVersionCreated for the row");
+            .expect("Client A should emit RowBatchCreated for the row");
 
         client_b
             .query_manager_mut()
@@ -3713,13 +3712,13 @@ mod tests {
         let row_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::RowVersionCreated { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchCreated { row, .. } = &e.payload {
                     row.row_id == doc_id
                 } else {
                     false
                 }
             })
-            .expect("Should have RowVersionCreated for the row in outbox");
+            .expect("Should have RowBatchCreated for the row in outbox");
 
         // Push to server inbox
         server
@@ -3771,7 +3770,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
         let doc_update_for_b = server_outbox.iter().find(|e| {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                && matches!(&e.payload, SyncPayload::RowVersionNeeded { row, .. } if row.row_id == doc_id)
+                && matches!(&e.payload, SyncPayload::RowBatchNeeded { row, .. } if row.row_id == doc_id)
         });
         assert!(
             doc_update_for_b.is_some(),
@@ -3782,7 +3781,7 @@ mod tests {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
                 && matches!(
                     &e.payload,
-                    SyncPayload::RowVersionNeeded { row, .. }
+                    SyncPayload::RowBatchNeeded { row, .. }
                         if row
                             .data
                             .windows("Test Document".len())
@@ -3975,12 +3974,12 @@ mod tests {
         // === Server should send Alice's doc to Client A ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        // Find row-version messages destined for client A
+        // Find row-batch messages destined for client A
         let alice_updates: Vec<_> = server_outbox
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_a_id)
-                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
+                    && matches!(e.payload, SyncPayload::RowBatchNeeded { .. })
             })
             .collect();
 
@@ -3989,7 +3988,7 @@ mod tests {
         let received_ids: Vec<ObjectId> = alice_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                     Some(row.row_id)
                 } else {
                     None
@@ -4045,14 +4044,14 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
+                    && matches!(e.payload, SyncPayload::RowBatchNeeded { .. })
             })
             .collect();
 
         let bob_received_ids: Vec<ObjectId> = bob_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                     Some(row.row_id)
                 } else {
                     None
@@ -4223,7 +4222,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
         let note_sent = server_outbox.iter().any(|e| {
-            if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+            if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                 row.row_id == note_id
             } else {
                 false
@@ -4701,10 +4700,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::Worker),
                 },
@@ -4727,10 +4726,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::EdgeServer),
                 },
@@ -5043,10 +5042,10 @@ mod tests {
                 .sync_manager_mut()
                 .push_inbox(InboxEntry {
                     source: Source::Server(server_id),
-                    payload: SyncPayload::RowVersionStateChanged {
+                    payload: SyncPayload::RowBatchStateChanged {
                         row_id: row.row_id,
                         branch_name: BranchName::new(&row.branch),
-                        version_id: row.version_id(),
+                        batch_id: row.batch_id,
                         state: None,
                         confirmed_tier: Some(DurabilityTier::Worker),
                     },
@@ -5139,10 +5138,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::Worker),
                 },

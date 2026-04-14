@@ -924,7 +924,7 @@ impl WasmRuntime {
         };
 
         let payload = serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "row": SubscriptionRow {
                 id: object_id.uuid().to_string(),
                 values: row_values,
@@ -961,7 +961,7 @@ impl WasmRuntime {
         };
 
         let payload = serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "row": SubscriptionRow {
                 id: object_id.uuid().to_string(),
                 values: row_values,
@@ -1061,7 +1061,7 @@ impl WasmRuntime {
         };
 
         serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1099,7 +1099,7 @@ impl WasmRuntime {
         };
 
         serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1174,7 +1174,7 @@ impl WasmRuntime {
         };
 
         serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1203,7 +1203,7 @@ impl WasmRuntime {
         };
 
         serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }))
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }

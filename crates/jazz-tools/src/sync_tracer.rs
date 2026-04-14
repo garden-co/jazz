@@ -102,7 +102,7 @@ impl SyncMessage {
     pub fn is_object_updated(&self) -> bool {
         matches!(
             self.payload,
-            SyncPayload::RowVersionCreated { .. } | SyncPayload::RowVersionNeeded { .. }
+            SyncPayload::RowBatchCreated { .. } | SyncPayload::RowBatchNeeded { .. }
         )
     }
 
@@ -110,7 +110,7 @@ impl SyncMessage {
     pub fn is_persistence_ack(&self) -> bool {
         matches!(
             self.payload,
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 confirmed_tier: Some(_),
                 ..
             }
@@ -135,9 +135,10 @@ impl SyncMessage {
     /// Extract object_id from payloads that carry one.
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
-            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.row_id)
+            }
+            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
             _ => None,
         }
     }
@@ -155,9 +156,10 @@ impl SyncMessage {
     /// Extract commit IDs from update or durability payloads.
     pub fn commit_ids(&self) -> Vec<CommitId> {
         match &self.payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => vec![row.version_id()],
-            SyncPayload::RowVersionStateChanged { version_id, .. } => vec![*version_id],
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                vec![row.batch_id().into()]
+            }
+            SyncPayload::RowBatchStateChanged { batch_id, .. } => vec![(*batch_id).into()],
             _ => vec![],
         }
     }
@@ -858,34 +860,34 @@ impl<'a> Normalizer<'a> {
 
     fn format_payload(&mut self, payload: &SyncPayload) -> String {
         match payload {
-            SyncPayload::RowVersionCreated { row, .. } => {
+            SyncPayload::RowBatchCreated { row, .. } => {
                 format!(
                     "created row:{} branch:{} version:{}",
                     self.object(&row.row_id),
                     self.branch(&BranchName::new(&row.branch)),
-                    self.commit(&row.version_id()),
+                    self.commit(&row.batch_id().into()),
                 )
             }
-            SyncPayload::RowVersionNeeded { row, .. } => {
+            SyncPayload::RowBatchNeeded { row, .. } => {
                 format!(
                     "needed row:{} branch:{} version:{}",
                     self.object(&row.row_id),
                     self.branch(&BranchName::new(&row.branch)),
-                    self.commit(&row.version_id()),
+                    self.commit(&row.batch_id().into()),
                 )
             }
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 row_id,
                 branch_name,
-                version_id,
+                batch_id,
                 state,
                 confirmed_tier,
             } => {
                 format!(
-                    "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                    "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
                     self.object(row_id),
                     self.branch(branch_name),
-                    self.commit(version_id),
+                    self.commit(&CommitId::from(*batch_id)),
                 )
             }
             SyncPayload::BatchSettlement { settlement } => {
@@ -977,20 +979,20 @@ fn format_message(msg: &SyncMessage, names: &Names<'_>) -> String {
 
 fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     match payload {
-        SyncPayload::RowVersionCreated { row, .. } => {
+        SyncPayload::RowBatchCreated { row, .. } => {
             format!(
                 "created row:{} branch:{} version:{}",
                 names.object(&row.row_id),
                 row.branch,
-                names.commit(&row.version_id()),
+                names.commit(&row.batch_id().into()),
             )
         }
-        SyncPayload::RowVersionNeeded { row, .. } => {
+        SyncPayload::RowBatchNeeded { row, .. } => {
             format!(
                 "needed row:{} branch:{} version:{}",
                 names.object(&row.row_id),
                 row.branch,
-                names.commit(&row.version_id()),
+                names.commit(&row.batch_id().into()),
             )
         }
         SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -1000,18 +1002,18 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 entry.object_type().unwrap_or("unknown"),
             )
         }
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name,
-            version_id,
+            batch_id,
             state,
             confirmed_tier,
         } => {
             format!(
-                "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
                 names.object(row_id),
                 branch_name,
-                names.commit(version_id),
+                names.commit(&CommitId::from(*batch_id)),
             )
         }
         SyncPayload::BatchSettlement { settlement } => {
@@ -1079,12 +1081,12 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
-    use crate::row_histories::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowBatch};
     use crate::sync_manager::ServerId;
 
-    fn make_row(byte: u8) -> StoredRowVersion {
+    fn make_row(byte: u8) -> StoredRowBatch {
         let row_id = ObjectId::new();
-        StoredRowVersion::new(
+        StoredRowBatch::new(
             row_id,
             "main",
             Vec::new(),
@@ -1101,7 +1103,7 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowVersionCreated {
+        let payload = SyncPayload::RowBatchCreated {
             metadata: None,
             row: make_row(1),
         };
@@ -1116,8 +1118,8 @@ mod tests {
         assert_eq!(tracer.count(), 2);
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
-        assert_eq!(tracer.of_type("RowVersionCreated").len(), 2);
-        assert_eq!(tracer.of_type("RowVersionStateChanged").len(), 0);
+        assert_eq!(tracer.of_type("RowBatchCreated").len(), 2);
+        assert_eq!(tracer.of_type("RowBatchStateChanged").len(), 0);
     }
 
     #[test]
@@ -1126,14 +1128,14 @@ mod tests {
         let server_id = ServerId::default();
 
         let row = make_row(1);
-        let outgoing = SyncPayload::RowVersionCreated {
+        let outgoing = SyncPayload::RowBatchCreated {
             metadata: None,
             row: row.clone(),
         };
-        let incoming = SyncPayload::RowVersionStateChanged {
+        let incoming = SyncPayload::RowBatchStateChanged {
             row_id: row.row_id,
             branch_name: "main".into(),
-            version_id: row.version_id(),
+            batch_id: row.batch_id,
             state: None,
             confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
         };
@@ -1152,7 +1154,7 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowVersionCreated {
+        let payload = SyncPayload::RowBatchCreated {
             metadata: None,
             row: make_row(1),
         };
@@ -1162,7 +1164,7 @@ mod tests {
         let dump = tracer.dump();
         assert!(dump.contains("alice"));
         assert!(dump.contains("server"));
-        assert!(dump.contains("RowVersionCreated"));
+        assert!(dump.contains("RowBatchCreated"));
         assert!(dump.contains("branch:main"));
     }
 

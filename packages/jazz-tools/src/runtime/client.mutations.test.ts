@@ -3,45 +3,34 @@ import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
-  const insertWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined]
-  > = [];
+  const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const insertDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
   > = [];
-  const updateWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined]
-  > = [];
+  const updateWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
   const deleteWithSessionCalls: Array<[string, string | undefined]> = [];
-  const updateDurableCalls: Array<[string, Record<string, unknown>, string]> =
-    [];
+  const updateDurableCalls: Array<[string, Record<string, unknown>, string]> = [];
   const updateDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
   > = [];
-  const insertPersistedCalls: Array<[string, Record<string, unknown>, string]> =
-    [];
+  const insertPersistedCalls: Array<[string, Record<string, unknown>, string]> = [];
   const insertPersistedWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
   > = [];
-  const updatePersistedCalls: Array<[string, Record<string, unknown>, string]> =
-    [];
+  const updatePersistedCalls: Array<[string, Record<string, unknown>, string]> = [];
   const updatePersistedWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
   > = [];
   const deletePersistedCalls: Array<[string, string]> = [];
-  const deletePersistedWithSessionCalls: Array<
-    [string, string | undefined, string]
-  > = [];
+  const deletePersistedWithSessionCalls: Array<[string, string | undefined, string]> = [];
   const localBatchRecordCalls: string[] = [];
   const localBatchRecordsCalls: string[] = [];
   const acknowledgeRejectedBatchCalls: string[] = [];
   const sealBatchCalls: string[] = [];
   const deleteCalls: string[] = [];
   const deleteDurableCalls: Array<[string, string]> = [];
-  const deleteDurableWithSessionCalls: Array<
-    [string, string | undefined, string]
-  > = [];
+  const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
   const localBatchRecord = {
     batchId: "00000000-0000-0000-0000-000000000041",
@@ -69,11 +58,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       values: Record<string, unknown>,
       writeContextJson?: string | null,
     ) => {
-      insertWithSessionCalls.push([
-        table,
-        values,
-        writeContextJson ?? undefined,
-      ]);
+      insertWithSessionCalls.push([table, values, writeContextJson ?? undefined]);
       return { id: "00000000-0000-0000-0000-000000000001", values: [] };
     },
     insertDurable: async () => ({
@@ -86,19 +71,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
       tier = "edge",
     ) => {
-      insertDurableWithSessionCalls.push([
-        table,
-        values,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
+      insertDurableWithSessionCalls.push([table, values, writeContextJson ?? undefined, tier]);
       return { id: "00000000-0000-0000-0000-000000000001", values: [] };
     },
-    insertPersisted: (
-      table: string,
-      values: Record<string, unknown>,
-      tier: string,
-    ) => {
+    insertPersisted: (table: string, values: Record<string, unknown>, tier: string) => {
       insertPersistedCalls.push([table, values, tier]);
       return {
         batchId: localBatchRecord.batchId,
@@ -111,12 +87,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
       tier = "edge",
     ) => {
-      insertPersistedWithSessionCalls.push([
-        table,
-        values,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
+      insertPersistedWithSessionCalls.push([table, values, writeContextJson ?? undefined, tier]);
       return {
         batchId: localBatchRecord.batchId,
         row: { id: "00000000-0000-0000-0000-000000000001", values: [] },
@@ -130,17 +101,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       updates: Record<string, unknown>,
       writeContextJson?: string | null,
     ) => {
-      updateWithSessionCalls.push([
-        objectId,
-        updates,
-        writeContextJson ?? undefined,
-      ]);
+      updateWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined]);
     },
-    updateDurable: async (
-      objectId: string,
-      updates: Record<string, unknown>,
-      tier: string,
-    ) => {
+    updateDurable: async (objectId: string, updates: Record<string, unknown>, tier: string) => {
       updateDurableCalls.push([objectId, updates, tier]);
     },
     updateDurableWithSession: async (
@@ -149,18 +112,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
       tier = "edge",
     ) => {
-      updateDurableWithSessionCalls.push([
-        objectId,
-        updates,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
+      updateDurableWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined, tier]);
     },
-    updatePersisted: (
-      objectId: string,
-      updates: Record<string, unknown>,
-      tier: string,
-    ) => {
+    updatePersisted: (objectId: string, updates: Record<string, unknown>, tier: string) => {
       updatePersistedCalls.push([objectId, updates, tier]);
       return { batchId: localBatchRecord.batchId };
     },
@@ -192,11 +146,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
       tier = "edge",
     ) => {
-      deleteDurableWithSessionCalls.push([
-        objectId,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
+      deleteDurableWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
     },
     deletePersisted: (objectId: string, tier: string) => {
       deletePersistedCalls.push([objectId, tier]);
@@ -207,11 +157,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
       tier = "edge",
     ) => {
-      deletePersistedWithSessionCalls.push([
-        objectId,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
+      deletePersistedWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
       return { batchId: localBatchRecord.batchId };
     },
     query: async () => [],
@@ -349,12 +295,7 @@ describe("JazzClient mutation durability split", () => {
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
     client.createInternal("todos", insertValues, undefined, "alice");
-    await client.createDurableInternal(
-      "todos",
-      insertValues,
-      undefined,
-      "alice",
-    );
+    await client.createDurableInternal("todos", insertValues, undefined, "alice");
     client.updateInternal("row-1", updates, undefined, "alice");
     await client.updateDurableInternal("row-1", updates, undefined, "alice");
     client.deleteInternal("row-1", undefined, "alice");
@@ -362,22 +303,14 @@ describe("JazzClient mutation durability split", () => {
       tier: "global",
     });
 
-    expect(insertWithSessionCalls).toEqual([
-      ["todos", insertValues, attributedContext],
-    ]);
+    expect(insertWithSessionCalls).toEqual([["todos", insertValues, attributedContext]]);
     expect(insertDurableWithSessionCalls).toEqual([
       ["todos", insertValues, attributedContext, "edge"],
     ]);
-    expect(updateWithSessionCalls).toEqual([
-      ["row-1", updates, attributedContext],
-    ]);
-    expect(updateDurableWithSessionCalls).toEqual([
-      ["row-1", updates, attributedContext, "edge"],
-    ]);
+    expect(updateWithSessionCalls).toEqual([["row-1", updates, attributedContext]]);
+    expect(updateDurableWithSessionCalls).toEqual([["row-1", updates, attributedContext, "edge"]]);
     expect(deleteWithSessionCalls).toEqual([["row-1", attributedContext]]);
-    expect(deleteDurableWithSessionCalls).toEqual([
-      ["row-1", attributedContext, "global"],
-    ]);
+    expect(deleteDurableWithSessionCalls).toEqual([["row-1", attributedContext, "global"]]);
   });
 
   it("encodes session and attribution together when both are provided", () => {
@@ -405,12 +338,8 @@ describe("JazzClient mutation durability split", () => {
   });
 
   it("reuses one transactional batch id across create, update, and delete", () => {
-    const {
-      client,
-      insertWithSessionCalls,
-      updateWithSessionCalls,
-      deleteWithSessionCalls,
-    } = makeClient();
+    const { client, insertWithSessionCalls, updateWithSessionCalls, deleteWithSessionCalls } =
+      makeClient();
     const transaction = client.beginTransaction();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
     const updates = { done: { type: "Boolean" as const, value: true } };
@@ -458,13 +387,45 @@ describe("JazzClient mutation durability split", () => {
     expect(insertWithSessionCalls).toEqual([]);
   });
 
-  it("returns persisted writes with an immediate batch id and local wait handle", async () => {
+  it("reuses one direct batch id across create, update, and delete without sealing", () => {
     const {
       client,
-      insertPersistedCalls,
-      localBatchRecordCalls,
-      localBatchRecord,
+      insertWithSessionCalls,
+      updateWithSessionCalls,
+      deleteWithSessionCalls,
+      sealBatchCalls,
     } = makeClient();
+    const batch = client.beginDirectBatch();
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+
+    expect(typeof batch.batchId()).toBe("string");
+
+    batch.create("todos", insertValues);
+    batch.update("row-1", updates);
+    batch.delete("row-1");
+
+    const insertContext = JSON.parse(insertWithSessionCalls[0]![2]!);
+    const updateContext = JSON.parse(updateWithSessionCalls[0]![2]!);
+    const deleteContext = JSON.parse(deleteWithSessionCalls[0]![1]!);
+
+    expect(insertContext).toMatchObject({
+      batch_mode: "direct",
+      batch_id: batch.batchId(),
+    });
+    expect(updateContext).toMatchObject({
+      batch_mode: "direct",
+      batch_id: batch.batchId(),
+    });
+    expect(deleteContext).toMatchObject({
+      batch_mode: "direct",
+      batch_id: batch.batchId(),
+    });
+    expect(sealBatchCalls).toEqual([]);
+  });
+
+  it("returns persisted writes with an immediate batch id and local wait handle", async () => {
+    const { client, insertPersistedCalls, localBatchRecordCalls, localBatchRecord } = makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
 
     const persisted = client.createPersisted("todos", insertValues);
@@ -510,15 +471,13 @@ describe("JazzClient mutation durability split", () => {
   });
 
   it("binds a transaction to the target composed prefix at begin time", () => {
-    let currentSchemaHash =
-      "1111111111111111111111111111111111111111111111111111111111111111";
+    let currentSchemaHash = "1111111111111111111111111111111111111111111111111111111111111111";
     const { client, insertWithSessionCalls, updateWithSessionCalls } = makeClient({
       getSchemaHash: () => currentSchemaHash,
     });
     const transaction = client.beginTransaction();
 
-    currentSchemaHash =
-      "2222222222222222222222222222222222222222222222222222222222222222";
+    currentSchemaHash = "2222222222222222222222222222222222222222222222222222222222222222";
 
     transaction.create("todos", {
       title: { type: "Text" as const, value: "Bound prefix" },
@@ -551,13 +510,9 @@ describe("JazzClient mutation durability split", () => {
       localBatchRecord,
     } = makeClient();
 
-    expect(client.localBatchRecord(localBatchRecord.batchId)).toEqual(
-      localBatchRecord,
-    );
+    expect(client.localBatchRecord(localBatchRecord.batchId)).toEqual(localBatchRecord);
     expect(client.localBatchRecords()).toEqual([localBatchRecord]);
-    expect(client.acknowledgeRejectedBatch(localBatchRecord.batchId)).toBe(
-      true,
-    );
+    expect(client.acknowledgeRejectedBatch(localBatchRecord.batchId)).toBe(true);
 
     expect(localBatchRecordCalls).toEqual([localBatchRecord.batchId]);
     expect(localBatchRecordsCalls).toEqual(["scan"]);

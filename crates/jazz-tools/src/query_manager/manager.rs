@@ -6,12 +6,9 @@ use sha2::{Digest, Sha256};
 
 use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{
-    BatchId, QueryRowVersion, RowState, RowVisibilityChange, StoredRowVersion,
-};
+use crate::row_histories::{BatchId, QueryRowBatch, RowState, RowVisibilityChange, StoredRowBatch};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
     translate_table_name_to_schema,
@@ -19,7 +16,7 @@ use crate::schema_manager::{
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    RowVersionKey, SchemaWarning, SyncManager,
+    RowBatchKey, SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -127,8 +124,8 @@ pub struct QueryHandle(pub u64);
 pub struct InsertResult {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// Version ID of the row data.
-    pub row_version_id: CommitId,
+    /// Logical batch identity for the written row member.
+    pub batch_id: BatchId,
     /// Inserted row values in table column order.
     pub row_values: Vec<Value>,
 }
@@ -138,8 +135,8 @@ pub struct InsertResult {
 pub struct DeleteHandle {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// Version ID of the delete tombstone row.
-    pub delete_version_id: CommitId,
+    /// Logical batch identity for the tombstone row member.
+    pub batch_id: BatchId,
 }
 
 impl InsertResult {
@@ -147,7 +144,7 @@ impl InsertResult {
     ///
     /// Must call `QueryManager::process()` between checks to drive storage operations.
     pub fn is_complete(&self, qm: &QueryManager, storage: &dyn Storage) -> bool {
-        qm.is_version_stored(storage, self.row_id, &self.row_version_id)
+        qm.is_version_stored(storage, self.row_id, &self.batch_id)
     }
 
     /// Check if the row is indexed (appears in the _id index).
@@ -390,12 +387,12 @@ pub struct QueryManager {
     /// These are retried when new schemas activate via try_activate_pending().
     pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
 
-    /// Latest locally-authored row version per row id.
+    /// Latest locally-authored row batch member per row id.
     ///
     /// Used to let `local_updates = Immediate` queries fall back to the current
-    /// local row version when the requested remote durability tier has not been
+    /// local row batch member when the requested remote durability tier has not been
     /// reached yet.
-    pub(super) pending_local_row_versions: HashMap<ObjectId, RowVersionKey>,
+    pub(super) pending_local_row_batches: HashMap<ObjectId, RowBatchKey>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
@@ -469,7 +466,7 @@ impl QueryManager {
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_visibility_changes: Vec::new(),
-            pending_local_row_versions: HashMap::new(),
+            pending_local_row_batches: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
         }
     }
@@ -1001,7 +998,7 @@ impl QueryManager {
                         };
                         let local_pending_version = (subscription.local_updates
                             == LocalUpdates::Immediate)
-                            .then(|| self.pending_local_row_versions.get(&id).copied())
+                            .then(|| self.pending_local_row_batches.get(&id).copied())
                             .flatten();
                         Self::load_visible_row_for_query(
                             storage_ref,
@@ -1223,21 +1220,21 @@ impl QueryManager {
 
         let descriptor = table_schema.columns.clone();
         let old_row = update.previous_row.as_ref();
-        let current_version_id = update.row.version_id();
-        let current_row_key = RowVersionKey::from_row(&update.row);
+        let current_batch_id = update.row.batch_id;
+        let current_row_key = RowBatchKey::from_row(&update.row);
 
         if local_update {
-            self.pending_local_row_versions
+            self.pending_local_row_batches
                 .insert(update.object_id, current_row_key);
         } else if let Some(pending_row_key) = self
-            .pending_local_row_versions
+            .pending_local_row_batches
             .get(&update.object_id)
             .copied()
             && (pending_row_key.branch_name.as_str() == update.row.branch.as_str())
-            && (pending_row_key.version_id != current_version_id
+            && (pending_row_key.batch_id != current_batch_id
                 || update.row.confirmed_tier == Some(DurabilityTier::GlobalServer))
         {
-            self.pending_local_row_versions.remove(&update.object_id);
+            self.pending_local_row_batches.remove(&update.object_id);
         }
 
         if self.visible_row_is_hard_deleted(storage, update.object_id, &update.row.branch)
@@ -1316,7 +1313,7 @@ impl QueryManager {
             return;
         }
 
-        let was_soft_deleted = old_row.is_some_and(StoredRowVersion::is_soft_deleted);
+        let was_soft_deleted = old_row.is_some_and(StoredRowBatch::is_soft_deleted);
         let new_data = &update.row.data;
 
         if was_soft_deleted {
@@ -1508,7 +1505,7 @@ impl QueryManager {
     }
 
     pub(crate) fn clear_local_pending_row_overlay(&mut self, table: &str, id: ObjectId) {
-        self.pending_local_row_versions.remove(&id);
+        self.pending_local_row_batches.remove(&id);
         self.mark_subscriptions_dirty_local(table);
         self.mark_local_row_updated_in_subscriptions(table, id);
     }
@@ -1517,7 +1514,7 @@ impl QueryManager {
         storage.load_row_locator(row_id).ok().flatten()
     }
 
-    pub(super) fn load_best_visible_row_version(
+    pub(super) fn load_best_visible_row_batch(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -1525,8 +1522,8 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
-        Self::load_best_visible_row_version_from_storage(
+    ) -> Option<(String, QueryRowBatch)> {
+        Self::load_best_visible_row_batch_from_storage(
             storage,
             row_id,
             branches,
@@ -1536,16 +1533,16 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn load_best_visible_row_version_from_storage(
+    pub(super) fn load_best_visible_row_batch_from_storage(
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         let locator = Self::load_row_locator(storage, row_id)?;
-        Self::load_best_visible_row_version_from_storage_with_locator(
+        Self::load_best_visible_row_batch_from_storage_with_locator(
             storage,
             row_id,
             &locator,
@@ -1590,7 +1587,7 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
         durability_tier: Option<DurabilityTier>,
-    ) -> Option<QueryRowVersion> {
+    ) -> Option<QueryRowBatch> {
         let load = |table: &str| match durability_tier {
             Some(required_tier) => {
                 storage.load_visible_query_row_for_tier(table, branch, row_id, required_tier)
@@ -1609,14 +1606,14 @@ impl QueryManager {
         storage: &dyn Storage,
         primary_table: &str,
         fallback_table: Option<&str>,
-        row_version_key: RowVersionKey,
-    ) -> Option<QueryRowVersion> {
+        row_batch_key: RowBatchKey,
+    ) -> Option<QueryRowBatch> {
         let load = |table: &str| {
-            storage.load_history_query_row_version(
+            storage.load_history_query_row_batch(
                 table,
-                row_version_key.branch_name.as_str(),
-                row_version_key.row_id,
-                row_version_key.version_id,
+                row_batch_key.branch_name.as_str(),
+                row_batch_key.row_id,
+                row_batch_key.batch_id,
             )
         };
 
@@ -1629,22 +1626,22 @@ impl QueryManager {
 
     fn load_local_pending_query_row_with_hint_or_locator(
         storage: &dyn Storage,
-        row_version_key: RowVersionKey,
+        row_batch_key: RowBatchKey,
         table_hint: Option<&str>,
         schema_context: &SchemaContext,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         if let Some(hint) = table_hint
             && let Some(row) = Self::load_local_pending_query_row_from_candidate_tables(
                 storage,
                 hint,
                 None,
-                row_version_key,
+                row_batch_key,
             )
         {
             return Some((hint.to_string(), row));
         }
 
-        let locator = Self::load_row_locator(storage, row_version_key.row_id)?;
+        let locator = Self::load_row_locator(storage, row_batch_key.row_id)?;
         let original_table = locator.table.as_str();
         let current_table = locator
             .origin_schema_hash
@@ -1662,12 +1659,12 @@ impl QueryManager {
             storage,
             current_table_name,
             Some(original_table),
-            row_version_key,
+            row_batch_key,
         )?;
         Some((current_table_name.to_string(), row))
     }
 
-    fn load_best_visible_row_version_from_storage_with_table_hint(
+    fn load_best_visible_row_batch_from_storage_with_table_hint(
         storage: &dyn Storage,
         row_id: ObjectId,
         table_hint: &str,
@@ -1675,8 +1672,8 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
-        let mut best: Option<(CommitId, QueryRowVersion)> = None;
+    ) -> Option<(String, QueryRowBatch)> {
+        let mut best: Option<(BatchId, QueryRowBatch)> = None;
 
         for branch in branches {
             let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
@@ -1706,13 +1703,13 @@ impl QueryManager {
                 continue;
             }
 
-            let version_id = row.version_id();
+            let batch_id = row.batch_id;
             match &best {
-                None => best = Some((version_id, row)),
-                Some((best_version_id, best_row))
-                    if (row.updated_at, version_id) > (best_row.updated_at, *best_version_id) =>
+                None => best = Some((batch_id, row)),
+                Some((best_batch_id, best_row))
+                    if (row.updated_at, batch_id) > (best_row.updated_at, *best_batch_id) =>
                 {
-                    best = Some((version_id, row));
+                    best = Some((batch_id, row));
                 }
                 _ => {}
             }
@@ -1721,7 +1718,7 @@ impl QueryManager {
         best.map(|(_, row)| (table_hint.to_string(), row))
     }
 
-    pub(super) fn load_best_visible_row_version_with_hint_or_locator(
+    pub(super) fn load_best_visible_row_batch_with_hint_or_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
         table_hint: Option<&str>,
@@ -1729,10 +1726,10 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         table_hint
             .and_then(|hint| {
-                Self::load_best_visible_row_version_from_storage_with_table_hint(
+                Self::load_best_visible_row_batch_from_storage_with_table_hint(
                     storage,
                     row_id,
                     hint,
@@ -1743,7 +1740,7 @@ impl QueryManager {
                 )
             })
             .or_else(|| {
-                Self::load_best_visible_row_version_from_storage(
+                Self::load_best_visible_row_batch_from_storage(
                     storage,
                     row_id,
                     branches,
@@ -1754,7 +1751,7 @@ impl QueryManager {
             })
     }
 
-    fn load_best_visible_row_version_from_storage_with_locator(
+    fn load_best_visible_row_batch_from_storage_with_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
         locator: &RowLocator,
@@ -1762,7 +1759,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         let original_table = locator.table.as_str();
         let current_table = locator
             .origin_schema_hash
@@ -1777,7 +1774,7 @@ impl QueryManager {
             .filter(|translated| translated != original_table);
         let current_table_name = current_table.as_deref().unwrap_or(original_table);
 
-        let mut best: Option<(CommitId, QueryRowVersion)> = None;
+        let mut best: Option<(BatchId, QueryRowBatch)> = None;
 
         for branch in branches {
             let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
@@ -1813,13 +1810,13 @@ impl QueryManager {
                 continue;
             }
 
-            let version_id = row.version_id();
+            let batch_id = row.batch_id;
             match &best {
-                None => best = Some((version_id, row)),
-                Some((best_version_id, best_row))
-                    if (row.updated_at, version_id) > (best_row.updated_at, *best_version_id) =>
+                None => best = Some((batch_id, row)),
+                Some((best_batch_id, best_row))
+                    if (row.updated_at, batch_id) > (best_row.updated_at, *best_batch_id) =>
                 {
-                    best = Some((version_id, row));
+                    best = Some((batch_id, row));
                 }
                 _ => {}
             }
@@ -1835,7 +1832,7 @@ impl QueryManager {
         table_hint: Option<&str>,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
-        local_pending_version: Option<RowVersionKey>,
+        local_pending_version: Option<RowBatchKey>,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -1843,7 +1840,7 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = Self::load_best_visible_row_version_with_hint_or_locator(
+        let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
             storage,
             row_id,
             table_hint,
@@ -1854,7 +1851,7 @@ impl QueryManager {
         )
         .or_else(|| {
             let pending_version = local_pending_version?;
-            let resolved = Self::load_best_visible_row_version_with_hint_or_locator(
+            let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
                 storage,
                 row_id,
                 table_hint,
@@ -1864,7 +1861,7 @@ impl QueryManager {
                 branch_schema_map,
             )?;
             let (_, row) = &resolved;
-            (row.version_id() == pending_version.version_id
+            (row.batch_id == pending_version.batch_id
                 && row.branch.as_str() == pending_version.branch_name.as_str())
             .then_some(resolved)
         })
@@ -1877,7 +1874,7 @@ impl QueryManager {
                 schema_context,
             )?;
             let (_, row) = &resolved;
-            (row.version_id() == pending_version.version_id
+            (row.batch_id == pending_version.batch_id
                 && row.branch.as_str() == pending_version.branch_name.as_str()
                 && matches!(row.state, RowState::StagingPending))
             .then_some(resolved)
@@ -1892,7 +1889,7 @@ impl QueryManager {
             return None;
         }
 
-        let version_id = row.version_id();
+        let batch_id = row.batch_id;
         let row_provenance = row.row_provenance();
         let source_branch = row.branch.as_str();
 
@@ -1900,16 +1897,15 @@ impl QueryManager {
             && source_hash != schema_context.current_hash
         {
             let transformer = LensTransformer::new(schema_context, &table);
-            match transformer.transform(&row.data, version_id, source_hash) {
+            match transformer.transform(&row.data, batch_id, source_hash) {
                 Ok(result) => {
                     return Some(LoadedRow::new(
                         result.data,
-                        result.version_id,
                         row_provenance,
                         [(row_id, BranchName::new(source_branch))]
                             .into_iter()
                             .collect(),
-                        row.batch_id,
+                        result.batch_id,
                     ));
                 }
                 Err(err) => {
@@ -1935,7 +1931,6 @@ impl QueryManager {
 
         Some(LoadedRow::new(
             row.data,
-            version_id,
             row_provenance,
             [(row_id, BranchName::new(source_branch))]
                 .into_iter()
@@ -1985,7 +1980,7 @@ impl QueryManager {
             .iter()
             .filter_map(|row| {
                 previous_rows.get(&row.id).and_then(|previous| {
-                    (previous.data != row.data || previous.version_id != row.version_id)
+                    (previous.data != row.data || previous.batch_id != row.batch_id)
                         .then(|| (previous.clone(), row.clone()))
                 })
             })
@@ -1997,7 +1992,7 @@ impl QueryManager {
                     && previous_rows
                         .get(&row.id)
                         .map(|previous| {
-                            previous.data == row.data && previous.version_id == row.version_id
+                            previous.data == row.data && previous.batch_id == row.batch_id
                         })
                         .unwrap_or(false)
                     && previous_indices.get(&row.id) != next_indices.get(&row.id)

@@ -129,11 +129,11 @@ The browser architecture itself stays the same underneath.
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `packages/jazz-tools/src/runtime/db.ts` | App-facing `Db` entry point |
-| `packages/jazz-tools/src/runtime/client.ts` | `JazzClient` implementation |
-| `packages/jazz-tools/src/runtime/worker-bridge.ts` | Main-thread to worker coordination |
-| `packages/jazz-tools/src/worker/jazz-worker.ts` | Dedicated worker runtime host |
-| `packages/jazz-tools/src/runtime/sync-transport.ts` | Shared transport utilities |
-| `crates/jazz-wasm/src/runtime.rs` | WASM runtime bindings |
+| File                                                | Purpose                            |
+| --------------------------------------------------- | ---------------------------------- |
+| `packages/jazz-tools/src/runtime/db.ts`             | App-facing `Db` entry point        |
+| `packages/jazz-tools/src/runtime/client.ts`         | `JazzClient` implementation        |
+| `packages/jazz-tools/src/runtime/worker-bridge.ts`  | Main-thread to worker coordination |
+| `packages/jazz-tools/src/worker/jazz-worker.ts`     | Dedicated worker runtime host      |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | Shared transport utilities         |
+| `crates/jazz-wasm/src/runtime.rs`                   | WASM runtime bindings              |

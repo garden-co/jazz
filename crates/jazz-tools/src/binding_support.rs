@@ -230,9 +230,9 @@ pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
 }
 
 pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
-    uuid::Uuid::parse_str(batch_id)
-        .map(BatchId)
-        .map_err(|err| format!("Invalid BatchId: {err}"))
+    batch_id
+        .parse()
+        .map_err(|err: String| format!("Invalid BatchId: {err}"))
 }
 
 fn serialize_batch_mode(mode: BatchMode) -> &'static str {
@@ -246,7 +246,7 @@ fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
     json!({
         "objectId": member.object_id.uuid().to_string(),
         "branchName": member.branch_name.to_string(),
-        "batchId": member.batch_id.0.to_string(),
+        "batchId": member.batch_id.to_string(),
     })
 }
 
@@ -254,7 +254,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
     match settlement {
         BatchSettlement::Missing { batch_id } => json!({
             "kind": "missing",
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
         }),
         BatchSettlement::Rejected {
             batch_id,
@@ -262,7 +262,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             reason,
         } => json!({
             "kind": "rejected",
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "code": code,
             "reason": reason,
         }),
@@ -272,7 +272,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             visible_members,
         } => json!({
             "kind": "durable_direct",
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
             "visibleMembers": visible_members
                 .iter()
@@ -285,7 +285,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             visible_members,
         } => json!({
             "kind": "accepted_transaction",
-            "batchId": batch_id.0.to_string(),
+            "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
             "visibleMembers": visible_members
                 .iter()
@@ -297,7 +297,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
 
 pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
     json!({
-        "batchId": record.batch_id.0.to_string(),
+        "batchId": record.batch_id.to_string(),
         "mode": serialize_batch_mode(record.mode),
         "requestedTier": serialize_durability_tier(record.requested_tier),
         "sealed": record.sealed,
@@ -591,7 +591,7 @@ mod tests {
                     "claims": {}
                 },
                 "batch_mode": "transactional",
-                "batch_id": batch_id.0.to_string(),
+                "batch_id": batch_id.to_string(),
             })
             .to_string(),
         ))
@@ -611,7 +611,7 @@ mod tests {
         let parsed = parse_write_context_input(Some(
             &json!({
                 "batch_mode": "transactional",
-                "batch_id": BatchId::new().0.to_string(),
+                "batch_id": BatchId::new().to_string(),
                 "target_branch_name": "dev-111111111111-main",
             })
             .to_string(),

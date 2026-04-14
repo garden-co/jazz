@@ -8,18 +8,18 @@ use std::time::{Duration, Instant};
 
 use smallvec::smallvec;
 
-use crate::commit::CommitId;
 use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
+use crate::row_histories::BatchId;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{
     ClientId, Destination, InboxEntry, QueryId, RowMetadata, Source, SyncError, SyncManager,
     SyncPayload,
 };
 use crate::test_row_history::{
-    apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
+    apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
     seeded_memory_storage,
 };
 
@@ -37,7 +37,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_histories::{RowState, StoredRowVersion};
+use crate::row_histories::{RowState, StoredRowBatch};
 
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
@@ -69,15 +69,16 @@ fn set_client_query_scope(
 }
 
 #[derive(Debug, Clone)]
-struct IncomingRowVersion {
-    parents: smallvec::SmallVec<[CommitId; 2]>,
+struct IncomingRowBatch {
+    batch_id: BatchId,
+    parents: smallvec::SmallVec<[BatchId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: String,
     delete_kind: Option<DeleteKind>,
 }
 
-impl IncomingRowVersion {
+impl IncomingRowBatch {
     fn row_provenance(&self) -> RowProvenance {
         RowProvenance::for_insert(self.author.clone(), self.timestamp)
     }
@@ -88,8 +89,9 @@ impl IncomingRowVersion {
             .collect()
     }
 
-    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowVersion {
-        StoredRowVersion::new(
+    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowBatch {
+        StoredRowBatch::new_with_batch_id(
+            self.batch_id,
             object_id,
             branch,
             self.parents.iter().copied().collect::<Vec<_>>(),
@@ -103,13 +105,14 @@ impl IncomingRowVersion {
 }
 
 fn stored_row_commit(
-    parents: smallvec::SmallVec<[CommitId; 2]>,
+    parents: smallvec::SmallVec<[BatchId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
     delete_kind: Option<DeleteKind>,
-) -> IncomingRowVersion {
-    IncomingRowVersion {
+) -> IncomingRowBatch {
+    IncomingRowBatch {
+        batch_id: BatchId::new(),
         parents,
         content,
         timestamp,
@@ -118,26 +121,26 @@ fn stored_row_commit(
     }
 }
 
-fn row_version_created_payload(
+fn row_batch_created_payload(
     object_id: ObjectId,
     branch: &str,
     metadata: Option<RowMetadata>,
-    commit: &IncomingRowVersion,
+    commit: &IncomingRowBatch,
 ) -> SyncPayload {
-    SyncPayload::RowVersionCreated {
+    SyncPayload::RowBatchCreated {
         metadata,
         row: commit.to_row(object_id, branch, RowState::VisibleDirect),
     }
 }
 
-fn row_version_id_for_commit(
+fn row_batch_id_for_commit(
     object_id: ObjectId,
     branch: &str,
-    commit: &IncomingRowVersion,
-) -> CommitId {
+    commit: &IncomingRowBatch,
+) -> BatchId {
     commit
         .to_row(object_id, branch, RowState::VisibleDirect)
-        .version_id()
+        .batch_id()
 }
 
 fn add_row_commit(
@@ -145,11 +148,11 @@ fn add_row_commit(
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
-    parents: Vec<crate::commit::CommitId>,
+    parents: Vec<BatchId>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
-) -> crate::commit::CommitId {
+) -> BatchId {
     let author = author.into();
     let provenance = if parents.is_empty() {
         RowProvenance::for_insert(author.clone(), timestamp)
@@ -161,7 +164,7 @@ fn add_row_commit(
             updated_at: timestamp,
         }
     };
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         object_id,
         branch,
         parents,
@@ -171,9 +174,9 @@ fn add_row_commit(
         RowState::VisibleDirect,
         None,
     );
-    let version_id = row.version_id();
-    apply_test_row_version(storage, object_id, branch, row).unwrap();
-    version_id
+    let batch_id = row.batch_id();
+    apply_test_row_batch(storage, object_id, branch, row).unwrap();
+    batch_id
 }
 
 fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> Option<HashMap<String, String>> {
@@ -184,7 +187,7 @@ fn test_row_tip_ids(
     storage: &MemoryStorage,
     row_id: ObjectId,
     branch: impl AsRef<str>,
-) -> Result<Vec<CommitId>, crate::storage::StorageError> {
+) -> Result<Vec<BatchId>, crate::storage::StorageError> {
     load_test_row_tip_ids(storage, row_id, branch.as_ref())
 }
 
@@ -499,7 +502,7 @@ fn enqueue_inherited_insert(
     branch: &str,
     folder_id: ObjectId,
     title: &str,
-) -> IncomingRowVersion {
+) -> IncomingRowBatch {
     let commit = stored_row_commit(
         smallvec![],
         encode_document("alice", title, Some(folder_id)),
@@ -510,7 +513,7 @@ fn enqueue_inherited_insert(
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             doc_id,
             branch,
             Some(RowMetadata {
@@ -596,7 +599,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     .unwrap();
 
     let update_commit = stored_row_commit(
-        smallvec![grand_handle.row_version_id],
+        smallvec![grand_handle.batch_id],
         update_content,
         4200,
         ObjectId::new().to_string(),
@@ -607,7 +610,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             grand_id,
             &branch,
             Some(RowMetadata {
@@ -632,11 +635,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     });
 
     let tips = test_row_tip_ids(&storage, grand_id, &branch).unwrap();
-    let applied = tips.contains(&row_version_id_for_commit(
-        grand_id,
-        &branch,
-        &update_commit,
-    ));
+    let applied = tips.contains(&row_batch_id_for_commit(grand_id, &branch, &update_commit));
 
     (denied, applied)
 }
@@ -678,7 +677,7 @@ fn rebac_insert_allowed_by_simple_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -695,7 +694,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     // Commit should be applied (owner matches session user)
     let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+        tips.contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Insert should be approved when owner matches session"
     );
 }
@@ -737,7 +736,7 @@ fn rebac_insert_denied_by_simple_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -774,7 +773,7 @@ fn rebac_insert_denied_by_simple_policy() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Insert should be denied when owner doesn't match session"
     );
 }
@@ -830,7 +829,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             &branch,
             Some(RowMetadata {
@@ -863,7 +862,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, &branch, &commit)),
         "Denied insert should not be applied on the branch"
     );
 }
@@ -904,7 +903,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             &branch,
             Some(RowMetadata {
@@ -937,7 +936,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, &branch, &commit)),
         "Denied insert should not be applied on the branch"
     );
 }
@@ -1004,7 +1003,7 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
 
     let tips = test_row_tip_ids(&storage, doc_id, &branch).unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
+        tips.contains(&row_batch_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should be applied when the parent folder is visible on the payload branch"
     );
 }
@@ -1065,7 +1064,7 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
 
     let tips = test_row_tip_ids(&storage, doc_id, &branch).unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
+        tips.contains(&row_batch_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should be applied after settlement reads the parent from the payload branch"
     );
 }
@@ -1127,7 +1126,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
 
     let tips = test_row_tip_ids(&storage, doc_id, &branch).unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
+        tips.contains(&row_batch_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should still be applied after permission settlement"
     );
 }
@@ -1221,7 +1220,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
 
     let tips = test_row_tip_ids(&storage, doc_id, &branch).unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(doc_id, &branch, &commit)),
+        tips.contains(&row_batch_id_for_commit(doc_id, &branch, &commit)),
         "Document insert should apply once the requested parent branch is consulted"
     );
 }
@@ -1257,7 +1256,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             &branch,
             Some(RowMetadata {
@@ -1290,7 +1289,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, &branch, &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, &branch, &commit)),
         "Deferred insert must not be applied before the schema is known"
     );
 
@@ -1346,7 +1345,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             &branch,
             Some(RowMetadata {
@@ -1393,7 +1392,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Timed-out insert should not be applied on the branch"
     );
 }
@@ -1430,7 +1429,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     // Plain "main" branch without schema hash context can fail schema resolution.
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1463,7 +1462,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Denied insert should not be applied on unresolved branch writes"
     );
 }
@@ -1513,7 +1512,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     // self.schema (permissive) and incorrectly allow this insert.
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1546,7 +1545,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
         tips.is_err()
             || !tips
                 .unwrap()
-                .contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+                .contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Denied insert should not be applied when stale self.schema fallback is unsafe"
     );
 }
@@ -1596,7 +1595,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1613,7 +1612,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     // Commit should be applied
     let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+        tips.contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "Table without policy should allow all writes"
     );
 }
@@ -1676,7 +1675,7 @@ fn rebac_two_clients_different_sessions() {
     // Both clients send their documents
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client1),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj1,
             "main",
             Some(RowMetadata {
@@ -1689,7 +1688,7 @@ fn rebac_two_clients_different_sessions() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client2),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj2,
             "main",
             Some(RowMetadata {
@@ -1706,13 +1705,13 @@ fn rebac_two_clients_different_sessions() {
     // Both commits should be applied (each owner matches their session)
     let tips1 = test_row_tip_ids(&storage, obj1, "main").unwrap();
     assert!(
-        tips1.contains(&row_version_id_for_commit(obj1, "main", &commit1)),
+        tips1.contains(&row_batch_id_for_commit(obj1, "main", &commit1)),
         "Alice's document should be approved"
     );
 
     let tips2 = test_row_tip_ids(&storage, obj2, "main").unwrap();
     assert!(
-        tips2.contains(&row_version_id_for_commit(obj2, "main", &commit2)),
+        tips2.contains(&row_batch_id_for_commit(obj2, "main", &commit2)),
         "Bob's document should be approved"
     );
 }
@@ -1784,7 +1783,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1922,7 +1921,7 @@ fn rebac_update_denied_by_using_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1957,7 +1956,7 @@ fn rebac_update_denied_by_using_policy() {
     // Update should NOT be applied
     let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
     assert!(
-        !tips.contains(&row_version_id_for_commit(obj_id, "main", &update_commit,)),
+        !tips.contains(&row_batch_id_for_commit(obj_id, "main", &update_commit,)),
         "Bob's update should be denied - he cannot see Alice's document"
     );
 }
@@ -2401,7 +2400,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         )
         .unwrap();
     let protected_obj = protected_handle.row_id;
-    let initial_commit = protected_handle.row_version_id;
+    let initial_commit = protected_handle.batch_id;
 
     // Get object metadata for later use in update payloads
     let protected_metadata = test_row_metadata(&storage, protected_obj).unwrap_or_default();
@@ -2435,7 +2434,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             protected_obj,
             &branch,
             Some(RowMetadata {
@@ -2471,7 +2470,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Bob's update should NOT be applied
     let tips = test_row_tip_ids(&storage, protected_obj, &branch).unwrap();
     assert!(
-        !tips.contains(&row_version_id_for_commit(
+        !tips.contains(&row_batch_id_for_commit(
             protected_obj,
             &branch,
             &bob_commit,
@@ -2514,7 +2513,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(alice_client),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             protected_obj,
             &branch,
             Some(RowMetadata {
@@ -2547,7 +2546,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Alice's update SHOULD be applied
     let tips = test_row_tip_ids(&storage, protected_obj, &branch).unwrap();
     assert!(
-        tips.contains(&row_version_id_for_commit(
+        tips.contains(&row_batch_id_for_commit(
             protected_obj,
             &branch,
             &alice_commit,
@@ -3195,7 +3194,7 @@ fn synced_soft_delete_should_use_delete_policy() {
     let delete_content =
         encode_row(&protected_descriptor, &[Value::Text("initial".into())]).unwrap();
     let delete_commit = stored_row_commit(
-        smallvec![protected.row_version_id],
+        smallvec![protected.batch_id],
         delete_content,
         2000,
         ObjectId::new().to_string(),
@@ -3204,7 +3203,7 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             protected.row_id,
             &branch,
             Some(RowMetadata {
@@ -3234,7 +3233,7 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     let tips = test_row_tip_ids(&storage, protected.row_id, &branch).unwrap();
     assert!(
-        !tips.contains(&row_version_id_for_commit(
+        !tips.contains(&row_batch_id_for_commit(
             protected.row_id,
             &branch,
             &delete_commit

@@ -55,7 +55,7 @@ impl SelectElementNode {
     fn tuple_content_changed(old_tuple: &Tuple, new_tuple: &Tuple) -> bool {
         match (old_tuple.to_single_row(), new_tuple.to_single_row()) {
             (Some(old_row), Some(new_row)) => {
-                old_row.data != new_row.data || old_row.version_id != new_row.version_id
+                old_row.data != new_row.data || old_row.batch_id != new_row.batch_id
             }
             _ => false,
         }
@@ -163,7 +163,6 @@ impl RowNode for SelectElementNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, TupleDescriptor, TupleElement, Value,
@@ -189,13 +188,13 @@ mod tests {
             TupleElement::Row {
                 id: left_id,
                 content: left_data.into(),
-                version_id: CommitId([0; 32]),
+                batch_id: crate::row_histories::BatchId([0; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: right_id,
                 content: right_data.into(),
-                version_id: CommitId([0; 32]),
+                batch_id: crate::row_histories::BatchId([0; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ])

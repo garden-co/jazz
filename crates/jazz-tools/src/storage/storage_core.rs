@@ -1,16 +1,16 @@
-use crate::commit::CommitId;
 use crate::object::ObjectId;
+use crate::row_histories::BatchId;
 use crate::row_histories::HistoryScan;
 
 use super::key_codec::{
-    history_row_key, history_row_prefix, history_row_versions_prefix, increment_string,
+    history_row_batches_prefix, history_row_key, history_row_prefix, increment_string,
     raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix, strip_raw_table_key,
-    visible_row_key, visible_row_prefix, visible_row_versions_key, visible_row_versions_prefix,
+    visible_row_batches_key, visible_row_batches_prefix, visible_row_key, visible_row_prefix,
 };
 use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
 
-fn encode_commit_id(version_id: CommitId) -> [u8; 32] {
-    version_id.0
+fn encode_batch_id(batch_id: BatchId) -> [u8; 16] {
+    *batch_id.as_bytes()
 }
 
 pub(super) fn raw_table_put_core(
@@ -115,7 +115,7 @@ pub(super) fn append_history_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, row.row_id, row.branch, row.version_id);
+        let key = history_row_key(table, row.row_id, row.branch, row.batch_id);
         set(&key, row.bytes)?;
     }
     Ok(())
@@ -130,22 +130,22 @@ pub(super) fn upsert_visible_region_row_bytes_core(
     for row in rows {
         let key = visible_row_key(table, row.branch, row.row_id);
         set(&key, row.bytes)?;
-        let row_versions_key = visible_row_versions_key(table, row.row_id, row.branch);
-        let version_id = encode_commit_id(row.current_version_id);
-        set(&row_versions_key, &version_id)?;
+        let row_batches_key = visible_row_batches_key(table, row.row_id, row.branch);
+        let batch_id = encode_batch_id(row.current_batch_id);
+        set(&row_batches_key, &batch_id)?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
-pub(super) fn load_history_row_version_bytes_core(
+pub(super) fn load_history_row_batch_bytes_core(
     table: &str,
     branch: &str,
     row_id: ObjectId,
-    version_id: CommitId,
+    batch_id: BatchId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = history_row_key(table, row_id, branch, version_id);
+    let key = history_row_key(table, row_id, branch, batch_id);
     get(&key)
 }
 
@@ -168,7 +168,7 @@ pub(super) fn scan_history_region_bytes_core(
 ) -> Result<Vec<Vec<u8>>, StorageError> {
     let prefix = match scan {
         HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
-        HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
+        HistoryScan::Row { row_id } => history_row_batches_prefix(table, row_id),
     };
 
     Ok(scan_prefix(&prefix)?
@@ -191,12 +191,12 @@ pub(super) fn scan_visible_region_bytes_core(
 }
 
 #[allow(dead_code)]
-pub(super) fn scan_visible_region_row_version_branches_core(
+pub(super) fn scan_visible_region_row_batch_branches_core(
     table: &str,
     row_id: ObjectId,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Result<Vec<String>, StorageError> {
-    let prefix = visible_row_versions_prefix(table, row_id);
+    let prefix = visible_row_batches_prefix(table, row_id);
     let mut branches = scan_prefix_keys(&prefix)?
         .into_iter()
         .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))

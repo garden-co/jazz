@@ -1,18 +1,17 @@
 use super::*;
 use crate::batch_fate::{BatchSettlement, SealedBatchSubmission, VisibleBatchMember};
-use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
-    RowState, RowVisibilityChange, StoredRowVersion, apply_row_version, patch_row_version_state,
+    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, patch_row_batch_state,
 };
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
 
-struct AppliedRowVersion {
+struct AppliedRowBatch {
     metadata: HashMap<String, String>,
-    row: StoredRowVersion,
+    row: StoredRowBatch,
     visibility_change: Option<RowVisibilityChange>,
 }
 impl SyncManager {
@@ -37,6 +36,17 @@ impl SyncManager {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
                 reason: "sealed transactional batch members must share a single target branch"
+                    .to_string(),
+            });
+        }
+
+        if submission.batch_digest
+            != SealedBatchSubmission::compute_batch_digest(&submission.members)
+        {
+            return Err(BatchSettlement::Rejected {
+                batch_id: submission.batch_id,
+                code: "invalid_batch_submission".to_string(),
+                reason: "sealed transactional batch digest does not match declared members"
                     .to_string(),
             });
         }
@@ -122,7 +132,7 @@ impl SyncManager {
     fn row_metadata_from_payload<H: Storage>(
         &self,
         storage: &H,
-        row: &StoredRowVersion,
+        row: &StoredRowBatch,
         metadata: Option<&RowMetadata>,
     ) -> Option<HashMap<String, String>> {
         if let Some(metadata) = metadata {
@@ -141,8 +151,8 @@ impl SyncManager {
         &mut self,
         storage: &mut H,
         metadata: Option<RowMetadata>,
-        mut row: StoredRowVersion,
-    ) -> Option<AppliedRowVersion> {
+        mut row: StoredRowBatch,
+    ) -> Option<AppliedRowBatch> {
         if let Some(local_tier) = self.max_local_durability_tier() {
             row.confirmed_tier = Some(match row.confirmed_tier {
                 Some(existing) => existing.max(local_tier),
@@ -154,23 +164,23 @@ impl SyncManager {
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
         let visibility_change =
-            apply_row_version(storage, row.row_id, &branch_name, row.clone(), &[])
+            apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[])
                 .ok()
                 .and_then(|applied| applied.visibility_change);
 
-        Some(AppliedRowVersion {
+        Some(AppliedRowBatch {
             metadata,
             row,
             visibility_change,
         })
     }
 
-    fn apply_row_version_state_changed<H: Storage>(
+    fn apply_row_batch_state_changed<H: Storage>(
         &mut self,
         storage: &mut H,
         row_id: ObjectId,
         branch_name: BranchName,
-        version_id: CommitId,
+        batch_id: BatchId,
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) {
@@ -178,11 +188,11 @@ impl SyncManager {
             return;
         }
 
-        let row_update = patch_row_version_state(
+        let row_update = patch_row_batch_state(
             storage,
             row_id,
             &branch_name,
-            version_id,
+            batch_id,
             state,
             confirmed_tier,
         )
@@ -190,8 +200,8 @@ impl SyncManager {
         .flatten();
 
         if let Some(tier) = confirmed_tier {
-            self.received_row_version_acks
-                .push((RowVersionKey::new(row_id, branch_name, version_id), tier));
+            self.received_row_batch_acks
+                .push((RowBatchKey::new(row_id, branch_name, batch_id), tier));
         }
 
         if let Some(update) = row_update {
@@ -230,7 +240,7 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
-    ) -> Vec<(String, StoredRowVersion)> {
+    ) -> Vec<(String, StoredRowBatch)> {
         let Ok(row_locators) = storage.scan_row_locators() else {
             return Vec::new();
         };
@@ -238,7 +248,7 @@ impl SyncManager {
         let mut rows = Vec::new();
         for (row_id, row_locator) in row_locators {
             let Ok(history_rows) =
-                storage.scan_history_row_versions(row_locator.table.as_str(), row_id)
+                storage.scan_history_row_batches(row_locator.table.as_str(), row_id)
             else {
                 continue;
             };
@@ -256,7 +266,7 @@ impl SyncManager {
                 .as_bytes()
                 .cmp(right.row_id.uuid().as_bytes())
                 .then_with(|| left.branch.as_str().cmp(right.branch.as_str()))
-                .then_with(|| left.version_id.0.cmp(&right.version_id.0))
+                .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
         });
         rows
     }
@@ -266,65 +276,18 @@ impl SyncManager {
         storage: &mut H,
         origin_client_id: Option<ClientId>,
         settlement: &BatchSettlement,
-        batch_rows: &[(String, StoredRowVersion)],
+        batch_rows: &[(String, StoredRowBatch)],
     ) {
         let server_ids: Vec<_> = self.servers.keys().copied().collect();
         match settlement {
             BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
-                for (table, row) in batch_rows {
+                for (_table, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
-                    let staged_version_id = row.version_id();
-
-                    let _ = patch_row_version_state(
-                        storage,
-                        row_id,
-                        &branch_name,
-                        staged_version_id,
-                        Some(RowState::Superseded),
-                        None,
-                    );
-
-                    if let Some(client_id) = origin_client_id {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::RowVersionStateChanged {
-                                row_id,
-                                branch_name,
-                                version_id: staged_version_id,
-                                state: Some(RowState::Superseded),
-                                confirmed_tier: None,
-                            },
-                        });
-                    }
-
-                    for server_id in &server_ids {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Server(*server_id),
-                            payload: SyncPayload::RowVersionStateChanged {
-                                row_id,
-                                branch_name,
-                                version_id: staged_version_id,
-                                state: Some(RowState::Superseded),
-                                confirmed_tier: None,
-                            },
-                        });
-                    }
-
                     let accepted_row = row.accepted_transaction_output(*confirmed_tier);
-                    let accepted_version_id = accepted_row.version_id();
-                    let existed = storage
-                        .load_history_row_version(
-                            table,
-                            branch_name.as_str(),
-                            row_id,
-                            accepted_version_id,
-                        )
-                        .ok()
-                        .flatten()
-                        .is_some();
+                    let accepted_batch_id = accepted_row.batch_id;
                     let applied =
-                        apply_row_version(storage, row_id, &branch_name, accepted_row.clone(), &[])
+                        apply_row_batch(storage, row_id, &branch_name, accepted_row.clone(), &[])
                             .ok();
 
                     let metadata = storage
@@ -333,24 +296,31 @@ impl SyncManager {
                         .flatten()
                         .map(|locator| metadata_from_row_locator(&locator));
 
-                    if !existed {
-                        if let (Some(client_id), Some(metadata)) =
-                            (origin_client_id, metadata.clone())
-                        {
-                            self.queue_row_to_client_unscoped(
-                                client_id,
+                    if let Some(client_id) = origin_client_id {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::RowBatchStateChanged {
                                 row_id,
-                                metadata,
-                                accepted_row.clone(),
-                                false,
-                            );
-                        }
-                        if let Some(metadata) = metadata {
-                            self.forward_row_version_to_servers(
-                                row_id,
-                                metadata,
-                                accepted_row.clone(),
-                            );
+                                branch_name,
+                                batch_id: accepted_batch_id,
+                                state: Some(RowState::VisibleTransactional),
+                                confirmed_tier: Some(*confirmed_tier),
+                            },
+                        });
+                    }
+
+                    if let Some(metadata) = metadata {
+                        for server_id in &server_ids {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Server(*server_id),
+                                payload: SyncPayload::RowBatchNeeded {
+                                    metadata: Some(RowMetadata {
+                                        id: row_id,
+                                        metadata: metadata.clone(),
+                                    }),
+                                    row: accepted_row.clone(),
+                                },
+                            });
                         }
                     }
 
@@ -388,13 +358,14 @@ impl SyncManager {
                 for (_, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
-                    let version_id = row.version_id();
+                    let batch_id = row.batch_id;
+                    let row_batch_id = row.batch_id();
 
-                    let visibility_change = patch_row_version_state(
+                    let visibility_change = patch_row_batch_state(
                         storage,
                         row_id,
                         &branch_name,
-                        version_id,
+                        row_batch_id,
                         Some(RowState::Rejected),
                         None,
                     )
@@ -404,10 +375,10 @@ impl SyncManager {
                     if let Some(client_id) = origin_client_id {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(client_id),
-                            payload: SyncPayload::RowVersionStateChanged {
+                            payload: SyncPayload::RowBatchStateChanged {
                                 row_id,
                                 branch_name,
-                                version_id,
+                                batch_id,
                                 state: Some(RowState::Rejected),
                                 confirmed_tier: None,
                             },
@@ -451,7 +422,7 @@ impl SyncManager {
         storage: &mut H,
         origin_client_id: Option<ClientId>,
         settlement: BatchSettlement,
-        batch_rows: &[(String, StoredRowVersion)],
+        batch_rows: &[(String, StoredRowBatch)],
     ) {
         self.persist_authoritative_batch_settlement(storage, &settlement);
         self.pending_batch_settlements.push(settlement.clone());
@@ -475,7 +446,7 @@ impl SyncManager {
         storage: &mut H,
         origin_client_id: Option<ClientId>,
         submission: SealedBatchSubmission,
-        batch_rows: Vec<(String, StoredRowVersion)>,
+        batch_rows: Vec<(String, StoredRowBatch)>,
     ) {
         let batch_id = submission.batch_id;
         let declared_rows: Vec<_> = submission
@@ -487,7 +458,7 @@ impl SyncManager {
                     .find(|(_, row)| {
                         row.row_id == member.object_id
                             && row.branch.as_str() == member.branch_name.as_str()
-                            && row.version_id() == member.version_id
+                            && row.content_digest() == member.row_digest
                     })
                     .cloned()
             })
@@ -531,7 +502,7 @@ impl SyncManager {
                 tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
             }
         }
-        let rows_to_patch: &[(String, StoredRowVersion)] = match settlement {
+        let rows_to_patch: &[(String, StoredRowBatch)] = match settlement {
             BatchSettlement::AcceptedTransaction { .. } => &declared_rows,
             BatchSettlement::Rejected { .. } => &batch_rows,
             BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => &[],
@@ -573,7 +544,7 @@ impl SyncManager {
             batch_rows.iter().any(|(_, row)| {
                 row.row_id == member.object_id
                     && row.branch.as_str() == member.branch_name.as_str()
-                    && row.version_id() == member.version_id
+                    && row.content_digest() == member.row_digest
             })
         }) {
             return;
@@ -619,7 +590,7 @@ impl SyncManager {
                 batch_rows.iter().any(|(_, row)| {
                     row.row_id == member.object_id
                         && row.branch.as_str() == member.branch_name.as_str()
-                        && row.version_id() == member.version_id
+                        && row.content_digest() == member.row_digest
                 })
             }) {
                 continue;
@@ -670,25 +641,25 @@ impl SyncManager {
                     self.forward_catalogue_entry_to_clients(entry, None);
                 }
             }
-            SyncPayload::RowVersionCreated { metadata, row }
-            | SyncPayload::RowVersionNeeded { metadata, row } => {
+            SyncPayload::RowBatchCreated { metadata, row }
+            | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
                 tracing::debug!(
                     %object_id,
                     %branch_name,
-                    "server→row-version payload"
+                    "server→row-batch payload"
                 );
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    let version_id = applied.row.version_id();
+                    let batch_id = applied.row.batch_id;
 
                     for tier in self.my_tiers.iter().copied() {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Server(server_id),
-                            payload: SyncPayload::RowVersionStateChanged {
+                            payload: SyncPayload::RowBatchStateChanged {
                                 row_id: object_id,
                                 branch_name,
-                                version_id,
+                                batch_id,
                                 state: None,
                                 confirmed_tier: Some(tier),
                             },
@@ -705,33 +676,33 @@ impl SyncManager {
                     }
                 }
             }
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 row_id,
                 branch_name,
-                version_id,
+                batch_id,
                 state,
                 confirmed_tier,
             } => {
                 tracing::debug!(
                     %row_id,
                     %branch_name,
-                    ?version_id,
+                    ?batch_id,
                     ?state,
                     ?confirmed_tier,
-                    "server→RowVersionStateChanged"
+                    "server→RowBatchStateChanged"
                 );
-                self.apply_row_version_state_changed(
+                self.apply_row_batch_state_changed(
                     storage,
                     row_id,
                     branch_name,
-                    version_id,
+                    batch_id,
                     state,
                     confirmed_tier,
                 );
 
-                let key = RowVersionKey::new(row_id, branch_name, version_id);
+                let key = RowBatchKey::new(row_id, branch_name, batch_id);
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.row_version_interest.get(&key) {
+                if let Some(clients) = self.row_batch_interest.get(&key) {
                     interested.extend(clients);
                 }
                 let settlement =
@@ -743,10 +714,10 @@ impl SyncManager {
                 for cid in interested {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Client(cid),
-                        payload: SyncPayload::RowVersionStateChanged {
+                        payload: SyncPayload::RowBatchStateChanged {
                             row_id,
                             branch_name,
-                            version_id,
+                            batch_id,
                             state,
                             confirmed_tier,
                         },
@@ -924,8 +895,8 @@ impl SyncManager {
                     }
                 }
             }
-            SyncPayload::RowVersionCreated { metadata, row }
-            | SyncPayload::RowVersionNeeded { metadata, row } => {
+            SyncPayload::RowBatchCreated { metadata, row }
+            | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
                 match client.role {
@@ -1095,24 +1066,24 @@ impl SyncManager {
                         query_id: *query_id,
                     });
             }
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 row_id,
                 branch_name,
-                version_id,
+                batch_id,
                 state,
                 confirmed_tier,
             } => {
-                self.apply_row_version_state_changed(
+                self.apply_row_batch_state_changed(
                     storage,
                     *row_id,
                     *branch_name,
-                    *version_id,
+                    *batch_id,
                     *state,
                     *confirmed_tier,
                 );
-                let key = RowVersionKey::new(*row_id, *branch_name, *version_id);
+                let key = RowBatchKey::new(*row_id, *branch_name, *batch_id);
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.row_version_interest.get(&key) {
+                if let Some(clients) = self.row_batch_interest.get(&key) {
                     interested.extend(clients);
                 }
                 interested.remove(&client_id);
@@ -1125,10 +1096,10 @@ impl SyncManager {
                 for cid in interested {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Client(cid),
-                        payload: SyncPayload::RowVersionStateChanged {
+                        payload: SyncPayload::RowBatchStateChanged {
                             row_id: *row_id,
                             branch_name: *branch_name,
-                            version_id: *version_id,
+                            batch_id: *batch_id,
                             state: *state,
                             confirmed_tier: *confirmed_tier,
                         },
@@ -1199,18 +1170,18 @@ impl SyncManager {
                     self.forward_catalogue_entry_to_clients(entry, Some(client_id));
                 }
             }
-            SyncPayload::RowVersionCreated { metadata, row }
-            | SyncPayload::RowVersionNeeded { metadata, row } => {
+            SyncPayload::RowBatchCreated { metadata, row }
+            | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
-                let version_id = row.version_id();
-                self.row_version_interest
-                    .entry(RowVersionKey::new(object_id, branch_name, version_id))
+                let batch_id = row.batch_id;
+                self.row_batch_interest
+                    .entry(RowBatchKey::new(object_id, branch_name, batch_id))
                     .or_default()
                     .insert(client_id);
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
+                    self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
@@ -1218,10 +1189,10 @@ impl SyncManager {
                         for tier in self.my_tiers.iter().copied() {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
-                                payload: SyncPayload::RowVersionStateChanged {
+                                payload: SyncPayload::RowBatchStateChanged {
                                     row_id: object_id,
                                     branch_name,
-                                    version_id,
+                                    batch_id,
                                     state: None,
                                     confirmed_tier: Some(tier),
                                 },

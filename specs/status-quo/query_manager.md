@@ -4,7 +4,7 @@ The Query Manager is where Jazz turns raw tables into live relational reads.
 
 If the storage layer answers:
 
-> "What row versions and visible entries exist?"
+> "What row batch members and visible entries exist?"
 
 the Query Manager answers:
 
@@ -83,7 +83,7 @@ Both APIs use the same graph engine.
 
 ### Live subscription
 
-`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row versions, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
+`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row batch members, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
 
 This shared machinery is why one-shot reads and live reads stay behaviorally aligned.
 
@@ -113,12 +113,12 @@ That is the reason sync can stay query-scoped without every transport layer need
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `crates/jazz-tools/src/query_manager/manager.rs` | QueryManager orchestration and subscription lifecycle |
-| `crates/jazz-tools/src/query_manager/graph.rs` | Query graph compilation and settle passes |
-| `crates/jazz-tools/src/query_manager/graph_nodes/` | Node implementations such as index scan, materialize, filter, sort, and output |
-| `crates/jazz-tools/src/query_manager/query.rs` | Query builder/data structures |
-| `crates/jazz-tools/src/query_manager/relation_ir_query_plan.rs` | Relation IR planning |
-| `crates/jazz-tools/src/query_manager/policy_graph.rs` | Policy evaluation support |
-| `crates/jazz-tools/src/row_format.rs` | Shared row decoding/reprojection |
+| File                                                            | Purpose                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `crates/jazz-tools/src/query_manager/manager.rs`                | QueryManager orchestration and subscription lifecycle                          |
+| `crates/jazz-tools/src/query_manager/graph.rs`                  | Query graph compilation and settle passes                                      |
+| `crates/jazz-tools/src/query_manager/graph_nodes/`              | Node implementations such as index scan, materialize, filter, sort, and output |
+| `crates/jazz-tools/src/query_manager/query.rs`                  | Query builder/data structures                                                  |
+| `crates/jazz-tools/src/query_manager/relation_ir_query_plan.rs` | Relation IR planning                                                           |
+| `crates/jazz-tools/src/query_manager/policy_graph.rs`           | Policy evaluation support                                                      |
+| `crates/jazz-tools/src/row_format.rs`                           | Shared row decoding/reprojection                                               |

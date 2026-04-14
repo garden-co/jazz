@@ -57,8 +57,8 @@ pub struct SyncManager {
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in row-version state updates.
-    pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
+    /// Tracks which clients are interested in row batch-member state updates.
+    pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -69,8 +69,8 @@ pub struct SyncManager {
     /// Pending replayable batch settlements for RuntimeCore to process.
     pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
-    /// Row-version state acks received during inbox processing.
-    pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
+    /// Row batch-member state acks received during inbox processing.
+    pub(super) received_row_batch_acks: Vec<(RowBatchKey, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -102,12 +102,12 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("row_version_interest", &self.row_version_interest)
+            .field("row_batch_interest", &self.row_batch_interest)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("pending_batch_settlements", &self.pending_batch_settlements)
-            .field("received_row_version_acks", &self.received_row_version_acks)
+            .field("received_row_batch_acks", &self.received_row_batch_acks)
             .finish()
     }
 }
@@ -160,12 +160,12 @@ impl SyncManager {
             pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            row_version_interest: HashMap::new(),
+            row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
             pending_batch_settlements: Vec::new(),
-            received_row_version_acks: Vec::new(),
+            received_row_batch_acks: Vec::new(),
         }
     }
 
@@ -298,7 +298,7 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.row_version_interest.retain(|_, clients| {
+        self.row_batch_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });
@@ -503,26 +503,26 @@ impl SyncManager {
             return;
         }
 
-        let mut removed_row_versions = Vec::new();
+        let mut removed_row_batches = Vec::new();
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
 
         for &(object_id, branch_name) in removed_scope {
-            if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
-                removed_row_versions.extend(
-                    version_ids
+            if let Some(batch_ids) = client.sent_batch_ids.remove(&(object_id, branch_name)) {
+                removed_row_batches.extend(
+                    batch_ids
                         .into_iter()
-                        .map(|version_id| RowVersionKey::new(object_id, branch_name, version_id)),
+                        .map(|batch_id| RowBatchKey::new(object_id, branch_name, batch_id)),
                 );
             }
         }
 
-        for key in removed_row_versions {
-            if let Some(clients) = self.row_version_interest.get_mut(&key) {
+        for key in removed_row_batches {
+            if let Some(clients) = self.row_batch_interest.get_mut(&key) {
                 clients.remove(&client_id);
                 if clients.is_empty() {
-                    self.row_version_interest.remove(&key);
+                    self.row_batch_interest.remove(&key);
                 }
             }
         }
@@ -613,10 +613,10 @@ impl SyncManager {
         std::mem::take(&mut self.pending_batch_settlements)
     }
 
-    /// Take received row-version persistence state since last call.
+    /// Take received row batch-member persistence state since last call.
     /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_version_acks(&mut self) -> Vec<(RowVersionKey, DurabilityTier)> {
-        std::mem::take(&mut self.received_row_version_acks)
+    pub fn take_received_row_batch_acks(&mut self) -> Vec<(RowBatchKey, DurabilityTier)> {
+        std::mem::take(&mut self.received_row_batch_acks)
     }
 
     /// Take pending row visibility changes for QueryManager to materialize

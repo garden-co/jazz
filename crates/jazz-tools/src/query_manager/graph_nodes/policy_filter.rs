@@ -443,12 +443,12 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
         TupleElement::Row {
             id,
             content,
-            version_id,
+            batch_id,
             row_provenance,
         } => Some(Row::new(
             *id,
             content.clone(),
-            *version_id,
+            *batch_id,
             row_provenance.clone(),
         )),
         TupleElement::Id(_) => None, // Not materialized
@@ -458,7 +458,6 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::relation_ir::RelExpr;
@@ -487,7 +486,7 @@ mod tests {
         Row::new(
             ObjectId::new(),
             data,
-            CommitId([0; 32]),
+            crate::row_histories::BatchId([0; 16]),
             crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         )
     }
@@ -699,7 +698,7 @@ mod tests {
         let row = Row::new(
             ObjectId::new(),
             data,
-            CommitId([0; 32]),
+            crate::row_histories::BatchId([0; 16]),
             crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         );
         let storage = crate::storage::MemoryStorage::new();
