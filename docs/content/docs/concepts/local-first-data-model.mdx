@@ -1,79 +1,118 @@
 ---
 title: Local-First Data Model
-description: An overview of how Jazz manages versions, history, conflicts, and avoids loading states.
-reviewedAt: "4059cdef"
+description: An overview of how Jazz manages local state, row histories, conflicts, and loading behavior.
+reviewedAt: "6027cae2"
 ---
 
 Jazz embeds a database on each device and syncs to the server in the background.
 
 ## How Jazz stores data
 
-As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps need to wait for a network round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the database on your users' devices. [Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/writing-data) (`insert`, `update`, `delete`) can also be applied locally immediately, with no network round-trip. The sync layer picks up changes in the background and propagates them over the network whenever a client is online.
+As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps wait on a network
+round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the
+database on your users' devices.
 
-This has a practical consequence: there is no difference between "optimistic" and "real" state. The local write _is_ the state. There is no single source of truth. Instead, every client that has received the same commits converges on the same result.
+[Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/writing-data)
+(`insert`, `update`, `delete`) are also applied locally immediately, with no network round-trip.
+The sync layer picks those changes up in the background and propagates them whenever a client is
+online.
+
+This has a practical consequence: there is no difference between "optimistic" and "real" state.
+The local write _is_ the state. There is no single always-online source of truth. Instead, every
+client that has received the same row-history updates converges on the same current result.
 
 ### The only loading moment
 
-Devices can't show data they don't have. On the very first load from the server, there'll be a loading moment while data starts to populate the local embedded database. From this point on, data for that query will always be available. You never need to wait for the network again: your app reads from what's already on disk, even offline.
+Devices cannot show data they do not have. On the very first load from the server, there will be a
+loading moment while data starts to populate the local embedded database. From that point on, data
+for that query is available locally and can be read again even while offline.
 
 <Callout type="info" title="Durability Tiers">
-  If you need to ensure data is fully up-to-date before displaying it, you can opt-in to waiting for
+  If you need to ensure data is fully up-to-date before displaying it, you can opt in to waiting for
   a higher [durability tier](/docs/reference/durability-tiers).
 </Callout>
 
-## Versioned objects
+## Tables, row versions, and visible state
 
-Every update or change made to a row in Jazz is recorded as a **commit**, and each commit results in a new, immutable version of the row it affects. Under the hood, each row's history is an append-only log of commits. The full history of each row is available, allowing you to view a row as it looked at any point in history, including intermediate, conflicting states.
+Jazz stays table-first all the way down.
 
-Each version links back to its parent, forming a chain.
+Each application table still behaves like a table, but the engine also tracks a little extra
+information for each logical row:
 
-## The DAG
+- a stable row identity
+- a current visible state used for ordinary reads
+- a retained history of row versions over time
 
-When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain, and it can diverge into multiple states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
+The easiest picture is:
 
-The result is a [**directed acyclic graph**](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAG), similar to Git:
-
-```mermaid
-gitGraph
-    commit id: "v1"
-    commit id: "v2"
-    branch "Peer B"
-    commit id: "b3"
-    commit id: "b4"
-    checkout main
-    commit id: "a3"
-    commit id: "a4"
-    merge "Peer B" id: "m5"
+```text
+todos
+  visible: current answer for each row in a branch
+  history: row versions over time for that same row
 ```
 
-Two peers that have never synced will each have their own view of history. Once they sync, their updates are merged, and from that point on, both peers share the same history.
+That is why the app-facing API can stay simple while the runtime still has enough information for
+replay, reconnect, and conflict resolution.
 
-For explicit isolation between independent lines of history, see [Branches](/docs/concepts/branches).
+## Row history
+
+Every write to a row creates a new **row version**.
+
+That version records:
+
+- the new row values
+- which earlier version(s) it came from
+- engine-managed metadata such as branch, delete state, and durability state
+
+Physically, that row version is still one flat stored row: user columns plus reserved `_jazz_*`
+columns in the same binary row format. So the runtime keeps a row-local history graph rather than
+just overwriting the row in place.
+
+### Concurrent edits
+
+When only one device is editing a row, the history is effectively linear. When multiple peers edit
+the same row concurrently, several row versions can exist at once and later be reconciled into a
+single current visible result.
+
+You can think of it like this:
+
+```mermaid
+flowchart LR
+    v1["v1"] --> v2["v2"]
+    v2 --> a3["a3"]
+    v2 --> b3["b3"]
+    a3 --> m4["m4"]
+    b3 --> m4
+```
+
+The important point is not the exact shape of the graph. The important point is that Jazz preserves
+enough row history to converge deterministically after peers reconnect.
 
 ## Conflict resolution
 
-When updates from multiple peers are merged, two or more peers may have changed the same column of the same row. Jazz resolves this with the [last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model) strategy. Each commit has a timestamp, and the most recent write is considered to have won.
+When concurrent writes touch the same field of the same row, Jazz resolves the visible result with
+[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). The later row version
+wins for the conflicting field.
 
-Jazz only uses this strategy when multiple peers have written to the same column of the same row. For example, if Alice changes the `title` of a to-do while Bob changes its `completed` status, even though both have updated the same row, there is no conflict, and both edits can be preserved in full.
-
-Conflict resolution is deterministic: every peer that sees the same set of versions will arrive at the same merged result, and even commits that lose out in a merge are still stored in the row's history. No data is ever lost.
+If two peers update different fields, both changes can still be preserved in the resulting visible
+row state. Even row versions that lose out in the current visible result remain in row history, so
+no local-first reconciliation information is discarded.
 
 <Callout type="warn" title="Beware of unexpected results">
-  In the example above, Jazz allows Alice to change a `title` and Bob to change the `completed`
-  status. This can lead to unexpected results, where Bob marks a to-do as `completed`, but in the
-  meantime, Alice has completely changed what needed to be done. Jazz resolves structural conflicts,
-  but you must also be cautious when writing your application to avoid conflicts in the **meaning**
-  of the data.
+  Jazz can resolve structural conflicts for you, but it cannot fully understand the meaning of your
+  data. If Alice renames a to-do while Bob marks it complete, both changes may be preserved even if
+  the new title changes what the task means. You still need application-level judgment about what
+  kinds of concurrent editing should be allowed.
 </Callout>
 
 ## How this differs from traditional apps
 
-|                        | Traditional                                | Jazz                                                         |
-| ---------------------- | ------------------------------------------ | ------------------------------------------------------------ |
-| **Read path**          | HTTP request, wait for response            | Read from local storage                                      |
-| **Write path**         | HTTP request, wait for confirmation        | Immediate local persistence, background sync                 |
-| **Optimistic updates** | Manually implemented, must handle rollback | Not needed, the local write is authoritative                 |
-| **Offline support**    | Bespoke queueing and retry logic           | Reads and writes continue to work against the local database |
-| **Loading states**     | Every network call                         | Only on first connection                                     |
-| **Source of truth**    | Single authoritative database              | Every client with the same commits sees the same state       |
-| **Conflict handling**  | Server rejects or last-request-wins        | Automatic per-column LWW merge                               |
+|                        | Traditional                                | Jazz                                                               |
+| ---------------------- | ------------------------------------------ | ------------------------------------------------------------------ |
+| **Read path**          | HTTP request, wait for response            | Read from local storage                                            |
+| **Write path**         | HTTP request, wait for confirmation        | Immediate local persistence, background sync                       |
+| **Optimistic updates** | Manually implemented, must handle rollback | Not needed, the local write is authoritative                       |
+| **Offline support**    | Bespoke queueing and retry logic           | Reads and writes continue to work against the local database       |
+| **Loading states**     | Every network call                         | Only on first connection                                           |
+| **Source of truth**    | Single authoritative database              | Every client with the same row-history updates sees the same state |
+| **Conflict handling**  | Server rejects or last-request-wins        | Automatic visible-state reconciliation with retained history       |

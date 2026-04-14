@@ -1,12 +1,17 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+
+Locally, Jazz distinguishes between two runtime states:
+
+- no compiled policy bundle loaded: local session-scoped reads and writes stay permissive
+- compiled policy bundle loaded: every read, insert, update, and delete needs an explicit grant, or it is denied
 
 ## Authoring workflow
 
@@ -31,7 +36,7 @@ Run `npx jazz-tools@alpha validate` before publishing to identify any issues. Yo
 
 </Callout>
 
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
+Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
 
 ## Basic policies
 
@@ -111,6 +116,19 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 </Accordion>
 </Accordions>
 
+### Update policies: old row vs new row
+
+Update policies can check both the row **before** the update (`.whereOld(...)`) and the row
+**after** the update (`.whereNew(...)`). This is useful when you need to verify that the user had
+permission to modify the original row and that the result is also valid.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-whereold-wherenew-ts
+</include>
+
+If you only use `.whereOld(...)`, the same condition is applied to both the old and new row. The
+same applies if you only use `.whereNew(...)`. Use both when the old-row and new-row checks differ.
+
 ## Policy enforcement and request context
 
 Every policy is evaluated against a session. On the frontend, this is the authenticated user's session. In a backend handler, create a scoped session per request so queries run with the right identity.
@@ -119,12 +137,12 @@ Every policy is evaluated against a session. On the frontend, this is the authen
   ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
 </include>
 
-See [Setup](/docs/reference/server-setup) for context setup details.
+See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for backend context setup details.
 
 <Callout type="info">
-  Policies are enforced on the sync server, not on the client. A client can write any data locally,
-  but the server will reject writes that violate policies when they sync. Reads are filtered
-  server-side before data is sent to the client.
+  Structural-only client runtimes stay permissive locally so offline reads and writes keep working.
+  Once a compiled bundle is loaded, Jazz enforces explicit grants locally too. Sync servers still
+  reject violating writes, and server-scoped reads are filtered before data is sent to the client.
 </Callout>
 
 ## Magic columns
@@ -168,8 +186,18 @@ Jazz always tracks this metadata; select the columns explicitly to include them 
 You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
+For the most common case, Jazz also exposes `policy.<table>.managedByCreator()` and `isCreator` as
+shorthand for the same `$createdBy === session.user_id` condition. You can still write the raw
+`$createdBy` comparison yourself whenever you want the explicit form.
+
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
+</include>
+
+When you want to reuse the same check inside a larger rule, compose `isCreator` directly:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-combinator-ts
 </include>
 
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than

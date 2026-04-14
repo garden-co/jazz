@@ -1,7 +1,7 @@
 ---
 title: Durability Tiers
 description: "API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
@@ -26,11 +26,11 @@ See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detail
 
 Read durability controls when the **first result** of a query or subscription is delivered.
 
-| Option         | Values                               | Default        | What it does                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"worker"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                               |
-| `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, local changes appear in the subscription while still waiting for the tier to confirm. With `"deferred"`, the subscription is held until the tier confirms&hairsp;—&hairsp;you only see the confirmed result. |
-| `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                          |
+| Option         | Values                               | Default        | What it does                                                                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tier`         | `"worker"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
+| `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
+| `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
 These options apply to:
 
@@ -53,7 +53,7 @@ These options apply to:
     </include>
   </Tab>
   <Tab value="Vue">
-    <include cwd lang="ts">
+    <include cwd lang="ts" meta='title="App.vue"'>
       ../examples/docs/todo-client-localfirst-vue/src/docs-snippets.ts#reading-tier-vue
     </include>
   </Tab>
@@ -63,7 +63,7 @@ These options apply to:
     </include>
   </Tab>
   <Tab value="Expo">
-    <include cwd lang="ts">
+    <include cwd lang="ts" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#reading-tier-expo
     </include>
   </Tab>
@@ -80,3 +80,12 @@ These options apply to:
 </Tabs>
 
 For most queries and subscriptions, omitting a tier is the right choice: Jazz delivers results from local storage immediately and streams in remote updates as they arrive. Reserve explicit tiers for cases where eventual consistency is not acceptable.
+
+<Callout type="warn">
+  The read tier gates the **first** delivery of a subscription only. After the initial snapshot
+  arrives at the requested tier, subsequent updates are delivered as they reach the local node,
+  regardless of which tier they've propagated to. For example, a subscription with `tier: "global"`
+  guarantees a globally-consistent initial snapshot, but later incremental updates from other
+  clients may arrive through edge tiers before being globally available **even if the durability of
+  the write is set to 'global'**.
+</Callout>

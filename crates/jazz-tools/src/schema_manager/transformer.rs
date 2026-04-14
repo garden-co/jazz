@@ -3,9 +3,12 @@
 //! This module provides utilities for transforming rows from old schema versions
 //! to the current schema using lenses.
 
+use std::collections::HashMap;
+
 use crate::commit::CommitId;
+use crate::metadata::MetadataKey;
 use crate::query_manager::encoding::{decode_row, encode_row};
-use crate::query_manager::types::SchemaHash;
+use crate::query_manager::types::{SchemaHash, TableName};
 
 use super::context::SchemaContext;
 use super::lens::Direction;
@@ -15,8 +18,8 @@ use super::lens::Direction;
 pub struct TransformResult {
     /// Transformed row data.
     pub data: Vec<u8>,
-    /// Original commit ID (preserved).
-    pub commit_id: CommitId,
+    /// Original row version ID (preserved).
+    pub version_id: CommitId,
     /// Whether the row was transformed (false if already in current schema).
     pub was_transformed: bool,
 }
@@ -79,7 +82,7 @@ impl<'a> LensTransformer<'a> {
     ///
     /// # Arguments
     /// * `data` - Raw row data encoded with source schema
-    /// * `commit_id` - Commit ID of the row
+    /// * `version_id` - Version ID of the row
     /// * `source_hash` - Schema hash of the source (where row was stored)
     ///
     /// # Returns
@@ -87,14 +90,14 @@ impl<'a> LensTransformer<'a> {
     pub fn transform(
         &self,
         data: &[u8],
-        commit_id: CommitId,
+        version_id: CommitId,
         source_hash: SchemaHash,
     ) -> Result<TransformResult, TransformError> {
         // If already in current schema, no transform needed
         if source_hash == self.context.current_hash {
             return Ok(TransformResult {
                 data: data.to_vec(),
-                commit_id,
+                version_id,
                 was_transformed: false,
             });
         }
@@ -108,9 +111,15 @@ impl<'a> LensTransformer<'a> {
                     target: self.context.current_hash,
                 })?;
 
+        let source_table_name =
+            translate_table_name_to_schema(self.context, &self.table, &source_hash)
+                .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
+
         let source_table = source_schema
-            .get(&crate::query_manager::types::TableName::new(&self.table))
-            .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
+            .get(&crate::query_manager::types::TableName::new(
+                &source_table_name,
+            ))
+            .ok_or_else(|| TransformError::TableNotFound(source_table_name.clone()))?;
 
         let target_table = self
             .context
@@ -136,6 +145,7 @@ impl<'a> LensTransformer<'a> {
 
         // Apply each lens in the path with the appropriate direction
         let mut current_desc = source_desc.clone();
+        let mut current_table_name = source_table_name;
         for (lens, direction) in lens_path {
             // Get the next schema based on direction
             // Forward: source -> target, Backward: target -> source
@@ -150,14 +160,20 @@ impl<'a> LensTransformer<'a> {
                     target: lens.target_hash,
                 }
             })?;
+            let next_table_name = lens
+                .translate_table(&current_table_name, direction)
+                .ok_or_else(|| TransformError::TableNotFound(current_table_name.clone()))?;
             let next_table = next_schema
-                .get(&crate::query_manager::types::TableName::new(&self.table))
-                .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
+                .get(&crate::query_manager::types::TableName::new(
+                    &next_table_name,
+                ))
+                .ok_or_else(|| TransformError::TableNotFound(next_table_name.clone()))?;
             let next_desc = &next_table.columns;
 
             // Apply lens with the appropriate direction
             values = lens.apply(&values, &current_desc, next_desc, direction);
             current_desc = next_desc.clone();
+            current_table_name = next_table_name;
         }
 
         // Encode with target schema
@@ -166,7 +182,7 @@ impl<'a> LensTransformer<'a> {
 
         Ok(TransformResult {
             data: transformed_data,
-            commit_id,
+            version_id,
             was_transformed: true,
         })
     }
@@ -176,33 +192,122 @@ impl<'a> LensTransformer<'a> {
 ///
 /// Used for index lookups: translates column names from current schema
 /// to the equivalent column in an old schema (backward direction).
+pub fn translate_table_name_to_schema(
+    context: &SchemaContext,
+    table: &str,
+    target_hash: &SchemaHash,
+) -> Option<String> {
+    if target_hash == &context.current_hash {
+        return Some(table.to_string());
+    }
+
+    let lens_path = context.lens_path(target_hash).ok()?;
+    let mut current_table = table.to_string();
+    for (lens, direction) in lens_path.iter().rev() {
+        let translate_direction = direction.reverse();
+        current_table = lens.translate_table(&current_table, translate_direction)?;
+
+        let next_hash = match translate_direction {
+            Direction::Forward => lens.target_hash,
+            Direction::Backward => lens.source_hash,
+        };
+        let next_schema = context.get_schema(&next_hash)?;
+        if !next_schema.contains_key(&TableName::new(&current_table)) {
+            return None;
+        }
+    }
+
+    Some(current_table)
+}
+
+/// Translate a table name from a source schema forward into the current schema.
+pub fn translate_table_name_from_schema(
+    context: &SchemaContext,
+    table: &str,
+    source_hash: &SchemaHash,
+) -> Option<String> {
+    if source_hash == &context.current_hash {
+        return Some(table.to_string());
+    }
+
+    let lens_path = context.lens_path(source_hash).ok()?;
+    let mut current_table = table.to_string();
+    for (lens, direction) in lens_path {
+        current_table = lens.translate_table(&current_table, direction)?;
+
+        let next_hash = match direction {
+            Direction::Forward => lens.target_hash,
+            Direction::Backward => lens.source_hash,
+        };
+        let next_schema = context.get_schema(&next_hash)?;
+        if !next_schema.contains_key(&TableName::new(&current_table)) {
+            return None;
+        }
+    }
+
+    Some(current_table)
+}
+
+pub fn origin_schema_hash_from_metadata(metadata: &HashMap<String, String>) -> Option<SchemaHash> {
+    let raw_hash = metadata.get(MetadataKey::OriginSchemaHash.as_str())?;
+    SchemaHash::from_hex(raw_hash)
+}
+
+pub fn resolve_current_table_name(
+    context: &SchemaContext,
+    original_table: &str,
+    origin_schema_hash: Option<&SchemaHash>,
+) -> Option<String> {
+    if let Some(origin_schema_hash) = origin_schema_hash {
+        let translated =
+            translate_table_name_from_schema(context, original_table, origin_schema_hash)?;
+        if context
+            .current_schema
+            .contains_key(&TableName::new(&translated))
+        {
+            return Some(translated);
+        }
+        None
+    } else {
+        // Fallback for legacy objects that don't have an origin schema hash.
+        // Assumes the object's original table name is still the current table name.
+        Some(original_table.to_string())
+    }
+}
+
+/// Translate a table/column pair through the lens chain for a target schema.
+pub fn translate_table_and_column_for_schema(
+    context: &SchemaContext,
+    table: &str,
+    column: &str,
+    target_hash: &SchemaHash,
+) -> Option<(String, String)> {
+    if target_hash == &context.current_hash {
+        return Some((table.to_string(), column.to_string()));
+    }
+
+    let lens_path = context.lens_path(target_hash).ok()?;
+    let mut current_table = table.to_string();
+    let mut current_column = column.to_string();
+    for (lens, direction) in lens_path.iter().rev() {
+        let translate_direction = direction.reverse();
+        let (next_table, next_column) =
+            lens.translate_table_and_column(&current_table, &current_column, translate_direction)?;
+        current_table = next_table;
+        current_column = next_column;
+    }
+
+    Some((current_table, current_column))
+}
+
 pub fn translate_column_for_index(
     context: &SchemaContext,
     table: &str,
     column: &str,
     target_hash: &SchemaHash,
 ) -> Option<String> {
-    if target_hash == &context.current_hash {
-        return Some(column.to_string());
-    }
-
-    // Get lens path from target to current
-    let lens_path = context.lens_path(target_hash).ok()?;
-
-    // Apply translations in reverse using the opposite direction
-    // If path was found going forward, we translate backward
-    // If path was found going backward, we translate forward
-    let mut current_name = column.to_string();
-    for (lens, direction) in lens_path.iter().rev() {
-        // Opposite direction for column translation when reversing the path
-        let translate_direction = match direction {
-            Direction::Forward => Direction::Backward,
-            Direction::Backward => Direction::Forward,
-        };
-        current_name = lens.translate_column(table, &current_name, translate_direction)?;
-    }
-
-    Some(current_name)
+    translate_table_and_column_for_schema(context, table, column, target_hash)
+        .map(|(_, translated_column)| translated_column)
 }
 
 #[cfg(test)]
@@ -301,6 +406,62 @@ mod tests {
         assert_eq!(v2_values[0], Value::Uuid(id));
         assert_eq!(v2_values[1], Value::Text("Alice".to_string()));
         assert_eq!(v2_values[2], Value::Null); // Added column
+    }
+
+    #[test]
+    fn transform_renamed_table() {
+        use crate::schema_manager::lens::{Lens, LensOp, LensTransform};
+
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut ctx = SchemaContext::new(v2.clone(), "dev", "main");
+        ctx.add_live_schema(v1.clone(), lens);
+
+        let transformer = LensTransformer::new(&ctx, "people");
+        let v1_table = v1
+            .get(&crate::query_manager::types::TableName::new("users"))
+            .unwrap();
+        let id = ObjectId::new();
+        let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
+        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
+
+        let result = transformer
+            .transform(&v1_data, make_commit_id(1), v1_hash)
+            .unwrap();
+
+        assert!(result.was_transformed);
+
+        let v2_table = v2
+            .get(&crate::query_manager::types::TableName::new("people"))
+            .unwrap();
+        let v2_values = decode_row(&v2_table.columns, &result.data).unwrap();
+        assert_eq!(v2_values, v1_values);
     }
 
     #[test]

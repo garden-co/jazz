@@ -4,8 +4,33 @@
 
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
-/** Local auth mode for client-generated identities. */
-export type LocalAuthMode = "anonymous" | "demo";
+/**
+ * Runtime source overrides for Jazz WASM and worker startup.
+ *
+ * These are primarily used by browser and edge-style runtimes.
+ */
+export interface RuntimeSourcesConfig {
+  /**
+   * Base URL for Jazz runtime files.
+   *
+   * When set, Jazz derives:
+   * - `jazz_wasm_bg.wasm`
+   * - `worker/jazz-worker.js`
+   */
+  baseUrl?: string;
+
+  /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
+  wasmUrl?: string;
+
+  /** Explicit URL for the worker entry script. Overrides `baseUrl`. */
+  workerUrl?: string;
+
+  /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
+  wasmSource?: BufferSource;
+
+  /** Explicit compiled WASM module. Highest-precedence bootstrap input. */
+  wasmModule?: WebAssembly.Module;
+}
 
 /**
  * Session context for policy evaluation.
@@ -35,6 +60,9 @@ export interface AppContext {
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
 
+  /** Optional runtime source overrides for WASM and worker loading. */
+  runtimeSources?: RuntimeSourcesConfig;
+
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
 
@@ -51,23 +79,6 @@ export interface AppContext {
    * Sent as `Authorization: Bearer <token>`.
    */
   jwtToken?: string;
-
-  /**
-   * Local auth mode for client-generated identities.
-   *
-   * Browser clients default to `"anonymous"` when no other auth is configured.
-   * Sent as `X-Jazz-Local-Mode`.
-   */
-  localAuthMode?: LocalAuthMode;
-
-  /**
-   * Client-generated auth token for anonymous/demo identity.
-   *
-   * For browser clients, if local auth mode is active and this is omitted,
-   * Jazz auto-generates and persists a per-app device token in localStorage.
-   * Sent as `X-Jazz-Local-Token`.
-   */
-  localAuthToken?: string;
 
   /**
    * Backend secret for session impersonation.

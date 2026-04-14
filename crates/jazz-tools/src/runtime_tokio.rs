@@ -28,7 +28,9 @@ use crate::runtime_core::{
 use crate::schema_manager::manager::PermissionsHeadSummary;
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
+};
 
 // ============================================================================
 // TokioScheduler
@@ -36,6 +38,8 @@ use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, S
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type PersistedWriteAck = futures::channel::oneshot::Receiver<()>;
+type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteAck);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -261,6 +265,21 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(result)
     }
 
+    /// Insert a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
+    pub fn insert_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedInsertResult, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let result = core.insert_persisted(table, values, owned.as_ref(), tier)?;
+        Ok(result)
+    }
+
     /// Update a row (partial update by column name).
     pub fn update(
         &self,
@@ -274,6 +293,21 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Update a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
+    pub fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteAck, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let receiver = core.update_persisted(object_id, values, owned.as_ref(), tier)?;
+        Ok(receiver)
+    }
+
     /// Delete a row.
     pub fn delete(
         &self,
@@ -284,6 +318,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let owned = session.cloned().map(WriteContext::from_session);
         core.delete(object_id, owned.as_ref())?;
         Ok(())
+    }
+
+    /// Delete a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
+    pub fn delete_persisted(
+        &self,
+        object_id: ObjectId,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteAck, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let receiver = core.delete_persisted(object_id, owned.as_ref(), tier)?;
+        Ok(receiver)
     }
 
     /// Flush pending operations to storage.
@@ -519,6 +567,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
+    }
+
+    /// Return the latest publish timestamp for a schema catalogue object.
+    pub fn schema_published_at(
+        &self,
+        schema_hash: &SchemaHash,
+    ) -> Result<Option<u64>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().schema_published_at(schema_hash))
     }
 
     /// Seed an additional known schema into the in-memory schema manager.

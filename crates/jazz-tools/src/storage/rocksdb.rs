@@ -5,8 +5,6 @@
 //! pattern as FjallStorage, delegating all logic to `storage_core` callbacks.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 use std::path::Path;
 
 use rocksdb::{
@@ -14,21 +12,21 @@ use rocksdb::{
     TransactionDBOptions,
 };
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
-use crate::sync_manager::DurabilityTier;
-
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
+        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
+        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        upsert_visible_region_row_bytes_core,
     },
 };
+use crate::commit::CommitId;
+use crate::object::ObjectId;
+use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+use crate::sync_manager::DurabilityTier;
 
 struct RocksDBInner {
     db: TransactionDB,
@@ -141,7 +139,30 @@ impl RocksDBStorage {
         Ok(out)
     }
 
-    fn scan_key_range_from_db(
+    fn scan_range_from_db(
+        db: &TransactionDB,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let start_bytes = start.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_upper_bound(end.as_bytes().to_vec());
+        let mut out = Vec::new();
+        let iter = db.iterator_opt(
+            IteratorMode::From(start_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
+        for item in iter {
+            let (key, value) =
+                item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
+            let key_str = String::from_utf8(key.to_vec())
+                .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
+            out.push((key_str, value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    fn scan_range_keys_from_db(
         db: &TransactionDB,
         start: &str,
         end: &str,
@@ -164,21 +185,6 @@ impl RocksDBStorage {
     }
 
     // ---- transaction helpers ----
-
-    fn get_from_txn<'a>(
-        txn: &Transaction<'a, TransactionDB>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        txn.get(key.as_bytes())
-            .map_err(|e| StorageError::IoError(format!("rocksdb txn get: {e}")))
-    }
-
-    fn get_from_txn_cell<'a>(
-        txn: &RefCell<Transaction<'a, TransactionDB>>,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        Self::get_from_txn(&txn.borrow(), key)
-    }
 
     fn put_on_txn<'a>(
         txn: &Transaction<'a, TransactionDB>,
@@ -216,244 +222,298 @@ impl RocksDBStorage {
         txn.commit()
             .map_err(|e| StorageError::IoError(format!("rocksdb txn commit: {e}")))
     }
+
+    fn apply_index_mutations_on_txn<'a>(
+        txn: &RefCell<Transaction<'a, TransactionDB>>,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::Insert {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => {
+                    let raw_table = key_codec::index_raw_table(table, column, branch);
+                    let key = key_codec::index_entry_key(table, column, branch, value, *row_id)?;
+                    raw_table_put_core(&raw_table, &key, &[0x01], |storage_key, bytes| {
+                        Self::put_on_txn_cell(txn, storage_key, bytes)
+                    })?;
+                }
+                IndexMutation::Remove {
+                    table,
+                    column,
+                    branch,
+                    value,
+                    row_id,
+                } => {
+                    let key =
+                        match key_codec::index_entry_key(table, column, branch, value, *row_id) {
+                            Ok(key) => key,
+                            Err(StorageError::IndexKeyTooLarge { .. }) => continue,
+                            Err(error) => return Err(error),
+                        };
+                    let raw_table = key_codec::index_raw_table(table, column, branch);
+                    raw_table_delete_core(&raw_table, &key, |storage_key| {
+                        Self::delete_on_txn_cell(txn, storage_key)
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Storage for RocksDBStorage {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            create_object_core(id, metadata, |key, value| {
-                Self::put_on_txn(&txn, key, value)
+            let txn = RefCell::new(inner.db.transaction());
+            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                Self::put_on_txn_cell(&txn, storage_key, bytes)
             })?;
-            Self::commit_txn(txn)
+            Self::commit_txn(txn.into_inner())
         })
     }
 
-    fn load_object_metadata(
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            raw_table_delete_core(table, key, |storage_key| {
+                Self::delete_on_txn_cell(&txn, storage_key)
+            })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_get_core(table, key, |storage_key| {
+                Self::get_from_db(&inner.db, storage_key)
+            })
+        })
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            Self::apply_index_mutations_on_txn(&txn, mutations)?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
         self.with_inner(|inner| {
-            load_object_metadata_core(id, |key| Self::get_from_db(&inner.db, key))
+            raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_from_db(&inner.db, storage_prefix)
+            })
         })
     }
 
-    fn load_branch(
+    fn raw_table_scan_prefix_keys(
         &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableKeys, StorageError> {
         self.with_inner(|inner| {
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::get_from_db(&inner.db, key),
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-            )
+            raw_table_scan_prefix_keys_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_keys_from_db(&inner.db, storage_prefix)
+            })
         })
     }
 
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            append_commit_core(
-                object_id,
-                branch,
-                commit,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            delete_commit_core(
-                object_id,
-                branch,
-                commit_id,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-                |key| Self::delete_on_txn_cell(&txn, key),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            set_branch_tails_core(
-                object_id,
-                branch,
-                tails,
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-                |key| Self::delete_on_txn_cell(&txn, key),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            store_ack_tier_core(
-                commit_id,
-                tier,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            append_catalogue_manifest_op_core(
-                app_id,
-                op,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            append_catalogue_manifest_ops_core(
-                app_id,
-                ops,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn load_catalogue_manifest(
+    fn raw_table_scan_range(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
         self.with_inner(|inner| {
-            load_catalogue_manifest_core(app_id, |prefix| {
+            raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_from_db(&inner.db, start_key, end_key)
+            })
+        })
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableKeys, StorageError> {
+        self.with_inner(|inner| {
+            raw_table_scan_range_keys_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_keys_from_db(&inner.db, start_key, end_key)
+            })
+        })
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            append_history_region_row_bytes_core(table, rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            upsert_visible_region_row_bytes_core(table, rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowVersion],
+        visible_entries: &[VisibleRowEntry],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            let encoded_history_rows =
+                super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
+            let borrowed_history_rows = encoded_history_rows
+                .iter()
+                .map(|row| HistoryRowBytes {
+                    row_id: row.row_id,
+                    version_id: row.version_id,
+                    bytes: &row.bytes,
+                })
+                .collect::<Vec<_>>();
+            append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            let encoded_visible_rows =
+                super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
+            let borrowed_visible_rows = encoded_visible_rows
+                .iter()
+                .map(|row| VisibleRowBytes {
+                    branch: row.branch.as_str(),
+                    row_id: row.row_id,
+                    current_version_id: row.current_version_id,
+                    bytes: &row.bytes,
+                })
+                .collect::<Vec<_>>();
+            upsert_visible_region_row_bytes_core(table, &borrowed_visible_rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            Self::apply_index_mutations_on_txn(&txn, index_mutations)?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        super::patch_row_region_rows_by_batch_with_storage(
+            self,
+            table,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
+    }
+
+    fn load_visible_region_row_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_region_row_bytes_core(table, branch, row_id, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn scan_visible_region_bytes(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            scan_visible_region_bytes_core(table, branch, |prefix| {
                 Self::scan_prefix_from_db(&inner.db, prefix)
             })
         })
     }
 
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                Self::put_on_txn(&txn, key, bytes)
-            })?;
-            Self::commit_txn(txn)
-        })
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_remove_core(table, column, branch, value, row_id, |key| {
-                Self::delete_on_txn(&txn, key)
-            })?;
-            Self::commit_txn(txn)
-        })
-    }
-
-    fn index_lookup(
+    fn scan_visible_region_row_versions(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        self.with_inner(|inner| {
-            Ok(index_lookup_core(table, column, branch, value, |prefix| {
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let branches = self.with_inner(|inner| {
+            scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
                 Self::scan_prefix_keys_from_db(&inner.db, prefix)
-            }))
-        })
-        .unwrap_or_default()
+            })
+        })?;
+
+        let mut rows = Vec::new();
+        for branch in branches {
+            if let Some(row) = self.load_visible_region_row(table, &branch, row_id)? {
+                rows.push(row);
+            }
+        }
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
     }
 
-    fn index_range(
+    fn load_history_row_version_bytes(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
+        row_id: ObjectId,
+        version_id: CommitId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_range_core(
-                table,
-                column,
-                branch,
-                start,
-                end,
-                |start_key, end_key| Self::scan_key_range_from_db(&inner.db, start_key, end_key),
-            ))
+            load_history_row_version_bytes_core(table, row_id, version_id, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
         })
-        .unwrap_or_default()
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+    fn scan_history_region_bytes(
+        &self,
+        table: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_scan_all_core(table, column, branch, |prefix| {
-                Self::scan_prefix_keys_from_db(&inner.db, prefix)
-            }))
+            scan_history_region_bytes_core(table, scan, |prefix| {
+                Self::scan_prefix_from_db(&inner.db, prefix)
+            })
         })
-        .unwrap_or_default()
     }
 
     fn flush(&self) {

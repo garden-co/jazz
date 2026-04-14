@@ -1,5 +1,5 @@
-import { AUTH_JWT_KID } from "../constants.js";
-import { startAuthServer } from "./auth-server.js";
+import { AUTH_JWT_KID } from "../constants.ts";
+import { startAuthServer } from "./auth-server.ts";
 
 const server = await startAuthServer({
   port: 3001,

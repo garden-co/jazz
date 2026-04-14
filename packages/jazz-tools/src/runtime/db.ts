@@ -13,7 +13,7 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { Session } from "./context.js";
+import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   JazzClient,
   loadWasmModule,
@@ -25,21 +25,29 @@ import {
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
+import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import { createAuthStateStore, type AuthState } from "./auth-state.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
-import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 import { normalizeBuiltQuery } from "./query-builder-shape.js";
+import {
+  appendWorkerRuntimeWasmUrl,
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+  resolveWorkerBootstrapWasmUrl,
+  resolveRuntimeConfigWorkerUrl,
+} from "./runtime-config.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
@@ -60,25 +68,14 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
   serverPathPrefix?: string;
+  /** Optional runtime source overrides for WASM and worker loading. */
+  runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
-  /**
-   * Local auth mode for client-generated identities.
-   *
-   * Browser clients default to `"anonymous"` when no other auth is configured.
-   */
-  localAuthMode?: "anonymous" | "demo";
-  /**
-   * Client-generated auth token for anonymous/demo identity.
-   *
-   * If omitted while local auth is active in browser, Jazz generates and
-   * persists a per-app device token in localStorage.
-   */
-  localAuthToken?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -87,6 +84,8 @@ export interface DbConfig {
   logLevel?: WasmLogLevel;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
+  auth?: { localFirstSecret: string };
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -339,6 +338,7 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
   private wasmModule: WasmModule | null;
+  private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private bridgeReady: Promise<void> | null = null;
@@ -354,6 +354,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private _localFirstSecret: string | null = null;
+  private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -387,6 +389,74 @@ export class Db {
   protected constructor(config: DbConfig, wasmModule: WasmModule | null) {
     this.config = config;
     this.wasmModule = wasmModule;
+    this.authStateStore = createAuthStateStore(config);
+  }
+
+  /** @internal Store the seed used for local-first auth and schedule token refresh. */
+  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
+    this._localFirstSecret = seed;
+    this.scheduleLocalFirstRefresh(ttlSeconds);
+  }
+
+  private scheduleLocalFirstRefresh(ttlSeconds: number): void {
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+    }
+    // Refresh at 80% of TTL
+    const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
+    this.localFirstRefreshTimer = setTimeout(() => {
+      this.refreshLocalFirstToken();
+    }, refreshMs);
+  }
+
+  private refreshLocalFirstToken(): void {
+    if (!this._localFirstSecret || this.isShuttingDown) return;
+
+    try {
+      const wasmModule = this.wasmModule;
+      if (!wasmModule) return;
+
+      const ttlSeconds = 3600;
+      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+      const newToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+        this._localFirstSecret,
+        this.config.appId,
+        BigInt(ttlSeconds),
+        nowSeconds,
+      );
+      this.updateAuthToken(newToken);
+      this.scheduleLocalFirstRefresh(ttlSeconds);
+    } catch (e) {
+      console.error("Failed to refresh local-first token:", e);
+    }
+  }
+
+  protected markUnauthenticated(reason: AuthFailureReason): void {
+    this.authStateStore.markUnauthenticated(reason);
+  }
+
+  protected applyAuthUpdate(token: string | null): boolean {
+    const jwtToken = token ?? undefined;
+    const previousToken = this.config.jwtToken;
+    const previousState = this.authStateStore.getState();
+    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const tokenChanged = previousToken !== jwtToken;
+
+    if (!tokenChanged && nextState === previousState) {
+      return false;
+    }
+
+    this.config.jwtToken = jwtToken;
+
+    for (const client of this.clients.values()) {
+      client.updateAuthToken(jwtToken);
+    }
+
+    this.workerBridge?.updateAuth({
+      jwtToken,
+    });
+
+    return true;
   }
 
   /**
@@ -394,7 +464,7 @@ export class Db {
    * @internal Use createDb() instead.
    */
   static async create(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     return new Db(config, wasmModule);
   }
 
@@ -408,7 +478,7 @@ export class Db {
    * @internal Use createDb() instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(config.runtimeSources);
     const db = new Db(config, wasmModule);
     const persistentDriver = resolveStorageDriver(config.driver);
     if (persistentDriver.type !== "persistent") {
@@ -442,7 +512,7 @@ export class Db {
         db.onLeaderElectionChange(snapshot);
       });
 
-      db.worker = await Db.spawnWorker();
+      db.worker = await Db.spawnWorker(config.runtimeSources);
 
       return db;
     } catch (error) {
@@ -491,8 +561,6 @@ export class Db {
           env: this.config.env,
           userBranch: this.config.userBranch,
           jwtToken: this.config.jwtToken,
-          localAuthMode: this.config.localAuthMode,
-          localAuthToken: this.config.localAuthToken,
           adminSecret: this.config.adminSecret,
           tier: this.worker ? undefined : "worker",
           // Keep worker-bridged browser clients on worker durability by default.
@@ -507,6 +575,9 @@ export class Db {
           // Worker-bridged runtimes exchange postcard payloads with peers;
           // direct browser/server routing keeps JSON payloads.
           useBinaryEncoding: this.worker !== null,
+          onAuthFailure: (reason) => {
+            this.markUnauthenticated(reason);
+          },
         },
       );
 
@@ -525,11 +596,22 @@ export class Db {
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
    */
-  private async ensureBridgeReady(): Promise<void> {
+  protected async ensureBridgeReady(): Promise<void> {
     await this.workerReconfigure;
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
+  }
+
+  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl) {
+      return;
+    }
+    if (!options?.tier || options.tier === "worker") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -543,8 +625,15 @@ export class Db {
       this.handleWorkerPeerSync(batch);
     });
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
+    bridge.onAuthFailure((reason) => {
+      this.markUnauthenticated(reason);
+    });
     this.workerBridge = bridge;
-    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+    const bridgeReady = bridge
+      .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => undefined);
+    bridgeReady.catch(() => undefined);
+    this.bridgeReady = bridgeReady;
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -562,9 +651,8 @@ export class Db {
       serverUrl: this.config.serverUrl,
       serverPathPrefix: this.config.serverPathPrefix,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
+      runtimeSources: this.config.runtimeSources,
       logLevel: this.config.logLevel,
     };
   }
@@ -848,7 +936,7 @@ export class Db {
     this.bridgeReady = null;
 
     currentWorker.terminate();
-    this.worker = await Db.spawnWorker();
+    this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
     // Re-attach immediately for existing client runtime(s) so subscriptions replay.
     const first = this.clients.entries().next();
@@ -926,13 +1014,23 @@ export class Db {
     return `${primaryDbName}__fallback__${snapshot.tabId}`;
   }
 
-  private static async spawnWorker(): Promise<Worker> {
-    const worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
+  private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
+    const wasmUrl = syncInitInput
+      ? null
+      : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
+    const workerUrl = appendWorkerRuntimeWasmUrl(
+      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
+      wasmUrl,
+    );
+
+    const worker = new Worker(workerUrl, {
       type: "module",
     });
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Worker WASM load timeout")), 15000);
+      const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
       const handler = (event: MessageEvent) => {
         if (event.data.type === "ready") {
           clearTimeout(timeout);
@@ -952,6 +1050,49 @@ export class Db {
     });
 
     return worker;
+  }
+
+  updateAuthToken(jwtToken: string | null): void {
+    this.applyAuthUpdate(jwtToken);
+  }
+
+  getAuthState(): AuthState {
+    return this.authStateStore.getState();
+  }
+
+  /**
+   * Mint a short-lived local-first JWT proving possession of the current identity.
+   * Returns `null` if the current session is not local-first.
+   */
+  async getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    if (!this._localFirstSecret) {
+      return null;
+    }
+
+    const wasmModule = this.wasmModule;
+    if (!wasmModule) {
+      return null;
+    }
+
+    const ttl = options?.ttlSeconds ?? 60;
+    const audience = options?.audience ?? this.config.appId;
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+
+    return wasmModule.WasmRuntime.mintLocalFirstToken(
+      this._localFirstSecret,
+      audience,
+      BigInt(ttl),
+      nowSeconds,
+    );
+  }
+
+  onAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.authStateStore.onChange((state) => {
+      listener(state);
+    });
   }
 
   getConfig(): DbConfig {
@@ -1072,7 +1213,7 @@ export class Db {
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
    * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
-   * localStorage-based auth or synthetic-user state.
+   * localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
@@ -1117,7 +1258,7 @@ export class Db {
         deleteError = error;
       }
 
-      this.worker = await Db.spawnWorker();
+      this.worker = await Db.spawnWorker(this.config.runtimeSources);
 
       if (deleteError) {
         throw deleteError;
@@ -1149,6 +1290,7 @@ export class Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
@@ -1290,6 +1432,10 @@ export class Db {
    */
   async shutdown(): Promise<void> {
     this.isShuttingDown = true;
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+      this.localFirstRefreshTimer = null;
+    }
     this.clearActiveQuerySubscriptionTraces();
     this.logLeaderDebug("shutdown");
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
@@ -1422,6 +1568,14 @@ class ClientBackedDb extends Db {
     super(config, null);
   }
 
+  override updateAuthToken(jwtToken: string | null): void {
+    if (!this.applyAuthUpdate(jwtToken)) {
+      return;
+    }
+
+    this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
+  }
+
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -1500,6 +1654,7 @@ class ClientBackedDb extends Db {
         ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
         : query._table;
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
@@ -1586,17 +1741,47 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
+  if (config.auth && config.jwtToken) {
+    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  }
+
+  let resolvedConfig = { ...config };
+
+  // Local-first auth: resolve seed and mint a JWT
+  let localFirstSecret: string | null = null;
+  if (config.auth) {
+    const secret = config.auth.localFirstSecret;
+    localFirstSecret = secret;
+
+    const wasmModule = await loadWasmModule(config.runtimeSources);
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const jwtToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+      secret,
+      config.appId,
+      BigInt(3600),
+      nowSeconds,
+    );
+    resolvedConfig = { ...resolvedConfig, jwtToken };
+  }
+
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
   if (driver.type === "memory" && !resolvedConfig.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
+  let db: Db;
   if (isBrowser() && driver.type === "persistent") {
-    return Db.createWithWorker(resolvedConfig);
+    db = await Db.createWithWorker(resolvedConfig);
+  } else {
+    db = await Db.create(resolvedConfig);
   }
-  return Db.create(resolvedConfig);
+
+  if (localFirstSecret) {
+    db.initLocalFirstAuth(localFirstSecret, 3600);
+  }
+
+  return db;
 }
 
 export function createDbFromClient(
@@ -1605,5 +1790,5 @@ export function createDbFromClient(
   session?: Session,
   attribution?: string,
 ): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
+  return new ClientBackedDb(config, client, session, attribution);
 }

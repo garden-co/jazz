@@ -1,0 +1,131 @@
+---
+title: "Auth provider integration"
+description: Connect an external auth provider to Jazz with JWT validation, with examples for Better Auth and WorkOS.
+reviewedAt: "f7048c19"
+---
+
+Jazz supports external JWT-based authentication for production use. This recipe walks through connecting a provider to Jazz, with examples for [Better Auth](https://www.better-auth.com/) (self-hosted) and [WorkOS](https://workos.com/) (managed service).
+
+## How it works
+
+<Mermaid chart={`
+sequenceDiagram
+    participant Browser
+    participant Auth as Auth provider
+
+    Browser->>Auth: Sign in
+    Auth-->>Browser: JWT token
+
+    create participant Jazz as Jazz server
+    Browser->>Jazz: Connect with JWT
+    Jazz->>Auth: Fetch JWKS
+    Auth-->>Jazz: Public keys
+    Jazz->>Jazz: Verify JWT
+    Jazz-->>Browser: Session ready
+
+`} />
+
+1. The user signs in with your auth provider and gets a JWT.
+2. Your client passes that JWT to Jazz.
+3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
+4. On success, Jazz derives `session.user_id` from `jazz_principal_id` when present, otherwise from the JWT's `sub` claim.
+
+If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
+
+## Provider setup
+
+<Tabs
+  groupId="auth-provider"
+  persist
+  updateAnchor
+  items={["Better Auth", "WorkOS"]}
+>
+  <Tab value="Better Auth">
+    [Better Auth](https://www.better-auth.com/) is a self-hosted auth framework. You run the server yourself and enable the `jwt` plugin, which exposes a JWKS endpoint and issues signed JWTs.
+
+    ### Server
+
+    <include cwd lang="ts" meta='title="src/lib/auth.ts"'>
+      ../examples/auth-betterauth-chat/src/docs/recipe-server-snippet.ts#betterauth-server
+    </include>
+
+    This exposes a JWKS endpoint at `/api/auth/jwks` (or wherever you mount Better Auth's handler).
+
+    ### Client
+
+    Create the auth client with the `jwtClient` plugin so you can request JWT tokens.
+
+    <include cwd lang="ts" meta='title="src/lib/auth-client.ts"'>
+      ../examples/auth-betterauth-chat/src/lib/auth-client.ts#betterauth-client
+    </include>
+
+    ### Connecting to Jazz
+
+    Get the JWT from Better Auth and pass it to Jazz via the `config` prop.
+
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/auth-betterauth-chat/src/docs/recipe-connect-snippet.tsx#betterauth-jazz-react
+    </include>
+
+    ### Jazz server configuration
+
+    Point the Jazz server at your Better Auth JWKS endpoint:
+
+    ```bash
+    jazz-tools server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks
+    ```
+
+    For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
+
+    <Callout type="info">
+      If your users start unauthenticated and sign up later, see [Local-first auth](/docs/auth/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
+    </Callout>
+
+  </Tab>
+  <Tab value="WorkOS">
+    [WorkOS](https://workos.com/) is a managed auth service&hairsp;—&hairsp;no server-side auth code needed. Wrap your app with `AuthKitProvider`, get the access token, and pass it to Jazz.
+
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/auth-workos-chat/src/docs/recipe-snippet.tsx#workos-jazz-react
+    </include>
+
+    ### Jazz server configuration
+
+    Point the Jazz server at the WorkOS JWKS endpoint:
+
+    ```bash
+    jazz-tools server <APP_ID> --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    ```
+
+    For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
+
+  </Tab>
+</Tabs>
+
+See [Server setup](/docs/getting-started/server-setup) for the full set of server flags.
+
+## Using JWT claims in permissions
+
+Your auth provider's JWT may include custom claims (roles, organisation IDs, etc.). Access them in permissions via `session.where(...)`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
+
+See [Permissions](/docs/auth/permissions) for the full claims API.
+
+## Other providers
+
+Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pattern is always the same: get a JWT from your provider, pass it to Jazz.
+
+| Provider    | JWKS endpoint                                                                               | `sub` claim format |
+| ----------- | ------------------------------------------------------------------------------------------- | ------------------ |
+| Better Auth | `<baseURL>/api/auth/jwks`                                                                   | User ID            |
+| WorkOS      | `https://api.workos.com/sso/jwks/<clientId>`                                                | `user_<id>`        |
+| Clerk       | `https://<app>.clerk.accounts.dev/.well-known/jwks.json`                                    | `user_<id>`        |
+| Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
+| Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
+
+By default, the `sub` claim identifies the user. If your provider supports custom claims but keeps `sub` fixed to its own user ID, include `jazz_principal_id` in the JWT instead. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
+
+Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

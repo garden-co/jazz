@@ -3,12 +3,16 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Keys used in object metadata (`HashMap<String, String>`) and commit
 /// metadata (`BTreeMap<String, String>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataKey {
     /// Table name — set on row objects.
     Table,
+    /// Origin schema hash - set on row objects.
+    OriginSchemaHash,
     /// Object type — catalogue_schema, catalogue_lens, index, etc.
     Type,
     /// Commit delete marker — soft or hard.
@@ -33,6 +37,7 @@ impl MetadataKey {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Table => "table",
+            Self::OriginSchemaHash => "origin_schema_hash",
             Self::Type => "type",
             Self::Delete => "delete",
             Self::CreatedBy => "created_by",
@@ -95,7 +100,7 @@ impl fmt::Display for ObjectType {
 }
 
 /// Values for the `Delete` commit metadata key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteKind {
     Soft,
     Hard,

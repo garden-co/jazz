@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
   benchmarksForSuite,
   DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
@@ -22,6 +23,7 @@ function printHelp() {
   node benchmarks/realistic/run_ci_benchmarks.mjs \\
     --suite native|browser \\
     --out-dir bench-out/native \\
+    [--storage-engine rocksdb|sqlite] \\
     [--profile s] \\
     [--skip-set benchmarks/realistic/ci_skip_set.json] \\
     [--repeat-count 3] \\
@@ -33,6 +35,7 @@ function parseArgs(argv) {
   const out = {
     suite: "",
     outDir: "",
+    storageEngine: "",
     profile: "s",
     skipSet: "benchmarks/realistic/ci_skip_set.json",
     repeatCount: DEFAULT_NOISE_REPEAT_COUNT,
@@ -48,6 +51,10 @@ function parseArgs(argv) {
     }
     if (arg === "--out-dir") {
       out.outDir = argv[++i] ?? "";
+      continue;
+    }
+    if (arg === "--storage-engine") {
+      out.storageEngine = argv[++i] ?? "";
       continue;
     }
     if (arg === "--profile") {
@@ -75,6 +82,12 @@ function parseArgs(argv) {
 
   if (!out.suite) fail("--suite is required");
   if (!out.outDir) fail("--out-dir is required");
+  if (out.suite === "native" && !["rocksdb", "sqlite"].includes(out.storageEngine)) {
+    fail("--storage-engine must be one of: rocksdb, sqlite");
+  }
+  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "opfs-btree") {
+    fail("--storage-engine is only supported for native suites");
+  }
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds < 1) {
     fail("--timeout-seconds must be a number >= 1");
   }
@@ -428,6 +441,7 @@ function summarizeBenchmark(benchmark, status, durationMs, extra = {}) {
   return {
     id: benchmark.id,
     suite: benchmark.suite,
+    storage_engine: benchmark.storage_engine ?? null,
     label: benchmark.label,
     kind: benchmark.kind,
     status,
@@ -440,28 +454,77 @@ function stripAnsi(value) {
   return String(value ?? "").replace(/\x1B\[[0-9;]*m/g, "");
 }
 
+export const NATIVE_EXAMPLE_FEATURES = "client,rocksdb";
+export const NATIVE_CRITERION_FEATURES = "rocksdb";
+export const NATIVE_EXAMPLE_FEATURES_BY_ENGINE = {
+  rocksdb: "client,rocksdb",
+  sqlite: "client,sqlite",
+};
+export const NATIVE_CRITERION_FEATURES_BY_ENGINE = {
+  rocksdb: "rocksdb",
+  sqlite: "sqlite",
+};
+
+function nativeStorageEngine(benchmark, args = {}) {
+  return benchmark?.storage_engine ?? args.storageEngine ?? "";
+}
+
+export function buildNativeExampleBaseCommand(benchmark, args) {
+  const profilePath =
+    benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+  const features = NATIVE_EXAMPLE_FEATURES_BY_ENGINE[nativeStorageEngine(benchmark, args)];
+  if (!features) {
+    throw new Error(
+      `Unsupported native example storage engine: ${nativeStorageEngine(benchmark, args)}`,
+    );
+  }
+
+  return [
+    "cargo",
+    "run",
+    "--release",
+    "-p",
+    "jazz-tools",
+    "--features",
+    features,
+    "--example",
+    "realistic_bench",
+    "--",
+    "--profile",
+    profilePath,
+    "--scenario",
+    benchmark.scenario_path,
+  ];
+}
+
+export function buildNativeCriterionCommand(benchmark) {
+  const features = NATIVE_CRITERION_FEATURES_BY_ENGINE[nativeStorageEngine(benchmark)];
+  if (!features) {
+    throw new Error(
+      `Unsupported native Criterion storage engine: ${nativeStorageEngine(benchmark)}`,
+    );
+  }
+  return [
+    "cargo",
+    "bench",
+    "-p",
+    "jazz-tools",
+    "--features",
+    features,
+    "--bench",
+    "realistic_phase1",
+    "--",
+    benchmark.criterion_filter,
+  ];
+}
+
 async function runNativeBenchmark(benchmark, args) {
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
+    const env = { ...process.env, ...(benchmark.env ?? {}) };
     const profilePath =
       benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
-    const env = { ...process.env, ...(benchmark.env ?? {}) };
-    const baseCommand = [
-      "cargo",
-      "run",
-      "--release",
-      "-p",
-      "jazz-tools",
-      "--features",
-      "client",
-      "--example",
-      "realistic_bench",
-      "--",
-      "--profile",
-      profilePath,
-      "--scenario",
-      benchmark.scenario_path,
-    ];
+    const baseCommand = buildNativeExampleBaseCommand(benchmark, args);
     const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
     const attempts = [];
     const scenarios = [];
@@ -631,18 +694,7 @@ async function runNativeBenchmark(benchmark, args) {
 
   const logFile = path.resolve(args.outDir, benchmark.log_path);
 
-  const command = [
-    "cargo",
-    "bench",
-    "-p",
-    "jazz-tools",
-    "--features",
-    "fjall",
-    "--bench",
-    "realistic_phase1",
-    "--",
-    benchmark.criterion_filter,
-  ];
+  const command = buildNativeCriterionCommand(benchmark);
 
   console.log(`\n==> ${benchmark.label}`);
   console.log(shellQuote(command));
@@ -785,10 +837,12 @@ function countByStatus(results) {
   return counts;
 }
 
-function summaryMarkdown(suite, results, timeoutSeconds, repeatCount) {
+function summaryMarkdown(suite, results, timeoutSeconds, repeatCount, storageEngine = "") {
   const counts = countByStatus(results);
   const lines = [];
-  lines.push(`## ${suite === "native" ? "Native" : "Browser"} benchmark status`);
+  const suiteTitle = suite === "native" ? "Native" : "Browser";
+  const storageSuffix = storageEngine ? ` (${storageEngine})` : "";
+  lines.push(`## ${suiteTitle}${storageSuffix} benchmark status`);
   lines.push("");
   lines.push(`Budget per benchmark: ${timeoutSeconds}s`);
   lines.push(`Repeated scenario benchmarks: ${repeatCount}x`);
@@ -830,7 +884,7 @@ async function main() {
 
   const skipSet = readSkipSet(path.resolve(args.skipSet));
   const skipIdSet = skipIds(skipSet);
-  const catalog = benchmarksForSuite(args.suite);
+  const catalog = benchmarksForSuite(args.suite, { storageEngine: args.storageEngine });
   const results = [];
 
   for (const benchmark of catalog) {
@@ -860,6 +914,7 @@ async function main() {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
+    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
     profile: args.profile,
     repeat_count: args.repeatCount,
     timeout_seconds: args.timeoutSeconds,
@@ -868,12 +923,19 @@ async function main() {
   writeJson(statusFile, statusPayload);
   fs.writeFileSync(
     summaryFile,
-    summaryMarkdown(args.suite, results, args.timeoutSeconds, args.repeatCount),
+    summaryMarkdown(
+      args.suite,
+      results,
+      args.timeoutSeconds,
+      args.repeatCount,
+      args.suite === "browser" ? "opfs-btree" : args.storageEngine,
+    ),
   );
   writeJson(skipCandidatesFile, {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
+    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
     timeout_seconds: args.timeoutSeconds,
     benchmark_ids: results
       .filter((result) => result.status === "timed_out")
@@ -888,6 +950,7 @@ async function main() {
       runner: "jazz-ts-browser-opfs",
       generated_at: generatedAt,
       profile: args.profile,
+      storage_engine: "opfs-btree",
       scenarios,
       benchmark_statuses: results.map(({ scenario, ...rest }) => rest),
     });
@@ -896,7 +959,9 @@ async function main() {
   console.log(fs.readFileSync(summaryFile, "utf8"));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    process.exit(1);
+  });
+}

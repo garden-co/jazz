@@ -79,16 +79,19 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
+- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
 - `dataPath` controls where local server state persists.
 
-Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
+Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 For server-owned work, use `context.asBackend()`. For embedded or local-only setups without a
-server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/reference/server-setup)
+server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/getting-started/server-setup)
 covers those patterns in more detail.
 
 <Accordions type="single">
   <Accordion title="What does the driver do?">
-    The `persistent` driver stores data on disk using [Fjall](https://github.com/fjall-rs/fjall), a fast Rust key-value store bundled inside `jazz-napi`. The `dataPath` is the directory where Fjall writes its data.
+    The `persistent` driver stores data on disk through the native `jazz-napi` runtime. In the
+    current Node.js setup that means SQLite-backed local persistence. `dataPath` is the directory
+    where that local database lives.
 
     There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
 
@@ -137,11 +140,10 @@ Start the server at the bottom of `src/index.ts`:
 npx tsx src/index.ts
 ```
 
-Try it out with a dummy JWT:
+Try it out with a self-signed dev token:
 
 ```bash title="Terminal"
-# Unsigned test token with sub: "test-user"
-TOKEN="eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LXVzZXIifQ."
+TOKEN=$(node -e 'const { mintSelfSignedToken } = require("jazz-napi"); const seed = Buffer.alloc(32, 7).toString("base64url"); console.log(mintSelfSignedToken(seed, "todo-server-ts", 3600));')
 
 curl -X POST http://localhost:3000/api/todos \
   -H "Content-Type: application/json" \
@@ -161,7 +163,10 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 ```
 
 <Callout type="info">
-  `forRequest` extracts the caller's identity from the `Authorization` header. The dummy token above is an unsigned JWT with `{"sub": "test-user"}`&hairsp;—&hairsp;fine for local development. In production, your auth provider issues signed JWTs and the server validates them via JWKS. See [Authentication](/docs/auth/authentication) for how to set that up.
+  `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
+  Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
+  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
+  them via JWKS.
 </Callout>
 
 ## Authentication
@@ -173,4 +178,4 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 - [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;identity providers, JWKS, and session resolution
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
-- [Server Setup](/docs/reference/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment
+- [Server Setup](/docs/getting-started/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment

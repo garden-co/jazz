@@ -8,8 +8,9 @@ What it demonstrates:
 - Better Auth's built-in `jwt` plugin to issue ES256 JWTs and expose a JWKS endpoint
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
-- Falling back to anonymous `localAuth` when no session exists
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts).
+- Recreating `JazzProvider` on login and logout, while keeping `db.updateAuthToken(...)` only for same-user JWT refresh after auth expiry
+- Falling back to local-first auth when no session exists
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
 New sign-ups receive `role = "member"` by default (configured via the `admin` plugin).
@@ -98,37 +99,41 @@ export const authClient = createAuthClient({ plugins: [jwtClient()] });
 `jwtClient()` adds the `authClient.token()` method used to fetch the JWT after sign-in. No explicit
 base URL is required; Better Auth defaults to `/api/auth` in the browser.
 
-### Client — `src/App.tsx`
+### Client — `app/page.tsx`
 
-`App` subscribes to the Better Auth session and, when a session exists, exchanges it for a JWT
+`Page` subscribes to the Better Auth session and, when a session exists, exchanges it for a JWT
 before mounting `JazzProvider`:
 
 ```tsx
 const { data: authSession } = authClient.useSession();
-const [token, setToken] = React.useState<string | null>(null);
+const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
 
 React.useEffect(() => {
   if (!authSession?.session) {
-    setToken(null);
+    setInitialJwtToken(null);
     return;
   }
-  authClient.token().then(({ data }) => setToken(data.token));
+  authClient.token().then(({ data }) => setInitialJwtToken(data.token));
 }, [authSession?.session?.id]);
 ```
 
 While the JWT is being fetched the app renders a loading state. Once the token arrives,
 `JazzProvider` is mounted in JWT mode. On sign-out Better Auth clears the session cookie and
-the effect resets `token` to `null`, reverting Jazz to anonymous mode.
+the effect resets `initialJwtToken` to `null`, recreating Jazz in local-first mode.
 
 ```tsx
-const config: DbConfig = token
-  ? { appId, jwtToken: token, serverUrl, ... }
-  : { appId, ...getActiveSyntheticAuth(appId, { defaultMode: "anonymous" }), ... };
+const config: DbConfig = initialJwtToken
+  ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
+  : { appId, auth: { localFirstSecret: secret }, serverUrl, ... };
 
-<JazzProvider key={token ? "jwt" : "local"} config={config}>
+<JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
   <ChatShell />
 </JazzProvider>
 ```
+
+If the sync server later returns `401` for an expired or invalid bearer token, the example calls
+`db.updateAuthToken(freshJwt)` only after fetching a replacement JWT for the same Better Auth session.
+It does not use `db.updateAuthToken(null)` for logout.
 
 ## Playwright
 

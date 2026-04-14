@@ -1,194 +1,148 @@
 # Query Manager — Status Quo
 
-This is where SQL lives. The [Object Manager](object_manager.md) stores versioned objects; the Query Manager interprets those objects as table rows and provides SQL queries over them.
+The Query Manager is where Jazz turns raw tables into live relational reads.
 
-The key property is **reactivity**: queries aren't one-shot. When you subscribe to "all todos where done=false", the query stays live. As data changes — local inserts, sync updates from other clients — the query graph re-evaluates incrementally and emits deltas (added/removed/updated rows). This is what makes local-first UIs work: the UI subscribes once and stays current automatically.
+If the storage layer answers:
 
-Queries compile into a pipeline of nodes (`IndexScan → Materialize → Filter → Sort → Output`) that process changes incrementally. The [Sync Manager](sync_manager.md) uses query results to determine which objects to send to clients — see [Query/Sync Integration](query_sync_integration.md). The [Schema Manager](schema_manager.md) wraps this layer to add schema versioning and cross-version queries.
+> "What row versions and visible entries exist?"
 
-## Architecture Layers
+the Query Manager answers:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Application                          │
-│              (Value for input/output)                   │
-├─────────────────────────────────────────────────────────┤
-│                   QueryManager                          │
-│  ┌─────────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ Row Codec   │  │ Indices  │  │ Query Graph       │  │
-│  │ encode at   │  │ (source  │  │ (binary rows      │  │
-│  │ boundary    │  │ nodes)   │  │  throughout)      │  │
-│  └─────────────┘  └──────────┘  └───────────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│                   SyncManager                           │
-├─────────────────────────────────────────────────────────┤
-│                  ObjectManager                          │
-│            (+ global object subscription)               │
-└─────────────────────────────────────────────────────────┘
-```
+> "Which rows match this query right now, and how did that answer change?"
 
-> `crates/groove/src/query_manager/manager.rs:226-266`
+That second part matters as much as the first. Queries in Jazz are usually long-lived subscriptions, not fire-and-forget requests.
 
-## Core Design Decisions
+## The Mental Model
 
-| Decision               | Details                                                                       | Why                                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Row = Object           | Each row is a separate Jazz object; ObjectId = primary key                    | Rows inherit versioning, sync, and conflict resolution from the object layer for free |
-| Row format             | Fixed fields first, then variable offsets, nullable 1-byte prefix             | Comparison without deserialization — sort and filter operate on bytes                 |
-| Binary throughout      | `Value` only at API boundary; internally `&[u8]` with `RowDescriptor`         | Avoids allocation and type dispatch in the hot path                                   |
-| Index-first            | No table scans; every query starts with an index (`_id` for unfiltered)       | Predictable performance; the `_id` index doubles as the row manifest                  |
-| Auto-index all columns | Every column gets a single-column index (zero-config)                         | Local-first databases are small enough that index overhead is negligible              |
-| All indices persisted  | Via `Storage` trait (MemoryStorage, FjallStorage, OpfsBTreeStorage)           | Cold start loads indices, not all row data — fast startup                             |
-| No index rebuild       | Incremental maintenance only; missing index = error                           | Indices are always consistent with data; no expensive rebuild path                    |
-| TupleDelta throughout  | Unified delta type for progressive materialization                            | Each node transforms deltas without knowing what's upstream or downstream             |
-| Branch-aware           | Indices keyed by `(table, column, branch)`; queries specify target branch(es) | Schema versions use different branches — queries must address the right one           |
+The Query Manager works over:
 
-## The `_id` Index as Row Manifest
+- raw tables
+- persisted indices
+- visible row entries
+- row-history fallbacks when a tier-specific winner differs from the current visible winner
+- schema context from `SchemaManager`
+- session/policy context for permission-aware filtering
 
-The `_id` index for each table is the authoritative list of row ObjectIds. There's no separate "table of contents" — the index IS the manifest. This means a table with no rows has no `_id` index entries, and discovering all rows in a table is just an `_id` index scan.
+So the engine is relational all the way through:
 
-**Durability** of a new row requires persisting BOTH the row object AND all index updates (`_id` + column indices). These happen atomically within a single `Storage` call sequence.
+- index scans find candidate rows
+- materialization turns those candidates into rows
+- filter/sort/limit/project nodes shape the result
+- output nodes emit deltas to subscribers
 
-**Cold start**: Load `_id` index → discover ObjectIds → load column indices → lazy-load row objects on demand via query. This means startup time is proportional to index size, not total data size.
+## Query Graph Shape
 
-> `crates/groove/src/query_manager/manager.rs:534-549` (row_is_indexed checks \_id)
+Most single-table queries compile to a graph like this:
 
-## Index Storage
-
-Indices are abstracted behind the `Storage` trait — QueryManager never deals with pages or B-tree internals directly.
-
-- `Storage::index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`
-- `MemoryStorage`: HashMap<IndexKey, BTreeMap<encoded_value, HashSet<ObjectId>>>
-- `FjallStorage`: native durable storage for server/CLI/client
-- `OpfsBTreeStorage`: durable OPFS storage for browser workers
-
-> `crates/groove/src/storage/mod.rs:67-195` (trait), `215-310` (MemoryStorage impl)
-
-`ScanCondition` uses `Value` directly: `All`, `Eq(Value)`, `Range { min: Bound<Value>, max: Bound<Value> }`.
-
-> `crates/groove/src/query_manager/index/mod.rs`
-
-## Query Graph Architecture
-
-### Tuple Model
-
-```
-TupleElement: Id(ObjectId) | Row { id, content, commit_id }
-Tuple: Vec<TupleElement>  — Hash/Eq based on IDs only
-TupleDelta: { added, removed, updated }
+```text
+IndexScan -> Materialize -> Filter -> Sort -> Limit/Offset -> Output
 ```
 
-> `crates/groove/src/query_manager/types.rs`
+More advanced queries add:
 
-### Node Traits
+- `Union` for disjunctions and branch unions
+- `Join` and `ArraySubquery` for relation traversal
+- `PolicyFilter` for permission-aware row filtering
+- `Project` and recursive relation nodes for shaping the final result
 
-| Trait           | Purpose                  | Implementations                                                                                                   |
-| --------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `SourceNode`    | Read from external state | IndexScanNode                                                                                                     |
-| `TransformNode` | Merge tuple sets         | UnionNode                                                                                                         |
-| `RowNode`       | Process TupleDelta       | MaterializeNode, FilterNode, SortNode, LimitOffsetNode, JoinNode, ArraySubqueryNode, OutputNode, PolicyFilterNode |
+The important point is that the graph is incremental. Nodes do not recompute the whole world on every change. They consume tuple deltas and push transformed deltas downstream.
 
-> `crates/groove/src/query_manager/graph_nodes/mod.rs:36-83`
+## Why It Is Index-First
 
-### Graph Pipeline
+Jazz does not treat table scans as the normal way to answer queries.
 
-Single-table: `IndexScan → [Union] → Materialize → [Filter] → [Sort] → [LimitOffset] → Output`
+Instead:
 
-Join: `IndexScan(left) → Materialize → JoinNode ← index lookup(right) → Materialize → [Filter] → Output`
+- every query starts from one or more persisted index scans
+- the `_id` index acts as the manifest for "all rows in this table"
+- materialization only happens for rows that survived the earlier graph stages
 
-All nodes receive explicit branch names in constructor — no implicit "main" default.
+That is what makes the current table-first engine practical on local devices: the query layer can stay reactive without eagerly decoding every stored row.
 
-> `crates/groove/src/query_manager/graph.rs:229-661` (compile_with_schema_context)
+## Materialization: Where Rows Become Rows Again
 
-### settle() Method
+`Materialize` is the point where the graph crosses from identifiers into row content.
 
-`settle(storage, row_loader)` processes the graph in topological order — source nodes first, output last. Each node transforms its input delta and passes results downstream. Row objects are loaded on demand via the `row_loader` callback (lazy, not eagerly cached). This means a query that filters on an indexed column never loads rows that don't match.
+Given candidate row ids, it:
 
-> `crates/groove/src/query_manager/graph.rs:1177-1400+`
+1. resolves the row's table if necessary
+2. loads the current visible entry for the relevant branch
+3. falls back to a history lookup only when the query asks for a lower durability tier than the current visible winner
+4. decodes or reprojects the flat row through `row_format`, projecting away the reserved `_jazz_*` columns when producing the app-facing row
+5. emits added/updated/removed tuple deltas
 
-## Query API
+This is why the visible region matters so much. Most current-state queries never need to reconstruct a row from raw history scans.
 
-Builder pattern with chaining:
+## One-Shot Queries and Live Subscriptions
 
-| Method                                | Purpose                                |
-| ------------------------------------- | -------------------------------------- |
-| `.branch()` / `.branches()`           | Target branch(es)                      |
-| `.filter_eq/ne/lt/le/gt/ge/between()` | Conditions                             |
-| `.order_by()` / `.order_by_desc()`    | Sorting                                |
-| `.limit()` / `.offset()`              | Pagination                             |
-| `.select()`                           | Column projection                      |
-| `.alias()`                            | Table aliasing                         |
-| `.join()` / `.on()`                   | Equi-joins                             |
-| `.with_array()`                       | Correlated array subqueries (nestable) |
-| `.include_deleted()`                  | Include soft-deleted rows              |
-| `.build()`                            | Produce `Query` struct                 |
+Both APIs use the same graph engine.
 
-> `crates/groove/src/query_manager/query.rs:400-650`
+### One-shot query
 
-## Deletion Semantics
+`db.all(...)` and `db.one(...)` compile a query, settle it, return the first full snapshot, and tear the subscription back down.
 
-| Type        | Content   | Metadata       | `_id_deleted` | Undeletable | Authoritative     |
-| ----------- | --------- | -------------- | ------------- | ----------- | ----------------- |
-| Soft Delete | Preserved | `delete: soft` | Added         | Yes         | No                |
-| Hard Delete | Empty     | `delete: hard` | Removed       | No          | Yes (always wins) |
+### Live subscription
 
-- `_id` index: live rows only
-- `_id_deleted` index: soft-deleted rows with preserved content
-- `include_deleted()` queries both
+`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row versions, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
 
-> `crates/groove/src/query_manager/manager.rs:534-598` (row_is_indexed, row_is_deleted, is_hard_deleted)
+This shared machinery is why one-shot reads and live reads stay behaviorally aligned.
 
-## Policy Evaluation (ReBAC)
+## Branches, Schemas, and Lenses
 
-Policies evaluated via PolicyGraphs for complex clauses (EXISTS, INHERITS). Session propagates through multi-tier sync.
+The Query Manager never assumes a single universal table image.
 
-> `crates/groove/src/query_manager/policy.rs`, `policy_graph.rs`, `graph_nodes/policy_filter.rs`
+It works with branch-aware and schema-aware context from `SchemaManager`:
 
-## Dynamic Schema Context
+- branch names identify which visible table image to read
+- live schema sets determine which branches are relevant
+- lenses translate columns and row values when old data is read through a newer schema view
 
-QueryManager supports dynamic schema activation without recreation — preserves active subscriptions and indices.
+That means a query can still feel like a normal table query even when the runtime is simultaneously serving multiple schema generations.
 
-- `set_current_schema()` initializes once
-- `add_live_schema()` / `register_lens()` mark subscriptions for recompile
-- Branch names: `{env}-{hash8}-{userBranch}` (e.g., `dev-a1b2c3d4-main`)
-- Queries without explicit `.branch()` auto-expand from schema context
-- Pending row buffer: rows on unknown branches buffered until schema activates
+## Policies and Sessions
 
-> `crates/groove/src/query_manager/manager.rs:276-427`
+Permission-aware reads happen inside the query pipeline rather than as an afterthought outside it.
 
-## Explicit Context Execution
+The Query Manager can attach a session to a query and use policy graphs to answer questions like:
 
-Two modes:
+- should this row be visible to Alice?
+- does this join path imply inherited access?
+- should this subscription ever receive this row?
 
-- **Implicit** (`execute(query)`) — uses manager's schema context
-- **Explicit** (`execute_with_explicit_context(query, schema, context)`) — for servers
+That is the reason sync can stay query-scoped without every transport layer
+needing to understand policy evaluation itself.
 
-> `crates/groove/src/query_manager/manager.rs`
+The current runtime also carries an explicit row-policy mode:
 
-## Server Subscriptions
+- `PermissiveLocal`: no compiled policy bundle is loaded in this runtime
+- `Enforcing`: a compiled policy bundle is loaded, even if it is empty
 
-`ServerQuerySubscription` tracks: query, graph, session, resolved branches, last_scope (for change detection), needs_recompile flag.
+That mode is shared across local query compilation, subscription filtering,
+server-side authorization, and sync-scope derivation.
 
-> `crates/groove/src/query_manager/manager.rs:188-204`
+In `PermissiveLocal`, the Query Manager does not synthesize deny-all filters
+just because policy clauses are absent. Local session-scoped reads and writes
+remain usable for offline/local-only runtimes.
 
-## File Structure
+In `Enforcing`, missing explicit clauses deny by default:
 
-```
-crates/groove/src/query_manager/
-├── mod.rs, manager.rs, manager_tests.rs
-├── types.rs          # Value, ColumnType, RowDescriptor, Tuple, TupleDelta, Schema, SchemaHash
-├── encoding.rs       # encode/decode at boundary
-├── query.rs          # Query, QueryBuilder, Condition, JoinSpec, ArraySubquerySpec
-├── graph.rs          # QueryGraph: compile, settle, topo_sort
-├── session.rs, policy.rs, policy_graph.rs, rebac_tests.rs
-├── index/mod.rs      # ScanCondition enum
-└── graph_nodes/      # index_scan, union, materialize, filter, sort, limit_offset,
-                      # output, alias, project, join, subgraph, array_subquery,
-                      # policy_filter, exists_output
-```
+- `read` requires `select.using`, otherwise rows are filtered out
+- `insert` requires `insert.with_check`
+- `update` requires at least one explicit update clause, and every present
+  clause must pass
+- `delete` prefers `delete.using`, falls back to `update.using`, and otherwise
+  denies
+- inherited and recursive checks fail closed when the parent policy or graph
+  context cannot be resolved
 
-## Error Types
+## Key Files
 
-Key variants: `TableNotFound`, `ColumnCountMismatch`, `EncodingError`, `ObjectNotFound`, `QueryCompilationError`, `IndexError`, `RowNotDeleted`, `RowAlreadyDeleted`, `RowHardDeleted`, `PolicyDenied`, `UnknownSchema`.
-
-> `crates/groove/src/query_manager/manager.rs:26-50`
+| File                                                            | Purpose                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `crates/jazz-tools/src/query_manager/manager.rs`                | QueryManager orchestration and subscription lifecycle                          |
+| `crates/jazz-tools/src/query_manager/graph.rs`                  | Query graph compilation and settle passes                                      |
+| `crates/jazz-tools/src/query_manager/graph_nodes/`              | Node implementations such as index scan, materialize, filter, sort, and output |
+| `crates/jazz-tools/src/query_manager/query.rs`                  | Query builder/data structures                                                  |
+| `crates/jazz-tools/src/query_manager/relation_ir_query_plan.rs` | Relation IR planning                                                           |
+| `crates/jazz-tools/src/query_manager/policy_graph.rs`           | Policy evaluation support                                                      |
+| `crates/jazz-tools/src/row_format.rs`                           | Shared row decoding/reprojection                                               |

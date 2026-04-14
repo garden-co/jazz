@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::commit::CommitId;
-use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::catalogue::CatalogueEntry;
+use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 
 // Module declarations
@@ -25,15 +25,15 @@ pub use types::*;
 // SyncManager
 // ============================================================================
 
-/// Manages synchronization state atop ObjectManager.
+/// Manages synchronization state atop storage-backed row and catalogue state.
 ///
 /// Coordinates:
 /// - Upstream servers (trusted, receive all our objects)
 /// - Downstream clients (untrusted, receive query-filtered subsets)
 #[derive(Clone)]
 pub struct SyncManager {
-    pub object_manager: ObjectManager,
-    pub(super) catalogue_objects: HashSet<ObjectId>,
+    pub(super) clock: MonotonicClock,
+    pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
@@ -47,28 +47,32 @@ pub struct SyncManager {
     pub(super) pending_query_subscriptions: Vec<PendingQuerySubscription>,
     /// Pending query unsubscriptions awaiting cleanup by QueryManager.
     pub(super) pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
+    /// Row visibility changes applied through row-history sync.
+    pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
+    /// Catalogue/system entry updates awaiting SchemaManager processing.
+    pub(super) pending_catalogue_updates: Vec<CatalogueEntry>,
 
     pub(super) next_pending_id: u64,
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in acks for each commit.
-    pub(super) commit_interest: HashMap<CommitId, HashSet<ClientId>>,
+    /// Tracks which clients are interested in row-version state updates.
+    pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
-    pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
+    pub(super) pending_query_settled: Vec<PendingQuerySettled>,
 
-    /// Acks received during inbox processing, for RuntimeCore to consume.
-    pub(super) received_acks: Vec<(CommitId, DurabilityTier)>,
+    /// Row-version state acks received during inbox processing.
+    pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
-            .field("object_manager", &self.object_manager)
-            .field("catalogue_objects", &self.catalogue_objects)
+            .field("clock", &self.clock)
+            .field("catalogue_entries", &self.catalogue_entries)
             .field(
                 "allow_unprivileged_schema_catalogue_writes",
                 &self.allow_unprivileged_schema_catalogue_writes,
@@ -86,12 +90,17 @@ impl std::fmt::Debug for SyncManager {
                 "pending_query_unsubscriptions",
                 &self.pending_query_unsubscriptions,
             )
+            .field(
+                "pending_row_visibility_changes",
+                &self.pending_row_visibility_changes,
+            )
+            .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("commit_interest", &self.commit_interest)
+            .field("row_version_interest", &self.row_version_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
-            .field("received_acks", &self.received_acks)
+            .field("received_row_version_acks", &self.received_row_version_acks)
             .finish()
     }
 }
@@ -102,24 +111,74 @@ impl Default for SyncManager {
     }
 }
 
-impl SyncManager {
-    pub fn new() -> Self {
-        Self::with_object_manager(ObjectManager::new())
+fn short_hash(hash: &impl ToString) -> String {
+    hash.to_string().chars().take(12).collect()
+}
+
+pub(crate) fn log_schema_warning(
+    warning: &SchemaWarning,
+    origin: Option<&str>,
+    subscription_id: Option<u64>,
+) {
+    tracing::warn!(
+        origin = origin,
+        sub_id = subscription_id,
+        query_id = warning.query_id.0,
+        table = warning.table_name,
+        row_count = warning.row_count,
+        from_hash = %warning.from_hash,
+        to_hash = %warning.to_hash,
+        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility, run `npx jazz-tools@alpha schema export --schema-hash {}`. Then generate a migration with `npx jazz-tools@alpha migrations create --fromHash {} --toHash <targetHash>`.",
+        warning.row_count,
+        warning.table_name,
+        short_hash(&warning.from_hash),
+        short_hash(&warning.from_hash),
+    );
+}
+
+pub(crate) fn log_connection_schema_diagnostics(
+    diagnostics: &ConnectionSchemaDiagnostics,
+    origin: Option<&str>,
+) {
+    let client_hash = short_hash(&diagnostics.client_schema_hash);
+
+    if let Some(permissions_hash) = diagnostics.disconnected_permissions_schema_hash {
+        let permissions_hash = short_hash(&permissions_hash);
+        tracing::error!(
+            origin = origin,
+            client_schema_hash = %client_hash,
+            permissions_schema_hash = %permissions_hash,
+            "Your declared schema {} is disconnected from the schema used to enforce permissions: {}. Reads and writes may fail until you add a migration. To recover, run `npx jazz-tools@alpha migrations create --fromHash {} --toHash {}`.",
+            client_hash,
+            permissions_hash,
+            permissions_hash,
+            client_hash,
+        );
     }
 
-    /// Create with an existing ObjectManager.
-    pub fn with_object_manager(object_manager: ObjectManager) -> Self {
-        let catalogue_objects = object_manager
-            .objects
+    if !diagnostics.unreachable_schema_hashes.is_empty() {
+        let unreachable_hashes: Vec<String> = diagnostics
+            .unreachable_schema_hashes
             .iter()
-            .filter_map(|(object_id, object)| {
-                Self::is_catalogue_metadata(&object.metadata).then_some(*object_id)
-            })
+            .map(short_hash)
             .collect();
+        tracing::warn!(
+            origin = origin,
+            client_schema_hash = %client_hash,
+            unreachable_schema_hashes = ?unreachable_hashes,
+            "Server knows schema branches that are unreachable from your declared schema {}: {}. Some data may be missing from reads until you add migrations. To recover, run `npx jazz-tools@alpha migrations create --fromHash <unreachableHash> --toHash {}` for each listed schema.",
+            client_hash,
+            unreachable_hashes.join(", "),
+            client_hash,
+        );
+    }
+}
 
+impl SyncManager {
+    pub fn new() -> Self {
         Self {
-            object_manager,
-            catalogue_objects,
+            clock: MonotonicClock::new(),
+            catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             clients: HashMap::new(),
@@ -128,13 +187,19 @@ impl SyncManager {
             pending_permission_checks: Vec::new(),
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
+            pending_row_visibility_changes: Vec::new(),
+            pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            commit_interest: HashMap::new(),
+            row_version_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
-            received_acks: Vec::new(),
+            received_row_version_acks: Vec::new(),
         }
+    }
+
+    pub fn reserve_timestamp(&mut self) -> u64 {
+        self.clock.reserve_timestamp()
     }
 
     /// Add a durability identity for this node (enables durability notifications).
@@ -178,27 +243,27 @@ impl SyncManager {
         self.my_tiers.clone()
     }
 
+    /// Return the strongest durability tier this node can attest to locally.
+    pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
+        self.my_tiers.iter().copied().max()
+    }
+
     // ========================================================================
     // Connection Management
     // ========================================================================
 
-    /// Add a server connection. Queues all existing objects to sync.
-    pub fn add_server(&mut self, server_id: ServerId) {
-        self.add_server_with_catalogue_match(server_id, false);
-    }
-
-    /// Add a server connection, optionally skipping catalogue replay when both
-    /// sides already advertise the same catalogue state.
-    pub fn add_server_with_catalogue_match(
+    /// Add a server connection using storage-backed current-state replay.
+    pub fn add_server_with_storage<H: Storage>(
         &mut self,
         server_id: ServerId,
         skip_catalogue_sync: bool,
+        storage: &H,
     ) {
         self.servers.insert(server_id, ServerState::default());
-        if skip_catalogue_sync {
-            self.mark_catalogue_sent_for_server(server_id);
+        self.queue_full_sync_to_server_from_storage(server_id, storage);
+        if !skip_catalogue_sync {
+            self.queue_catalogue_sync_to_server_from_storage(server_id, storage);
         }
-        self.queue_full_sync_to_server(server_id);
     }
 
     /// Remove a server connection.
@@ -206,10 +271,10 @@ impl SyncManager {
         self.servers.remove(&server_id);
     }
 
-    /// Add a client connection.
-    pub fn add_client(&mut self, client_id: ClientId) {
+    /// Add a client connection using storage-backed catalogue replay.
+    pub fn add_client_with_storage<H: Storage>(&mut self, storage: &H, client_id: ClientId) {
         self.clients.insert(client_id, ClientState::default());
-        self.queue_catalogue_sync_to_client(client_id);
+        self.queue_catalogue_sync_to_client_from_storage(client_id, storage);
     }
 
     /// Remove a client connection and all associated state.
@@ -233,7 +298,7 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.commit_interest.retain(|_, clients| {
+        self.row_version_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });
@@ -258,6 +323,10 @@ impl SyncManager {
     /// Get server state.
     pub fn get_server(&self, server_id: ServerId) -> Option<&ServerState> {
         self.servers.get(&server_id)
+    }
+
+    pub fn has_servers(&self) -> bool {
+        !self.servers.is_empty()
     }
 
     /// Get client state.
@@ -307,43 +376,6 @@ impl SyncManager {
     }
 
     // ========================================================================
-    // Catalogue Object Creation
-    // ========================================================================
-
-    /// Create an object with initial content for catalogue storage.
-    ///
-    /// Creates an object with the specified ID, metadata, and content.
-    /// The content is stored as a commit on the "main" branch.
-    ///
-    /// Used for storing schemas and lenses in the catalogue.
-    pub fn create_object_with_content<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        content: Vec<u8>,
-    ) {
-        self.track_catalogue_object(object_id, &metadata);
-
-        // Create the object if it doesn't exist
-        if self.object_manager.get(object_id).is_none() {
-            self.object_manager
-                .create_with_id(storage, object_id, Some(metadata));
-        }
-
-        // Add content as a commit on the "main" branch
-        let _ = self.object_manager.add_commit(
-            storage,
-            object_id,
-            "main",
-            Vec::new(), // No parents - root commit
-            content,
-            SYSTEM_PRINCIPAL_ID.to_string(),
-            None,
-        );
-    }
-
-    // ========================================================================
     // Pending Query Subscriptions
     // ========================================================================
 
@@ -368,12 +400,11 @@ impl SyncManager {
         std::mem::take(&mut self.pending_query_unsubscriptions)
     }
 
-    /// Set the scope for a client's query subscription.
-    ///
-    /// Called by QueryManager after building QueryGraph and computing contributing ObjectIds.
-    /// This triggers initial sync of all objects in the scope.
-    pub fn set_client_query_scope(
+    /// Storage-backed version of `set_client_query_scope` that can replay row
+    /// objects directly from storage-backed visible rows.
+    pub fn set_client_query_scope_with_storage<H: Storage + ?Sized>(
         &mut self,
+        storage: &H,
         client_id: ClientId,
         query_id: QueryId,
         scope: HashSet<(ObjectId, BranchName)>,
@@ -383,14 +414,17 @@ impl SyncManager {
             return;
         };
 
-        // Collect all objects currently in any query scope
+        let old_query_scope = client
+            .queries
+            .get(&query_id)
+            .map(|query| query.scope.clone())
+            .unwrap_or_default();
         let old_scope: HashSet<(ObjectId, BranchName)> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
-        // Insert/update the query with the computed scope
         client.queries.insert(
             query_id,
             QueryScope {
@@ -399,20 +433,27 @@ impl SyncManager {
             },
         );
 
-        // Collect all objects now in any query scope
         let new_scope: HashSet<(ObjectId, BranchName)> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
-        // Find newly visible (object, branch) pairs
-        let newly_visible: Vec<(ObjectId, BranchName)> =
-            new_scope.difference(&old_scope).cloned().collect();
+        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+            old_scope.difference(&new_scope).cloned().collect();
+        let newly_visible_for_query: Vec<(ObjectId, BranchName)> =
+            scope.difference(&old_query_scope).cloned().collect();
 
-        // Queue initial syncs for newly visible objects
-        for (object_id, branch_name) in newly_visible {
-            self.queue_initial_sync_to_client(client_id, object_id, branch_name);
+        self.prune_client_scope_tracking(client_id, &no_longer_visible);
+
+        for (object_id, branch_name) in newly_visible_for_query {
+            self.queue_initial_sync_to_client_with_storage(
+                storage,
+                client_id,
+                object_id,
+                branch_name,
+                true,
+            );
         }
     }
 
@@ -421,13 +462,60 @@ impl SyncManager {
     /// Removes per-query scope and origin tracking.
     pub fn drop_client_query_subscription(&mut self, client_id: ClientId, query_id: QueryId) {
         if let Some(client) = self.clients.get_mut(&client_id) {
+            let old_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.scope.iter().cloned())
+                .collect();
             client.queries.remove(&query_id);
+            let new_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.scope.iter().cloned())
+                .collect();
+            let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+                old_scope.difference(&new_scope).cloned().collect();
+            self.prune_client_scope_tracking(client_id, &no_longer_visible);
         }
 
         if let Some(clients) = self.query_origin.get_mut(&query_id) {
             clients.remove(&client_id);
             if clients.is_empty() {
                 self.query_origin.remove(&query_id);
+            }
+        }
+    }
+
+    fn prune_client_scope_tracking(
+        &mut self,
+        client_id: ClientId,
+        removed_scope: &HashSet<(ObjectId, BranchName)>,
+    ) {
+        if removed_scope.is_empty() {
+            return;
+        }
+
+        let mut removed_row_versions = Vec::new();
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return;
+        };
+
+        for &(object_id, branch_name) in removed_scope {
+            if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
+                removed_row_versions.extend(
+                    version_ids
+                        .into_iter()
+                        .map(|version_id| RowVersionKey::new(object_id, branch_name, version_id)),
+                );
+            }
+        }
+
+        for key in removed_row_versions {
+            if let Some(clients) = self.row_version_interest.get_mut(&key) {
+                clients.remove(&client_id);
+                if clients.is_empty() {
+                    self.row_version_interest.remove(&key);
+                }
             }
         }
     }
@@ -494,30 +582,55 @@ impl SyncManager {
     }
 
     /// Take pending QuerySettled notifications for QueryManager to process.
-    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, DurabilityTier)> {
+    pub fn take_pending_query_settled(&mut self) -> Vec<PendingQuerySettled> {
         std::mem::take(&mut self.pending_query_settled)
     }
 
-    /// Take received persistence acks since last call.
-    /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
-    pub fn take_received_acks(&mut self) -> Vec<(CommitId, DurabilityTier)> {
-        std::mem::take(&mut self.received_acks)
+    /// Re-queue QuerySettled notifications that are still blocked on stream sequencing.
+    pub fn requeue_pending_query_settled(&mut self, pending: Vec<PendingQuerySettled>) {
+        self.pending_query_settled.extend(pending);
+    }
+
+    /// Take received row-version persistence state since last call.
+    /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
+    pub fn take_received_row_version_acks(&mut self) -> Vec<(RowVersionKey, DurabilityTier)> {
+        std::mem::take(&mut self.received_row_version_acks)
+    }
+
+    /// Take pending row visibility changes for QueryManager to materialize
+    /// into indices and subscriptions.
+    pub fn take_pending_row_visibility_changes(&mut self) -> Vec<RowVisibilityChange> {
+        std::mem::take(&mut self.pending_row_visibility_changes)
+    }
+
+    /// Take pending catalogue/system entry updates for QueryManager/SchemaManager.
+    pub fn take_pending_catalogue_updates(&mut self) -> Vec<CatalogueEntry> {
+        std::mem::take(&mut self.pending_catalogue_updates)
+    }
+
+    /// Requeue row visibility changes that could not be processed yet,
+    /// typically because the corresponding schema has not been activated yet.
+    pub fn requeue_pending_row_visibility_changes(&mut self, updates: Vec<RowVisibilityChange>) {
+        self.pending_row_visibility_changes.extend(updates);
     }
 
     /// Emit a QuerySettled notification to a client.
     ///
     /// Called by QueryManager when a server subscription settles for the first time.
-    pub fn emit_query_settled(&mut self, client_id: ClientId, query_id: QueryId) {
-        for tier in self.my_tiers.iter().copied() {
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(client_id),
-                payload: SyncPayload::QuerySettled {
-                    query_id,
-                    tier,
-                    through_seq: 0,
-                },
-            });
-        }
+    pub fn emit_query_settled(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        tier: DurabilityTier,
+    ) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::QuerySettled {
+                query_id,
+                tier,
+                through_seq: 0,
+            },
+        });
     }
 
     /// Emit a schema warning to a client.

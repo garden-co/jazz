@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
@@ -12,19 +12,19 @@ use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
-use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
-#[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
-use crate::storage::FjallStorage;
+use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
+use crate::server::{
+    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ExternalIdentityStore, ServerState,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
+use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
 
+#[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
-const SYNC_BROADCAST_CAPACITY: usize = 256;
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -70,7 +70,10 @@ impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig::default(),
+            auth_config: AuthConfig {
+                allow_local_first_auth: true,
+                ..Default::default()
+            },
             catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_mode: ServerStorageMode::Persistent {
@@ -87,6 +90,11 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
+        self
+    }
+
+    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
+        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 
@@ -143,7 +151,7 @@ impl ServerBuilder {
         let jwks_cache = build_jwks_cache(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
-        let (runtime, sync_broadcast) = self.build_runtime()?;
+        let (runtime, connection_event_hub) = self.build_runtime()?;
         let external_identity_store = Arc::new(self.build_external_identity_store()?);
         let http_client = reqwest::Client::builder()
             .build()
@@ -163,7 +171,7 @@ impl ServerBuilder {
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast,
+            connection_event_hub,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
             jwks_cache,
@@ -199,17 +207,9 @@ impl ServerBuilder {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_runtime(
-        &self,
-    ) -> Result<
-        (
-            TokioRuntime<DynStorage>,
-            broadcast::Sender<(ClientId, SyncPayload)>,
-        ),
-        String,
-    > {
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(SYNC_BROADCAST_CAPACITY);
-        let sync_tx_clone = sync_tx.clone();
+    fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
+        let connection_event_hub = Arc::new(ConnectionEventHub::default());
+        let dispatch_hub = Arc::clone(&connection_event_hub);
         let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
@@ -220,11 +220,11 @@ impl ServerBuilder {
                 if let Some(ref tracer) = tracer_for_outgoing {
                     tracer.record_outgoing("server", &entry.destination, &entry.payload);
                 }
-                let _ = sync_tx_clone.send((client_id, entry.payload));
+                dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
 
-        Ok((runtime, sync_tx))
+        Ok((runtime, connection_event_hub))
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
@@ -234,7 +234,7 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => {
                 let mut schema_manager =
                     SchemaManager::new_server(sync_manager, self.app_id, "prod");
-                rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, self.app_id)
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
                     .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
                 Ok(schema_manager)
             }
@@ -268,14 +268,9 @@ impl ServerBuilder {
                     })?;
                     Ok(Box::new(storage))
                 }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
+                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
                 {
-                    let db_path = Path::new(data_dir).join("jazz.fjall");
-                    let storage =
-                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                            format!("failed to open storage '{}': {e:?}", db_path.display())
-                        })?;
-                    Ok(Box::new(storage))
+                    Ok(Box::new(MemoryStorage::new()))
                 }
             }
             #[cfg(feature = "sqlite")]
@@ -328,14 +323,9 @@ impl ServerBuilder {
                     })?;
                     ExternalIdentityStore::new_with_storage(Box::new(storage))
                 }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
+                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
                 {
-                    let db_path = meta_dir.join("jazz.fjall");
-                    let storage =
-                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                        })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
+                    ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
                 }
             }
             #[cfg(feature = "sqlite")]
@@ -388,7 +378,7 @@ fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     )
 }
 
-async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
+async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<Arc<JwksCache>>, String> {
     let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
         return Ok(None);
     };
@@ -404,16 +394,33 @@ async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>,
         .map(Duration::from_secs)
         .unwrap_or(JWKS_MAX_STALE);
 
-    let cache = JwksCache::new(
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
+
+    let cache = Arc::new(JwksCache::new(
         jwks_url.clone(),
-        reqwest::Client::new(),
+        http_client,
         jwks_ttl,
         jwks_max_stale,
-    );
-    cache
-        .load(false)
-        .await
-        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+    ));
+
+    // Warm the cache in the background. The JWKS endpoint may not be
+    // available yet (e.g. Jazz server starts during Next.js config resolution,
+    // before the app is listening). First auth request will block on fetch
+    // if the background warm hasn't completed.
+    {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            if let Err(e) = cache.load(false).await {
+                tracing::warn!(
+                    "Background JWKS warm failed (will retry on first auth request): {e}"
+                );
+            }
+        });
+    }
 
     Ok(Some(cache))
 }
@@ -443,22 +450,14 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
             format!("forward({base_url})")
         }
     };
-    if auth_config.is_configured() {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
-            auth_config.allow_anonymous,
-            auth_config.allow_demo,
-            auth_config.jwks_url.is_some(),
-            auth_config.backend_secret.is_some(),
-            auth_config.admin_secret.is_some(),
-            authority_mode
-        );
-    } else {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
-            auth_config.allow_anonymous, auth_config.allow_demo, authority_mode
-        );
-    }
+    info!(
+        "Auth configured: local_first={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+        auth_config.allow_local_first_auth,
+        auth_config.jwks_url.is_some(),
+        auth_config.backend_secret.is_some(),
+        auth_config.admin_secret.is_some(),
+        authority_mode
+    );
 }
 
 #[cfg(test)]

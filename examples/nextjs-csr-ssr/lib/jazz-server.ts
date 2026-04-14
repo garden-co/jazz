@@ -13,13 +13,12 @@ const { createJazzContext } = nodeRequire(
 ) as typeof import("jazz-tools/backend");
 
 const context = createJazzContext({
-  appId: process.env.NEXT_PUBLIC_APP_ID!,
+  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
   app: schemaApp,
   permissions: {},
   driver: { type: "memory" },
-  serverUrl: process.env.NEXT_PUBLIC_SYNC_SERVER_URL!,
+  serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
   backendSecret: process.env.BACKEND_SECRET!,
-  tier: "worker",
 });
 
 export const db = context.asBackend();

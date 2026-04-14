@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 
 import {
   buildIndex,
@@ -11,6 +12,8 @@ import {
   resolveIncludes,
   splitIntoSections,
 } from "./build-index.js";
+
+const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -405,4 +408,53 @@ describe("buildIndex", () => {
       await cleanupFixtureTree(tmpDir);
     }
   }, 10_000);
+});
+
+describe("packaged docs index", () => {
+  it("ships current auth docs in docs-index.txt", async () => {
+    const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
+
+    expect(txt).toContain("===PAGE:auth/local-first-auth===");
+    // <APP_ID> is stripped by the JSX tag stripper (uppercase-initial tag)
+    expect(txt).toContain("jazz-tools server  --allow-local-first-auth");
+    expect(txt).toContain(
+      'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
+    );
+    expect(txt).toContain(
+      "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
+    );
+
+    expect(txt).not.toContain("allowSelfSigned");
+    expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");
+  });
+
+  it("ships current auth docs in docs-index.db", () => {
+    const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
+
+    try {
+      const localFirstPage = db
+        .prepare("SELECT body FROM pages WHERE slug = 'auth/local-first-auth'")
+        .get() as { body: string } | undefined;
+      const serverSetupPage = db
+        .prepare("SELECT body FROM pages WHERE slug = 'getting-started/server-setup'")
+        .get() as { body: string } | undefined;
+      const quickstartPage = db
+        .prepare("SELECT body FROM pages WHERE slug = 'quickstarts/typescript-server'")
+        .get() as { body: string } | undefined;
+      const authProviderPage = db
+        .prepare("SELECT body FROM pages WHERE slug = 'recipes/auth-provider-integration'")
+        .get() as { body: string } | undefined;
+
+      expect(localFirstPage?.body).toContain("jazz-tools server  --allow-local-first-auth");
+      expect(serverSetupPage?.body).toContain("--allow-local-first-auth");
+      expect(quickstartPage?.body).toContain(
+        'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
+      );
+      expect(authProviderPage?.body).toContain(
+        "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
+      );
+    } finally {
+      db.close();
+    }
+  });
 });

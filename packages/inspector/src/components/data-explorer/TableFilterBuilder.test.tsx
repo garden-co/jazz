@@ -162,8 +162,9 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove filter on title" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove filter on title" })[0] as Element,
+    );
     expect(onClausesChange).toHaveBeenCalledWith([
       { id: "b", column: "count", operator: "gt", value: 1 },
     ]);
@@ -184,6 +185,7 @@ describe("TableFilterBuilder", () => {
     );
 
     expect(screen.getByRole("button", { name: "Filter (2)" })).not.toBeNull();
-    expect(screen.getByText("title contains alpha AND count gt 1")).not.toBeNull();
+    expect(screen.getAllByText("title contains alpha").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("count gt 1").length).toBeGreaterThan(0);
   });
 });

@@ -1,7 +1,10 @@
-import type { NextConfig } from "next";
+import { withJazz } from "jazz-tools/dev/next";
 
-const nextConfig: NextConfig = {
-  serverExternalPackages: ["jazz-napi", "jazz-tools"],
-};
-
-export default nextConfig;
+export default withJazz(
+  {},
+  {
+    server: {
+      backendSecret: "dev-backend-secret",
+    },
+  },
+);

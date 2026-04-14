@@ -71,25 +71,6 @@ describe("react/create-jazz-client integration", () => {
     }
   }, 15000);
 
-  it("RC-I02: local auth defaults return a non-null local session in local mode", async () => {
-    let client: JazzClient | null = null;
-
-    try {
-      client = await createJazzClient({
-        appId: makeAppId("local-session"),
-        localAuthMode: "anonymous",
-      });
-
-      expect(client.session).not.toBeNull();
-      expect(client.session?.claims.auth_mode).toBe("local");
-      expect(client.session?.claims.local_mode).toBe("anonymous");
-    } finally {
-      if (client) {
-        await client.shutdown();
-      }
-    }
-  }, 15000);
-
   it("RC-I03: shutdown after activity releases resources cleanly", async () => {
     let client: JazzClient | null = null;
 

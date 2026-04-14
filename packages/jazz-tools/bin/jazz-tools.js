@@ -98,11 +98,13 @@ function printWrapperHelp() {
   console.log("");
   console.log("Commands:");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
-  console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log(
+    "  schema export         Print structural schema JSON from schema.ts or a schema hash",
+  );
   console.log("  permissions status    Show the current server permissions head for this app");
   console.log("  permissions push      Publish the current permissions.ts with head-parent checks");
   console.log(
-    "  migrations create     Generate a typed structural migration stub from two known schema hashes",
+    "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
   console.log("  migrations push       Push a reviewed migration edge to the server");
   console.log("  create                Create a new resource");

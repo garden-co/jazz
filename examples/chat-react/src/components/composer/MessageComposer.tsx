@@ -19,6 +19,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   const userId = session?.user_id ?? null;
 
   const myProfile = useMyProfile();
+  const composerReady = !!userId && !!myProfile;
 
   const handleSend = useCallback(
     (html: string) => {
@@ -37,39 +38,49 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
 
   const handleSendAttachment = useCallback(
     async (attachment: AttachmentData) => {
-      if (!userId || !myProfile) return;
+      if (!userId || !myProfile) {
+        throw new Error("Profile is still loading. Please try again.");
+      }
 
-      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "edge" });
+      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "worker" });
 
-      const message = db.insert(app.messages, {
-        chatId,
-        text: "",
-        senderId: myProfile.id,
-        createdAt: new Date(),
-      });
+      const message = await db.insertDurable(
+        app.messages,
+        {
+          chatId,
+          text: "",
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        },
+        { tier: "worker" },
+      );
 
-      db.insert(app.attachments, {
-        messageId: message.id,
-        type: attachment.type,
-        name: attachment.file.name,
-        fileId: storedFile.id,
-        size: attachment.file.size,
-      });
+      await db.insertDurable(
+        app.attachments,
+        {
+          messageId: message.id,
+          type: attachment.type,
+          name: attachment.file.name,
+          fileId: storedFile.id,
+          size: attachment.file.size,
+        },
+        { tier: "worker" },
+      );
     },
     [userId, chatId, db, myProfile],
   );
 
   return (
     <div className="m-2 flex items-end gap-2">
-      <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} />
+      <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} disabled={!composerReady} />
 
-      <Editor ref={editorRef} onSend={handleSend} disabled={!userId} />
+      <Editor ref={editorRef} onSend={handleSend} disabled={!composerReady} />
 
       <Button
         variant="outline"
         size="icon-lg"
         onClick={() => editorRef.current?.send()}
-        disabled={!userId}
+        disabled={!composerReady}
       >
         <SendIcon />
       </Button>

@@ -75,7 +75,7 @@ fn index_scan_ordered(
 ) -> Vec<(Value, ObjectId)>;
 ```
 
-All three backends (MemoryStorage, OpfsBTreeStorage, FjallStorage) already iterate in sorted order internally — BTreeMap::range(), opfs-btree range(), fjall range(). The new method just exposes this with direction + take + skip parameters.
+The current storage backends already iterate in sorted order internally — `BTreeMap::range()` for `MemoryStorage`, ordered scans in `opfs-btree`, and ordered native KV iteration for durable native backends such as RocksDB/SQLite. The new method just exposes this with direction + take + skip parameters.
 
 Also add **cardinality methods** for planner strategy selection:
 
@@ -87,7 +87,7 @@ fn index_count(&self, table: &str, column: &str, branch: &str, value: &Value) ->
 fn index_count_all(&self, table: &str, column: &str, branch: &str) -> usize;
 ```
 
-For MemoryStorage: `index_count` is `btree.get(encode(value)).map(|set| set.len())` — O(1) hash lookup + set size. `index_count_all` sums all set sizes (or maintains a running counter on insert/remove for O(1)). OpfsBTree and Fjall can count matching keys in a prefix scan.
+For `MemoryStorage`, `index_count` is `btree.get(encode(value)).map(|set| set.len())` — O(1) hash lookup + set size. `index_count_all` sums all set sizes (or maintains a running counter on insert/remove for O(1)). Durable ordered backends can count matching keys in a prefix scan.
 
 These give the planner **exact cardinality** — no histograms, no estimation. The data structures already exist; we're just exposing their size.
 

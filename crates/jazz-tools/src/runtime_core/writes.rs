@@ -20,6 +20,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let row_id = result.row_id;
         let row_values = result.row_values;
         debug!(object_id = %row_id, "inserted");
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok((row_id, row_values))
     }
@@ -36,6 +37,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())
     }
@@ -51,6 +53,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         debug!("deleted");
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())
     }
@@ -73,8 +76,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
-        let row_commit_id = result.row_commit_id;
+        let row_version_id = result.row_version_id;
         let row_values = result.row_values;
+        let row_version_key =
+            RowVersionKey::new(row_id, self.schema_manager.branch_name(), row_version_id);
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -86,11 +91,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(row_commit_id)
+                .entry(row_version_key)
                 .or_default()
                 .push((tier, sender));
         }
 
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(((row_id, row_values), receiver))
     }
@@ -104,10 +110,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
-        let commit_id = self
+        let version_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_version_key =
+            RowVersionKey::new(object_id, self.schema_manager.branch_name(), version_id);
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -119,11 +127,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(commit_id)
+                .entry(row_version_key)
                 .or_default()
                 .push((tier, sender));
         }
 
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(receiver)
     }
@@ -140,6 +149,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_version_key = RowVersionKey::new(
+            handle.row_id,
+            self.schema_manager.branch_name(),
+            handle.delete_version_id,
+        );
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -151,11 +165,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(handle.delete_commit_id)
+                .entry(row_version_key)
                 .or_default()
                 .push((tier, sender));
         }
 
+        self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(receiver)
     }

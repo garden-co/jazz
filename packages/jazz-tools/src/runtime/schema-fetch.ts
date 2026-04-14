@@ -12,7 +12,7 @@ export interface FetchStoredWasmSchemaOptions {
 export async function fetchStoredWasmSchema(
   serverUrl: string,
   options: FetchStoredWasmSchemaOptions,
-): Promise<{ schema: WasmSchema }> {
+): Promise<{ schema: WasmSchema; publishedAt: number | null }> {
   const schemaUrl = buildEndpointUrl(
     serverUrl,
     `/schema/${encodeURIComponent(options.schemaHash)}`,
@@ -32,8 +32,15 @@ export async function fetchStoredWasmSchema(
     throw new Error(`Schema fetch failed: ${response.status} ${response.statusText}${detail}`);
   }
 
-  const schema = (await response.json()) as WasmSchema;
-  return { schema };
+  const body = (await response.json()) as {
+    schema: WasmSchema;
+    publishedAt?: number | null;
+  };
+
+  return {
+    schema: body.schema,
+    publishedAt: body.publishedAt ?? null,
+  };
 }
 
 export interface FetchStoredSchemasOptions {
@@ -197,13 +204,13 @@ export type PublishedMigrationOp =
   | {
       type: "introduce";
       column: string;
-      columnType: ColumnType;
+      column_type: ColumnType;
       value: PublishedMigrationValue;
     }
   | {
       type: "drop";
       column: string;
-      columnType: ColumnType;
+      column_type: ColumnType;
       value: PublishedMigrationValue;
     }
   | {
@@ -214,6 +221,9 @@ export type PublishedMigrationOp =
 
 export interface PublishedTableLens {
   table: string;
+  added?: boolean;
+  removed?: boolean;
+  renamedFrom?: string;
   operations: PublishedMigrationOp[];
 }
 

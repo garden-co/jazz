@@ -9,17 +9,17 @@ use crate::storage::Storage;
 
 use crate::schema_manager::SchemaContext;
 
-use super::graph::{GraphNode, QueryGraph};
+use super::graph::{GraphNode, QueryGraph, RelationCompileFeatures};
 use super::graph_nodes::NodeId;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::materialize::MaterializeNode;
-use super::graph_nodes::policy_filter::PolicyFilterNode;
+use super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{LoadedRow, Schema, TableName, TupleDescriptor, Value};
+use super::types::{LoadedRow, RowPolicyMode, Schema, TableName, TupleDescriptor, Value};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -35,6 +35,28 @@ pub struct PolicyGraph {
     table: TableName,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PolicyGraphBuildOptions<'a> {
+    branch: &'a str,
+    initial_depth: usize,
+    row_policy_mode: RowPolicyMode,
+}
+
+impl<'a> PolicyGraphBuildOptions<'a> {
+    pub(crate) fn new(branch: &'a str, row_policy_mode: RowPolicyMode) -> Self {
+        Self {
+            branch,
+            initial_depth: 0,
+            row_policy_mode,
+        }
+    }
+
+    pub(crate) fn with_initial_depth(mut self, initial_depth: usize) -> Self {
+        self.initial_depth = initial_depth;
+        self
+    }
+}
+
 impl PolicyGraph {
     /// Create a graph for USING check: can session see this specific row?
     ///
@@ -48,19 +70,26 @@ impl PolicyGraph {
         session: &Session,
         schema: &Schema,
         branch: &str,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
-        Self::for_using_check_with_depth(table, object_id, policy, session, schema, branch, 0)
+        Self::for_using_check_with_options(
+            table,
+            object_id,
+            policy,
+            session,
+            schema,
+            PolicyGraphBuildOptions::new(branch, row_policy_mode),
+        )
     }
 
-    /// Create a graph for USING check with an explicit initial recursion depth.
-    pub fn for_using_check_with_depth(
+    /// Create a graph for USING check with explicit build options.
+    fn for_using_check_with_options(
         table: &TableName,
         object_id: ObjectId,
         policy: &PolicyExpr,
         session: &Session,
         schema: &Schema,
-        branch: &str,
-        initial_depth: usize,
+        options: PolicyGraphBuildOptions<'_>,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.columns.clone();
@@ -72,7 +101,7 @@ impl PolicyGraph {
         let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
-            branch,
+            options.branch,
             ScanCondition::Eq(Value::Uuid(object_id)),
             descriptor.clone(),
         );
@@ -86,14 +115,15 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate policy against row
-        let policy_node = PolicyFilterNode::new_with_branch_and_depth(
+        let policy_node = PolicyFilterNode::new_with_options(
             descriptor.clone(),
             policy.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
-            branch,
-            initial_depth,
+            PolicyFilterOptions::for_branch(options.branch)
+                .with_initial_depth(options.initial_depth)
+                .with_row_policy_mode(options.row_policy_mode),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -117,24 +147,22 @@ impl PolicyGraph {
     /// Graph structure: IndexScan(parent_table, _id = parent_id) → Materialize → PolicyFilter → ExistsOutput
     ///
     /// Returns None if the parent table is not in the schema.
-    pub fn for_inherits(
+    pub(crate) fn for_inherits(
         parent_table: &TableName,
         parent_id: ObjectId,
         parent_policy: &PolicyExpr,
         session: &Session,
         schema: &Schema,
-        branch: &str,
-        initial_depth: usize,
+        options: PolicyGraphBuildOptions<'_>,
     ) -> Option<Self> {
         // INHERITS is essentially the same as a USING check on the parent table
-        Self::for_using_check_with_depth(
+        Self::for_using_check_with_options(
             parent_table,
             parent_id,
             parent_policy,
             session,
             schema,
-            branch,
-            initial_depth,
+            options,
         )
     }
 
@@ -149,6 +177,7 @@ impl PolicyGraph {
         session: &Session,
         schema: &Schema,
         branch: &str,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.columns.clone();
@@ -174,13 +203,14 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate condition against each row
-        let policy_node = PolicyFilterNode::new_with_branch(
+        let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
             descriptor.clone(),
             condition.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
             branch,
+            row_policy_mode,
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -207,15 +237,19 @@ impl PolicyGraph {
         rel: &crate::query_manager::relation_ir::RelExpr,
         schema: &Schema,
         branch: &str,
+        session: Option<Session>,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let branches = vec![branch.to_string()];
         let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
-        let mut graph = QueryGraph::compile_relation_ir_with_schema_context(
+        let mut graph = QueryGraph::compile_relation_ir_with_schema_context_and_features(
             rel,
             schema,
             &branches,
-            None,
+            session,
             &schema_context,
+            RelationCompileFeatures::default(),
+            row_policy_mode,
         )?;
         let output_descriptor = match graph
             .nodes
@@ -240,15 +274,16 @@ impl PolicyGraph {
 
     /// Settle the graph. With synchronous Storage, always completes in one pass.
     ///
-    /// The row_loader trait object is used to fetch row content by ObjectId.
+    /// The row_loader trait object is used to fetch row content by ObjectId and
+    /// optional table hint.
     /// Using trait object instead of generic to avoid recursion limit when
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let _delta = self.graph.settle(io, row_loader);
+        let _delta = self.graph.settle(io, &mut |id, hint| row_loader(id, hint));
         true
     }
 
@@ -327,8 +362,15 @@ mod tests {
 
         let policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
 
-        let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
+        let policy_graph = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            "main",
+            RowPolicyMode::PermissiveLocal,
+        );
 
         assert!(policy_graph.is_some());
 
@@ -346,8 +388,15 @@ mod tests {
 
         let policy = PolicyExpr::True;
 
-        let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
+        let policy_graph = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            "main",
+            RowPolicyMode::PermissiveLocal,
+        );
 
         assert!(policy_graph.is_none());
     }
@@ -361,9 +410,16 @@ mod tests {
 
         let policy = PolicyExpr::True;
 
-        let pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
-                .unwrap();
+        let pg = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            "main",
+            RowPolicyMode::PermissiveLocal,
+        )
+        .unwrap();
 
         // Before settling, result should be false (no rows yet)
         // But it might be pending since we haven't settled
@@ -380,15 +436,23 @@ mod tests {
         // PolicyExpr::True should always pass
         let policy = PolicyExpr::True;
 
-        let mut pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
-                .unwrap();
+        let mut pg = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            "main",
+            RowPolicyMode::PermissiveLocal,
+        )
+        .unwrap();
 
         // With no actual data in storage, the scan will return no rows
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
-        let mut row_loader = |_id: ObjectId| -> Option<LoadedRow> { None };
+        let mut row_loader =
+            |_id: ObjectId, _hint: Option<TableName>| -> Option<LoadedRow> { None };
 
         // Settle the graph
         pg.settle(&storage, &mut row_loader);
@@ -411,7 +475,13 @@ mod tests {
             },
         };
 
-        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        let graph = PolicyGraph::for_exists_rel(
+            &rel,
+            &schema,
+            "main",
+            None,
+            RowPolicyMode::PermissiveLocal,
+        );
         assert!(graph.is_some(), "exists-rel graph should compile");
 
         let graph = graph.expect("graph");
@@ -522,7 +592,13 @@ mod tests {
             }],
         };
 
-        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        let graph = PolicyGraph::for_exists_rel(
+            &rel,
+            &schema,
+            "main",
+            None,
+            RowPolicyMode::PermissiveLocal,
+        );
         assert!(
             graph.is_some(),
             "gather + post-join exists-rel should compile"

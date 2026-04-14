@@ -94,6 +94,13 @@ function scenarioLabel(scenario) {
   return parts.join(" / ");
 }
 
+function storageEngineLabel(storageEngine) {
+  if (storageEngine === "rocksdb") return "RocksDB";
+  if (storageEngine === "sqlite") return "SQLite";
+  if (storageEngine === "opfs-btree") return "OPFS-btree";
+  return storageEngine || "default";
+}
+
 function scenarioMap(run) {
   const map = new Map();
   for (const scenario of run?.scenarios ?? []) {
@@ -195,10 +202,15 @@ function fmtPct(value) {
   return `${sign}${fmt(Math.abs(value))}%`;
 }
 
-function latestRun(runs, branch, suite, profile) {
+function latestRun(runs, branch, suite, storageEngine, profile) {
   return (
-    runs.find((run) => run.branch === branch && run.suite === suite && run.profile === profile) ??
-    null
+    runs.find(
+      (run) =>
+        run.branch === branch &&
+        run.suite === suite &&
+        (run.storage_engine ?? null) === (storageEngine ?? null) &&
+        run.profile === profile,
+    ) ?? null
   );
 }
 
@@ -269,7 +281,11 @@ function render(history, args) {
       (!profileFilter || run.profile === profileFilter),
   );
 
-  const suites = unique(candidateRuns.map((run) => run.suite).filter(Boolean)).sort();
+  const lanes = unique(
+    candidateRuns
+      .map((run) => [run.suite || "", run.storage_engine || ""].join("::"))
+      .filter(Boolean),
+  ).sort();
   const profiles = unique(candidateRuns.map((run) => run.profile).filter(Boolean)).sort();
 
   const sections = [];
@@ -282,15 +298,16 @@ function render(history, args) {
 
   let renderedComparisons = 0;
 
-  for (const suite of suites) {
+  for (const lane of lanes) {
+    const [suite, storageEngine] = lane.split("::");
     const suiteProfiles = profileFilter ? [profileFilter] : profiles.filter(Boolean);
     for (const profile of suiteProfiles) {
-      const baseRun = latestRun(runs, args.baseBranch, suite, profile);
-      const headRun = latestRun(runs, args.headBranch, suite, profile);
+      const baseRun = latestRun(runs, args.baseBranch, suite, storageEngine, profile);
+      const headRun = latestRun(runs, args.headBranch, suite, storageEngine, profile);
       if (!baseRun || !headRun) continue;
 
       const rows = comparableRows(baseRun, headRun);
-      sections.push(`## ${suite} / profile ${profile}`);
+      sections.push(`## ${suite} / ${storageEngineLabel(storageEngine)} / profile ${profile}`);
       sections.push(``);
       sections.push(
         `Base ${String(baseRun.sha ?? "").slice(0, 12)} (${baseRun.generated_at ?? "n/a"}) vs Head ${String(

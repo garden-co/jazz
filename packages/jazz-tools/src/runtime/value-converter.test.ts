@@ -219,12 +219,11 @@ describe("toInsertRecord", () => {
     };
 
     const result = toInsertRecord(data, schema, "todos");
+    const payload = result.payload as { type: "Bytea"; value: Uint8Array };
 
-    expect(result.payload?.type).toBe("Bytea");
-    expect(result.payload?.value).toBeInstanceOf(Uint8Array);
-    expect(Array.from((result.payload as { type: "Bytea"; value: Uint8Array }).value)).toEqual([
-      1, 2, 3,
-    ]);
+    expect(payload.type).toBe("Bytea");
+    expect(payload.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(payload.value)).toEqual([1, 2, 3]);
   });
 
   it("throws for unknown table", () => {
@@ -297,12 +296,11 @@ describe("toUpdateRecord", () => {
   it("normalizes Bytea updates to JSON-friendly byte arrays", () => {
     const data = { payload: new Uint8Array([4, 5, 6]) };
     const result = toUpdateRecord(data, schema, "todos");
+    const payload = result.payload as { type: "Bytea"; value: Uint8Array };
 
-    expect(result.payload?.type).toBe("Bytea");
-    expect(result.payload?.value).toBeInstanceOf(Uint8Array);
-    expect(Array.from((result.payload as { type: "Bytea"; value: Uint8Array }).value)).toEqual([
-      4, 5, 6,
-    ]);
+    expect(payload.type).toBe("Bytea");
+    expect(payload.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(payload.value)).toEqual([4, 5, 6]);
   });
 
   it("throws when null is used to unset a required field", () => {

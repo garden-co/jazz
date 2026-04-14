@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -6,7 +6,6 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +15,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
-import { loadCompiledSchema } from "../schema-loader.js";
+import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
@@ -122,9 +121,6 @@ type SyncCaptureServerHandle = {
   stop(): Promise<void>;
 };
 
-const JWT_KID = "napi-test-kid";
-const JWT_SECRET = "napi-test-secret";
-
 const TEST_SCHEMA: WasmSchema = {
   todos: {
     columns: [
@@ -176,15 +172,13 @@ const FILE_STORAGE_SCHEMA: WasmSchema = {
   },
 };
 
-let todoServerWasmSchemaPromise: Promise<WasmSchema> | null = null;
+let todoServerProjectPromise: Promise<LoadedSchemaProject> | null = null;
 
-async function loadTodoServerWasmSchema(): Promise<WasmSchema> {
-  if (!todoServerWasmSchemaPromise) {
-    todoServerWasmSchemaPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR).then(
-      (compiled) => compiled.wasmSchema,
-    );
+async function loadTodoServerProject(): Promise<LoadedSchemaProject> {
+  if (!todoServerProjectPromise) {
+    todoServerProjectPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR);
   }
-  return await todoServerWasmSchemaPromise;
+  return await todoServerProjectPromise;
 }
 
 const simpleTodosTable: TableProxy<SimpleTodo, SimpleTodoInit> = {
@@ -273,23 +267,6 @@ function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, Policy
   };
 }
 
-function makeAllPolicyTodosQuery(schema: WasmSchema): QueryBuilder<PolicyTodo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: undefined as unknown as PolicyTodo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        offset: 0,
-      });
-    },
-  };
-}
-
 function makePolicyTodoByIdQuery(schema: WasmSchema, id: string): QueryBuilder<PolicyTodo> {
   return {
     _table: "todos",
@@ -342,28 +319,6 @@ async function readRequestBody(request: IncomingMessage): Promise<string> {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString("utf8");
-}
-
-async function getAvailablePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close((error) => {
-          if (error) reject(error);
-          else reject(new Error("failed to allocate an available port"));
-        });
-        return;
-      }
-
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(address.port);
-      });
-    });
-  });
 }
 
 async function listen(server: HttpServer): Promise<number> {
@@ -517,60 +472,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-function base64Url(input: Buffer | string): string {
-  const encoded = (input instanceof Buffer ? input : Buffer.from(input)).toString("base64");
-  return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-class JwksServer {
-  private readonly server: HttpServer;
-  readonly url: string;
-
-  private constructor(server: HttpServer, url: string) {
-    this.server = server;
-    this.url = url;
-  }
-
-  static async start(secret: string): Promise<JwksServer> {
-    const server = createHttpServer((request, response) => {
-      if (request.url !== "/jwks") {
-        response.statusCode = 404;
-        response.end("not found");
-        return;
-      }
-
-      response.statusCode = 200;
-      response.setHeader("Content-Type", "application/json");
-      response.end(
-        JSON.stringify({
-          keys: [
-            {
-              kty: "oct",
-              kid: JWT_KID,
-              alg: "HS256",
-              k: base64Url(secret),
-            },
-          ],
-        }),
-      );
-    });
-
-    const port = await getAvailablePort();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, "127.0.0.1", (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    return new JwksServer(server, `http://127.0.0.1:${port}/jwks`);
-  }
-
-  async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-}
-
 function isNestedOutboxCall(call: unknown[]): call is [null, [string, string, string, boolean]] {
   return (
     call[0] === null &&
@@ -611,21 +512,6 @@ async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
-function toBase64Url(value: unknown): string {
-  return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
-}
-
-function makeJwt(payload: Record<string, unknown>): string {
-  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
-}
-
-function signJwt(payload: Record<string, unknown>, secret: string): string {
-  const header = { alg: "HS256", typ: "JWT", kid: JWT_KID };
-  const signedPart = `${toBase64Url(header)}.${toBase64Url(payload)}`;
-  const signature = createHmac("sha256", secret).update(signedPart).digest();
-  return `${signedPart}.${base64Url(signature)}`;
-}
-
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
   return JSON.stringify({
     QuerySubscription: {
@@ -641,10 +527,31 @@ async function createTempDir(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), prefix));
 }
 
+type TempRuntimeData = {
+  dataRoot: string;
+  dataPath: string;
+};
+
+async function createTempRuntimeData(prefix: string): Promise<TempRuntimeData> {
+  const dataRoot = await createTempDir(prefix);
+  return {
+    dataRoot,
+    dataPath: join(dataRoot, "runtime.db"),
+  };
+}
+
+async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<void> {
+  if (!data) {
+    return;
+  }
+  await rm(data.dataRoot, { recursive: true, force: true });
+}
+
 describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const { NapiRuntime } = await loadNapiModule();
-    const dataPath = await createTempDir("jazz-napi-large-index-");
+    const dataDir = await createTempDir("jazz-napi-large-index-");
+    const dataPath = join(dataDir, "jazz.db");
     const runtime = new NapiRuntime(
       serializeRuntimeSchema(TEST_SCHEMA),
       `napi-large-index-${randomUUID()}`,
@@ -700,7 +607,7 @@ describe("NAPI integration", () => {
       expect(updatedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
     } finally {
       runtime.close();
-      await rm(dataPath, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
     }
   }, 20_000);
 
@@ -794,7 +701,7 @@ describe("NAPI integration", () => {
               isNestedOutboxCall(call) &&
               call[1][0] === "client" &&
               call[1][1] === clientId &&
-              hasPayloadKind(call[1][2], "ObjectUpdated"),
+              hasPayloadKind(call[1][2], "RowVersionNeeded"),
           ),
         ).toBe(true);
       },
@@ -807,6 +714,7 @@ describe("NAPI integration", () => {
 
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
     const captureServer = await startSyncCaptureServer();
+    let runtimeData: TempRuntimeData | null = null;
     let context: {
       asBackend(): Db;
       shutdown(): Promise<void>;
@@ -814,11 +722,12 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      runtimeData = await createTempRuntimeData("jazz-napi-backend-sync-");
       context = createJazzContext({
         appId: `napi-backend-sync-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "memory" },
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
       });
@@ -857,13 +766,13 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
       await captureServer.stop();
     }
   }, 20_000);
 
-  it("replays active backend query subscriptions after the events stream reconnects", async () => {
+  it("posts catalogue sync with admin auth even in backend mode", async () => {
     const captureServer = await startSyncCaptureServer();
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     let context: {
       asBackend(): Db;
       shutdown(): Promise<void>;
@@ -872,10 +781,77 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       context = createJazzContext({
-        appId: `napi-backend-reconnect-${randomUUID()}`,
+        appId: `napi-backend-catalogue-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
         driver: { type: "memory" },
+        serverUrl: captureServer.baseUrl,
+        backendSecret: "napi-backend-secret",
+        adminSecret: "napi-admin-secret",
+      });
+
+      const db = context.asBackend();
+      const unsubscribe = db.subscribeAll(allTodosQuery, () => undefined, { tier: "edge" });
+
+      await vi.waitFor(
+        () =>
+          expect(
+            captureServer.syncRequests.some((request) =>
+              request.body.payloads.some(
+                (payload) =>
+                  typeof payload === "object" &&
+                  payload !== null &&
+                  "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+              ),
+            ),
+          ).toBe(true),
+        {
+          timeout: 15_000,
+        },
+      );
+
+      const request = captureServer.syncRequests.find((candidate) =>
+        candidate.body.payloads.some(
+          (payload) =>
+            typeof payload === "object" &&
+            payload !== null &&
+            "CatalogueEntryUpdated" in (payload as Record<string, unknown>),
+        ),
+      );
+      if (!request) {
+        throw new Error("expected a CatalogueEntryUpdated sync request");
+      }
+
+      expect(request.headers["x-jazz-admin-secret"]).toBe("napi-admin-secret");
+      expect(request.headers["x-jazz-backend-secret"]).toBeUndefined();
+      expect(request.headers.authorization).toBeUndefined();
+      unsubscribe();
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await captureServer.stop();
+    }
+  }, 20_000);
+
+  it("replays active backend query subscriptions after the events stream reconnects", async () => {
+    const captureServer = await startSyncCaptureServer();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let runtimeData: TempRuntimeData | null = null;
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      runtimeData = await createTempRuntimeData("jazz-napi-backend-reconnect-");
+      context = createJazzContext({
+        appId: `napi-backend-reconnect-${randomUUID()}`,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
       });
@@ -914,18 +890,18 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
       await captureServer.stop();
     }
   }, 25_000);
 
   it("applies createJazzContext(...).forSession() mutations through high-level Db APIs", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-session-secret";
     const adminSecret = "napi-session-admin-secret";
+    let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
-      port,
       backendSecret,
       adminSecret,
     });
@@ -946,19 +922,20 @@ describe("NAPI integration", () => {
         env: "test",
         userBranch: "main",
       });
-      const todoServerSchema = await loadTodoServerWasmSchema();
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
+      runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
+        permissions: todoServerProject.permissions ?? {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
         env: "test",
         userBranch: "main",
-        tier: "worker",
       });
       await settleAsyncSyncWork();
 
@@ -1065,362 +1042,19 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
       await server.stop();
-    }
-  }, 60_000);
-
-  it("extracts JWT request auth and applies createJazzContext(...).forRequest() mutations via Db", async () => {
-    const port = await getAvailablePort();
-    const appId = randomUUID();
-    const backendSecret = "napi-request-secret";
-    const adminSecret = "napi-request-admin-secret";
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      backendSecret,
-      adminSecret,
-    });
-    let context: {
-      asBackend(): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-
-    try {
-      const { createJazzContext } = await import("../backend/create-jazz-context.js");
-
-      await pushSchemaCatalogue({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
-      });
-      const todoServerSchema = await loadTodoServerWasmSchema();
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
-
-      context = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        backendSecret,
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-
-      const backendDb = context.asBackend();
-      const requestDb = context.forRequest({
-        headers: {
-          authorization: `Bearer ${makeJwt({
-            sub: "request-user",
-            claims: { role: "reviewer", tenant: "beta" },
-          })}`,
-        },
-      });
-
-      const createdTodo = await withTimeout(
-        requestDb.insertDurable(
-          policyTodosTable,
-          {
-            title: "request-created-item",
-            done: false,
-            description: "created via forRequest",
-            owner_id: "request-user",
-          },
-          { tier: "edge" },
-        ),
-        10_000,
-        "request insert timed out",
-      );
-
-      await vi.waitFor(
-        async () => {
-          expect(
-            await withTimeout(
-              requestDb.all(allPolicyTodosQuery, { tier: "edge" }),
-              10_000,
-              "request-scoped read timed out",
-            ),
-          ).toEqual([
-            expect.objectContaining({
-              id: createdTodo.id,
-              title: "request-created-item",
-              owner_id: "request-user",
-            }),
-          ]);
-        },
-        { timeout: 20_000 },
-      );
-
-      await expect(
-        requestDb.insertDurable(
-          policyTodosTable,
-          {
-            title: "request-policy-denied",
-            done: false,
-            description: "",
-            owner_id: "someone-else",
-          },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow();
-
-      await vi.waitFor(
-        async () => {
-          expect(
-            await withTimeout(
-              backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
-              }),
-              10_000,
-              "backend request read timed out",
-            ),
-          ).toMatchObject({
-            id: createdTodo.id,
-            title: "request-created-item",
-            owner_id: "request-user",
-          });
-        },
-        { timeout: 20_000 },
-      );
-    } finally {
-      if (context) {
-        await context.shutdown();
-      }
-      await settleAsyncSyncWork();
-      await server.stop();
-    }
-  }, 60_000);
-
-  it("filters session-scoped query reads over backend-authenticated sync", async () => {
-    const port = await getAvailablePort();
-    const appId = randomUUID();
-    const backendSecret = "napi-query-backend-secret";
-    const adminSecret = "napi-query-admin-secret";
-    const rowTitles = (rows: PolicyTodo[]): string[] => rows.map((row) => row.title).sort();
-
-    const jwks = await JwksServer.start(JWT_SECRET);
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      jwksUrl: jwks.url,
-      backendSecret,
-      adminSecret,
-    });
-    let bobContext: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-    let carolContext: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-    let aliceContext: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-    let readerContext: {
-      asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
-      forRequest(request: { headers: Record<string, string> }): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-
-    try {
-      const { createJazzContext } = await import("../backend/create-jazz-context.js");
-
-      await pushSchemaCatalogue({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
-      });
-      const todoServerSchema = await loadTodoServerWasmSchema();
-      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
-      const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
-
-      bobContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        jwtToken: signJwt({ sub: "bob", claims: {} }, JWT_SECRET),
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      carolContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        jwtToken: signJwt({ sub: "carol", claims: {} }, JWT_SECRET),
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      aliceContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        jwtToken: signJwt({ sub: "alice", claims: {} }, JWT_SECRET),
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      readerContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        backendSecret,
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      await settleAsyncSyncWork();
-
-      const bobWriter = bobContext.db();
-      const carolWriter = carolContext.db();
-      const aliceWriter = aliceContext.db();
-
-      await withTimeout(
-        bobWriter.insertDurable(
-          policyTodosTable,
-          {
-            title: "bob-item",
-            done: false,
-            description: "",
-            owner_id: "bob",
-          },
-          { tier: "edge" },
-        ),
-        10_000,
-        "bob writer create timed out",
-      );
-      await withTimeout(
-        carolWriter.insertDurable(
-          policyTodosTable,
-          {
-            title: "carol-item",
-            done: false,
-            description: "",
-            owner_id: "carol",
-          },
-          { tier: "edge" },
-        ),
-        10_000,
-        "carol writer create timed out",
-      );
-      await withTimeout(
-        aliceWriter.insertDurable(
-          policyTodosTable,
-          {
-            title: "alice-item",
-            done: false,
-            description: "",
-            owner_id: "alice",
-          },
-          { tier: "edge" },
-        ),
-        10_000,
-        "alice writer create timed out",
-      );
-
-      const readerBackend = readerContext.asBackend();
-      const aliceSessionDb = readerContext.forSession({
-        user_id: "alice",
-        claims: {},
-      });
-      const aliceRequestDb = readerContext.forRequest({
-        headers: {
-          authorization: `Bearer ${makeJwt({ sub: "alice" })}`,
-        },
-      });
-
-      await vi.waitFor(
-        async () => {
-          expect(
-            rowTitles(
-              await withTimeout(
-                readerBackend.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
-                "backend reader query timed out",
-              ),
-            ),
-          ).toEqual(["alice-item", "bob-item", "carol-item"]);
-        },
-        { timeout: 20_000 },
-      );
-
-      await vi.waitFor(
-        async () => {
-          expect(
-            rowTitles(
-              await withTimeout(
-                aliceSessionDb.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
-                "alice session query timed out",
-              ),
-            ),
-          ).toEqual(["alice-item"]);
-        },
-        { timeout: 20_000 },
-      );
-
-      await vi.waitFor(
-        async () => {
-          expect(
-            rowTitles(
-              await withTimeout(
-                aliceRequestDb.all(allPolicyTodosQuery, { tier: "edge" }),
-                10_000,
-                "alice request query timed out",
-              ),
-            ),
-          ).toEqual(["alice-item"]);
-        },
-        { timeout: 20_000 },
-      );
-    } finally {
-      if (bobContext) {
-        await bobContext.shutdown();
-      }
-      if (carolContext) {
-        await carolContext.shutdown();
-      }
-      if (aliceContext) {
-        await aliceContext.shutdown();
-      }
-      if (readerContext) {
-        await readerContext.shutdown();
-      }
-      await settleAsyncSyncWork();
-      await server.stop();
-      await jwks.stop();
     }
   }, 60_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-e2e-backend-secret";
     const adminSecret = "napi-e2e-admin-secret";
+    let writerRuntimeData: TempRuntimeData | null = null;
+    let readerRuntimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
-      port,
       backendSecret,
       adminSecret,
     });
@@ -1443,19 +1077,21 @@ describe("NAPI integration", () => {
         schemaDir: BASIC_SCHEMA_DIR,
       });
 
+      writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "memory" },
+        driver: { type: "persistent", dataPath: writerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
       });
+      readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "memory" },
+        driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
       });
@@ -1503,11 +1139,13 @@ describe("NAPI integration", () => {
         (rows) => !rows.some((row) => row.id === rowId),
       );
       await readerContext.shutdown();
+      await cleanupTempRuntimeData(readerRuntimeData);
+      readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-reopen-");
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
-        driver: { type: "memory" },
+        driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
       });
@@ -1526,13 +1164,15 @@ describe("NAPI integration", () => {
         await readerContext.shutdown();
       }
       await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(writerRuntimeData);
+      await cleanupTempRuntimeData(readerRuntimeData);
       await server.stop();
     }
   }, 60_000);
 
   it("reopens persistent backend runtimes cleanly and retains local data", async () => {
     const dataRoot = await createTempDir("jazz-napi-persistent-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const appId = randomUUID();
     let writerContext: {
       db(): Db;
@@ -1611,7 +1251,7 @@ describe("NAPI integration", () => {
 
   it("accepts modern epoch-millisecond timestamps from the TS value converter on backend durable writes", async () => {
     const dataRoot = await createTempDir("jazz-napi-timestamp-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const timestamp = 1773285322816;
     let context: {
       db(): Db;

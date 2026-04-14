@@ -10,9 +10,8 @@ repository = "https://github.com/garden-co/jazz2"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]
-compare-native = ["dep:bf-tree", "rocksdb", "fjall"]
+compare-native = ["dep:bf-tree", "rocksdb"]
 
 [dependencies]
 rustc-hash = "2"
@@ -24,7 +23,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bf-tree = { version = "0.4.8", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
-fjall = { version = "3.0.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

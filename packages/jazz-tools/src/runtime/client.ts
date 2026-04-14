@@ -5,14 +5,8 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext, Session } from "./context.js";
-import type {
-  FFIRecord,
-  InsertValues,
-  Value,
-  RowDelta,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
+import type { FFIRecord, InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
@@ -22,17 +16,20 @@ import {
   createRuntimeSyncStreamController,
   createSyncOutboxRouter,
   isExpectedFetchAbortError,
-  linkExternalIdentity as sendLinkExternalIdentityRequest,
+  SyncAuthError,
   type SyncStreamController,
   type SyncAuth,
-  type LinkExternalResponse,
+  type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
-import { resolveLocalAuthDefaults } from "./local-auth.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import { resolveClientSessionStateSync } from "./client-session.js";
 import { toFFIRecord } from "./ffi-value.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import {
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+} from "./runtime-config.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -99,9 +96,9 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(serverCatalogueStateHash?: string | null): void;
+  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
@@ -158,16 +155,9 @@ interface WriteContextPayload {
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
 
-export interface LinkExternalIdentityOptions {
-  jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
-}
-
-export type LinkExternalIdentityResult = LinkExternalResponse;
-
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
+  onAuthFailure?: (reason: AuthFailureReason) => void;
 }
 
 /**
@@ -610,28 +600,52 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
+  private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
+  private syncStarted = false;
+  private remoteSyncConnected: boolean;
+  private pendingRemoteSyncWaiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private readonly inFlightServerSyncs = new Set<Promise<void>>();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   private constructor(
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.resolvedSession = resolveClientSessionSync({
+    this.onAuthFailure = runtimeOptions?.onAuthFailure;
+    this.remoteSyncConnected = !context.serverUrl;
+    this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
-      localAuthMode: context.localAuthMode,
-      localAuthToken: context.localAuthToken,
-    });
+    }).session;
     this.streamController = createRuntimeSyncStreamController({
       getRuntime: () => this.runtime,
       getAuth: () => this.getSyncAuth(),
+      getSchemaHash: () => this.runtime.getSchemaHash(),
       getClientId: () => this.serverClientId,
       setClientId: (clientId) => {
         this.serverClientId = clientId;
+      },
+      onConnected: () => {
+        this.remoteSyncConnected = true;
+        this.resolvePendingRemoteSyncWaiters();
+      },
+      onDisconnected: () => {
+        this.remoteSyncConnected = false;
+      },
+      onAuthFailure: (reason) => {
+        this.remoteSyncConnected = false;
+        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
+        this.onAuthFailure?.(reason);
       },
     });
   }
@@ -642,31 +656,33 @@ export class JazzClient {
    * @param context Application context with driver and schema
    * @returns Connected JazzClient instance
    */
-  static async connect(context: AppContext): Promise<JazzClient> {
-    const resolvedContext = resolveLocalAuthDefaults(context);
-
+  static async connect(
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): Promise<JazzClient> {
     // Load WASM module dynamically
-    const wasmModule = await loadWasmModule();
+    const wasmModule = await loadWasmModule(context.runtimeSources);
 
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(context.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      resolvedContext.appId,
-      resolvedContext.env ?? "dev",
-      resolvedContext.userBranch ?? "main",
-      resolveNodeTier(resolvedContext.tier),
+      context.appId,
+      context.env ?? "dev",
+      context.userBranch ?? "main",
+      resolveNodeTier(context.tier),
     );
 
     const client = new JazzClient(
       runtime,
-      resolvedContext,
-      resolveDefaultDurabilityTier(resolvedContext),
+      context,
+      resolveDefaultDurabilityTier(context),
+      runtimeOptions,
     );
 
     // Set up sync if server URL provided
-    if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -687,28 +703,27 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    const resolvedContext = resolveLocalAuthDefaults(context);
-
     // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(resolvedContext.schema);
+    const schemaJson = serializeRuntimeSchema(context.schema);
     const runtime = new wasmModule.WasmRuntime(
       schemaJson,
-      resolvedContext.appId,
-      resolvedContext.env ?? "dev",
-      resolvedContext.userBranch ?? "main",
-      resolveNodeTier(resolvedContext.tier),
+      context.appId,
+      context.env ?? "dev",
+      context.userBranch ?? "main",
+      resolveNodeTier(context.tier),
       runtimeOptions?.useBinaryEncoding ?? false,
     );
 
     const client = new JazzClient(
       runtime,
-      resolvedContext,
-      resolveDefaultDurabilityTier(resolvedContext),
+      context,
+      resolveDefaultDurabilityTier(context),
+      runtimeOptions,
     );
 
     // Set up sync if server URL provided
-    if (resolvedContext.serverUrl) {
-      client.setupSync(resolvedContext.serverUrl, resolvedContext.serverPathPrefix);
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl, context.serverPathPrefix);
     }
 
     return client;
@@ -724,8 +739,17 @@ export class JazzClient {
    * @param context Application context
    * @returns Connected JazzClient instance
    */
-  static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
-    const client = new JazzClient(runtime, context, resolveDefaultDurabilityTier(context));
+  static connectWithRuntime(
+    runtime: Runtime,
+    context: AppContext,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
+  ): JazzClient {
+    const client = new JazzClient(
+      runtime,
+      context,
+      resolveDefaultDurabilityTier(context),
+      runtimeOptions,
+    );
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -797,22 +821,32 @@ export class JazzClient {
     return this;
   }
 
+  updateAuthToken(jwtToken?: string): void {
+    this.context.jwtToken = jwtToken;
+    this.resolvedSession = resolveClientSessionStateSync({
+      appId: this.context.appId,
+      jwtToken,
+    }).session;
+    this.streamController.updateAuth();
+  }
+
   private getSyncAuth(): SyncAuth {
     if (this.useBackendSyncAuth) {
       return {
         backendSecret: this.context.backendSecret,
+        adminSecret: this.context.adminSecret,
       };
     }
 
     return {
       jwtToken: this.context.jwtToken,
-      localAuthMode: this.context.localAuthMode,
-      localAuthToken: this.context.localAuthToken,
       adminSecret: this.context.adminSecret,
     };
   }
 
-  private normalizeQueryExecutionOptions(options?: QueryExecutionOptions): QueryExecutionOptions {
+  private normalizeQueryExecutionOptions(
+    options?: QueryExecutionOptions,
+  ): ResolvedQueryExecutionOptions {
     return resolveEffectiveQueryExecutionOptions(
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
@@ -1134,6 +1168,7 @@ export class JazzClient {
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
+    await this.waitForRemoteReadAvailability(normalizedOptions.tier);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -1406,12 +1441,10 @@ export class JazzClient {
       headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
       headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
     }
-    // Priority 2: frontend auth (JWT or local anonymous/demo token headers)
+    // Priority 2: frontend auth (JWT bearer token)
     else {
       applyUserAuthHeaders(headers, {
         jwtToken: this.context.jwtToken,
-        localAuthMode: this.context.localAuthMode,
-        localAuthToken: this.context.localAuthToken,
       });
     }
 
@@ -1423,61 +1456,33 @@ export class JazzClient {
   }
 
   /**
-   * Link an anonymous/demo local principal to an external JWT identity.
-   *
-   * Requires all three auth fields:
-   * - `jwtToken`
-   * - `localAuthMode`
-   * - `localAuthToken`
-   *
-   * Values default to the current AppContext auth fields unless overridden.
-   */
-  async linkExternalIdentity(
-    options: LinkExternalIdentityOptions = {},
-  ): Promise<LinkExternalIdentityResult> {
-    if (!this.context.serverUrl) {
-      throw new Error("No server connection");
-    }
-
-    const jwtToken = options.jwtToken ?? this.context.jwtToken;
-    const localAuthMode = options.localAuthMode ?? this.context.localAuthMode;
-    const localAuthToken = options.localAuthToken ?? this.context.localAuthToken;
-
-    if (!jwtToken) {
-      throw new Error("linkExternalIdentity requires jwtToken");
-    }
-    if (!localAuthMode) {
-      throw new Error("linkExternalIdentity requires localAuthMode");
-    }
-    if (!localAuthToken) {
-      throw new Error("linkExternalIdentity requires localAuthToken");
-    }
-
-    return sendLinkExternalIdentityRequest(
-      this.context.serverUrl,
-      {
-        jwtToken,
-        localAuthMode,
-        localAuthToken,
-        pathPrefix: this.context.serverPathPrefix,
-      },
-      "[client] ",
-    );
-  }
-
-  /**
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.streamController.stop();
-
-    // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
-    if (this.runtime.close) {
-      await this.runtime.close();
+    this.resolvePendingRemoteSyncWaiters();
+    if (this.shutdownPromise) {
+      return await this.shutdownPromise;
     }
+
+    this.shutdownPromise = (async () => {
+      this.shuttingDown = true;
+
+      // Stop accepting new server-bound outbox work before tearing down sync.
+      this.runtime.onSyncMessageToSend(() => undefined);
+      this.streamController.stop();
+      await this.waitForInFlightServerSyncs();
+
+      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+      if (this.runtime.close) {
+        await this.runtime.close();
+      }
+    })();
+
+    return await this.shutdownPromise;
   }
 
   private setupSync(serverUrl: string, serverPathPrefix?: string): void {
+    this.syncStarted = true;
     this.runtime.onSyncMessageToSend(
       createSyncOutboxRouter({
         logPrefix: "[client] ",
@@ -1485,6 +1490,11 @@ export class JazzClient {
         onServerPayload: (payload, isCatalogue) =>
           this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
+          if (error instanceof SyncAuthError) {
+            this.streamController.notifyAuthFailure(error.reason);
+            return;
+          }
+
           const isExpectedAbort = isExpectedFetchAbortError(error);
           if (!isExpectedAbort) {
             console.error("Sync POST error:", error);
@@ -1498,20 +1508,78 @@ export class JazzClient {
     this.streamController.start(serverUrl, serverPathPrefix);
   }
 
-  private async sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
-    const serverUrl = this.streamController.getServerUrl();
-    if (!serverUrl) return;
+  private resolvePendingRemoteSyncWaiters(): void {
+    if (this.pendingRemoteSyncWaiters.length === 0) {
+      return;
+    }
 
-    await sendSyncPayload(
-      serverUrl,
-      payloadJson,
-      isCatalogue,
-      {
-        ...this.getSyncAuth(),
-        clientId: this.serverClientId,
-        pathPrefix: this.streamController.getPathPrefix(),
-      },
-      "[client] ",
+    const waiters = this.pendingRemoteSyncWaiters.splice(0);
+    for (const waiter of waiters) {
+      waiter.resolve();
+    }
+  }
+
+  private rejectPendingRemoteSyncWaiters(error: Error): void {
+    if (this.pendingRemoteSyncWaiters.length === 0) {
+      return;
+    }
+
+    const waiters = this.pendingRemoteSyncWaiters.splice(0);
+    for (const waiter of waiters) {
+      waiter.reject(error);
+    }
+  }
+
+  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
+    if (
+      !this.syncStarted ||
+      !this.context.serverUrl ||
+      tier === "worker" ||
+      this.remoteSyncConnected
+    ) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      this.pendingRemoteSyncWaiters.push({ resolve, reject });
+    });
+  }
+
+  private async waitForInFlightServerSyncs(): Promise<void> {
+    while (this.inFlightServerSyncs.size > 0) {
+      await Promise.allSettled(this.inFlightServerSyncs);
+    }
+  }
+
+  private trackServerSync(pending: Promise<void>): Promise<void> {
+    let tracked: Promise<void>;
+    tracked = pending.finally(() => {
+      this.inFlightServerSyncs.delete(tracked);
+    });
+    this.inFlightServerSyncs.add(tracked);
+    return tracked;
+  }
+
+  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
+    if (this.shuttingDown) {
+      return Promise.resolve();
+    }
+
+    const serverUrl = this.streamController.getServerUrl();
+    if (!serverUrl) return Promise.resolve();
+
+    return this.trackServerSync(
+      sendSyncPayload(
+        serverUrl,
+        payloadJson,
+        isCatalogue,
+        {
+          ...this.getSyncAuth(),
+          clientId: this.serverClientId,
+          pathPrefix: this.streamController.getPathPrefix(),
+        },
+        "[client] ",
+      ),
     );
   }
 }
@@ -1522,14 +1590,45 @@ export class JazzClient {
  */
 export type WasmModule = typeof import("jazz-wasm");
 
+async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
+  const moduleBuiltin = process.getBuiltinModule?.("module");
+  const fsBuiltin = process.getBuiltinModule?.("fs");
+  const pathBuiltin = process.getBuiltinModule?.("path");
+
+  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
+    return null;
+  }
+
+  const { createRequire } = moduleBuiltin;
+  const { existsSync, readFileSync } = fsBuiltin;
+  const { dirname, resolve } = pathBuiltin;
+
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("jazz-wasm/package.json");
+  const packageDir = dirname(packageJsonPath);
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+  if (!existsSync(wasmPath)) {
+    return null;
+  }
+
+  return readFileSync(wasmPath);
+}
+
 /**
  * Load and initialize the WASM module.
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(): Promise<WasmModule> {
+export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
+
+  if (syncInitInput) {
+    wasmModule.initSync(syncInitInput);
+    return wasmModule;
+  }
 
   // In Node.js, we need to read the .wasm file and use initSync.
   // In browsers/React Native, the default fetch-based init works (or default()).
@@ -1537,17 +1636,9 @@ export async function loadWasmModule(): Promise<WasmModule> {
   let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
     try {
-      const { existsSync, readFileSync } = await import(/* @vite-ignore */ "node:fs");
-      const { createRequire } = await import(/* @vite-ignore */ "node:module");
-      const { dirname, resolve } = await import(/* @vite-ignore */ "node:path");
-
-      const require = createRequire(import.meta.url);
-      const packageJsonPath = require.resolve("jazz-wasm/package.json");
-      const packageDir = dirname(packageJsonPath);
-      const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
-
-      if (existsSync(wasmPath)) {
-        wasmModule.initSync({ module: readFileSync(wasmPath) });
+      const wasmBinary = await tryLoadNodePackagedWasmBinary();
+      if (wasmBinary) {
+        wasmModule.initSync({ module: wasmBinary });
         nodeInitDone = true;
       }
     } catch {
@@ -1555,7 +1646,16 @@ export async function loadWasmModule(): Promise<WasmModule> {
     }
   }
   if (!nodeInitDone && typeof wasmModule.default === "function") {
-    await wasmModule.default();
+    const wasmUrl =
+      typeof location !== "undefined"
+        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
+        : null;
+
+    if (wasmUrl) {
+      await wasmModule.default({ module_or_path: wasmUrl });
+    } else {
+      await wasmModule.default();
+    }
   }
 
   return wasmModule;

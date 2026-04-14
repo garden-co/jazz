@@ -110,6 +110,14 @@ class FakeWorkerScript {
   emitSyncToMain(...payloads: Uint8Array[]): void {
     this.worker.emitToMain({ type: "sync", payload: payloads });
   }
+
+  emitUpstreamConnected(): void {
+    this.worker.emitToMain({ type: "upstream-connected" });
+  }
+
+  emitUpstreamDisconnected(): void {
+    this.worker.emitToMain({ type: "upstream-disconnected" });
+  }
 }
 
 class FakeWorker {
@@ -263,6 +271,43 @@ describe("WorkerBridge race harness", () => {
 
     worker.script.completeInit("worker-client-3");
     await initPromise;
+  });
+
+  it("WB-U04b waits for a direct upstream connection before resolving edge readiness", async () => {
+    const worker = new FakeWorker({ initAckMode: "sync-ok" });
+    const { runtime } = createRuntimeHarness();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+    await bridge.init({
+      ...makeBridgeOptions(),
+      serverUrl: "https://example.test",
+    });
+
+    let resolved = false;
+    const waitPromise = bridge.waitForUpstreamServerConnection().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    worker.script.emitUpstreamConnected();
+    await waitPromise;
+    expect(resolved).toBe(true);
+  });
+
+  it("WB-U04c skips upstream waiting when server payloads route through another tab", async () => {
+    const worker = new FakeWorker({ initAckMode: "sync-ok" });
+    const { runtime } = createRuntimeHarness();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
+
+    await bridge.init({
+      ...makeBridgeOptions(),
+      serverUrl: "https://example.test",
+    });
+
+    bridge.setServerPayloadForwarder(() => {});
+    await expect(bridge.waitForUpstreamServerConnection()).resolves.toBeUndefined();
   });
 
   it("WB-U05 init memoizes and returns the same in-flight promise", async () => {

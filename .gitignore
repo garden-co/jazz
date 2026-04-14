@@ -18,6 +18,7 @@ dist/
 
 # Agents
 .claude/settings.local.json
+.worktrees/
 
 # OS
 .DS_Store

@@ -3,12 +3,18 @@ import fs from "node:fs";
 export const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 60;
 export const DEFAULT_NOISE_REPEAT_COUNT = 3;
 
-export const NATIVE_BENCHMARKS = [
+export const NATIVE_STORAGE_ENGINES = ["rocksdb", "sqlite"];
+
+function nativeStorageEngineLabel(storageEngine) {
+  if (storageEngine === "rocksdb") return "RocksDB";
+  if (storageEngine === "sqlite") return "SQLite";
+  return storageEngine;
+}
+
+const NATIVE_EXAMPLE_SCENARIOS = [
   {
-    id: "native:w1_interactive",
-    suite: "native",
+    id: "w1_interactive",
     label: "W1 (interactive)",
-    kind: "native-example",
     output_path: "w1_interactive.json",
     log_path: "logs/w1_interactive.log",
     scenario_path: "benchmarks/realistic/ci/scenarios/w1_interactive.json",
@@ -16,149 +22,141 @@ export const NATIVE_BENCHMARKS = [
     prepare_seed: true,
   },
   {
-    id: "native:w4_cold_start",
-    suite: "native",
+    id: "w4_cold_start",
     label: "W4 (cold start)",
-    kind: "native-example",
     output_path: "w4_cold_start.json",
     log_path: "logs/w4_cold_start.log",
     scenario_path: "benchmarks/realistic/ci/scenarios/w4_cold_start.json",
     profile_path: "benchmarks/realistic/ci/profiles/s.json",
     prepare_seed: true,
   },
+];
+
+const NATIVE_CRITERION_SCENARIOS = [
   {
-    id: "native-criterion:r1_crud_sustained",
-    suite: "native",
+    id: "r1_crud_sustained",
     label: "Criterion R1 CRUD sustained",
-    kind: "criterion",
-    log_path: "logs/criterion_r1_crud_sustained.log",
-    criterion_filter: "realistic_phase1/crud_sustained/r1_s",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/crud_sustained_rocksdb",
+      sqlite: "realistic_phase1/crud_sustained_sqlite",
     },
   },
   {
-    id: "native-criterion:r1_crud_sustained_single_hop",
-    suite: "native",
+    id: "r1_crud_sustained_single_hop",
     label: "Criterion R1 CRUD single-hop",
-    kind: "criterion",
-    log_path: "logs/criterion_r1_crud_sustained_single_hop.log",
-    criterion_filter: "realistic_phase1/crud_sustained_single_hop",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/crud_sustained_single_hop_rocksdb",
+      sqlite: "realistic_phase1/crud_sustained_single_hop_sqlite",
     },
   },
   {
-    id: "native-criterion:r2_reads_sustained",
-    suite: "native",
+    id: "r2_reads_sustained",
     label: "Criterion R2 reads sustained",
-    kind: "criterion",
-    log_path: "logs/criterion_r2_reads_sustained.log",
-    criterion_filter: "realistic_phase1/reads_sustained/r2_s",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/reads_sustained_rocksdb",
+      sqlite: "realistic_phase1/reads_sustained_sqlite",
     },
   },
   {
-    id: "native-criterion:r2_reads_sustained_single_hop",
-    suite: "native",
+    id: "r2_reads_sustained_single_hop",
     label: "Criterion R2 reads single-hop",
-    kind: "criterion",
-    log_path: "logs/criterion_r2_reads_sustained_single_hop.log",
-    criterion_filter: "realistic_phase1/reads_sustained_single_hop",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/reads_sustained_single_hop_rocksdb",
+      sqlite: "realistic_phase1/reads_sustained_single_hop_sqlite",
     },
   },
   {
-    id: "native-criterion:r2_reads_with_write_churn",
-    suite: "native",
+    id: "r2_reads_with_write_churn",
     label: "Criterion R2 reads with churn",
-    kind: "criterion",
-    log_path: "logs/criterion_r2_reads_with_write_churn.log",
-    criterion_filter: "realistic_phase1/reads_sustained_with_write_churn",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
+      sqlite: "realistic_phase1/reads_sustained_with_write_churn_sqlite",
     },
   },
   {
-    id: "native-criterion:r3_cold_load_fjall",
-    suite: "native",
-    label: "Criterion R3 cold-load Fjall",
-    kind: "criterion",
-    log_path: "logs/criterion_r3_cold_load_fjall.log",
-    criterion_filter: "realistic_phase1/cold_load_fjall",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    id: "r3_cold_load",
+    label: "Criterion R3 cold-load",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/cold_load_rocksdb",
+      sqlite: "realistic_phase1/cold_load_sqlite",
     },
   },
   {
-    id: "native-criterion:r4_fanout_updates",
-    suite: "native",
+    id: "r4_fanout_updates",
     label: "Criterion R4 fanout updates",
-    kind: "criterion",
-    log_path: "logs/criterion_r4_fanout_updates.log",
-    criterion_filter: "realistic_phase1/fanout_updates",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/fanout_updates_rocksdb",
+      sqlite: "realistic_phase1/fanout_updates_sqlite",
     },
   },
   {
-    id: "native-criterion:r5_permission_recursive",
-    suite: "native",
+    id: "r5_permission_recursive",
     label: "Criterion R5 permission recursive",
-    kind: "criterion",
-    log_path: "logs/criterion_r5_permission_recursive.log",
-    criterion_filter: "realistic_phase1/permission_recursive",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/permission_recursive_rocksdb",
+      sqlite: "realistic_phase1/permission_recursive_sqlite",
     },
   },
   {
-    id: "native-criterion:r6_permission_write_heavy",
-    suite: "native",
+    id: "r6_permission_write_heavy",
     label: "Criterion R6 permission write-heavy",
-    kind: "criterion",
-    log_path: "logs/criterion_r6_permission_write_heavy.log",
-    criterion_filter: "realistic_phase1/permission_write_heavy",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/permission_write_heavy_rocksdb",
+      sqlite: "realistic_phase1/permission_write_heavy_sqlite",
     },
   },
   {
-    id: "native-criterion:r7_hotspot_history",
-    suite: "native",
+    id: "r7_hotspot_history",
     label: "Criterion R7 hotspot history",
-    kind: "criterion",
-    log_path: "logs/criterion_r7_hotspot_history.log",
-    criterion_filter: "realistic_phase1/hotspot_history",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/hotspot_history_rocksdb",
+      sqlite: "realistic_phase1/hotspot_history_sqlite",
     },
   },
   {
-    id: "native-criterion:r8_many_branches",
-    suite: "native",
+    id: "r8_many_branches",
     label: "Criterion R8 many branches",
-    kind: "criterion",
-    log_path: "logs/criterion_r8_many_branches.log",
-    criterion_filter: "realistic_phase1/many_branches",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/many_branches_rocksdb",
+      sqlite: "realistic_phase1/many_branches_sqlite",
     },
   },
   {
-    id: "native-criterion:r9_subscribed_write_path",
-    suite: "native",
+    id: "r9_subscribed_write_path",
     label: "Criterion R9 subscribed write path",
-    kind: "criterion",
-    log_path: "logs/criterion_r9_subscribed_write_path.log",
-    criterion_filter: "realistic_phase1/subscribed_write_path",
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
+    criterion_filter_by_engine: {
+      rocksdb: "realistic_phase1/subscribed_write_path_rocksdb",
+      sqlite: "realistic_phase1/subscribed_write_path_sqlite",
     },
   },
 ];
+
+export const NATIVE_BENCHMARKS = NATIVE_STORAGE_ENGINES.flatMap((storage_engine) => [
+  ...NATIVE_EXAMPLE_SCENARIOS.map((scenario) => ({
+    id: `native:${storage_engine}:${scenario.id}`,
+    suite: "native",
+    storage_engine,
+    label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
+    kind: "native-example",
+    output_path: scenario.output_path,
+    log_path: scenario.log_path,
+    scenario_path: scenario.scenario_path,
+    profile_path: scenario.profile_path,
+    prepare_seed: scenario.prepare_seed,
+  })),
+  ...NATIVE_CRITERION_SCENARIOS.map((scenario) => ({
+    id: `native-criterion:${storage_engine}:${scenario.id}`,
+    suite: "native",
+    storage_engine,
+    label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
+    kind: "criterion",
+    log_path: `logs/criterion_${scenario.id}.log`,
+    criterion_filter: scenario.criterion_filter_by_engine[storage_engine],
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
+  })),
+]);
 
 export const BROWSER_BENCHMARKS = [
   {
@@ -235,8 +233,13 @@ export const BROWSER_BENCHMARKS = [
   },
 ];
 
-export function benchmarksForSuite(suite) {
-  if (suite === "native") return NATIVE_BENCHMARKS;
+export function benchmarksForSuite(suite, options = {}) {
+  if (suite === "native") {
+    if (!options.storageEngine) return NATIVE_BENCHMARKS;
+    return NATIVE_BENCHMARKS.filter(
+      (benchmark) => benchmark.storage_engine === options.storageEngine,
+    );
+  }
   if (suite === "browser") return BROWSER_BENCHMARKS;
   throw new Error(`Unsupported suite: ${suite}`);
 }

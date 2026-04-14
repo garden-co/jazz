@@ -17,30 +17,27 @@ required-features = ["cli"]
 
 [features]
 default = []
-fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
-transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
-cli = [
+transport-http = ["transport", "dep:reqwest", "dep:bytes"]
+client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
+server = [
   "runtime-tokio",
   "transport",
-  "rocksdb",
   "dep:tokio",
   "dep:axum",
-  "dep:clap",
   "dep:tracing-subscriber",
   "dep:tower-http",
   "dep:async-stream",
   "dep:jsonwebtoken",
-  "dep:base64",
   "dep:bytes",
   "dep:reqwest",
 ]
-test-utils = ["cli", "client"]
-test = ["test-utils"]
+cli = ["server", "rocksdb", "dep:clap"]
+test-utils = ["server", "client", "sqlite"]
+test = ["test-utils", "cli"]
 otel = [
   "cli",
   "dep:opentelemetry",
@@ -73,7 +70,6 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-fjall = { version = "3.0.2", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
@@ -84,7 +80,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
 async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "9", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 reqwest = { version = "0.12", default-features = false, features = [
   "json",

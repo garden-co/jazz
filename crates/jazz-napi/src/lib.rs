@@ -1,35 +1,36 @@
 //! jazz-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<RocksDBStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<SqliteStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `RocksDBStorage` provides persistent on-disk storage
+//! - `SqliteStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-use std::thread;
-use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_outbox_entry, subscription_delta_to_json,
+    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
 };
+use jazz_tools::identity;
+use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
@@ -39,8 +40,11 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::server::TestingServer as JazzTestingServer;
-use jazz_tools::storage::{MemoryStorage, RocksDBStorage, Storage};
+use jazz_tools::server::{
+    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder,
+    TestingServer as JazzTestingServer,
+};
+use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
@@ -107,7 +111,10 @@ impl TypeName for FfiRecordArg {
 }
 
 impl FromNapiValue for FfiRecordArg {
-    unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> Result<Self> {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        napi_val: napi::sys::napi_value,
+    ) -> Result<Self> {
         let env = Env::from_raw(env);
         let unknown = unsafe { Unknown::from_napi_value(env.raw(), napi_val)? };
         let values = env
@@ -141,48 +148,31 @@ fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<Durabili
     parse_node_durability_tiers(tier.as_deref())
 }
 
-fn open_rocksdb_storage_with_retry(
-    data_path: &str,
-    cache_size: usize,
-) -> napi::Result<RocksDBStorage> {
-    const MAX_ATTEMPTS: usize = 100;
-    const RETRY_DELAY_MS: u64 = 25;
-
-    let mut last_error = None;
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match RocksDBStorage::open(data_path, cache_size) {
-            Ok(storage) => return Ok(storage),
-            Err(error) => {
-                let is_lock_error = matches!(
-                    &error,
-                    jazz_tools::storage::StorageError::IoError(message)
-                        if message.to_ascii_lowercase().contains("lock")
-                            || message.to_ascii_lowercase().contains("busy")
-                );
-                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
-                    last_error = Some(error);
-                    break;
-                }
-                thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-            }
-        }
-    }
-
-    let error = last_error.unwrap_or_else(|| {
-        jazz_tools::storage::StorageError::IoError(
-            "rocksdb open failed without error details".to_string(),
-        )
-    });
-    Err(napi::Error::from_reason(format!(
-        "Failed to open storage: {:?}",
-        error
-    )))
+fn open_sqlite_storage(data_path: &str) -> napi::Result<SqliteStorage> {
+    SqliteStorage::open(data_path)
+        .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))
 }
 
 // ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     parse_binding_tier(tier).map_err(napi::Error::from_reason)
+}
+
+fn parse_optional_sequence(sequence: Option<f64>) -> napi::Result<Option<u64>> {
+    let Some(sequence) = sequence else {
+        return Ok(None);
+    };
+    if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
+        return Err(napi::Error::from_reason(
+            "Invalid stream sequence: expected a non-negative integer",
+        ));
+    }
+    if sequence > u64::MAX as f64 {
+        return Err(napi::Error::from_reason(
+            "Invalid stream sequence: value exceeds u64 range",
+        ));
+    }
+    Ok(Some(sequence as u64))
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
@@ -246,6 +236,16 @@ fn make_subscription_callback(
     }
 }
 
+fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid base64url seed: {}", e)))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("Seed must be exactly 32 bytes"))?;
+    Ok(arr)
+}
+
 // ============================================================================
 // NapiScheduler
 // ============================================================================
@@ -262,6 +262,27 @@ struct TestingServerStartOptions {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevServerStartOptions {
+    app_id: String,
+    port: Option<u16>,
+    data_dir: Option<String>,
+    in_memory: Option<bool>,
+    jwks_url: Option<String>,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+    allow_local_first_auth: Option<bool>,
+    catalogue_authority: Option<String>,
+    catalogue_authority_url: Option<String>,
+    catalogue_authority_admin_secret: Option<String>,
+}
+
+fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
+    serde_json::from_value(options)
+        .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -371,8 +392,9 @@ fn build_napi_runtime(
     tier: Option<String>,
 ) -> napi::Result<NapiRuntime> {
     // Parse schema
-    let schema: Schema = serde_json::from_str(&schema_json)
+    let runtime_schema = parse_runtime_schema_input(&schema_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
+    let schema = runtime_schema.schema;
     let declared_schema = schema.clone();
 
     // Parse optional tier
@@ -385,12 +407,17 @@ fn build_napi_runtime(
     }
 
     // Create schema manager
-    let schema_manager = SchemaManager::new(
+    let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         schema,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,
+        if runtime_schema.loaded_policy_bundle {
+            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+        } else {
+            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+        },
     )
     .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
 
@@ -461,7 +488,7 @@ pub struct NapiRuntime {
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with RocksDB-backed persistent storage.
+    /// Create a new NapiRuntime with SQLite-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -472,9 +499,7 @@ impl NapiRuntime {
         data_path: String,
         tier: Option<String>,
     ) -> napi::Result<Self> {
-        // Create RocksDB storage
-        let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = open_rocksdb_storage_with_retry(&data_path, cache_size)?;
+        let storage = open_sqlite_storage(&data_path)?;
 
         build_napi_runtime(
             env,
@@ -1010,12 +1035,34 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(js_name = "onSyncMessageReceived")]
-    pub fn on_sync_message_received(&self, message_json: String) -> napi::Result<()> {
-        let payload: SyncPayload = serde_json::from_str(&message_json)
+    pub fn on_sync_message_received(
+        &self,
+        message_json: String,
+        sequence: Option<f64>,
+    ) -> napi::Result<()> {
+        let mut payload: SyncPayload = serde_json::from_str(&message_json)
             .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
+        let sequence = parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
+        let server_id = (*self
+            .upstream_server_id
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?)
+        .ok_or_else(|| {
+            napi::Error::from_reason(
+                "No upstream server registered; call addServer() before sync delivery",
+            )
+        })?;
 
         let entry = InboxEntry {
-            source: Source::Server(ServerId::new()),
+            source: Source::Server(server_id),
             payload,
         };
 
@@ -1023,7 +1070,11 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.park_sync_message(entry);
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
         Ok(())
     }
 
@@ -1070,7 +1121,12 @@ impl NapiRuntime {
     }
 
     #[napi(js_name = "addServer")]
-    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) -> napi::Result<()> {
+    pub fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> napi::Result<()> {
+        let next_sync_seq = parse_optional_sequence(next_sync_seq)?;
         let server_id = {
             let mut slot = self
                 .upstream_server_id
@@ -1095,6 +1151,9 @@ impl NapiRuntime {
             server_id,
             server_catalogue_state_hash.as_deref(),
         );
+        if let Some(next_sync_seq) = next_sync_seq {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
         Ok(())
     }
 
@@ -1198,6 +1257,30 @@ impl NapiRuntime {
             .close()
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
+    }
+
+    #[napi(js_name = "deriveUserId")]
+    pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        Ok(identity::derive_user_id(&seed).to_string())
+    }
+
+    #[napi(js_name = "mintLocalFirstToken")]
+    pub fn mint_local_first_token(
+        seed_b64: String,
+        audience: String,
+        ttl_seconds: u32,
+    ) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
+            .map_err(napi::Error::from_reason)
+    }
+
+    #[napi(js_name = "getPublicKeyBase64url")]
+    pub fn get_public_key_base64url(seed_b64: String) -> napi::Result<String> {
+        let seed = napi_decode_seed(&seed_b64)?;
+        let verifying_key = identity::derive_verifying_key(&seed);
+        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 }
 
@@ -1345,6 +1428,157 @@ impl TestingServer {
 }
 
 // ============================================================================
+// DevServer
+// ============================================================================
+
+#[napi]
+pub struct DevServer {
+    inner: Mutex<Option<JazzHostedServer>>,
+    app_id: String,
+    url: String,
+    port: u16,
+    data_dir: String,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+}
+
+#[napi]
+impl DevServer {
+    #[napi(factory, ts_return_type = "Promise<DevServer>")]
+    pub async fn start(
+        #[napi(
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+        )]
+        options: JsonValue,
+    ) -> napi::Result<Self> {
+        let opts = parse_dev_server_start_options(options)?;
+
+        let app_id =
+            AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
+
+        let catalogue_authority = match opts.catalogue_authority.as_deref() {
+            Some("forward") => {
+                let base_url = opts.catalogue_authority_url.ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "catalogueAuthorityUrl is required when catalogueAuthority is 'forward'",
+                    )
+                })?;
+                let admin_secret = opts.catalogue_authority_admin_secret.ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "catalogueAuthorityAdminSecret is required when catalogueAuthority is 'forward'",
+                    )
+                })?;
+                CatalogueAuthorityMode::Forward {
+                    base_url,
+                    admin_secret,
+                }
+            }
+            _ => CatalogueAuthorityMode::Local,
+        };
+
+        let auth_config = AuthConfig {
+            jwks_url: opts.jwks_url,
+            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
+            backend_secret: opts.backend_secret.clone(),
+            admin_secret: opts.admin_secret.clone(),
+        };
+
+        let in_memory = opts.in_memory.unwrap_or(false);
+        let data_dir = if in_memory {
+            String::new()
+        } else {
+            opts.data_dir.unwrap_or_else(|| "./data".to_string())
+        };
+
+        let mut server_builder = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_catalogue_authority(catalogue_authority);
+
+        if in_memory {
+            server_builder = server_builder.with_in_memory_storage();
+        } else {
+            server_builder = server_builder.with_sqlite_storage(&data_dir);
+        }
+
+        let built = server_builder
+            .build()
+            .await
+            .map_err(napi::Error::from_reason)?;
+
+        let data_dir_path = std::path::PathBuf::from(&data_dir);
+
+        let hosted = JazzHostedServer::start(
+            built,
+            opts.port,
+            app_id,
+            data_dir_path,
+            opts.admin_secret.clone(),
+            opts.backend_secret.clone(),
+        )
+        .await;
+
+        let url = hosted.base_url();
+        let port = hosted.port;
+        let resolved_data_dir = hosted.data_dir.to_string_lossy().into_owned();
+
+        Ok(Self {
+            inner: Mutex::new(Some(hosted)),
+            app_id: opts.app_id,
+            url,
+            port,
+            data_dir: resolved_data_dir,
+            backend_secret: opts.backend_secret,
+            admin_secret: opts.admin_secret,
+        })
+    }
+
+    #[napi(getter, js_name = "appId")]
+    pub fn app_id(&self) -> String {
+        self.app_id.clone()
+    }
+
+    #[napi(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    #[napi(getter)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    #[napi(getter, js_name = "dataDir")]
+    pub fn data_dir(&self) -> String {
+        self.data_dir.clone()
+    }
+
+    #[napi(getter, js_name = "backendSecret")]
+    pub fn backend_secret(&self) -> Option<String> {
+        self.backend_secret.clone()
+    }
+
+    #[napi(getter, js_name = "adminSecret")]
+    pub fn admin_secret(&self) -> Option<String> {
+        self.admin_secret.clone()
+    }
+
+    #[napi]
+    pub async fn stop(&self) -> napi::Result<()> {
+        let mut server = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .take();
+
+        if let Some(ref mut server) = server {
+            server.shutdown().await;
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Module-level utility functions
 // ============================================================================
 
@@ -1364,6 +1598,79 @@ pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
     serde_json::to_value(&schema)
         .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
+}
+
+// ============================================================================
+// Identity crypto utilities
+// ============================================================================
+
+fn decode_seed_napi(seed_b64: &str) -> napi::Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(seed_b64)
+        .map_err(|e| napi::Error::from_reason(format!("seed base64 decode error: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("seed must be exactly 32 bytes"))
+}
+
+#[napi(js_name = "deriveUserId")]
+pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    Ok(identity::derive_user_id(&seed).to_string())
+}
+
+#[napi(js_name = "mintLocalFirstToken")]
+pub fn mint_local_first_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: u32,
+) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
+        .map_err(napi::Error::from_reason)
+}
+
+#[napi(object)]
+pub struct VerifyTokenResult {
+    pub ok: bool,
+    pub id: String,
+    pub error: Option<String>,
+}
+
+#[napi(js_name = "verifyLocalFirstIdentityProof")]
+pub fn verify_local_first_identity_proof_napi(
+    token: Option<String>,
+    expected_audience: String,
+) -> VerifyTokenResult {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return VerifyTokenResult {
+                ok: false,
+                id: String::new(),
+                error: Some("proofToken is required".to_string()),
+            };
+        }
+    };
+    match identity::verify_local_first_identity_proof(&token, &expected_audience) {
+        Ok(verified) => VerifyTokenResult {
+            ok: true,
+            id: verified.user_id,
+            error: None,
+        },
+        Err(e) => VerifyTokenResult {
+            ok: false,
+            id: String::new(),
+            error: Some(e),
+        },
+    }
+}
+
+#[napi(js_name = "getPublicKeyBase64url")]
+pub fn get_public_key_b64(seed_b64: String) -> napi::Result<String> {
+    let seed = decode_seed_napi(&seed_b64)?;
+    let verifying_key = identity::derive_verifying_key(&seed);
+    Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
 }
 
 #[cfg(test)]

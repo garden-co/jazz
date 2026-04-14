@@ -129,7 +129,7 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
         <div className="space-y-2">
           <Label htmlFor="logout">Log Out</Label>
           <p className="text-xs text-muted-foreground">
-            If you log out, you will be automatically provisioned with a new anonymous account.
+            If you log out, you will be automatically provisioned with a new local-first identity.
           </p>
           <Button
             id="logout"

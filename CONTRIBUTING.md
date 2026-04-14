@@ -16,38 +16,53 @@ Then add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 export RUSTC_WRAPPER=sccache
 ```
 
-### libclang for RocksDB builds
+### RocksDB artifact cache
 
-The `rocksdb` feature uses `bindgen` to generate FFI bindings at build time, which requires `libclang`.
+The repo-local `librocksdb-sys` patch now uses checked-in bindings, so `libclang`
+is no longer required for RocksDB builds.
 
-**macOS:**
+Supported server targets now download a pinned prebuilt RocksDB archive from GHCR
+into the local Cargo cache on the first build, then reuse it on later builds.
 
-```sh
-brew install llvm
+The cache root defaults to:
+
+```text
+$CARGO_HOME/jazz-cache/rocksdb/<manifest-digest>/<target-triple>/lib/librocksdb.a
 ```
 
-Then symlink `libclang.dylib` into `/usr/local/lib` so the dynamic linker can
-always find it, regardless of how the build is invoked:
+Supported prebuilt target triples:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+
+Override the cache root with:
 
 ```sh
-sudo mkdir -p /usr/local/lib
-sudo ln -s "$(brew --prefix llvm)/lib/libclang.dylib" /usr/local/lib/libclang.dylib
+export JAZZ_ROCKSDB_CACHE_DIR=/path/to/cache-root
 ```
 
-> Note: environment variables like `DYLD_LIBRARY_PATH` are stripped by macOS
-> SIP in many process chains, so the symlink approach is more reliable.
-
-**Linux (Debian/Ubuntu):**
+The default GHCR package is public, so the fast path works without credentials.
+If the package ever becomes private again, export credentials first:
 
 ```sh
-sudo apt install libclang-dev
+export JAZZ_ROCKSDB_GHCR_USERNAME=your-github-username
+export JAZZ_ROCKSDB_GHCR_PASSWORD=your-read-packages-token
 ```
 
-**Linux (Fedora/RHEL):**
+`GHCR_USERNAME` plus `CR_PAT` works too. Without credentials, builds fall back to
+compiling RocksDB from source.
+
+To rebuild and publish the full supported set on macOS, use:
 
 ```sh
-sudo dnf install clang-devel
+bash scripts/publish-rocksdb-artifacts.sh
 ```
+
+If an archive is missing or GHCR fetch is unavailable, builds fall back to
+compiling RocksDB from the upstream `rust-rocksdb` checkout, which still needs a
+working C/C++ toolchain.
 
 ## Testing
 
