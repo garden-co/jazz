@@ -33,6 +33,7 @@ export type JazzContextManagerProps<
   onAnonymousAccountDiscarded?: (
     anonymousAccount: InstanceOfSchema<S>,
   ) => Promise<void>;
+  experimental_clockSyncFromServerPings?: boolean;
 };
 
 export class ReactNativeContextManager<
@@ -49,6 +50,8 @@ export class ReactNativeContextManager<
         sync: props.sync,
         storage: props.storage,
         authSecretStorage: this.authSecretStorage,
+        experimental_clockSyncFromServerPings:
+          props.experimental_clockSyncFromServerPings,
       });
     } else {
       return createJazzReactNativeContext<S>({
@@ -59,6 +62,8 @@ export class ReactNativeContextManager<
         newAccountProps: authProps?.newAccountProps,
         defaultProfileName: props.defaultProfileName,
         authSecretStorage: this.authSecretStorage,
+        experimental_clockSyncFromServerPings:
+          props.experimental_clockSyncFromServerPings,
       });
     }
   }

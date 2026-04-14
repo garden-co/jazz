@@ -26,6 +26,7 @@ export type BaseReactNativeContextOptions = {
   reconnectionTimeout?: number;
   storage?: SQLiteDatabaseDriverAsync | "disabled";
   authSecretStorage: AuthSecretStorage;
+  experimental_clockSyncFromServerPings?: boolean;
 };
 
 class ReactNativeWebSocketPeerWithReconnection extends WebSocketPeerWithReconnection {
@@ -72,6 +73,9 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
     },
     removePeer: (peer) => {
       peers.splice(peers.indexOf(peer), 1);
+    },
+    onPingReceived: (sample) => {
+      node?.clockOffset.addSample(sample);
     },
   });
 
@@ -128,6 +132,8 @@ export async function createJazzReactNativeGuestContext(
     peers,
     syncWhen,
     storage,
+    experimental_clockSyncFromServerPings:
+      options.experimental_clockSyncFromServerPings,
   });
 
   setNode(context.agent.node);
@@ -211,6 +217,8 @@ export async function createJazzReactNativeContext<
     sessionProvider,
     authSecretStorage: options.authSecretStorage,
     storage,
+    experimental_clockSyncFromServerPings:
+      options.experimental_clockSyncFromServerPings,
   });
 
   setNode(context.node);

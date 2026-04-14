@@ -31,6 +31,7 @@ export type JazzContextManagerProps<
   storage?: BaseBrowserContextOptions["storage"];
   AccountSchema?: S;
   defaultProfileName?: string;
+  experimental_clockSyncFromServerPings?: boolean;
 };
 
 export class JazzBrowserContextManager<
@@ -57,6 +58,8 @@ export class JazzBrowserContextManager<
         sync: props.sync,
         storage: props.storage,
         authSecretStorage: this.authSecretStorage,
+        experimental_clockSyncFromServerPings:
+          props.experimental_clockSyncFromServerPings,
       });
     } else {
       return createJazzBrowserContext<S>({
@@ -67,6 +70,8 @@ export class JazzBrowserContextManager<
         newAccountProps: authProps?.newAccountProps,
         defaultProfileName: props.defaultProfileName,
         authSecretStorage: this.authSecretStorage,
+        experimental_clockSyncFromServerPings:
+          props.experimental_clockSyncFromServerPings,
       });
     }
   }
