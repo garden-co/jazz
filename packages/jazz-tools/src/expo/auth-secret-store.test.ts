@@ -75,4 +75,19 @@ describe("ExpoAuthSecretStore", () => {
     await store.saveSecret("test-secret");
     expect(await secureStore.getItemAsync("jazz-auth-secret")).toBe("test-secret");
   });
+
+  it("saveSecret updates getOrCreateSecret's cache", async () => {
+    const first = await store.getOrCreateSecret();
+    const replacement = "replacement-secret-base64url-value-xyz";
+    expect(replacement).not.toBe(first);
+    await store.saveSecret(replacement);
+    expect(await store.getOrCreateSecret()).toBe(replacement);
+  });
+
+  it("saveSecret updates loadSecret even after getOrCreateSecret was cached", async () => {
+    await store.getOrCreateSecret();
+    const replacement = "replacement-secret-base64url-value-xyz";
+    await store.saveSecret(replacement);
+    expect(await store.loadSecret()).toBe(replacement);
+  });
 });
