@@ -249,3 +249,79 @@ describe("BrowserPasskeyBackup.restore — invalid-credential", () => {
     await expect(pb.restore()).rejects.toMatchObject({ code: "invalid-credential" });
   });
 });
+
+describe("BrowserPasskeyBackup.restore — happy path", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the secret encoded in userHandle as base64url", async () => {
+    const secretBytes = new Uint8Array(32).fill(0);
+    const mockCredential = {
+      type: "public-key",
+      response: { userHandle: secretBytes.buffer },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    const secret = await pb.restore();
+    // 32 zero bytes → base64url
+    expect(secret).toBe("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  });
+
+  it("passes rpId to credentials.get", async () => {
+    const mockGet = vi.fn().mockResolvedValue({
+      type: "public-key",
+      response: { userHandle: new Uint8Array(32).buffer },
+    });
+    vi.stubGlobal("navigator", { credentials: { get: mockGet } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "myapp.com" });
+    await pb.restore();
+
+    const callArg = mockGet.mock.calls[0][0] as CredentialRequestOptions;
+    expect(callArg.publicKey?.rpId).toBe("myapp.com");
+    expect(callArg.mediation).toBe("required");
+  });
+});
+
+describe("BrowserPasskeyBackup round-trip", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("backup secret bytes match restored secret", async () => {
+    // Capture the user.id bytes passed to credentials.create
+    let capturedUserId: Uint8Array | null = null;
+    const mockCreate = vi
+      .fn()
+      .mockImplementation((opts: { publicKey: PublicKeyCredentialCreationOptions }) => {
+        capturedUserId = new Uint8Array(opts.publicKey.user.id as ArrayBuffer);
+        return Promise.resolve({});
+      });
+
+    // Generate a random 32-byte secret
+    const rawBytes = new Uint8Array(32);
+    crypto.getRandomValues(rawBytes);
+    let bin = "";
+    for (const b of rawBytes) bin += String.fromCharCode(b);
+    const originalSecret = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate, get: vi.fn() } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(originalSecret);
+
+    // Now restore using the captured bytes as the userHandle
+    const mockGet = vi.fn().mockResolvedValue({
+      type: "public-key",
+      response: { userHandle: capturedUserId!.buffer },
+    });
+    vi.stubGlobal("navigator", { credentials: { create: vi.fn(), get: mockGet } });
+
+    const restoredSecret = await pb.restore();
+    expect(restoredSecret).toBe(originalSecret);
+  });
+});
