@@ -67,7 +67,7 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
@@ -476,10 +476,9 @@ impl WasmRuntime {
         info!("creating in-memory runtime");
 
         // Parse schema
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-
-        let schema: Schema = wasm_schema;
+        let schema = runtime_schema.schema;
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -492,8 +491,19 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
-            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new_with_policy_mode(
+            sync_manager,
+            schema,
+            app_id,
+            env,
+            user_branch,
+            if runtime_schema.loaded_policy_bundle {
+                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+            } else {
+                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+            },
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
@@ -1298,9 +1308,9 @@ impl WasmRuntime {
     /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
     #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
     pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema: Schema = wasm_schema;
+        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
+            .schema;
 
         let mut core = self.core.borrow_mut();
         core.add_live_schema_and_persist_catalogue(schema)
@@ -1359,10 +1369,9 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let wasm_schema: Schema = serde_json::from_str(schema_json)
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-
-        let schema: Schema = wasm_schema;
+        let schema = runtime_schema.schema;
         // Parse optional node durability tiers
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -1375,8 +1384,19 @@ impl WasmRuntime {
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
 
         // Create schema manager
-        let mut schema_manager = SchemaManager::new(sync_manager, schema, app_id, env, user_branch)
-            .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let mut schema_manager = SchemaManager::new_with_policy_mode(
+            sync_manager,
+            schema,
+            app_id,
+            env,
+            user_branch,
+            if runtime_schema.loaded_policy_bundle {
+                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+            } else {
+                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+            },
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
         let mut storage: Box<dyn Storage> = Box::new(

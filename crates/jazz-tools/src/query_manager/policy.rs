@@ -777,16 +777,15 @@ where
 
     // Get the parent's policy for the specified operation
     let parent_policy = match operation {
-        Operation::Select => parent_schema.policies.select.using.as_ref(),
-        Operation::Insert => parent_schema.policies.insert.with_check.as_ref(),
-        Operation::Update => parent_schema.policies.update.using.as_ref(),
+        Operation::Select => parent_schema.policies.select_policy(),
+        Operation::Insert => parent_schema.policies.insert_policy(),
+        Operation::Update => parent_schema.policies.update_using_policy(),
         Operation::Delete => parent_schema.policies.effective_delete_using(),
     };
 
-    // If parent has no policy, allow access
     let parent_policy = match parent_policy {
         Some(p) => p,
-        None => return true,
+        None => return false,
     };
 
     // Recursively evaluate the parent's policy

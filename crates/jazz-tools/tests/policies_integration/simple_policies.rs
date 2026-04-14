@@ -23,7 +23,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
@@ -100,7 +100,7 @@ fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchem
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .column("priority", ColumnType::Integer)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn priority_values(title: &str, priority: i32) -> Vec<Value> {
@@ -111,7 +111,7 @@ fn make_review_schema(table_name: &str, policies: TablePolicies) -> TableSchemaB
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .nullable_column("reviewer_id", ColumnType::Text)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn review_values(title: &str, reviewer_id: Option<&str>) -> Vec<Value> {
