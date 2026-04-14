@@ -1,7 +1,5 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,8 +38,10 @@ type TempRuntimeData = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const JWT_KID = "napi-test-kid";
-const JWT_SECRET = "napi-test-secret";
+// Deterministic base64url-encoded seeds — different values produce different
+// local-first identities, which map to different owner_id values in policy checks.
+const ALICE_SECRET = "YWxpY2Utc2VjcmV0LWZvci10ZXN0LXB1cnBvc2VzISE";
+const BOB_SECRET = "Ym9iLS0tc2VjcmV0LWZvci10ZXN0LXB1cnBvc2VzISE";
 
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts", import.meta.url),
@@ -50,89 +50,6 @@ const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function base64Url(input: Buffer | string): string {
-  const encoded = (input instanceof Buffer ? input : Buffer.from(input)).toString("base64");
-  return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-function toBase64Url(value: unknown): string {
-  return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
-}
-
-function makeJwt(payload: Record<string, unknown>): string {
-  const header = toBase64Url({ alg: "HS256", typ: "JWT", kid: JWT_KID });
-  const body = toBase64Url(payload);
-  const signature = createHmac("sha256", JWT_SECRET)
-    .update(`${header}.${body}`, "utf8")
-    .digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-  return `${header}.${body}.${signature}`;
-}
-
-async function getAvailablePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close((error) => {
-          if (error) reject(error);
-          else reject(new Error("failed to allocate an available port"));
-        });
-        return;
-      }
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(address.port);
-      });
-    });
-  });
-}
-
-class JwksServer {
-  private readonly server: HttpServer;
-  readonly url: string;
-
-  private constructor(server: HttpServer, url: string) {
-    this.server = server;
-    this.url = url;
-  }
-
-  static async start(secret: string): Promise<JwksServer> {
-    const server = createHttpServer((request, response) => {
-      if (request.url !== "/jwks") {
-        response.statusCode = 404;
-        response.end("not found");
-        return;
-      }
-      response.statusCode = 200;
-      response.setHeader("Content-Type", "application/json");
-      response.end(
-        JSON.stringify({
-          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
-        }),
-      );
-    });
-
-    const port = await getAvailablePort();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, "127.0.0.1", (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    return new JwksServer(server, `http://127.0.0.1:${port}/jwks`);
-  }
-
-  async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-}
 
 async function createTempRuntimeData(prefix: string): Promise<TempRuntimeData> {
   const dataRoot = await mkdtemp(join(tmpdir(), prefix));
@@ -218,7 +135,6 @@ describe("forRequest concurrent session isolation", () => {
     const scopeTag = `concurrent-scope-${randomUUID()}`;
     let runtimeData: TempRuntimeData | null = null;
 
-    const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
 
     let context: {
@@ -229,6 +145,7 @@ describe("forRequest concurrent session isolation", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const { mintLocalFirstToken, verifyLocalFirstIdentityProof } = await loadNapiModule();
 
       await pushSchemaCatalogue({
         serverUrl: server.url,
@@ -252,20 +169,29 @@ describe("forRequest concurrent session isolation", () => {
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
-        jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
         tier: "worker",
       });
 
+      // Mint local-first tokens for alice and bob. No JWKS server needed —
+      // forRequest verifies these directly via the NAPI module.
+      const aliceToken = mintLocalFirstToken(ALICE_SECRET, appId, 60);
+      const bobToken = mintLocalFirstToken(BOB_SECRET, appId, 60);
+
+      // Resolve the canonical user IDs derived from each secret so we can
+      // use them as owner_id when inserting rows.
+      const aliceId = verifyLocalFirstIdentityProof(aliceToken, appId).id;
+      const bobId = verifyLocalFirstIdentityProof(bobToken, appId).id;
+
       // Obtain session-scoped Db handles for alice and bob concurrently from
       // the same shared context — this is the pattern a real server would use.
       const [aliceDb, bobDb] = await Promise.all([
         context.forRequest({
-          headers: { authorization: `Bearer ${makeJwt({ sub: "alice" })}` },
+          headers: { authorization: `Bearer ${aliceToken}` },
         }),
         context.forRequest({
-          headers: { authorization: `Bearer ${makeJwt({ sub: "bob" })}` },
+          headers: { authorization: `Bearer ${bobToken}` },
         }),
       ]);
 
@@ -274,7 +200,7 @@ describe("forRequest concurrent session isolation", () => {
         withTimeout(
           aliceDb.insertDurable(
             policyTodosTable,
-            { title: "alice-todo", done: false, description: scopeTag, owner_id: "alice" },
+            { title: "alice-todo", done: false, description: scopeTag, owner_id: aliceId },
             { tier: "edge" },
           ),
           10_000,
@@ -283,7 +209,7 @@ describe("forRequest concurrent session isolation", () => {
         withTimeout(
           bobDb.insertDurable(
             policyTodosTable,
-            { title: "bob-todo", done: false, description: scopeTag, owner_id: "bob" },
+            { title: "bob-todo", done: false, description: scopeTag, owner_id: bobId },
             { tier: "edge" },
           ),
           10_000,
@@ -323,14 +249,14 @@ describe("forRequest concurrent session isolation", () => {
         expect(
           aliceDb.insertDurable(
             policyTodosTable,
-            { title: "alice-as-bob", done: false, description: scopeTag, owner_id: "bob" },
+            { title: "alice-as-bob", done: false, description: scopeTag, owner_id: bobId },
             { tier: "edge" },
           ),
         ).rejects.toThrow(),
         expect(
           bobDb.insertDurable(
             policyTodosTable,
-            { title: "bob-as-alice", done: false, description: scopeTag, owner_id: "alice" },
+            { title: "bob-as-alice", done: false, description: scopeTag, owner_id: aliceId },
             { tier: "edge" },
           ),
         ).rejects.toThrow(),
@@ -339,7 +265,7 @@ describe("forRequest concurrent session isolation", () => {
       // A fresh forRequest call for alice (simulating a later HTTP request)
       // must still be isolated from bob's data.
       const aliceDb2 = await context.forRequest({
-        headers: { authorization: `Bearer ${makeJwt({ sub: "alice" })}` },
+        headers: { authorization: `Bearer ${mintLocalFirstToken(ALICE_SECRET, appId, 60)}` },
       });
       await vi.waitFor(
         async () => {
@@ -357,7 +283,6 @@ describe("forRequest concurrent session isolation", () => {
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
       await server.stop();
-      await jwks.stop();
     }
   }, 60_000);
 });
