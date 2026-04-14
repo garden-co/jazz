@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { PasskeyBackupError, BrowserPasskeyBackup } from "./passkey-backup.js";
 
+// Build a minimal authenticatorData buffer. The flags byte lives at offset 32.
+// UP = bit 0 (0x01), UV = bit 2 (0x04). Both set = 0x05.
+function makeAuthData(flags: number): ArrayBuffer {
+  const buf = new Uint8Array(37); // 32 (rpIdHash) + 1 (flags) + 4 (signCount)
+  buf[32] = flags;
+  return buf.buffer;
+}
+
+const UP_UV = 0x05; // user present + user verified
+
 describe("PasskeyBackupError", () => {
   it("has the correct name", () => {
     const err = new PasskeyBackupError("not-supported");
@@ -28,6 +38,9 @@ describe("PasskeyBackupError", () => {
     expect(new PasskeyBackupError("no-credential").message).toBe("No passkey credential found");
     expect(new PasskeyBackupError("invalid-credential").message).toBe(
       "Passkey credential does not contain a valid secret",
+    );
+    expect(new PasskeyBackupError("verification-failed").message).toBe(
+      "Authenticator did not perform user verification",
     );
   });
 
@@ -120,6 +133,32 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     expect(userId).toEqual(new Uint8Array(32)); // 32 zero bytes
   });
 
+  it("sets authenticatorAttachment: platform", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.authenticatorSelection?.authenticatorAttachment).toBe("platform");
+  });
+
+  it("sets userVerification: required on authenticatorSelection", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions;
+    };
+    expect(callArg.publicKey.authenticatorSelection?.userVerification).toBe("required");
+  });
+
   it("sets residentKey: required on authenticatorSelection", async () => {
     const mockCreate = vi.fn().mockResolvedValue({});
     vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
@@ -132,6 +171,23 @@ describe("BrowserPasskeyBackup.backup — credentials.create", () => {
     };
     expect(callArg.publicKey.authenticatorSelection?.residentKey).toBe("required");
     expect(callArg.publicKey.authenticatorSelection?.requireResidentKey).toBe(true);
+  });
+
+  it("sets credentialProtectionPolicy: userVerificationRequired extension", async () => {
+    const mockCreate = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("navigator", { credentials: { create: mockCreate } });
+
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await pb.backup(VALID_SECRET);
+
+    const callArg = mockCreate.mock.calls[0][0] as {
+      publicKey: PublicKeyCredentialCreationOptions & {
+        extensions?: Record<string, unknown>;
+      };
+    };
+    expect(callArg.publicKey.extensions?.credentialProtectionPolicy).toBe(
+      "userVerificationRequired",
+    );
   });
 
   it("sets rp.id to appHostname", async () => {
@@ -220,6 +276,57 @@ describe("BrowserPasskeyBackup.restore — no-credential", () => {
   });
 });
 
+describe("BrowserPasskeyBackup.restore — verification-failed", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("throws verification-failed when neither UP nor UV is set", async () => {
+    const mockCredential = {
+      type: "public-key",
+      response: {
+        userHandle: new Uint8Array(32).buffer,
+        authenticatorData: makeAuthData(0x00),
+      },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "verification-failed" });
+  });
+
+  it("throws verification-failed when UV is set but UP is not", async () => {
+    const mockCredential = {
+      type: "public-key",
+      response: {
+        userHandle: new Uint8Array(32).buffer,
+        authenticatorData: makeAuthData(0x04), // UV only
+      },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "verification-failed" });
+  });
+
+  it("throws verification-failed when UP is set but UV is not", async () => {
+    const mockCredential = {
+      type: "public-key",
+      response: {
+        userHandle: new Uint8Array(32).buffer,
+        authenticatorData: makeAuthData(0x01), // UP only
+      },
+    };
+    vi.stubGlobal("navigator", {
+      credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
+    });
+    const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
+    await expect(pb.restore()).rejects.toMatchObject({ code: "verification-failed" });
+  });
+});
+
 describe("BrowserPasskeyBackup.restore — invalid-credential", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -228,7 +335,10 @@ describe("BrowserPasskeyBackup.restore — invalid-credential", () => {
   it("throws invalid-credential when userHandle is null", async () => {
     const mockCredential = {
       type: "public-key",
-      response: { userHandle: null },
+      response: {
+        userHandle: null,
+        authenticatorData: makeAuthData(UP_UV),
+      },
     };
     vi.stubGlobal("navigator", {
       credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
@@ -240,7 +350,10 @@ describe("BrowserPasskeyBackup.restore — invalid-credential", () => {
   it("throws invalid-credential when userHandle is not 32 bytes", async () => {
     const mockCredential = {
       type: "public-key",
-      response: { userHandle: new Uint8Array(16).buffer },
+      response: {
+        userHandle: new Uint8Array(16).buffer,
+        authenticatorData: makeAuthData(UP_UV),
+      },
     };
     vi.stubGlobal("navigator", {
       credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
@@ -259,7 +372,10 @@ describe("BrowserPasskeyBackup.restore — happy path", () => {
     const secretBytes = new Uint8Array(32).fill(0);
     const mockCredential = {
       type: "public-key",
-      response: { userHandle: secretBytes.buffer },
+      response: {
+        userHandle: secretBytes.buffer,
+        authenticatorData: makeAuthData(UP_UV),
+      },
     };
     vi.stubGlobal("navigator", {
       credentials: { get: vi.fn().mockResolvedValue(mockCredential) },
@@ -271,10 +387,13 @@ describe("BrowserPasskeyBackup.restore — happy path", () => {
     expect(secret).toBe("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   });
 
-  it("passes rpId to credentials.get", async () => {
+  it("passes rpId and userVerification: required to credentials.get", async () => {
     const mockGet = vi.fn().mockResolvedValue({
       type: "public-key",
-      response: { userHandle: new Uint8Array(32).buffer },
+      response: {
+        userHandle: new Uint8Array(32).buffer,
+        authenticatorData: makeAuthData(UP_UV),
+      },
     });
     vi.stubGlobal("navigator", { credentials: { get: mockGet } });
 
@@ -283,6 +402,7 @@ describe("BrowserPasskeyBackup.restore — happy path", () => {
 
     const callArg = mockGet.mock.calls[0][0] as CredentialRequestOptions;
     expect(callArg.publicKey?.rpId).toBe("myapp.com");
+    expect(callArg.publicKey?.userVerification).toBe("required");
     expect(callArg.mediation).toBe("required");
   });
 });
@@ -317,7 +437,10 @@ describe("BrowserPasskeyBackup round-trip", () => {
     // Now restore using the captured bytes as the userHandle
     const mockGet = vi.fn().mockResolvedValue({
       type: "public-key",
-      response: { userHandle: capturedUserId!.buffer },
+      response: {
+        userHandle: capturedUserId!.buffer,
+        authenticatorData: makeAuthData(UP_UV),
+      },
     });
     vi.stubGlobal("navigator", { credentials: { create: vi.fn(), get: mockGet } });
 
