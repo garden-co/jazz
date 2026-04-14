@@ -1242,17 +1242,15 @@ impl NapiRuntime {
     /// `RuntimeCore`, and spawns the manager loop as a Tokio task.
     #[napi]
     pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
-        let auth: jazz_tools::transport_manager::AuthConfig =
-            serde_json::from_str(&auth_json)
-                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let auth: jazz_tools::transport_manager::AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let tick = NapiTickNotifier {
             core: Arc::clone(&self.core),
         };
-        let (handle, manager) =
-            jazz_tools::transport_manager::create::<
-                jazz_tools::ws_stream::NativeWsStream,
-                NapiTickNotifier,
-            >(url, auth, tick);
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            jazz_tools::ws_stream::NativeWsStream,
+            NapiTickNotifier,
+        >(url, auth, tick);
         self.core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?

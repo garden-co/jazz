@@ -1673,7 +1673,7 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 ///   broken:   owner="bob", title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "TODO: sync transport does not guarantee delivery order - writes from the same client can arrive at the server out of sequence"]
+#[ignore = "WebSocket transport now preserves per-client ordering on the wire, but this test depends on a query-result path that is timing out under the new pipeline; needs separate investigation"]
 async fn single_client_operations_reach_server_in_causal_order() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()

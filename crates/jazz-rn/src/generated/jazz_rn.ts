@@ -708,6 +708,13 @@ export interface RnRuntimeInterface {
    */
   close() /*throws*/ : void;
   /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+   */
+  connect(url: string, authJson: string) /*throws*/ : void;
+  /**
    * Phase 1 of 2-phase subscribe: allocate a handle and store query params.
    */
   createSubscription(
@@ -720,6 +727,10 @@ export interface RnRuntimeInterface {
     objectId: string,
     writeContextJson: string | undefined
   ) /*throws*/ : void;
+  /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   */
+  disconnect(): void;
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -885,6 +896,29 @@ export class RnRuntime
   }
 
   /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+   */
+  connect(url: string, authJson: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(url),
+          FfiConverterString.lower(authJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
    * Phase 1 of 2-phase subscribe: allocate a handle and store query params.
    */
   createSubscription(
@@ -940,6 +974,21 @@ export class RnRuntime
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterString.lower(objectId),
           FfiConverterOptionalString.lower(writeContextJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   */
+  disconnect(): void {
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           callStatus
         );
       },
@@ -1442,6 +1491,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect() !==
+    261
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_connect'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription() !==
     20107
   ) {
@@ -1463,6 +1520,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect() !==
+    61004
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_disconnect'
     );
   }
   if (

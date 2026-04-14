@@ -1502,15 +1502,13 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn connect(&self, url: String, auth_json: String) -> Result<(), JsValue> {
         let auth: jazz_tools::transport_manager::AuthConfig =
-            serde_json::from_str(&auth_json)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let scheduler = self.core.borrow().scheduler().clone();
         let tick = WasmTickNotifier { scheduler };
-        let (handle, manager) =
-            jazz_tools::transport_manager::create::<
-                crate::ws_stream::WasmWsStream,
-                WasmTickNotifier,
-            >(url, auth, tick);
+        let (handle, manager) = jazz_tools::transport_manager::create::<
+            crate::ws_stream::WasmWsStream,
+            WasmTickNotifier,
+        >(url, auth, tick);
         self.core.borrow_mut().set_transport(handle);
         wasm_bindgen_futures::spawn_local(manager.run());
         Ok(())
