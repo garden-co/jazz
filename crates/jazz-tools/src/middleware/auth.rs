@@ -21,6 +21,7 @@
 //! 3. No session
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -65,6 +66,72 @@ pub type ExternalIdentityMap = HashMap<(String, String), String>;
 // Auth Configuration
 // ============================================================================
 
+#[derive(Clone)]
+pub struct AuthClock {
+    now_seconds: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl AuthClock {
+    pub fn system() -> Self {
+        Self {
+            now_seconds: Arc::new(system_now_seconds),
+        }
+    }
+
+    pub fn now_seconds(&self) -> u64 {
+        (self.now_seconds)()
+    }
+}
+
+impl Default for AuthClock {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+impl fmt::Debug for AuthClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthClock").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Debug)]
+pub struct TestClock {
+    now_seconds: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "test-utils")]
+impl TestClock {
+    pub fn new(now_seconds: u64) -> Self {
+        Self {
+            now_seconds: Arc::new(AtomicU64::new(now_seconds)),
+        }
+    }
+
+    pub fn now_seconds(&self) -> u64 {
+        self.now_seconds.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self, now_seconds: u64) {
+        self.now_seconds.store(now_seconds, Ordering::SeqCst);
+    }
+
+    pub fn advance(&self, delta: Duration) {
+        self.now_seconds
+            .fetch_add(delta.as_secs(), Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "test-utils")]
+impl From<TestClock> for AuthClock {
+    fn from(clock: TestClock) -> Self {
+        Self {
+            now_seconds: Arc::new(move || clock.now_seconds()),
+        }
+    }
+}
+
 /// Authentication configuration for the server.
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -76,6 +143,8 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
+    /// Time source for auth expiry checks. Defaults to the system clock.
+    pub clock: AuthClock,
 }
 
 impl AuthConfig {
@@ -328,6 +397,21 @@ fn now_timestamp_us() -> u64 {
     }
 }
 
+fn system_now_seconds() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    }
+}
+
+fn local_first_auth_error(message: String) -> UnauthenticatedResponse {
+    if message.starts_with("token expired:") {
+        UnauthenticatedResponse::expired("JWT has expired")
+    } else {
+        UnauthenticatedResponse::invalid(message)
+    }
+}
+
 // ============================================================================
 // Extractors
 // ============================================================================
@@ -572,15 +656,10 @@ pub fn verify_jwt_signature_with_jwks(
     )))
 }
 
-fn ensure_jwt_not_expired(verified: &VerifiedJwt) -> Result<(), JwtError> {
+fn ensure_jwt_not_expired_at(verified: &VerifiedJwt, now: u64) -> Result<(), JwtError> {
     let Some(exp) = verified.exp else {
         return Ok(());
     };
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     if exp <= now {
         return Err(JwtError::Expired);
@@ -599,6 +678,14 @@ pub async fn validate_jwt_with_cache(
     token: &str,
     cache: &JwksCache,
 ) -> Result<VerifiedJwt, JwtError> {
+    validate_jwt_with_cache_at(token, cache, system_now_seconds()).await
+}
+
+pub async fn validate_jwt_with_cache_at(
+    token: &str,
+    cache: &JwksCache,
+    now_seconds: u64,
+) -> Result<VerifiedJwt, JwtError> {
     let cached_jwks = cache.load(false).await.map_err(|e| {
         warn!(error = %e, "failed to load cached JWKS");
         JwtError::Invalid("unable to load JWKS".to_string())
@@ -606,7 +693,7 @@ pub async fn validate_jwt_with_cache(
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired(&verified)?;
+            ensure_jwt_not_expired_at(&verified, now_seconds)?;
             return Ok(verified);
         }
         Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
@@ -625,7 +712,7 @@ pub async fn validate_jwt_with_cache(
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired(&verified)?;
+            ensure_jwt_not_expired_at(&verified, now_seconds)?;
             Ok(verified)
         }
         Err(JwtVerificationError::Retryable(e) | JwtVerificationError::Fatal(e)) => {
@@ -792,8 +879,12 @@ pub async fn extract_session(
                     "Self-signed auth is not enabled for this app",
                 ));
             }
-            let verified = identity::verify_local_first_identity_proof(token, &app_id.to_string())
-                .map_err(UnauthenticatedResponse::invalid)?;
+            let verified = identity::verify_local_first_identity_proof_at(
+                token,
+                &app_id.to_string(),
+                config.clock.now_seconds(),
+            )
+            .map_err(local_first_auth_error)?;
             return Ok(Some(Session {
                 user_id: verified.user_id,
                 claims: serde_json::json!({
@@ -804,7 +895,7 @@ pub async fn extract_session(
 
         // JWKS JWT path
         let jwt_result = if let Some(cache) = jwks_cache {
-            validate_jwt_with_cache(token, cache).await
+            validate_jwt_with_cache_at(token, cache, config.clock.now_seconds()).await
         } else {
             Err(JwtError::NoKeyConfigured)
         };
@@ -902,6 +993,7 @@ mod tests {
             allow_local_first_auth: false,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
+            ..Default::default()
         }
     }
 
@@ -1224,6 +1316,7 @@ mod tests {
             allow_local_first_auth: true,
             backend_secret: None,
             admin_secret: None,
+            ..Default::default()
         }
     }
 
@@ -1263,6 +1356,42 @@ mod tests {
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         let result = extract_session(&headers, app_id, &config, None, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_first_auth_expiry_uses_configured_test_clock() {
+        let app_id = test_app_id();
+        let clock = TestClock::new(1_700_000_000);
+        let config = AuthConfig {
+            allow_local_first_auth: true,
+            clock: clock.clone().into(),
+            ..Default::default()
+        };
+        let token = identity::mint_local_first_token_at(
+            &alice_seed(),
+            &app_id.to_string(),
+            5,
+            clock.now_seconds(),
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+
+        let session = extract_session(&headers, app_id, &config, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.user_id,
+            identity::derive_user_id(&alice_seed()).to_string()
+        );
+
+        clock.advance(Duration::from_secs(6));
+
+        let result = extract_session(&headers, app_id, &config, None, None).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Expired);
     }
 
     #[tokio::test]

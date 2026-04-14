@@ -169,6 +169,7 @@ async fn main() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                ..Default::default()
             };
             let catalogue_authority = match catalogue_authority {
                 CatalogueAuthorityArg::Local => CatalogueAuthorityMode::Local,

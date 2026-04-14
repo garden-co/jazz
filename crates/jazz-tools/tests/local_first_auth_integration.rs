@@ -14,6 +14,7 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::middleware::auth::TestClock;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder,
@@ -382,16 +383,23 @@ async fn local_first_and_jwt_clients_coexist() {
 /// queued write flushes to the server.
 #[tokio::test]
 async fn expired_token_reconnect_flushes_queued_writes() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let auth_clock = TestClock::new(1_700_000_000);
+    let server = TestingServer::builder()
+        .with_schema(test_schema())
+        .with_auth_clock(auth_clock.clone())
+        .start()
+        .await;
 
     let audience = server.app_id().to_string();
     let seed = alice_seed();
 
-    // Base context with persistent storage; swap in a 1-second TTL token so we
-    // can drive it past expiry in the test timeline.
+    // Base context with persistent storage; swap in a token minted against the
+    // server's test auth clock so the test can advance expiry deterministically
+    // without sleeping on wall time.
     let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Persistent);
     ctx.jwt_token = Some(
-        identity::mint_local_first_token(&seed, &audience, 1).expect("mint short-lived token"),
+        identity::mint_local_first_token_at(&seed, &audience, 5, auth_clock.now_seconds())
+            .expect("mint short-lived token"),
     );
 
     let client = JazzClient::connect(ctx.clone())
@@ -411,8 +419,9 @@ async fn expired_token_reconnect_flushes_queued_writes() {
     )
     .await;
 
-    // Let the token lapse. 1s TTL + 1500ms yields a definitively-expired token.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Advance the server's auth clock past the token TTL. The live client keeps
+    // running; only subsequent server auth checks see the token as expired.
+    auth_clock.advance(Duration::from_secs(6));
 
     // Post-expiry write: commit succeeds locally even though the server would
     // now reject the bearer token on sync.
@@ -427,8 +436,13 @@ async fn expired_token_reconnect_flushes_queued_writes() {
     // write replays.
     let mut fresh_ctx = ctx.clone();
     fresh_ctx.jwt_token = Some(
-        identity::mint_local_first_token(&seed, &audience, TOKEN_TTL_SECS)
-            .expect("mint refreshed token"),
+        identity::mint_local_first_token_at(
+            &seed,
+            &audience,
+            TOKEN_TTL_SECS,
+            auth_clock.now_seconds(),
+        )
+        .expect("mint refreshed token"),
     );
 
     let reconnected = JazzClient::connect(fresh_ctx)
