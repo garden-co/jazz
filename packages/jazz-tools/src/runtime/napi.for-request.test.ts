@@ -192,7 +192,7 @@ describe("forRequest auth and policy", () => {
         { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
         { tier: "edge" },
       ),
-      10_000,
+      5_000,
       "insert timed out",
     );
 
@@ -201,14 +201,14 @@ describe("forRequest auth and policy", () => {
       async () => {
         const rows = await withTimeout(
           aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          10_000,
+          5_000,
           "request-scoped read timed out",
         );
         expect(rows).toEqual([
           expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.userId }),
         ]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     // Insert with a foreign owner_id is rejected by the policy.
@@ -225,14 +225,14 @@ describe("forRequest auth and policy", () => {
       async () => {
         const rows = await withTimeout(
           backendDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          10_000,
+          5_000,
           "backend read timed out",
         );
         expect(rows).toContainEqual(expect.objectContaining({ id: row.id }));
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
-  }, 60_000);
+  }, 30_000);
 
   it("rejects local-first token when allowLocalFirstAuth is false", async () => {
     const appId = randomUUID();
@@ -307,7 +307,7 @@ describe("forRequest auth and policy", () => {
           { title: "alice-item", done: false, description: scopeTag, owner_id: alice.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "alice writer insert timed out",
       ),
       withTimeout(
@@ -316,7 +316,7 @@ describe("forRequest auth and policy", () => {
           { title: "bob-item", done: false, description: scopeTag, owner_id: bob.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "bob writer insert timed out",
       ),
       withTimeout(
@@ -325,7 +325,7 @@ describe("forRequest auth and policy", () => {
           { title: "carol-item", done: false, description: scopeTag, owner_id: carol.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "carol writer insert timed out",
       ),
     ]);
@@ -340,12 +340,12 @@ describe("forRequest auth and policy", () => {
       async () => {
         const rows = await withTimeout(
           readerBackend.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          10_000,
+          5_000,
           "backend reader timed out",
         );
         expect(rows.map((r) => r.title).sort()).toEqual(["alice-item", "bob-item", "carol-item"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     // Both alice handles surface only alice's row.
@@ -354,21 +354,21 @@ describe("forRequest auth and policy", () => {
         const [sessionRows, requestRows] = await Promise.all([
           withTimeout(
             aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "alice session read timed out",
           ),
           withTimeout(
             aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "alice request read timed out",
           ),
         ]);
         expect(sessionRows.map((r) => r.title)).toEqual(["alice-item"]);
         expect(requestRows.map((r) => r.title)).toEqual(["alice-item"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
-  }, 60_000);
+  }, 30_000);
 });
 
 describe("forRequest concurrent session isolation", () => {
@@ -425,7 +425,7 @@ describe("forRequest concurrent session isolation", () => {
           },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "alice insert timed out",
       ),
       withTimeout(
@@ -439,7 +439,7 @@ describe("forRequest concurrent session isolation", () => {
           },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "bob insert timed out",
       ),
     ]);
@@ -451,12 +451,12 @@ describe("forRequest concurrent session isolation", () => {
           aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
             tier: "edge",
           }),
-          10_000,
+          5_000,
           "alice read timed out",
         );
         expect(rows.map((r) => r.title).sort()).toEqual(["alice-todo"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     // Bob's scoped Db should only surface his own row.
@@ -466,12 +466,12 @@ describe("forRequest concurrent session isolation", () => {
           bobDb.all(todoApp.todos.where({ description: scopeTag }), {
             tier: "edge",
           }),
-          10_000,
+          5_000,
           "bob read timed out",
         );
         expect(rows.map((r) => r.title).sort()).toEqual(["bob-todo"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     // Cross-user write rejection: alice and bob must not be able to insert
@@ -515,14 +515,14 @@ describe("forRequest concurrent session isolation", () => {
           aliceDb2.all(todoApp.todos.where({ description: scopeTag }), {
             tier: "edge",
           }),
-          10_000,
+          5_000,
           "alice2 read timed out",
         );
         expect(rows.map((r) => r.title).sort()).toEqual(["alice-todo"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
-  }, 60_000);
+  }, 30_000);
 
   it("concurrent updateDurable respects per-user ownership — cross-user update is rejected", async () => {
     const appId = randomUUID();
@@ -557,7 +557,7 @@ describe("forRequest concurrent session isolation", () => {
           { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "alice insert timed out",
       ),
       withTimeout(
@@ -566,7 +566,7 @@ describe("forRequest concurrent session isolation", () => {
           { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "bob insert timed out",
       ),
     ]);
@@ -580,12 +580,12 @@ describe("forRequest concurrent session isolation", () => {
           { title: "alice-updated" },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "alice update timed out",
       ),
       withTimeout(
         bobDb.updateDurable(todoApp.todos, bobRow.id, { title: "bob-updated" }, { tier: "edge" }),
-        10_000,
+        5_000,
         "bob update timed out",
       ),
     ]);
@@ -595,19 +595,19 @@ describe("forRequest concurrent session isolation", () => {
         const [aliceRows, bobRows] = await Promise.all([
           withTimeout(
             aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "alice read timed out",
           ),
           withTimeout(
             bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "bob read timed out",
           ),
         ]);
         expect(aliceRows.map((r) => r.title)).toEqual(["alice-updated"]);
         expect(bobRows.map((r) => r.title)).toEqual(["bob-updated"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     // Cross-user update must be rejected.
@@ -629,7 +629,7 @@ describe("forRequest concurrent session isolation", () => {
         ),
       ).rejects.toThrow(),
     ]);
-  }, 60_000);
+  }, 30_000);
 
   it("concurrent deleteDurable respects per-user ownership — cross-user delete is rejected", async () => {
     const appId = randomUUID();
@@ -664,7 +664,7 @@ describe("forRequest concurrent session isolation", () => {
           { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "alice insert timed out",
       ),
       withTimeout(
@@ -673,7 +673,7 @@ describe("forRequest concurrent session isolation", () => {
           { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
           { tier: "edge" },
         ),
-        10_000,
+        5_000,
         "bob insert timed out",
       ),
     ]);
@@ -688,12 +688,12 @@ describe("forRequest concurrent session isolation", () => {
     await Promise.all([
       withTimeout(
         aliceDb.deleteDurable(todoApp.todos, aliceRow.id, { tier: "edge" }),
-        10_000,
+        5_000,
         "alice delete timed out",
       ),
       withTimeout(
         bobDb.deleteDurable(todoApp.todos, bobRow.id, { tier: "edge" }),
-        10_000,
+        5_000,
         "bob delete timed out",
       ),
     ]);
@@ -703,21 +703,21 @@ describe("forRequest concurrent session isolation", () => {
         const [aliceRows, bobRows] = await Promise.all([
           withTimeout(
             aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "alice read timed out",
           ),
           withTimeout(
             bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "bob read timed out",
           ),
         ]);
         expect(aliceRows).toEqual([]);
         expect(bobRows).toEqual([]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
-  }, 60_000);
+  }, 30_000);
 
   it("two concurrent forRequest sessions for the same user both see only that user's rows", async () => {
     const appId = randomUUID();
@@ -753,7 +753,7 @@ describe("forRequest concurrent session isolation", () => {
         { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
         { tier: "edge" },
       ),
-      10_000,
+      5_000,
       "alice insert timed out",
     );
 
@@ -763,19 +763,19 @@ describe("forRequest concurrent session isolation", () => {
         const [rows1, rows2] = await Promise.all([
           withTimeout(
             aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "aliceDb1 read timed out",
           ),
           withTimeout(
             aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-            10_000,
+            5_000,
             "aliceDb2 read timed out",
           ),
         ]);
         expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
         expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     await withTimeout(
@@ -784,7 +784,7 @@ describe("forRequest concurrent session isolation", () => {
         { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
         { tier: "edge" },
       ),
-      10_000,
+      5_000,
       "bob insert timed out",
     );
 
@@ -793,29 +793,29 @@ describe("forRequest concurrent session isolation", () => {
       async () => {
         const bobRows = await withTimeout(
           bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          10_000,
+          5_000,
           "bob read timed out",
         );
         expect(bobRows).toHaveLength(1);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     const [rows1, rows2] = await Promise.all([
       withTimeout(
         aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-        10_000,
+        5_000,
         "aliceDb1 read timed out",
       ),
       withTimeout(
         aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-        10_000,
+        5_000,
         "aliceDb2 read timed out",
       ),
     ]);
     expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
     expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
-  }, 60_000);
+  }, 30_000);
 
   it("forRequest user with no rows gets empty results, not another user's rows", async () => {
     const appId = randomUUID();
@@ -847,7 +847,7 @@ describe("forRequest concurrent session isolation", () => {
         { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
         { tier: "edge" },
       ),
-      10_000,
+      5_000,
       "alice insert timed out",
     );
 
@@ -856,19 +856,19 @@ describe("forRequest concurrent session isolation", () => {
       async () => {
         const rows = await withTimeout(
           aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-          10_000,
+          5_000,
           "alice read timed out",
         );
         expect(rows).toHaveLength(1);
       },
-      { timeout: 20_000 },
+      { timeout: 10_000 },
     );
 
     const carolRows = await withTimeout(
       carolDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "edge" }),
-      10_000,
+      5_000,
       "carol read timed out",
     );
     expect(carolRows).toEqual([]);
-  }, 60_000);
+  }, 30_000);
 });
