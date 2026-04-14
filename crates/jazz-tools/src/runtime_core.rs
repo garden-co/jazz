@@ -44,6 +44,7 @@ use crate::query_manager::types::{
     OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
@@ -149,6 +150,17 @@ impl From<QueryError> for RuntimeError {
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.
 pub type InsertedRow = (ObjectId, Vec<Value>);
+
+/// Structured rejection returned by persisted writes when their batch is rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedWriteRejection {
+    pub batch_id: BatchId,
+    pub code: String,
+    pub reason: String,
+}
+
+/// Terminal outcome for a persisted write wait.
+pub type PersistedWriteAck = std::result::Result<(), PersistedWriteRejection>;
 
 /// Future that resolves to query results.
 ///
@@ -256,7 +268,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Watchers for persistence acks: (row, branch, logical write batch, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,

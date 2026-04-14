@@ -879,6 +879,8 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
             }],
         }),
     );
+    record.track_touched_row(ObjectId::from_uuid(uuid::Uuid::from_u128(94)));
+    record.track_touched_row(ObjectId::from_uuid(uuid::Uuid::from_u128(95)));
     record.sealed_submission = Some(SealedBatchSubmission::new(
         batch_id,
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),

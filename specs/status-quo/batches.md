@@ -389,10 +389,14 @@ Important APIs:
 - `db.beginDirectBatch(table)`
 - `db.beginTransaction(table)`
 
+The `Db` batch handles are intentionally seeded by a table: that first table chooses the runtime
+client/schema, and later writes through the same handle must stay on that client-bound schema
+surface.
+
 `PersistedWrite` also stays batch-shaped:
 
 - `batchId()` returns the logical batch id
-- `wait()` waits for the requested durability outcome
+- `wait()` resolves when the requested durability tier is confirmed, or rejects if the batch is rejected
 - `localBatchRecord()` reloads replayable local state
 - `acknowledgeRejectedBatch()` prunes a retained rejected record
 

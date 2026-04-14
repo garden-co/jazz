@@ -123,6 +123,8 @@ At the typed `Db` layer:
 
 The returned handles (`DirectBatch`, `Transaction`, `DbDirectBatch`, `DbTransaction`) reuse the
 same CRUD surface as normal writes, but with one shared logical `BatchId`.
+For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
+client/schema owns that handle.
 
 Transactional handles add the explicit completion step:
 
@@ -131,7 +133,7 @@ Transactional handles add the explicit completion step:
 Persisted writes are batch-shaped too:
 
 - the handle exposes `batchId()`
-- `wait()` resolves when the requested replayable outcome is satisfied
+- `wait()` resolves when the requested replayable durability outcome is satisfied, or rejects if the batch is rejected
 - `localBatchRecord()` reloads retained local state
 - `acknowledgeRejectedBatch()` prunes retained rejected records once the app has handled them
 

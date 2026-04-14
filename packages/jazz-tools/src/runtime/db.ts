@@ -50,7 +50,6 @@ import { normalizeBuiltQuery } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
-  resolveRuntimeConfigWasmUrl,
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
@@ -220,6 +219,20 @@ function resolveSchemaWithTable(
   return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
 }
 
+function assertTableBelongsToClient<T, Init>(
+  table: TableProxy<T, Init>,
+  expectedClient: JazzClient,
+  resolveClient: (schema: WasmSchema) => JazzClient,
+  operation: string,
+): void {
+  if (resolveClient(table._schema) === expectedClient) {
+    return;
+  }
+  throw new Error(
+    `${operation} is bound to the client chosen at begin time and cannot be used with table "${table._table}" from a different schema/client.`,
+  );
+}
+
 /**
  * Interface for table proxies used with mutations.
  * Generated table constants implement this interface.
@@ -273,6 +286,10 @@ export class DbTransaction {
   constructor(
     private readonly client: JazzClient,
     private readonly runtimeTransaction: RuntimeTransaction,
+    private readonly assertOwnsTable: <T, Init>(
+      table: TableProxy<T, Init>,
+      operation: string,
+    ) => void,
   ) {}
 
   private ensureWritable(): void {
@@ -282,6 +299,7 @@ export class DbTransaction {
   }
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
+    this.assertOwnsTable(table, "DbTransaction");
     return resolveSchemaWithTable(
       table._schema,
       normalizeRuntimeSchema(this.client.getSchema()),
@@ -371,17 +389,19 @@ export class DbTransaction {
     );
   }
 
-  delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     this.ensureWritable();
+    this.assertOwnsTable(table, "DbTransaction");
     this.runtimeTransaction.delete(id);
   }
 
   deletePersisted<T, Init>(
-    _table: TableProxy<T, Init>,
+    table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
     this.ensureWritable();
+    this.assertOwnsTable(table, "DbTransaction");
     const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,
@@ -406,9 +426,14 @@ export class DbDirectBatch {
   constructor(
     private readonly client: JazzClient,
     private readonly runtimeBatch: RuntimeDirectBatch,
+    private readonly assertOwnsTable: <T, Init>(
+      table: TableProxy<T, Init>,
+      operation: string,
+    ) => void,
   ) {}
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
+    this.assertOwnsTable(table, "DbDirectBatch");
     return resolveSchemaWithTable(
       table._schema,
       normalizeRuntimeSchema(this.client.getSchema()),
@@ -485,15 +510,17 @@ export class DbDirectBatch {
     );
   }
 
-  delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+    this.assertOwnsTable(table, "DbDirectBatch");
     this.runtimeBatch.delete(id);
   }
 
   deletePersisted<T, Init>(
-    _table: TableProxy<T, Init>,
+    table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
+    this.assertOwnsTable(table, "DbDirectBatch");
     const pendingWrite = this.runtimeBatch.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,
@@ -1521,12 +1548,32 @@ export class Db {
 
   beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
     const client = this.getClient(table._schema);
-    return new DbTransaction(client, client.beginTransactionInternal());
+    return new DbTransaction(
+      client,
+      client.beginTransactionInternal(),
+      (candidateTable, operation) =>
+        assertTableBelongsToClient(
+          candidateTable,
+          client,
+          (schema) => this.getClient(schema),
+          operation,
+        ),
+    );
   }
 
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.getClient(table._schema);
-    return new DbDirectBatch(client, client.beginDirectBatchInternal());
+    return new DbDirectBatch(
+      client,
+      client.beginDirectBatchInternal(),
+      (candidateTable, operation) =>
+        assertTableBelongsToClient(
+          candidateTable,
+          client,
+          (schema) => this.getClient(schema),
+          operation,
+        ),
+    );
   }
 
   /**
@@ -2027,6 +2074,13 @@ class ClientBackedDb extends Db {
     return new DbTransaction(
       this.runtimeClient,
       this.runtimeClient.beginTransactionInternal(this.session, this.attribution),
+      (candidateTable, operation) =>
+        assertTableBelongsToClient(
+          candidateTable,
+          this.runtimeClient,
+          () => this.runtimeClient,
+          operation,
+        ),
     );
   }
 
@@ -2034,6 +2088,13 @@ class ClientBackedDb extends Db {
     return new DbDirectBatch(
       this.runtimeClient,
       this.runtimeClient.beginDirectBatchInternal(this.session, this.attribution),
+      (candidateTable, operation) =>
+        assertTableBelongsToClient(
+          candidateTable,
+          this.runtimeClient,
+          () => this.runtimeClient,
+          operation,
+        ),
     );
   }
 

@@ -14,6 +14,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::row_histories::BatchId;
+use crate::runtime_core::PersistedWriteAck;
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -119,7 +120,7 @@ pub struct DirectBatch<'a> {
 pub struct PersistedWrite<T> {
     batch_id: BatchId,
     value: T,
-    receiver: futures_oneshot::Receiver<()>,
+    receiver: futures_oneshot::Receiver<PersistedWriteAck>,
 }
 
 impl<T> PersistedWrite<T> {
@@ -131,13 +132,22 @@ impl<T> PersistedWrite<T> {
         &self.value
     }
 
-    pub fn into_parts(self) -> (T, BatchId, futures_oneshot::Receiver<()>) {
+    pub fn into_parts(self) -> (T, BatchId, futures_oneshot::Receiver<PersistedWriteAck>) {
         (self.value, self.batch_id, self.receiver)
     }
 
     pub async fn wait(self) -> Result<T> {
         let (value, _batch_id, receiver) = self.into_parts();
-        receiver.await.map_err(|_| JazzError::ChannelClosed)?;
+        match receiver.await.map_err(|_| JazzError::ChannelClosed)? {
+            Ok(()) => {}
+            Err(rejection) => {
+                return Err(JazzError::BatchRejected {
+                    batch_id: rejection.batch_id,
+                    code: rejection.code,
+                    reason: rejection.reason,
+                });
+            }
+        }
         Ok(value)
     }
 }
@@ -1973,7 +1983,8 @@ mod tests {
 
         receiver
             .await
-            .expect("durability ack receiver should resolve");
+            .expect("durability ack receiver should resolve")
+            .expect("durability wait should settle successfully");
 
         let local_record = client
             .local_batch_record(batch_id)
@@ -1994,6 +2005,68 @@ mod tests {
                 }],
             })
         );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_transaction_persisted_wait_returns_rejection() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-transaction-persisted-rejection");
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let pending = client
+            .begin_transaction()
+            .create_persisted(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("draft".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+                DurabilityTier::Worker,
+            )
+            .await
+            .expect("create transactional persisted row");
+
+        let batch_id = pending.batch_id();
+        handle_server_event(
+            ServerEvent::SyncUpdate {
+                seq: Some(1),
+                payload: Box::new(SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::Rejected {
+                        batch_id,
+                        code: "permission_denied".to_string(),
+                        reason: "writer lacks publish rights".to_string(),
+                    },
+                }),
+            },
+            &client.runtime,
+            ServerId::new(),
+            None,
+        )
+        .expect("apply rejected transaction settlement");
+        client.runtime.flush().await.expect("flush runtime");
+
+        let error = pending
+            .wait()
+            .await
+            .expect_err("wait should return rejection");
+        assert!(matches!(
+            error,
+            JazzError::BatchRejected {
+                batch_id: rejected_batch_id,
+                ref code,
+                ref reason,
+            } if rejected_batch_id == batch_id
+                && code == "permission_denied"
+                && reason == "writer lacks publish rights"
+        ));
 
         client.shutdown().await.expect("shutdown client");
     }

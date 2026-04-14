@@ -24,7 +24,7 @@ mod sqlite;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use sqlite::SqliteStorage;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
@@ -303,6 +303,12 @@ fn local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
         ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("requested_tier", ColumnType::Text),
         ColumnDescriptor::new("sealed", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "touched_rows",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
         ColumnDescriptor::new("sealed_submission", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("latest_settlement", ColumnType::Bytea).nullable(),
     ])
@@ -1128,6 +1134,13 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
             Value::Text(encode_batch_mode(record.mode).to_string()),
             Value::Text(encode_durability_tier(record.requested_tier).to_string()),
             Value::Boolean(record.sealed),
+            Value::Array(
+                record
+                    .touched_rows
+                    .iter()
+                    .map(|row_id| Value::Bytea(row_id.uuid().as_bytes().to_vec()))
+                    .collect(),
+            ),
             sealed_submission.map(Value::Bytea).unwrap_or(Value::Null),
             latest_settlement.map(Value::Bytea).unwrap_or(Value::Null),
         ],
@@ -1149,6 +1162,7 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         mode,
         requested_tier,
         sealed,
+        touched_rows,
         sealed_submission,
         latest_settlement,
     ] = values.as_slice()
@@ -1198,6 +1212,29 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
             )));
         }
     };
+    let touched_rows = match touched_rows {
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Bytea(bytes) => {
+                    let uuid = uuid::Uuid::from_slice(bytes).map_err(|err| {
+                        StorageError::IoError(format!(
+                            "decode touched row object id: expected uuid bytes: {err}"
+                        ))
+                    })?;
+                    Ok(ObjectId::from_uuid(uuid))
+                }
+                other => Err(StorageError::IoError(format!(
+                    "expected touched row bytes, got {other:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?,
+        other => {
+            return Err(StorageError::IoError(format!(
+                "expected touched row array, got {other:?}"
+            )));
+        }
+    };
     let sealed_submission = match sealed_submission {
         Value::Null => None,
         Value::Bytea(bytes) => Some(decode_sealed_batch_submission_with_branch_ords(
@@ -1226,6 +1263,7 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         mode,
         requested_tier,
         sealed,
+        touched_rows,
         sealed_submission,
         latest_settlement,
     })
@@ -1843,36 +1881,37 @@ pub trait Storage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
-        let row_locators = self.scan_row_locators()?;
+        let branch_names = self
+            .raw_table_scan_prefix(BRANCH_ORD_BY_ORD_TABLE, "ord:")?
+            .into_iter()
+            .map(|(_key, bytes)| decode_branch_name(&bytes, "decode branch name by ord scan"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let family_branches: Vec<_> = branch_names
+            .into_iter()
+            .filter(|branch_name| {
+                branch_matches_transaction_family(*branch_name, target_branch_name)
+            })
+            .collect();
+        if family_branches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tables = self
+            .scan_row_locators()?
+            .into_iter()
+            .map(|(_row_id, row_locator)| row_locator.table.to_string())
+            .collect::<BTreeSet<_>>();
+
         let mut frontier = Vec::new();
-
-        for (row_id, row_locator) in row_locators {
-            let history_rows = self.scan_history_row_batches(row_locator.table.as_str(), row_id)?;
-            let mut branch_names: Vec<_> = history_rows
-                .into_iter()
-                .map(|row| BranchName::new(&row.branch))
-                .filter(|branch_name| {
-                    branch_matches_transaction_family(*branch_name, target_branch_name)
-                })
-                .collect();
-            branch_names.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            branch_names.dedup();
-
-            for branch_name in branch_names {
-                let Some(current_row) = self.load_visible_region_row(
-                    row_locator.table.as_str(),
-                    branch_name.as_str(),
-                    row_id,
-                )?
-                else {
-                    continue;
-                };
-
-                frontier.push(CapturedFrontierMember {
-                    object_id: row_id,
-                    branch_name,
-                    batch_id: current_row.batch_id(),
-                });
+        for table in tables {
+            for branch_name in &family_branches {
+                for current_row in self.scan_visible_region(&table, branch_name.as_str())? {
+                    frontier.push(CapturedFrontierMember {
+                        object_id: current_row.row_id,
+                        branch_name: *branch_name,
+                        batch_id: current_row.batch_id(),
+                    });
+                }
             }
         }
 

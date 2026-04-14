@@ -247,15 +247,15 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
+        object_ids: &[ObjectId],
     ) -> Vec<(String, StoredRowBatch)> {
-        let Ok(row_locators) = storage.scan_row_locators() else {
-            return Vec::new();
-        };
-
         let mut rows = Vec::new();
-        for (row_id, row_locator) in row_locators {
+        for row_id in object_ids {
+            let Ok(Some(row_locator)) = storage.load_row_locator(*row_id) else {
+                continue;
+            };
             let Ok(history_rows) =
-                storage.scan_history_row_batches(row_locator.table.as_str(), row_id)
+                storage.scan_history_row_batches(row_locator.table.as_str(), *row_id)
             else {
                 continue;
             };
@@ -537,7 +537,15 @@ impl SyncManager {
             }
         };
 
-        let batch_rows = self.transactional_batch_rows(storage, batch_id);
+        let batch_rows = self.transactional_batch_rows(
+            storage,
+            batch_id,
+            &submission
+                .members
+                .iter()
+                .map(|member| member.object_id)
+                .collect::<Vec<_>>(),
+        );
         if let Err(rejection) = self.validate_sealed_batch_submission(&submission) {
             self.reject_sealed_transactional_batch(
                 storage,
@@ -596,7 +604,15 @@ impl SyncManager {
 
         let mut recovered_any = false;
         for submission in submissions {
-            let batch_rows = self.transactional_batch_rows(storage, submission.batch_id);
+            let batch_rows = self.transactional_batch_rows(
+                storage,
+                submission.batch_id,
+                &submission
+                    .members
+                    .iter()
+                    .map(|member| member.object_id)
+                    .collect::<Vec<_>>(),
+            );
             if let Err(rejection) = self.validate_sealed_batch_submission(&submission) {
                 self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
                 recovered_any = true;
@@ -1245,7 +1261,15 @@ impl SyncManager {
                     return;
                 }
                 if let Err(rejection) = self.validate_sealed_batch_submission(&submission) {
-                    let batch_rows = self.transactional_batch_rows(storage, submission.batch_id);
+                    let batch_rows = self.transactional_batch_rows(
+                        storage,
+                        submission.batch_id,
+                        &submission
+                            .members
+                            .iter()
+                            .map(|member| member.object_id)
+                            .collect::<Vec<_>>(),
+                    );
                     self.reject_sealed_transactional_batch(
                         storage,
                         Some(client_id),

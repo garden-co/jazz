@@ -26,8 +26,8 @@ use crate::query_manager::types::{Schema, SchemaHash, Value};
 use crate::row_histories::BatchId;
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
-    QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
-    SubscriptionDelta, SyncSender,
+    PersistedWriteAck, QueryFuture, ReadDurabilityOptions, RuntimeCore,
+    RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta, SyncSender,
 };
 use crate::schema_manager::manager::PermissionsHeadSummary;
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
@@ -40,7 +40,11 @@ use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, S
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
-type PersistedWriteResult = ((ObjectId, Vec<Value>), BatchId, oneshot::Receiver<()>);
+type PersistedWriteResult = (
+    (ObjectId, Vec<Value>),
+    BatchId,
+    oneshot::Receiver<PersistedWriteAck>,
+);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -354,7 +358,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.update_persisted_with_batch_id(object_id, values, write_context, tier)?)
     }
@@ -367,7 +371,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_persisted_with_write_context(object_id, values, owned.as_ref(), tier)
     }
@@ -379,7 +383,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.delete_persisted_with_batch_id(object_id, write_context, tier)?)
     }
@@ -391,7 +395,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         session: Option<&Session>,
         tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.delete_persisted_with_write_context(object_id, owned.as_ref(), tier)
     }
