@@ -42,10 +42,7 @@
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock"
       ],
-      "outputs": [
-        "$TURBO_ROOT$/target/debug/jazz-tools",
-        "$TURBO_ROOT$/target/debug/jazz-cloud-server"
-      ]
+      "outputs": ["$TURBO_ROOT$/target/debug/jazz-tools"]
     },
     "build:rn": {
       "dependsOn": ["^build:rn"],
