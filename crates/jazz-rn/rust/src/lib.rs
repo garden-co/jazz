@@ -880,6 +880,70 @@ impl RnRuntime {
             Ok(())
         })
     }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("connect", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            let scheduler = self
+                .core
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .scheduler()
+                .clone();
+            let tick = RnTickNotifier { scheduler };
+            let (handle, manager) =
+                jazz_tools::transport_manager::create::<
+                    jazz_tools::ws_stream::NativeWsStream,
+                    RnTickNotifier,
+                >(url, auth, tick);
+            self.core
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .set_transport(handle);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                rt.block_on(manager.run());
+            });
+            Ok(())
+        })
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    pub fn disconnect(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            core.clear_transport();
+        }
+    }
+}
+
+// ============================================================================
+// RnTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the React Native (UniFFI) runtime.
+///
+/// Holds a clone of `RnScheduler` and calls `schedule_batched_tick()` whenever
+/// the transport layer needs to wake up `batched_tick`.
+struct RnTickNotifier {
+    scheduler: RnScheduler,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
 }
 
 #[cfg(test)]
