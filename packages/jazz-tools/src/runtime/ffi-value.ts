@@ -1,4 +1,4 @@
-import type { FFIRecord, FFIRow, FFIValue, Value } from "../drivers/types.js";
+import type { FFIRecord, FFIRow, Value } from "../drivers/types.js";
 
 type JsonFFIValue =
   | { type: "Integer"; value: number }
@@ -39,37 +39,7 @@ function decodeHex(value: string): Uint8Array {
   return bytes;
 }
 
-export function toFFIValue(value: Value): FFIValue {
-  switch (value.type) {
-    case "Bytea":
-      return { type: "Bytea", value: new Uint8Array(value.value) };
-    case "Array":
-      return { type: "Array", value: value.value.map((entry) => toFFIValue(entry)) };
-    case "Row":
-      return {
-        type: "Row",
-        value: {
-          id: value.value.id,
-          values: value.value.values.map((entry) => toFFIValue(entry)),
-        },
-      };
-    case "Integer":
-    case "BigInt":
-    case "Double":
-    case "Boolean":
-    case "Text":
-    case "Timestamp":
-    case "Uuid":
-    case "Null":
-      return { ...value };
-  }
-}
-
-export function toFFIRecord(values: Record<string, Value>): FFIRecord {
-  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, toFFIValue(value)]));
-}
-
-function encodeJsonFFIValue(value: FFIValue): JsonFFIValue {
+function encodeJsonFFIValue(value: Value): JsonFFIValue {
   switch (value.type) {
     case "Bytea":
       return { type: "Bytea", value: encodeHex(value.value) };
@@ -95,7 +65,7 @@ function encodeJsonFFIValue(value: FFIValue): JsonFFIValue {
   }
 }
 
-function decodeJsonFFIValue(value: JsonFFIValue): FFIValue {
+function decodeJsonFFIValue(value: JsonFFIValue): Value {
   switch (value.type) {
     case "Bytea":
       return { type: "Bytea", value: decodeHex(value.value) };

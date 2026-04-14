@@ -129,16 +129,20 @@ describe("JazzClient mutation durability split", () => {
   it("keeps Bytea mutations as Uint8Array at the runtime boundary", () => {
     const { client, insertCalls, updateCalls } = makeClient();
     const payload = new Uint8Array([1, 2, 3]);
+    const insertValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
+    const updateValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
 
-    client.create("todos", {
-      payload: { type: "Bytea", value: payload },
-    });
-    client.update("row-1", {
-      payload: { type: "Bytea", value: payload },
-    });
+    client.create("todos", insertValues);
+    client.update("row-1", updateValues);
 
     expect(insertCalls).toHaveLength(1);
     expect(updateCalls).toHaveLength(1);
+    expect(insertCalls[0]?.[1]).toBe(insertValues);
+    expect(updateCalls[0]?.[1]).toBe(updateValues);
 
     const insertPayload = insertCalls[0]?.[1].payload as
       | { type: "Bytea"; value: Uint8Array }
@@ -151,6 +155,8 @@ describe("JazzClient mutation durability split", () => {
     expect(updatePayload?.type).toBe("Bytea");
     expect(insertPayload?.value).toBeInstanceOf(Uint8Array);
     expect(updatePayload?.value).toBeInstanceOf(Uint8Array);
+    expect(insertPayload?.value).toBe(payload);
+    expect(updatePayload?.value).toBe(payload);
     expect(Array.from(insertPayload?.value ?? [])).toEqual([1, 2, 3]);
     expect(Array.from(updatePayload?.value ?? [])).toEqual([1, 2, 3]);
   });
