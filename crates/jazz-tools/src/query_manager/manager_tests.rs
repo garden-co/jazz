@@ -9021,7 +9021,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     assert_eq!(
         relayed.len(),
         1,
-        "Mid-tier should relay matching row batch members downstream"
+        "Mid-tier should relay matching row batch entries downstream"
     );
 }
 

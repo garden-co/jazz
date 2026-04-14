@@ -6,7 +6,7 @@ Everything above it assumes reads and writes happen immediately:
 
 - queries settle synchronously
 - local mutations update subscriptions in the same call stack
-- sync replay can apply row batch members without waiting for an async database callback
+- sync replay can apply row batch entries without waiting for an async database callback
 
 That is why the `Storage` trait is synchronous even in the browser. The browser gets there by putting durable storage in a dedicated worker, where OPFS exposes synchronous file access.
 
@@ -37,7 +37,7 @@ Storage also owns small engine metadata rows used for runtime bookkeeping.
 
 For user data, storage persists both:
 
-- the append-friendly history region for row batch members
+- the append-friendly history region for row batch entries
 - the compact visible region for current reads
 
 Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` columns plus the

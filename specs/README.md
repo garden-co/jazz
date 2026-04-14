@@ -16,7 +16,7 @@ These docs describe the system as it works today.
 
 ### 1. Table-First Foundation
 
-**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row batch members, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
+**[Row Histories](status-quo/row_histories.md)** — The core mental model. Explains logical rows, row batch entries, visible entries, reserved `_jazz_*` columns, and why ordinary reads are "visible-region first".
 
 **[Storage](status-quo/storage.md)** — The synchronous storage boundary beneath the runtime. Covers raw tables, indices, row locators, catalogue rows, row-history persistence, and the current durable backends.
 

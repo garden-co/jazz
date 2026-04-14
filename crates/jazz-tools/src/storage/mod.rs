@@ -34,7 +34,7 @@ use crate::batch_fate::{
     BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
+use crate::digest::Digest32;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
@@ -921,7 +921,7 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
             ))
         })?;
     let batch_digest = match batch_digest {
-        Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(|_| {
+        Value::Bytea(bytes) => Digest32(bytes.as_slice().try_into().map_err(|_| {
             StorageError::IoError(format!(
                 "expected sealed batch digest to be 32 bytes, got {}",
                 bytes.len()
@@ -959,7 +959,7 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                         }
                     };
                     let row_digest = match row_digest {
-                        Value::Bytea(bytes) => CommitId(bytes.as_slice().try_into().map_err(
+                        Value::Bytea(bytes) => Digest32(bytes.as_slice().try_into().map_err(
                             |_| {
                                 StorageError::IoError(format!(
                                     "expected sealed batch member row digest to be 32 bytes, got {}",

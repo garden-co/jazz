@@ -3,11 +3,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
-use jazz_tools::commit::CommitId;
 use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
-use jazz_tools::row_histories::{RowState, StoredRowVersion};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch};
 use jazz_tools::schema_manager::encode_schema;
 use jazz_tools::sync_manager::{ClientId, SyncPayload};
 use jazz_tools::transport_protocol::SyncBatchRequest;
@@ -278,10 +277,10 @@ fn basic_auth_header(username: &str, password: &str) -> String {
 
 fn sync_body() -> SyncBatchRequest {
     let row_id = jazz_tools::ObjectId::new();
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         row_id,
         "main",
-        Vec::<CommitId>::new(),
+        Vec::<BatchId>::new(),
         b"alice".to_vec(),
         jazz_tools::metadata::RowProvenance::for_insert(row_id.to_string(), 1_000),
         Default::default(),

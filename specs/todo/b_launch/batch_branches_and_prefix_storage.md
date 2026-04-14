@@ -321,7 +321,7 @@ This allows incremental adoption instead of a single all-at-once rewrite.
 
 - Exact text encoding for `BatchId` in public branch names.
 - Whether `BatchOrd` should be stable forever or allow periodic compaction/reassignment.
-- Whether parent batch refs should be stored as `BatchOrd`, `CommitId`, or both.
+- Whether parent batch refs should be stored as `BatchOrd`, `Digest32`, or both.
 - How aggressively to inline tiny head snapshots in `BatchMeta`.
 - Thresholds for sealing segments and for snapshot checkpoints.
 - Whether we need a separate compact summary structure when a prefix frontier becomes unusually wide.

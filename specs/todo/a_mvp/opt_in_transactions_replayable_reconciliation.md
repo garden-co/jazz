@@ -407,7 +407,7 @@ Because transactionality is opt-in:
 
 #### Write-set semantics inside one transactional batch
 
-The MVP transactional staging model is a write-set, not an append-only sequence of staged row batch members.
+The MVP transactional staging model is a write-set, not an append-only sequence of staged row batch entries.
 
 Within one transactional batch:
 
@@ -425,8 +425,8 @@ The normalization intent is:
 The staging/history consequences are:
 
 - transactional reads and later writes inside the same batch compose on the latest live staged member for that touched object
-- storage may still retain older same-object staged row batch members for history/debuggability, but only one such member remains live in the batch write-set
-- older same-object staged row batch members in the same batch become non-visible superseded staging history and must not be sealed, replayed to ordinary readers, or treated as accepted output candidates
+- storage may still retain older same-object staged row batch entries for history/debuggability, but only one such member remains live in the batch write-set
+- older same-object staged row batch entries in the same batch become non-visible superseded staging history and must not be sealed, replayed to ordinary readers, or treated as accepted output candidates
 
 The exact storage encoding of staged members is an implementation detail. What matters is that the authority validates one final per-object write-set for the batch, not an arbitrary list of intermediate staged edits.
 
@@ -619,7 +619,7 @@ To make strict visibility concrete, the query layer needs two pieces of shadow s
 
 This replaces per-visible-commit tracking with per-visible-batch tracking.
 
-Single-table queries can often derive visible batch ids directly from the row batch member, because every visible row member's batch identity is its `BatchId`. Joins, array subqueries, and other derived outputs must union the visible batch ids of every contributing tuple element.
+Single-table queries can often derive visible batch ids directly from the row batch entry, because every visible row member's batch identity is its `BatchId`. Joins, array subqueries, and other derived outputs must union the visible batch ids of every contributing tuple element.
 
 This shadow provenance is internal delivery state. It does not need to become a public row shape in the MVP.
 

@@ -380,7 +380,7 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row batch member on a specific branch through the storage-backed sync path.
+    /// Ingest a remote row batch entry on a specific branch through the storage-backed sync path.
     /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,

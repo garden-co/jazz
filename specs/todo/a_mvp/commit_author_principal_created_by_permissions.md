@@ -229,9 +229,9 @@ If the row is visible to the query, provenance magic columns evaluate from the v
 
 ## Execution Semantics
 
-### What row batch member is checked?
+### What row batch entry is checked?
 
-Policy evaluation should use the same visible row batch member the query/mutation path already uses.
+Policy evaluation should use the same visible row batch entry the query/mutation path already uses.
 
 - `created_by` comes from the visible row commit metadata
 - `updated_by` comes from the visible row commit author
@@ -313,7 +313,7 @@ This change is intentionally breaking at the commit layer.
 Why:
 
 - `Commit.author` changes type and serialized representation
-- `Commit.author` participates in `CommitId` hashing
+- `Commit.author` participates in `Digest32` hashing
 - new commits created under the new semantics will hash differently
 
 MVP stance:

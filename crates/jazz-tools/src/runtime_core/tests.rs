@@ -2301,9 +2301,7 @@ fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
             assert_eq!(row.row_id, row_id);
         }
         other => {
-            panic!(
-                "local row writes should sync using the authored row batch member, got {other:?}"
-            )
+            panic!("local row writes should sync using the authored row batch entry, got {other:?}")
         }
     }
 }
@@ -3422,7 +3420,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     assert_eq!(
         history_rows_after.len(),
         1,
-        "sealed batches should reject follow-up writes before new row batch members are created"
+        "sealed batches should reject follow-up writes before new row batch entries are created"
     );
 }
 
