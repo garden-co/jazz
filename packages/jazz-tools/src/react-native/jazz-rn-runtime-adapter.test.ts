@@ -20,7 +20,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
-    onSyncMessageToSend: vi.fn(),
     query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
@@ -119,19 +118,9 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
-  it("bridges sync and subscription callbacks with handle conversion", () => {
+  it("bridges subscription callbacks with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
-
-    // New callback shape: direct 4-arg payload (after RN callback API update).
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    callbackObject.onSyncMessage("server", "server-1", "{}", false);
-    expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
     const onUpdate = vi.fn();
     const handle = adapter.subscribe("{}", onUpdate, null, null);
@@ -179,16 +168,9 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.unsubscribe).toHaveBeenCalledWith(9n);
   });
 
-  it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
+  it("swallows exceptions thrown by subscription callbacks crossing the native boundary", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    adapter.onSyncMessageToSend(() => {
-      throw new Error("sync boom");
-    });
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const syncCallback = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
@@ -197,25 +179,6 @@ describe("JazzRnRuntimeAdapter", () => {
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
-  });
-
-  it("rejects legacy one-arg outbox callbacks", () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() =>
-      (callbackObject as any).onSyncMessage(
-        JSON.stringify({
-          destination: { Server: "server-1" },
-          payload: { QueryUnsubscription: { query_id: 1 } },
-        }),
-      ),
-    ).not.toThrow();
-    expect(syncHandler).not.toHaveBeenCalled();
   });
 
   it("passes canonical subscription tuple updates through unchanged", () => {

@@ -8,8 +8,8 @@
 //! - `SqliteStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
-//! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
+//! - Server sync uses the Rust-owned WebSocket transport via `connect()`
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -27,7 +27,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -37,7 +37,6 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
@@ -47,7 +46,7 @@ use jazz_tools::server::{
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
@@ -254,64 +253,6 @@ impl Scheduler for NapiScheduler {
     }
 }
 
-// ============================================================================
-// NapiSyncSender
-// ============================================================================
-
-/// Arguments for the sync message callback
-/// (destinationKind, destinationId, payloadJson, isCatalogue)
-type SyncCallbackParams = (String, String, String, bool);
-
-/// Bridges outbound sync messages from the Rust runtime to a JS callback.
-///
-/// Staging implementation: wired via `on_sync_message_to_send` today; will be
-/// superseded by the Rust-owned transport in Tasks 11/12/13.
-#[derive(Clone)]
-pub struct NapiSyncSender {
-    callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
-}
-
-impl NapiSyncSender {
-    fn new() -> Self {
-        Self {
-            callback: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn set_callback(&self, tsfn: ThreadsafeFunction<SyncCallbackParams>) {
-        if let Ok(mut cb) = self.callback.lock() {
-            *cb = Some(tsfn);
-        }
-    }
-}
-
-impl SyncSender for NapiSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let cb = match self.callback.lock() {
-            Ok(cb) => cb,
-            Err(_) => return,
-        };
-        let tsfn = match cb.as_ref() {
-            Some(tsfn) => tsfn,
-            None => return,
-        };
-        let serialized = match serialize_outbox_entry(&message) {
-            Ok(serialized) => serialized,
-            Err(_) => return,
-        };
-
-        tsfn.call(
-            Ok((
-                serialized.destination_kind,
-                serialized.destination_id,
-                serialized.payload_json,
-                serialized.is_catalogue,
-            )),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
-    }
-}
-
 fn build_napi_runtime(
     env: Env,
     schema_json: String,
@@ -353,7 +294,6 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
     let core = RuntimeCore::new(schema_manager, storage, scheduler);
@@ -398,7 +338,6 @@ fn build_napi_runtime(
 
     Ok(NapiRuntime {
         core: core_arc,
-        sync_sender,
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
@@ -412,14 +351,6 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
-    /// JS callback holder for outbound sync messages.
-    ///
-    /// `on_sync_message_to_send` installs the JS-side callback here so messages
-    /// produced during ticks can be forwarded to the transport layer.
-    /// Outbox delivery via this sender is not wired through the Rust-owned
-    /// transport yet — that plumbing is deferred to Tasks 11/12/13, which will
-    /// remove `SyncSender` entirely in favour of the `connect()` pathway.
-    sync_sender: NapiSyncSender,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
@@ -1059,17 +990,6 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.park_sync_message(entry);
-        Ok(())
-    }
-
-    #[napi(js_name = "onSyncMessageToSend")]
-    pub fn on_sync_message_to_send(
-        &self,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] callback: ThreadsafeFunction<
-            SyncCallbackParams,
-        >,
-    ) -> napi::Result<()> {
-        self.sync_sender.set_callback(callback);
         Ok(())
     }
 
