@@ -247,6 +247,22 @@ function storedRootSchema() {
   };
 }
 
+function storedBooleanTodoSchemaWithDefaultFalse() {
+  return {
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "done",
+          column_type: { type: "Boolean" },
+          nullable: false,
+          default: { type: "Boolean", value: false },
+        },
+      ],
+    },
+  };
+}
+
 function storedRootSchemaWithReorderedColumns() {
   return {
     projects: {
@@ -533,6 +549,144 @@ describe("cli migrations", () => {
     expect(noopResult).toBeNull();
     expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
     expect(noopLogs).toContain("No structural schema changes detected.");
+  });
+
+  it("skips creating a migration file when hashes differ but no row transforms are required", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    const fromHash = "7070707070707070707070707070707070707070707070707070707070707070";
+    const toHash = "7171717171717171717171717171717171717171717171717171717171717171";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "done", column_type: { type: "Boolean" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(2);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+    expect(logs.some((line) => line.includes("Run npx jazz-tools@"))).toBe(true);
+  });
+
+  it("skips creating a migration file for reordered columns across explicit schema hashes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "1010101010101010101010101010101010101010101010101010101010101010";
+    const toHash = "2020202020202020202020202020202020202020202020202020202020202020";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+  });
+
+  it("still creates a migration file for nullability-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "3030303030303030303030303030303030303030303030303030303030303030";
+    const toHash = "4040404040404040404040404040404040404040404040404040404040404040";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: true }],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
   });
 
   it("uses --name to generate a named migration file and skips the rename reminder", async () => {
@@ -928,6 +1082,304 @@ export default s.defineMigration({
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pushes a reviewed migration from a CommonJS-compiled TypeScript module", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    await writeFile(join(root, "package.json"), '{ "type": "commonjs" }\n');
+    await writeFile(
+      join(root, "tsconfig.json"),
+      JSON.stringify(
+        {
+          compilerOptions: {
+            module: "commonjs",
+            target: "es2020",
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const fromHash = "abababababababababababababababababababababababababababababababab";
+    const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pushes an empty no-op migration from a CommonJS-compiled TypeScript module", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(join(root, "package.json"), '{ "type": "commonjs" }\n');
+    await writeFile(
+      join(root, "tsconfig.json"),
+      JSON.stringify(
+        {
+          compilerOptions: {
+            module: "commonjs",
+            target: "es2020",
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const fromHash = "9090909090909090909090909090909090909090909090909090909090909090";
+    const toHash = "9191919191919191919191919191919191919191919191919191919191919191";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-unnamed-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      join(snapshotsDir, `20260411T212509-${fromShortHash}.json`),
+      JSON.stringify({
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "done", column_type: { type: "Boolean" }, nullable: false },
+          ],
+        },
+      }) + "\n",
+    );
+    await writeFile(
+      join(snapshotsDir, `20260411T212510-${toShortHash}.json`),
+      JSON.stringify(storedBooleanTodoSchemaWithDefaultFalse()) + "\n",
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {},
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {},
+  to: {},
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (_input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "done", column_type: { type: "Boolean" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (_input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pushes an inferred empty migration when hashes differ but no reviewed file is needed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+
+    const fromHash = "9292929292929292929292929292929292929292929292929292929292929292";
+    const toHash = "9393939393939393939393939393939393939393939393939393939393939393";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    await writeFile(
+      join(snapshotsDir, `20260411T212509-${fromShortHash}.json`),
+      JSON.stringify(storedRootSchema(), null, 2) + "\n",
+    );
+    await writeFile(
+      join(snapshotsDir, `20260411T212510-${toShortHash}.json`),
+      JSON.stringify(storedRootSchemaWithReorderedColumns(), null, 2) + "\n",
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (_input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (_input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not infer an empty migration for reference-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "9494949494949494949494949494949494949494949494949494949494949494";
+    const toHash = "9595959595959595959595959595959595959595959595959595959595959595";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          memberships: {
+            columns: [
+              {
+                name: "ownerId",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "users",
+              },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          memberships: {
+            columns: [
+              {
+                name: "ownerId",
+                column_type: { type: "Uuid" },
+                nullable: false,
+                references: "people",
+              },
+            ],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      pushMigration({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromShortHash,
+        toHash: toShortHash,
+      }),
+    ).rejects.toThrow(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
   });
 
   it("pushes explicit table renames via renamedFrom on the admin migrations payload", async () => {

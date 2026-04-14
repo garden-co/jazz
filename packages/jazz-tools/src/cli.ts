@@ -522,6 +522,41 @@ function tableSchemasEqual(
   return leftColumns.every((column, index) => columnsEqual(column, rightColumns[index]!));
 }
 
+function tableSchemasRequireRowTransform(
+  left: WasmSchema[string] | undefined,
+  right: WasmSchema[string] | undefined,
+): boolean {
+  if (!left || !right) {
+    return true;
+  }
+
+  const leftColumnNames = left.columns.map((column) => column.name).sort();
+  const rightColumnNames = right.columns.map((column) => column.name).sort();
+
+  if (leftColumnNames.length !== rightColumnNames.length) {
+    return true;
+  }
+
+  for (const [index, columnName] of leftColumnNames.entries()) {
+    if (columnName !== rightColumnNames[index]) {
+      return true;
+    }
+  }
+
+  const leftColumns = new Map(left.columns.map((column) => [column.name, column]));
+  const rightColumns = new Map(right.columns.map((column) => [column.name, column]));
+
+  return leftColumnNames.some((columnName) => {
+    const leftColumn = leftColumns.get(columnName)!;
+    const rightColumn = rightColumns.get(columnName)!;
+    return (
+      leftColumn.nullable !== rightColumn.nullable ||
+      leftColumn.references !== rightColumn.references ||
+      columnTypeSignature(leftColumn.column_type) !== columnTypeSignature(rightColumn.column_type)
+    );
+  });
+}
+
 function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
   const leftTableNames = Object.keys(left).sort();
   const rightTableNames = Object.keys(right).sort();
@@ -536,6 +571,28 @@ function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
     }
     return tableSchemasEqual(left[tableName], right[tableName]);
   });
+}
+
+function schemaTransitionRequiresRowTransform(
+  fromSchema: WasmSchema,
+  toSchema: WasmSchema,
+): boolean {
+  const fromTableNames = Object.keys(fromSchema).sort();
+  const toTableNames = Object.keys(toSchema).sort();
+
+  if (fromTableNames.length !== toTableNames.length) {
+    return true;
+  }
+
+  for (const [index, tableName] of fromTableNames.entries()) {
+    if (tableName !== toTableNames[index]) {
+      return true;
+    }
+  }
+
+  return fromTableNames.some((tableName) =>
+    tableSchemasRequireRowTransform(fromSchema[tableName], toSchema[tableName]),
+  );
 }
 
 function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
@@ -1116,7 +1173,7 @@ async function loadDefinedMigration(filePath: string): Promise<DefinedMigration>
       default?: unknown;
       migration?: unknown;
     };
-    const migration = loaded.default ?? loaded.migration;
+    const migration = unwrapMigrationExport(loaded.default ?? loaded.migration);
     if (!isDefinedMigration(migration)) {
       throw new Error(
         `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
@@ -1126,6 +1183,21 @@ async function loadDefinedMigration(filePath: string): Promise<DefinedMigration>
   } finally {
     await rm(outFile, { force: true }).catch(() => undefined);
   }
+}
+
+function unwrapMigrationExport(value: unknown): unknown {
+  let current = value;
+
+  while (
+    typeof current === "object" &&
+    current !== null &&
+    "default" in current &&
+    Object.keys(current as Record<string, unknown>).length === 1
+  ) {
+    current = (current as { default: unknown }).default;
+  }
+
+  return current;
 }
 
 async function findMigrationFile(
@@ -1354,6 +1426,21 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     return null;
   }
 
+  if (!schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+    if (shouldWriteCommittedSnapshot) {
+      await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp);
+    }
+
+    const version = await packageVersion();
+    console.log(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+    console.log(
+      `Next step: Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
+    );
+    return null;
+  }
+
   const filePath = migrationFilename(
     options.migrationsDir,
     fromSchema.hash,
@@ -1402,7 +1489,54 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   });
   const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
   const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-  const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
+  let filePath: string | null = null;
+
+  try {
+    filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !error.message.startsWith(`No migration file found in ${options.migrationsDir}`)
+    ) {
+      throw error;
+    }
+  }
+
+  if (!filePath) {
+    const fromSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      fromHash,
+      "fromHash",
+      serverUrl,
+      adminSecret,
+    );
+    const toSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      toHash,
+      "toHash",
+      serverUrl,
+      adminSecret,
+    );
+
+    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+      throw new Error(
+        `No migration file found in ${options.migrationsDir} for ${fromHash} -> ${toHash}. Run \`jazz-tools migrations create --fromHash ${shortSchemaHash(fromHash)} --toHash ${shortSchemaHash(toHash)}\` first.`,
+      );
+    }
+
+    await publishStoredMigration(serverUrl, {
+      adminSecret,
+      fromHash,
+      toHash,
+      forward: [],
+    });
+
+    console.log(
+      `Pushed migration ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} without a reviewed migration file because no row transformations are required.`,
+    );
+    return;
+  }
+
   const migration = await loadDefinedMigration(filePath);
 
   if (
@@ -1418,10 +1552,27 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   schemaDefinitionToAst(migration.to as any);
 
   if (migration.forward.length === 0) {
-    throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
+    const fromSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      fromHash,
+      "fromHash",
+      serverUrl,
+      adminSecret,
+    );
+    const toSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      toHash,
+      "toHash",
+      serverUrl,
+      adminSecret,
+    );
+
+    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+      throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
+    }
   }
 
-  const forward = serializeForwardLenses(migration.forward);
+  const forward = migration.forward.length === 0 ? [] : serializeForwardLenses(migration.forward);
   await publishStoredMigration(serverUrl, {
     adminSecret,
     fromHash,
