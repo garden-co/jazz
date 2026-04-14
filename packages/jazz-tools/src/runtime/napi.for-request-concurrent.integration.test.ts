@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "jazz-tools";
-import type { Db, QueryBuilder, TableProxy } from "./db.js";
+import type { Db } from "./db.js";
 import {
   fetchPermissionsHead,
   publishStoredPermissions,
@@ -38,21 +38,6 @@ const inlinePermissions = s.definePermissions(inlineApp, ({ policy, session }) =
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-type PolicyTodo = {
-  id: string;
-  title: string;
-  done: boolean;
-  description?: string;
-  owner_id: string;
-};
-
-type PolicyTodoInit = {
-  title: string;
-  done: boolean;
-  description?: string;
-  owner_id: string;
-};
 
 type TempRuntimeData = {
   dataRoot: string;
@@ -100,32 +85,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
-}
-
-function makePolicyTodosTable(): TableProxy<PolicyTodo, PolicyTodoInit> {
-  return {
-    _table: "todos",
-    _schema: inlineApp.wasmSchema,
-    _rowType: undefined as unknown as PolicyTodo,
-    _initType: undefined as unknown as PolicyTodoInit,
-  };
-}
-
-function makePolicyTodosByDescriptionQuery(description: string): QueryBuilder<PolicyTodo> {
-  return {
-    _table: "todos",
-    _schema: inlineApp.wasmSchema,
-    _rowType: undefined as unknown as PolicyTodo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [{ column: "description", op: "eq", value: description }],
-        includes: {},
-        orderBy: [],
-        offset: 0,
-      });
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +150,6 @@ describe("forRequest concurrent session isolation", () => {
       const aliceId = verifyLocalFirstIdentityProof(aliceToken, appId).id;
       const bobId = verifyLocalFirstIdentityProof(bobToken, appId).id;
 
-      const policyTodosTable = makePolicyTodosTable();
-      const scopedQuery = makePolicyTodosByDescriptionQuery(scopeTag);
-
       // Obtain session-scoped Db handles for alice and bob concurrently from
       // the same shared context — this is the pattern a real server would use.
       const [aliceDb, bobDb] = await Promise.all([
@@ -209,8 +165,13 @@ describe("forRequest concurrent session isolation", () => {
       await Promise.all([
         withTimeout(
           aliceDb.insertDurable(
-            policyTodosTable,
-            { title: "alice-todo", done: false, description: scopeTag, owner_id: aliceId },
+            inlineApp.todos,
+            {
+              title: "alice-todo",
+              done: false,
+              description: scopeTag,
+              owner_id: aliceId,
+            },
             { tier: "edge" },
           ),
           10_000,
@@ -218,8 +179,13 @@ describe("forRequest concurrent session isolation", () => {
         ),
         withTimeout(
           bobDb.insertDurable(
-            policyTodosTable,
-            { title: "bob-todo", done: false, description: scopeTag, owner_id: bobId },
+            inlineApp.todos,
+            {
+              title: "bob-todo",
+              done: false,
+              description: scopeTag,
+              owner_id: bobId,
+            },
             { tier: "edge" },
           ),
           10_000,
@@ -231,7 +197,7 @@ describe("forRequest concurrent session isolation", () => {
       await vi.waitFor(
         async () => {
           const rows = await withTimeout(
-            aliceDb.all(scopedQuery, { tier: "edge" }),
+            aliceDb.all(inlineApp.todos.where({ description: scopeTag }), { tier: "edge" }),
             10_000,
             "alice read timed out",
           );
@@ -244,7 +210,7 @@ describe("forRequest concurrent session isolation", () => {
       await vi.waitFor(
         async () => {
           const rows = await withTimeout(
-            bobDb.all(scopedQuery, { tier: "edge" }),
+            bobDb.all(inlineApp.todos.where({ description: scopeTag }), { tier: "edge" }),
             10_000,
             "bob read timed out",
           );
@@ -258,15 +224,25 @@ describe("forRequest concurrent session isolation", () => {
       await Promise.all([
         expect(
           aliceDb.insertDurable(
-            policyTodosTable,
-            { title: "alice-as-bob", done: false, description: scopeTag, owner_id: bobId },
+            inlineApp.todos,
+            {
+              title: "alice-as-bob",
+              done: false,
+              description: scopeTag,
+              owner_id: bobId,
+            },
             { tier: "edge" },
           ),
         ).rejects.toThrow(),
         expect(
           bobDb.insertDurable(
-            policyTodosTable,
-            { title: "bob-as-alice", done: false, description: scopeTag, owner_id: aliceId },
+            inlineApp.todos,
+            {
+              title: "bob-as-alice",
+              done: false,
+              description: scopeTag,
+              owner_id: aliceId,
+            },
             { tier: "edge" },
           ),
         ).rejects.toThrow(),
@@ -280,7 +256,7 @@ describe("forRequest concurrent session isolation", () => {
       await vi.waitFor(
         async () => {
           const rows = await withTimeout(
-            aliceDb2.all(scopedQuery, { tier: "edge" }),
+            aliceDb2.all(inlineApp.todos.where({ description: scopeTag }), { tier: "edge" }),
             10_000,
             "alice2 read timed out",
           );
