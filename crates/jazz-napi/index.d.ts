@@ -38,7 +38,6 @@ export declare class NapiRuntime {
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
-  onSyncMessageToSend(callback: (...args: any[]) => any): void
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string

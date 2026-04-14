@@ -11,7 +11,7 @@ import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
-import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 type SimpleTodo = {
   id: string;

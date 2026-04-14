@@ -9,7 +9,7 @@
 //!
 //! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
-//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
+//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback (worker-bridge only; server sync via `connect()`)
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
 
 use std::cell::RefCell;
@@ -368,9 +368,12 @@ impl Scheduler for WasmScheduler {
 
 /// Bridges outbound sync messages from the Rust runtime to a JS callback.
 ///
-/// The callback is installed lazily via `on_sync_message_to_send()`.
-/// Staging implementation: wired via that callback today; will be superseded
-/// by the Rust-owned transport in Tasks 11/12/13.
+/// This sender is intentionally kept for the **worker-bridge path only**:
+/// the worker WASM runtime routes `"client"`-destination outbox messages
+/// back to the main thread via postMessage. Server-bound messages go through
+/// the Rust-owned WebSocket transport (`WasmRuntime::connect`) instead; any
+/// `"server"` destination that arrives here is silently dropped by the JS
+/// callback registered in `jazz-worker.ts`.
 pub struct JsSyncSender {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
@@ -434,13 +437,11 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
-    /// JS callback holder for outbound sync messages.
+    /// JS callback holder for outbound sync messages (worker-bridge path only).
     ///
-    /// `on_sync_message_to_send` installs the JS-side callback here so messages
-    /// produced during ticks can be forwarded to the transport layer.
-    /// Outbox delivery via this sender is not wired through the Rust-owned
-    /// transport yet — that plumbing is deferred to Tasks 11/12/13, which will
-    /// remove `SyncSender` entirely in favour of the `connect()` pathway.
+    /// `on_sync_message_to_send` installs the JS-side callback here. The worker
+    /// WASM runtime uses it to forward `"client"`-destination outbox messages to
+    /// the main thread via postMessage. Server sync goes through `connect()`.
     sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
