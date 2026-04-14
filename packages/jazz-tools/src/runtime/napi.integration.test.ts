@@ -1014,7 +1014,6 @@ describe("NAPI integration", () => {
         backendSecret,
         env: "test",
         userBranch: "main",
-        tier: "worker",
       });
       await settleAsyncSyncWork();
 
@@ -1171,7 +1170,6 @@ describe("NAPI integration", () => {
         jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
-        tier: "worker",
       });
 
       const backendDb = context.asBackend();
@@ -1357,7 +1355,6 @@ describe("NAPI integration", () => {
         backendSecret,
         env: "test",
         userBranch: "main",
-        tier: "worker",
       });
       mark("writer contexts created");
       readerRuntimeData = await createTempRuntimeData("jazz-napi-query-reader-");
@@ -1371,7 +1368,6 @@ describe("NAPI integration", () => {
         jwksUrl: jwks.url,
         env: "test",
         userBranch: "main",
-        tier: "worker",
       });
 
       const writerBackend = writerContext.asBackend();
