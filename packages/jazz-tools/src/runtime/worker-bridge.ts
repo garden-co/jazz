@@ -128,7 +128,7 @@ export class WorkerBridge {
     };
 
     // Wire main → worker: outgoing sync messages from runtime
-    this.runtime.onSyncMessageToSend(
+    this.runtime.onSyncMessageToSend?.(
       createSyncOutboxRouter({
         onServerPayload: (payload) => {
           if (this.isDisposedLike()) return;
@@ -429,7 +429,7 @@ export class WorkerBridge {
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
     this.state.syncBatchFlushQueued = false;
-    this.runtime.onSyncMessageToSend(() => undefined);
+    this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }
 
