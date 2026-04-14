@@ -9,12 +9,21 @@
 - [**stale-client-cache-after-scope-removal**](todo/issues/stale-client-cache-after-scope-removal.md) — When a row is deleted (or otherwise exits a query's result set) while a client has no active server-side subscription for that query, the client's local object manager retains stale data indefinitely. Subsequent one-shot `query()` calls with `tier: "edge"` return the stale row because the server never sends the deletion to the client — it considers the object "out of scope" and skips it.
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**update-inherits-policy-bug**](todo/issues/update-inherits-policy-bug.md) — UPDATE operations fail with PolicyDenied even when an INHERITS chain should grant access.
+- [**verbose-batch-payloads**](todo/issues/verbose-batch-payloads.md) — Replayable settlements still repeat per-member batch identity that is already fixed by the outer batch, wasting durable bytes and in-memory copies.
 
 ### Medium
 
+- [**duplicated-batch-bookkeeping-storage**](todo/issues/duplicated-batch-bookkeeping-storage.md) — Local batch records duplicate sealed submissions and settlements that are also stored in dedicated durable tables, increasing persistent size and widening the replay state surface.
 - [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
 - [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
+- [**oversized-visible-row-storage**](todo/issues/oversized-visible-row-storage.md) — The visible-row region stores a full current history row plus visibility bookkeeping, which duplicates history-only fields and makes the hot visible prefix heavier than it needs to be.
 - [**policy-error-reasons**](todo/issues/policy-error-reasons.md) — Policy-denied errors (e.g. `WriteError("policy denied INSERT on table todos")`) include
+- [**row-storage-common-case-encoding**](todo/issues/row-storage-common-case-encoding.md) — The flat row formats encode common singleton and empty cases verbosely, especially visible branch frontiers and empty metadata, which wastes space on the dominant row shapes.
+- [**sync-sent-batch-id-retention**](todo/issues/sync-sent-batch-id-retention.md) — Per-peer sync state retains every sent batch id in memory, which can grow with history size and may keep more tracking state than replay actually needs.
+
+### Low
+
+- [**text-encoded-storage-enums**](todo/issues/text-encoded-storage-enums.md) — Flat row storage currently encodes enum-like fields as text, which is larger than necessary and adds avoidable decode overhead on hot storage paths.
 
 ## Ideas
 

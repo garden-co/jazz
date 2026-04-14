@@ -14,7 +14,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
-use crate::row_format::{EncodingError, column_bytes, decode_column, decode_row, encode_row};
+use crate::row_format::{EncodingError, decode_row, encode_row};
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
@@ -211,66 +211,8 @@ fn delete_kind_column_type() -> ColumnType {
     }
 }
 
-fn flat_history_row_format_id() -> ObjectId {
-    ObjectId::from_uuid(Uuid::from_bytes([
-        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x68, 0x69, 0x73, 0x74, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d,
-        0x31,
-    ]))
-}
-
-fn flat_history_row_marker_descriptor() -> &'static RowDescriptor {
-    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "_jazz_format_id",
-            ColumnType::Uuid,
-        )])
-    })
-}
-
-fn flat_history_row_identity_descriptor() -> &'static RowDescriptor {
-    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
-            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
-        ])
-    })
-}
-
-fn flat_visible_row_format_id() -> ObjectId {
-    ObjectId::from_uuid(Uuid::from_bytes([
-        0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x76, 0x69, 0x73, 0x2d, 0x66, 0x6c, 0x61, 0x74, 0x2d, 0x31,
-        0x00,
-    ]))
-}
-
-fn flat_visible_row_marker_descriptor() -> &'static RowDescriptor {
-    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RowDescriptor::new(vec![ColumnDescriptor::new(
-            "_jazz_format_id",
-            ColumnType::Uuid,
-        )])
-    })
-}
-
-fn flat_visible_row_identity_descriptor() -> &'static RowDescriptor {
-    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
-            ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
-        ])
-    })
-}
-
 fn history_row_system_columns() -> Vec<ColumnDescriptor> {
     vec![
-        ColumnDescriptor::new("_jazz_format_id", ColumnType::Uuid),
-        ColumnDescriptor::new("_jazz_row_id", ColumnType::Uuid),
-        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
-        ColumnDescriptor::new("_jazz_branch", ColumnType::Text),
         ColumnDescriptor::new(
             "_jazz_parents",
             ColumnType::Array {
@@ -281,7 +223,6 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
         ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
         ColumnDescriptor::new("_jazz_updated_by", ColumnType::Text),
-        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
         ColumnDescriptor::new("_jazz_state", row_state_column_type()),
         ColumnDescriptor::new("_jazz_confirmed_tier", confirmed_tier_column_type()).nullable(),
         ColumnDescriptor::new("_jazz_delete_kind", delete_kind_column_type()).nullable(),
@@ -297,18 +238,13 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
     ]
 }
 
-fn stored_row_system_values(row: &StoredRowBatch, format_id: ObjectId) -> Vec<Value> {
+fn history_row_system_values(row: &StoredRowBatch) -> Vec<Value> {
     vec![
-        Value::Uuid(format_id),
-        Value::Uuid(row.row_id),
-        batch_id_to_value(row.batch_id),
-        Value::Text(row.branch.to_string()),
         Value::Array(row.parents.iter().copied().map(batch_id_to_value).collect()),
         Value::Timestamp(row.updated_at),
         Value::Text(row.created_by.to_string()),
         Value::Timestamp(row.created_at),
         Value::Text(row.updated_by.to_string()),
-        batch_id_to_value(row.batch_id),
         row_state_to_value(row.state),
         row.confirmed_tier
             .map(durability_tier_to_value)
@@ -321,28 +257,36 @@ fn stored_row_system_values(row: &StoredRowBatch, format_id: ObjectId) -> Vec<Va
     ]
 }
 
-fn history_row_system_values(row: &StoredRowBatch) -> Vec<Value> {
-    stored_row_system_values(row, flat_history_row_format_id())
-}
-
 fn history_row_system_column_count() -> usize {
     history_row_system_columns().len()
 }
 
-pub(crate) fn is_flat_history_row(data: &[u8]) -> bool {
-    matches!(
-        column_bytes(flat_history_row_marker_descriptor(), data, 0),
-        Ok(Some(bytes)) if bytes == flat_history_row_format_id().uuid().as_bytes()
-    )
-}
-
-pub(crate) fn flat_history_row_id(data: &[u8]) -> Result<ObjectId, EncodingError> {
-    let value = decode_column(flat_history_row_identity_descriptor(), data, 1)?;
-    expect_uuid(&value, "row_id")
-}
-
 fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
-    let mut columns = history_row_system_columns();
+    let mut columns = vec![
+        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
+        ColumnDescriptor::new(
+            "_jazz_parents",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Bytea),
+            },
+        ),
+        ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
+        ColumnDescriptor::new("_jazz_updated_by", ColumnType::Text),
+        ColumnDescriptor::new("_jazz_state", row_state_column_type()),
+        ColumnDescriptor::new("_jazz_confirmed_tier", confirmed_tier_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_delete_kind", delete_kind_column_type()).nullable(),
+        ColumnDescriptor::new("_jazz_is_deleted", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "_jazz_metadata",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(metadata_entry_descriptor().clone()),
+                }),
+            },
+        ),
+    ];
     columns.extend([
         ColumnDescriptor::new(
             "_jazz_branch_frontier",
@@ -358,7 +302,35 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
 }
 
 fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
-    let mut values = stored_row_system_values(&entry.current_row, flat_visible_row_format_id());
+    let mut values = vec![
+        batch_id_to_value(entry.current_row.batch_id),
+        Value::Array(
+            entry
+                .current_row
+                .parents
+                .iter()
+                .copied()
+                .map(batch_id_to_value)
+                .collect(),
+        ),
+        Value::Timestamp(entry.current_row.updated_at),
+        Value::Text(entry.current_row.created_by.to_string()),
+        Value::Timestamp(entry.current_row.created_at),
+        Value::Text(entry.current_row.updated_by.to_string()),
+        row_state_to_value(entry.current_row.state),
+        entry
+            .current_row
+            .confirmed_tier
+            .map(durability_tier_to_value)
+            .unwrap_or(Value::Null),
+        entry
+            .current_row
+            .delete_kind
+            .map(delete_kind_to_value)
+            .unwrap_or(Value::Null),
+        Value::Boolean(entry.current_row.is_deleted),
+        metadata_to_value(&entry.current_row.metadata),
+    ];
     values.extend([
         batch_ids_to_value(&entry.branch_frontier),
         optional_batch_id_to_value(entry.worker_batch_id),
@@ -370,18 +342,6 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
 
 fn visible_row_system_column_count() -> usize {
     visible_row_system_columns().len()
-}
-
-pub(crate) fn is_flat_visible_row(data: &[u8]) -> bool {
-    matches!(
-        column_bytes(flat_visible_row_marker_descriptor(), data, 0),
-        Ok(Some(bytes)) if bytes == flat_visible_row_format_id().uuid().as_bytes()
-    )
-}
-
-pub(crate) fn flat_visible_row_id(data: &[u8]) -> Result<ObjectId, EncodingError> {
-    let value = decode_column(flat_visible_row_identity_descriptor(), data, 1)?;
-    expect_uuid(&value, "row_id")
 }
 
 /// Build the physical row descriptor used when row-history state is stored as a
@@ -437,15 +397,18 @@ fn flat_user_data_from_values(
 
 fn stored_row_batch_from_flat_parts(
     user_descriptor: &RowDescriptor,
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
     system_values: &[Value],
     user_values: &[Value],
 ) -> Result<StoredRowBatch, EncodingError> {
-    let delete_kind = delete_kind_from_value(&system_values[12])?;
-    let is_deleted = expect_bool(&system_values[13], "is_deleted")?;
+    let delete_kind = delete_kind_from_value(&system_values[7])?;
+    let is_deleted = expect_bool(&system_values[8], "is_deleted")?;
     let user_data =
         flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
 
-    let parents = match &system_values[4] {
+    let parents = match &system_values[0] {
         Value::Array(values) => values
             .iter()
             .map(batch_id_from_value)
@@ -455,30 +418,21 @@ fn stored_row_batch_from_flat_parts(
         }
     };
 
-    let history_batch_id = batch_id_from_value(&system_values[2])?;
-    let batch_id = batch_id_from_value(&system_values[9])?;
-    if history_batch_id != batch_id {
-        return Err(malformed(format!(
-            "stored row batch id mismatch: history field {:?} != batch field {:?}",
-            history_batch_id, batch_id
-        )));
-    }
-
     Ok(StoredRowBatch {
-        row_id: expect_uuid(&system_values[1], "row_id")?,
+        row_id,
         batch_id,
-        branch: expect_text(&system_values[3], "branch")?.into(),
+        branch: branch.into(),
         parents,
-        updated_at: expect_timestamp(&system_values[5], "updated_at")?,
-        created_by: expect_text(&system_values[6], "created_by")?.into(),
-        created_at: expect_timestamp(&system_values[7], "created_at")?,
-        updated_by: expect_text(&system_values[8], "updated_by")?.into(),
-        state: row_state_from_value(&system_values[10])?,
-        confirmed_tier: durability_tier_from_value(&system_values[11])?,
+        updated_at: expect_timestamp(&system_values[1], "updated_at")?,
+        created_by: expect_text(&system_values[2], "created_by")?.into(),
+        created_at: expect_timestamp(&system_values[3], "created_at")?,
+        updated_by: expect_text(&system_values[4], "updated_by")?.into(),
+        state: row_state_from_value(&system_values[5])?,
+        confirmed_tier: durability_tier_from_value(&system_values[6])?,
         delete_kind,
         is_deleted,
         data: user_data.into(),
-        metadata: metadata_from_value(&system_values[14])?,
+        metadata: metadata_from_value(&system_values[9])?,
     })
 }
 
@@ -496,12 +450,22 @@ pub fn encode_flat_history_row(
 /// Decode a flat physical row back into the current `StoredRowBatch` shape.
 pub fn decode_flat_history_row(
     user_descriptor: &RowDescriptor,
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
     data: &[u8],
 ) -> Result<StoredRowBatch, EncodingError> {
     let descriptor = history_row_physical_descriptor(user_descriptor);
     let values = decode_row(&descriptor, data)?;
     let (system_values, user_values) = values.split_at(history_row_system_column_count());
-    stored_row_batch_from_flat_parts(user_descriptor, system_values, user_values)
+    stored_row_batch_from_flat_parts(
+        user_descriptor,
+        row_id,
+        branch,
+        batch_id,
+        system_values,
+        user_values,
+    )
 }
 
 pub fn encode_flat_visible_row_entry(
@@ -515,24 +479,30 @@ pub fn encode_flat_visible_row_entry(
 
 pub fn decode_flat_visible_row_entry(
     user_descriptor: &RowDescriptor,
+    row_id: ObjectId,
+    branch: &str,
     data: &[u8],
 ) -> Result<VisibleRowEntry, EncodingError> {
     let descriptor = visible_row_physical_descriptor(user_descriptor);
     let values = decode_row(&descriptor, data)?;
     let system_count = history_row_system_column_count();
     let visible_system_count = visible_row_system_column_count();
+    let batch_id = batch_id_from_value(&values[0])?;
     let current_row = stored_row_batch_from_flat_parts(
         user_descriptor,
-        &values[..system_count],
+        row_id,
+        branch,
+        batch_id,
+        &values[1..=system_count],
         &values[visible_system_count..],
     )?;
 
     Ok(VisibleRowEntry {
         current_row,
-        branch_frontier: batch_ids_from_value(&values[system_count], "branch_frontier")?,
-        worker_batch_id: optional_batch_id_from_value(&values[system_count + 1])?,
-        edge_batch_id: optional_batch_id_from_value(&values[system_count + 2])?,
-        global_batch_id: optional_batch_id_from_value(&values[system_count + 3])?,
+        branch_frontier: batch_ids_from_value(&values[system_count + 1], "branch_frontier")?,
+        worker_batch_id: optional_batch_id_from_value(&values[system_count + 2])?,
+        edge_batch_id: optional_batch_id_from_value(&values[system_count + 3])?,
+        global_batch_id: optional_batch_id_from_value(&values[system_count + 4])?,
     })
 }
 
@@ -697,13 +667,6 @@ fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
     }
 
     Ok(RowMetadata::from_entries(metadata))
-}
-
-fn expect_uuid(value: &Value, label: &str) -> Result<ObjectId, EncodingError> {
-    match value {
-        Value::Uuid(id) => Ok(*id),
-        other => Err(malformed(format!("expected {label} uuid, got {other:?}"))),
-    }
 }
 
 fn expect_text(value: &Value, label: &str) -> Result<String, EncodingError> {
@@ -1611,8 +1574,13 @@ mod tests {
 
         let encoded =
             encode_flat_visible_row_entry(&user_descriptor, &entry).expect("encode flat visible");
-        let decoded =
-            decode_flat_visible_row_entry(&user_descriptor, &encoded).expect("decode flat visible");
+        let decoded = decode_flat_visible_row_entry(
+            &user_descriptor,
+            entry.current_row.row_id,
+            entry.current_row.branch.as_str(),
+            &encoded,
+        )
+        .expect("decode flat visible");
 
         assert_eq!(decoded, entry);
     }
@@ -1738,6 +1706,60 @@ mod tests {
     }
 
     #[test]
+    fn history_row_physical_descriptor_omits_key_derived_and_marker_columns() {
+        let descriptor = history_row_physical_descriptor(&user_descriptor());
+
+        assert_eq!(
+            descriptor
+                .columns
+                .iter()
+                .filter(|column| column.name == "_jazz_batch_id")
+                .count(),
+            0,
+            "flat history rows should not store batch identity from the key in the payload"
+        );
+        assert!(
+            descriptor.column("_jazz_format_id").is_none(),
+            "flat history rows should not need an in-payload format marker once decoding is key-aware"
+        );
+        assert!(
+            descriptor.column("_jazz_row_id").is_none(),
+            "flat history rows should not store row id from the key in the payload"
+        );
+        assert!(
+            descriptor.column("_jazz_branch").is_none(),
+            "flat history rows should not store branch from the key in the payload"
+        );
+    }
+
+    #[test]
+    fn visible_row_physical_descriptor_keeps_current_batch_id_but_omits_marker() {
+        let descriptor = visible_row_physical_descriptor(&user_descriptor());
+
+        assert!(
+            descriptor.column("_jazz_format_id").is_none(),
+            "visible rows should not need an in-payload format marker once keyed decoding is available"
+        );
+        assert_eq!(
+            descriptor
+                .columns
+                .iter()
+                .filter(|column| column.name == "_jazz_batch_id")
+                .count(),
+            1,
+            "visible rows should keep the current visible batch id in the flat payload"
+        );
+        assert!(
+            descriptor.column("_jazz_row_id").is_none(),
+            "visible rows should derive row id from the storage key"
+        );
+        assert!(
+            descriptor.column("_jazz_branch").is_none(),
+            "visible rows should derive branch from the storage key"
+        );
+    }
+
+    #[test]
     fn flat_history_row_binary_roundtrips_user_and_system_columns() {
         let user_descriptor = user_descriptor();
         let user_values = vec![Value::Text("Write docs".into()), Value::Boolean(false)];
@@ -1760,8 +1782,14 @@ mod tests {
 
         let encoded =
             encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
-        let decoded =
-            decode_flat_history_row(&user_descriptor, &encoded).expect("decode flat history row");
+        let decoded = decode_flat_history_row(
+            &user_descriptor,
+            row.row_id,
+            row.branch.as_str(),
+            row.batch_id(),
+            &encoded,
+        )
+        .expect("decode flat history row");
 
         assert_eq!(decoded, row);
 
@@ -1808,8 +1836,14 @@ mod tests {
             Value::Null
         );
 
-        let decoded =
-            decode_flat_history_row(&user_descriptor, &encoded).expect("decode hard delete");
+        let decoded = decode_flat_history_row(
+            &user_descriptor,
+            deleted.row_id,
+            deleted.branch.as_str(),
+            deleted.batch_id(),
+            &encoded,
+        )
+        .expect("decode hard delete");
         assert_eq!(decoded.data.as_ref(), &[] as &[u8]);
         assert!(decoded.is_hard_deleted());
     }

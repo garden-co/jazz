@@ -470,7 +470,17 @@ pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
         .unwrap()
         .expect("history row should persist");
 
-    assert_eq!(decode_flat_history_row(&descriptor, &encoded).unwrap(), row);
+    assert_eq!(
+        decode_flat_history_row(
+            &descriptor,
+            row_id,
+            row.branch.as_str(),
+            row.batch_id(),
+            &encoded,
+        )
+        .unwrap(),
+        row
+    );
 }
 
 pub fn test_visible_region_uses_flat_bytes_when_schema_known(
@@ -535,8 +545,62 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(
         .expect("visible row should persist");
 
     assert_eq!(
-        decode_flat_visible_row_entry(&descriptor, &encoded).unwrap(),
+        decode_flat_visible_row_entry(&descriptor, row_id, "main", &encoded).unwrap(),
         entry
+    );
+}
+
+pub fn test_visible_region_does_not_write_separate_batch_side_index(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "tasks");
+    let schema = row_history_test_schema("tasks");
+    let descriptor = row_history_user_descriptor();
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "tasks", row_id, schema_hash);
+
+    let row = StoredRowBatch::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(&descriptor, &[Value::Text("ship".to_string())]).unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        Some(DurabilityTier::Worker),
+    );
+    let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .raw_table_scan_prefix("tasks", "row:tasks:2:")
+            .unwrap(),
+        Vec::new(),
+        "visible rows should not need a separate batch-id side index once current batch identity lives in the flat payload"
     );
 }
 
@@ -820,7 +884,6 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
-            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
             row_digest: Digest32([9; 32]),
         }],
         vec![CapturedFrontierMember {
@@ -937,17 +1000,14 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
         vec![
             SealedBatchMember {
                 object_id: alice,
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: Digest32([1; 32]),
             },
             SealedBatchMember {
                 object_id: bob,
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: Digest32([2; 32]),
             },
             SealedBatchMember {
                 object_id: alice,
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: Digest32([1; 32]),
             },
         ],
@@ -968,12 +1028,10 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
             vec![
                 SealedBatchMember {
                     object_id: alice,
-                    branch_name: crate::object::BranchName::new("main"),
                     row_digest: Digest32([1; 32]),
                 },
                 SealedBatchMember {
                     object_id: bob,
-                    branch_name: crate::object::BranchName::new("main"),
                     row_digest: Digest32([2; 32]),
                 },
             ],
@@ -1007,7 +1065,6 @@ pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> 
         crate::object::BranchName::new("main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
-            branch_name: crate::object::BranchName::new("main"),
             row_digest: Digest32([4; 32]),
         }],
         Vec::new(),
@@ -1130,7 +1187,6 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
-            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
             row_digest: Digest32([11; 32]),
         }],
         vec![CapturedFrontierMember {
@@ -1210,12 +1266,10 @@ pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentSt
         vec![
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(501)),
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: Digest32([5; 32]),
             },
             SealedBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(502)),
-                branch_name: crate::object::BranchName::new("main"),
                 row_digest: Digest32([6; 32]),
             },
         ],
@@ -1436,6 +1490,13 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn visible_region_uses_flat_bytes_when_schema_known() {
                 conformance::test_visible_region_uses_flat_bytes_when_schema_known(&$factory);
+            }
+
+            #[test]
+            fn visible_region_does_not_write_separate_batch_side_index() {
+                conformance::test_visible_region_does_not_write_separate_batch_side_index(
+                    &$factory,
+                );
             }
 
             #[test]

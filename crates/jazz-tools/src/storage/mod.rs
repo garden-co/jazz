@@ -155,14 +155,12 @@ pub(crate) struct OwnedHistoryRowBytes {
 pub struct VisibleRowBytes<'a> {
     pub branch: &'a str,
     pub row_id: ObjectId,
-    pub current_batch_id: BatchId,
     pub bytes: &'a [u8],
 }
 
 pub(crate) struct OwnedVisibleRowBytes {
     pub branch: String,
     pub row_id: ObjectId,
-    pub current_batch_id: BatchId,
     pub bytes: Vec<u8>,
 }
 
@@ -631,7 +629,6 @@ pub(crate) fn encode_visible_row_bytes_for_storage<H: Storage + ?Sized>(
             Ok(OwnedVisibleRowBytes {
                 branch: entry.current_row.branch.to_string(),
                 row_id: entry.current_row.row_id,
-                current_batch_id: entry.current_row.batch_id(),
                 bytes,
             })
         })
@@ -642,82 +639,116 @@ fn decode_history_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
     row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
     bytes: &[u8],
 ) -> Result<StoredRowBatch, StorageError> {
-    if crate::row_histories::is_flat_history_row(bytes) {
-        let mut last_error = None;
-        for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
-            match crate::row_histories::decode_flat_history_row(&user_descriptor, bytes) {
-                Ok(row) => return Ok(row),
-                Err(err) => last_error = Some(err),
-            }
+    let mut last_error = None;
+    for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
+        match crate::row_histories::decode_flat_history_row(
+            &user_descriptor,
+            row_id,
+            branch,
+            batch_id,
+            bytes,
+        ) {
+            Ok(row) => return Ok(row),
+            Err(err) => last_error = Some(err),
         }
-
-        let detail = last_error
-            .map(|err| err.to_string())
-            .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
-        return Err(StorageError::IoError(format!(
-            "decode flat history row: {detail}"
-        )));
     }
 
-    Err(StorageError::IoError(
-        "decode history row: legacy stored row format is no longer supported".to_string(),
-    ))
+    let detail = last_error
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
+    Err(StorageError::IoError(format!(
+        "decode flat history row: {detail}"
+    )))
 }
 
 fn decode_query_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
     row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
     bytes: &[u8],
 ) -> Result<QueryRowBatch, StorageError> {
-    decode_history_row_bytes_with_storage(storage, table, row_id, bytes)
+    decode_history_row_bytes_with_storage(storage, table, row_id, branch, batch_id, bytes)
         .map(|row| QueryRowBatch::from(&row))
 }
 
-fn decode_scanned_history_row_with_storage<H: Storage + ?Sized>(
+fn scan_history_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
-    bytes: &[u8],
-) -> Result<StoredRowBatch, StorageError> {
-    if crate::row_histories::is_flat_history_row(bytes) {
-        let row_id = crate::row_histories::flat_history_row_id(bytes)
-            .map_err(|err| StorageError::IoError(format!("decode flat history row id: {err}")))?;
-        return decode_history_row_bytes_with_storage(storage, table, row_id, bytes);
-    }
+    scan: HistoryScan,
+) -> Result<Vec<OwnedHistoryRowBytes>, StorageError> {
+    let prefix = match scan {
+        HistoryScan::Branch | HistoryScan::AsOf { .. } => key_codec::history_row_prefix(table),
+        HistoryScan::Row { row_id } => key_codec::history_row_batches_prefix(table, row_id),
+    };
 
-    Err(StorageError::IoError(
-        "decode history row: legacy stored row format is no longer supported".to_string(),
-    ))
+    storage
+        .raw_table_scan_prefix(table, &prefix)?
+        .into_iter()
+        .map(|(key, bytes)| {
+            let (row_id, branch, batch_id) = key_codec::decode_history_row_key(table, &key)?;
+            Ok(OwnedHistoryRowBytes {
+                branch,
+                row_id,
+                batch_id,
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn scan_visible_row_bytes_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    branch: &str,
+) -> Result<Vec<(ObjectId, Vec<u8>)>, StorageError> {
+    let prefix = key_codec::visible_row_prefix(table, branch);
+    storage
+        .raw_table_scan_prefix(table, &prefix)?
+        .into_iter()
+        .map(|(key, bytes)| {
+            let (decoded_branch, row_id) = key_codec::decode_visible_row_key(table, &key)?;
+            if decoded_branch != branch {
+                return Err(StorageError::IoError(format!(
+                    "visible row key '{key}' decoded unexpected branch '{decoded_branch}'"
+                )));
+            }
+            Ok((row_id, bytes))
+        })
+        .collect()
 }
 
 fn decode_visible_row_entry_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
     row_id: ObjectId,
+    branch: &str,
     bytes: &[u8],
 ) -> Result<VisibleRowEntry, StorageError> {
-    if crate::row_histories::is_flat_visible_row(bytes) {
-        let mut last_error = None;
-        for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
-            match crate::row_histories::decode_flat_visible_row_entry(&user_descriptor, bytes) {
-                Ok(entry) => return Ok(entry),
-                Err(err) => last_error = Some(err),
-            }
+    let mut last_error = None;
+    for user_descriptor in all_history_user_descriptors(storage, table, row_id)? {
+        match crate::row_histories::decode_flat_visible_row_entry(
+            &user_descriptor,
+            row_id,
+            branch,
+            bytes,
+        ) {
+            Ok(entry) => return Ok(entry),
+            Err(err) => last_error = Some(err),
         }
-
-        let detail = last_error
-            .map(|err| err.to_string())
-            .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
-        return Err(StorageError::IoError(format!(
-            "decode flat visible row: {detail}"
-        )));
     }
 
-    Err(StorageError::IoError(
-        "decode visible row: legacy visible row format is no longer supported".to_string(),
-    ))
+    let detail = last_error
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "no matching descriptor found in catalogue".to_string());
+    Err(StorageError::IoError(format!(
+        "decode flat visible row: {detail}"
+    )))
 }
 
 pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
@@ -727,10 +758,18 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
     state: Option<RowState>,
     confirmed_tier: Option<DurabilityTier>,
 ) -> Result<(), StorageError> {
-    let history_rows = storage
-        .scan_history_region_bytes(table, HistoryScan::Branch)?
+    let history_rows = scan_history_row_bytes_with_storage(storage, table, HistoryScan::Branch)?
         .into_iter()
-        .map(|bytes| decode_scanned_history_row_with_storage(storage, table, &bytes))
+        .map(|row| {
+            decode_history_row_bytes_with_storage(
+                storage,
+                table,
+                row.row_id,
+                row.branch.as_str(),
+                row.batch_id,
+                &row.bytes,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut patched_history = Vec::new();
@@ -823,13 +862,6 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         .members
         .iter()
         .map(|member| {
-            let member_branch_ord = storage.resolve_or_alloc_branch_ord(member.branch_name)?;
-            if member_branch_ord != target_branch_ord {
-                return Err(StorageError::IoError(format!(
-                    "sealed batch member branch {} does not match target branch {}",
-                    member.branch_name, submission.target_branch_name
-                )));
-            }
             Ok(Value::Row {
                 id: None,
                 values: vec![
@@ -975,7 +1007,6 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
                     };
                     Ok(crate::batch_fate::SealedBatchMember {
                         object_id,
-                        branch_name: target_branch_name,
                         row_digest,
                     })
                 }
@@ -1671,7 +1702,6 @@ pub trait Storage {
             .map(|row| VisibleRowBytes {
                 branch: row.branch.as_str(),
                 row_id: row.row_id,
-                current_batch_id: row.current_batch_id,
                 bytes: &row.bytes,
             })
             .collect::<Vec<_>>();
@@ -1714,14 +1744,10 @@ pub trait Storage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let mut rows = self
-            .scan_visible_region_bytes(table, branch)?
+        let mut rows = scan_visible_row_bytes_with_storage(self, table, branch)?
             .into_iter()
-            .map(|bytes| {
-                let row_id = crate::row_histories::flat_visible_row_id(&bytes).map_err(|err| {
-                    StorageError::IoError(format!("decode flat visible row id: {err}"))
-                })?;
-                decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes)
+            .map(|(row_id, bytes)| {
+                decode_visible_row_entry_bytes_with_storage(self, table, row_id, branch, &bytes)
                     .map(|entry| entry.current_row)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1735,9 +1761,9 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        self.load_visible_region_row_bytes(table, branch, row_id)?
+        self.raw_table_get(table, &key_codec::visible_row_key(table, branch, row_id))?
             .map(|bytes| {
-                decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes)
+                decode_visible_row_entry_bytes_with_storage(self, table, row_id, branch, &bytes)
                     .map(|entry| entry.current_row)
             })
             .transpose()
@@ -1795,8 +1821,10 @@ pub trait Storage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        self.load_visible_region_row_bytes(table, branch, row_id)?
-            .map(|bytes| decode_visible_row_entry_bytes_with_storage(self, table, row_id, &bytes))
+        self.raw_table_get(table, &key_codec::visible_row_key(table, branch, row_id))?
+            .map(|bytes| {
+                decode_visible_row_entry_bytes_with_storage(self, table, row_id, branch, &bytes)
+            })
             .transpose()
     }
 
@@ -1867,9 +1895,14 @@ pub trait Storage {
         row_id: ObjectId,
         batch_id: BatchId,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        self.load_history_row_batch_bytes(table, branch, row_id, batch_id)?
-            .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
-            .transpose()
+        self.raw_table_get(
+            table,
+            &key_codec::history_row_key(table, row_id, branch, batch_id),
+        )?
+        .map(|bytes| {
+            decode_history_row_bytes_with_storage(self, table, row_id, branch, batch_id, &bytes)
+        })
+        .transpose()
     }
 
     fn load_history_query_row_batch(
@@ -1879,9 +1912,14 @@ pub trait Storage {
         row_id: ObjectId,
         batch_id: BatchId,
     ) -> Result<Option<QueryRowBatch>, StorageError> {
-        self.load_history_row_batch_bytes(table, branch, row_id, batch_id)?
-            .map(|bytes| decode_query_row_bytes_with_storage(self, table, row_id, &bytes))
-            .transpose()
+        self.raw_table_get(
+            table,
+            &key_codec::history_row_key(table, row_id, branch, batch_id),
+        )?
+        .map(|bytes| {
+            decode_query_row_bytes_with_storage(self, table, row_id, branch, batch_id, &bytes)
+        })
+        .transpose()
     }
 
     fn load_history_row_batch_any_branch(
@@ -1978,11 +2016,20 @@ pub trait Storage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let mut rows: Vec<StoredRowBatch> = self
-            .scan_history_region_bytes(table, HistoryScan::Row { row_id })?
-            .into_iter()
-            .map(|bytes| decode_history_row_bytes_with_storage(self, table, row_id, &bytes))
-            .collect::<Result<_, _>>()?;
+        let mut rows: Vec<StoredRowBatch> =
+            scan_history_row_bytes_with_storage(self, table, HistoryScan::Row { row_id })?
+                .into_iter()
+                .map(|row| {
+                    decode_history_row_bytes_with_storage(
+                        self,
+                        table,
+                        row.row_id,
+                        row.branch.as_str(),
+                        row.batch_id,
+                        &row.bytes,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
         rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
         Ok(rows)
     }
@@ -1993,10 +2040,18 @@ pub trait Storage {
         branch: &str,
         scan: HistoryScan,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let scanned: Vec<StoredRowBatch> = self
-            .scan_history_region_bytes(table, scan)?
+        let scanned: Vec<StoredRowBatch> = scan_history_row_bytes_with_storage(self, table, scan)?
             .into_iter()
-            .map(|bytes| decode_scanned_history_row_with_storage(self, table, &bytes))
+            .map(|row| {
+                decode_history_row_bytes_with_storage(
+                    self,
+                    table,
+                    row.row_id,
+                    row.branch.as_str(),
+                    row.batch_id,
+                    &row.bytes,
+                )
+            })
             .collect::<Result<_, _>>()?;
 
         let mut rows: Vec<StoredRowBatch> = match scan {
@@ -3768,7 +3823,14 @@ mod tests {
             .unwrap()
             .expect("history bytes should load");
         assert_eq!(
-            decode_flat_history_row(&user_descriptor, &loaded).unwrap(),
+            decode_flat_history_row(
+                &user_descriptor,
+                row_id,
+                row.branch.as_str(),
+                row.batch_id(),
+                &loaded,
+            )
+            .unwrap(),
             row
         );
 
@@ -3777,7 +3839,14 @@ mod tests {
             .unwrap();
         assert_eq!(scanned.len(), 1);
         assert_eq!(
-            decode_flat_history_row(&user_descriptor, &scanned[0]).unwrap(),
+            decode_flat_history_row(
+                &user_descriptor,
+                row_id,
+                row.branch.as_str(),
+                row.batch_id(),
+                &scanned[0],
+            )
+            .unwrap(),
             row
         );
     }
@@ -3841,7 +3910,14 @@ mod tests {
             .unwrap()
             .expect("history bytes should load");
         assert_eq!(
-            decode_flat_history_row(&user_descriptor, &encoded).unwrap(),
+            decode_flat_history_row(
+                &user_descriptor,
+                row_id,
+                row.branch.as_str(),
+                row.batch_id(),
+                &encoded,
+            )
+            .unwrap(),
             row
         );
     }

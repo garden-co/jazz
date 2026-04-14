@@ -8,12 +8,15 @@ This is the simplest way to think about Jazz today:
 - current reads come from a compact visible entry
 - history stays around so sync, reconnect, and replay can speak in row-batch terms
 
+For the full direct/transactional batch lifecycle, replayable settlement model, and app-facing
+batch APIs, read this together with [Batches](batches.md).
+
 If you are new to the internals, it helps to picture one user table as two engine-managed regions:
 
 ```text
 todos
   visible: (branch, row_id) -> current visible winner
-  history: (row_id, batch_id) -> every stored row batch entry
+  history: (row_id, branch, batch_id) -> every stored row batch entry
 ```
 
 The visible region is the hot path for ordinary queries. The history region is the source of truth for replay, ancestry, and tier-aware fallbacks.
@@ -37,6 +40,9 @@ A `StoredRowBatch` is one concrete stored entry for that logical row. It carries
 - delete markers
 - engine/user metadata
 - the application row values
+
+The stable identity is `(row_id, branch_name, batch_id)`. `batch_id` is the public row identity
+for both direct visible rows and accepted transactional rows.
 
 Physically, a stored row batch entry is one flat `row_format` record:
 
@@ -65,11 +71,9 @@ Conceptually, every user table has:
 - the application columns you defined in `schema.ts`
 - a reserved set of engine fields that explain how the row should behave
 
-The important reserved columns are:
+The important engine fields are:
 
-- `_jazz_row_id` — stable logical row identity
-- `_jazz_branch` — the branch view this version belongs to
-- `_jazz_batch_id` — identity of this concrete stored entry
+- `(row_id, branch_name, batch_id)` — the stable identity of one stored row batch entry
 - `_jazz_parents` — parent batch ids for row-local ancestry
 - `_jazz_state` — whether the version is visible, staging, or rejected
 - `_jazz_confirmed_tier` — highest durability tier known for that version
@@ -77,19 +81,34 @@ The important reserved columns are:
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
-The important idea is that visibility, ancestry, durability, and deletion are expressed directly as
-table columns inside the engine's flat row format.
+For history rows, that identity now lives in the storage key rather than the payload columns. For
+visible rows, `(branch_name, row_id)` comes from the key and the current visible `batch_id` stays
+in the flat visible payload. The important idea is still that visibility, ancestry, durability,
+and deletion are expressed directly in the engine-managed row shape without repeating the full
+key-derived identity inside the payload.
 
 ## How a Direct Write Lands
 
-For a normal row write, the engine does four things:
+For a normal row write, the engine treats that write as a one-member direct batch and does four things:
 
-1. Append a new `StoredRowBatch` to the history region.
+1. Upsert the batch entry into the history region.
 2. Recompute the visible winner for that `(branch, row_id)`.
 3. Upsert the `VisibleRowEntry` for the branch view.
 4. Update the relevant indices and queue sync notifications.
 
 That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream systems care about.
+
+## How a Transactional Write Lands
+
+Transactional writes reuse the same `StoredRowBatch` shape, but they stage first:
+
+1. Write a `StoredRowBatch` with `RowState::StagingPending`.
+2. Keep it out of ordinary visible reads.
+3. Seal the batch explicitly when the writer is done.
+4. If the authority accepts it, promote that same batch entry to `VisibleTransactional`.
+
+The row shape stays the same across both paths. The distinction is lifecycle and settlement, not
+row identity.
 
 ## Why Visible Entries Exist
 
@@ -129,6 +148,7 @@ That split keeps the mental model tidy:
 | ---------------------------------------------------------------- | --------------------------------------------- |
 | `crates/jazz-tools/src/row_histories/mod.rs`                     | Row-history types and reducer logic           |
 | `crates/jazz-tools/src/storage/mod.rs`                           | Storage-backed persistence and lookup helpers |
+| `specs/status-quo/batches.md`                                    | Direct/transactional batch lifecycle summary  |
 | `crates/jazz-tools/src/row_format.rs`                            | Shared binary row/value encoding              |
 | `crates/jazz-tools/src/query_manager/graph_nodes/materialize.rs` | Visible-entry driven materialization          |
 | `crates/jazz-tools/src/sync_manager/types.rs`                    | Row-batch oriented sync payloads              |

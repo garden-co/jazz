@@ -221,16 +221,21 @@ fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_s
             other => panic!("unexpected column {other}"),
         })
         .collect::<Vec<_>>();
-    qm.insert(&mut storage, "users", &values)
+    let inserted = qm
+        .insert(&mut storage, "users", &values)
         .expect("insert should succeed");
 
     let history_bytes = storage
         .scan_history_region_bytes("users", HistoryScan::Branch)
         .expect("history bytes should be readable");
     assert_eq!(history_bytes.len(), 1);
-    assert!(
-        crate::row_histories::is_flat_history_row(&history_bytes[0]),
-        "direct QueryManager writes should persist flat history rows after schema bootstrap"
+    assert_eq!(
+        storage
+            .scan_history_row_batches("users", inserted.row_id)
+            .expect("flat history rows should decode with keyed storage context")
+            .len(),
+        history_bytes.len(),
+        "direct QueryManager writes should persist keyed-decodable flat history rows after schema bootstrap"
     );
 }
 

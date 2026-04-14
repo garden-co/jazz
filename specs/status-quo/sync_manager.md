@@ -16,7 +16,7 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row batch entries and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch entries, explicit transactional seals, replayable batch fate, and catalogue updates so the server can build the same relational view and answer forwarded queries.
 
 ### Downward, toward clients
 
@@ -57,8 +57,12 @@ The sync payloads now speak in row-history and query terms:
 - `RowBatchCreated`
 - `RowBatchNeeded`
 - `RowBatchStateChanged`
+- `SealBatch`
+- `BatchSettlement`
+- `BatchSettlementNeeded`
 - `QuerySubscription`
 - `QueryUnsubscription`
+- `QueryScopeSnapshot`
 - `QuerySettled`
 - `SchemaWarning`
 - `Error`
@@ -67,17 +71,29 @@ That payload set matches the table-first runtime model:
 
 - new row batch entries travel as row batch entries
 - initial query fill can explicitly ask for needed row batch entries
+- transactional batches are explicitly sealed upstream
+- replayable whole-batch fate travels separately from concrete row entries
 - row-state and durability progression travel as row-state changes
 - schemas and lenses travel as catalogue entries
 
 ## A Typical Flow
 
-### Local write
+### Direct local write
 
 1. A runtime appends a new row batch entry locally.
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
 4. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
+5. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
+
+### Transactional write
+
+1. A runtime upserts staging row batch entries locally.
+2. Ordinary readers ignore those `StagingPending` rows.
+3. The writer explicitly seals the batch, sending `SealBatch` upstream.
+4. The authority decides replayable batch fate.
+5. Accepted output becomes visible and is replayable as `BatchSettlement::AcceptedTransaction`.
+6. Rejection or missing authority truth is replayable as `Rejected` or `Missing`.
 
 ### New query subscription
 
@@ -90,6 +106,8 @@ That payload set matches the table-first runtime model:
 ### Later visibility/state change
 
 When a row already known to a peer changes durability or state, the runtime can send `RowBatchStateChanged` without pretending the row is brand new.
+
+The row-level identity for those changes is `RowBatchKey { row_id, branch_name, batch_id }`.
 
 ## Query-Scoped Delivery
 
@@ -146,3 +164,4 @@ This is what makes reconnect feel reliable without every app having to remember 
 | `crates/jazz-tools/src/sync_manager/types.rs`           | Payloads, ids, roles, and durability tiers |
 | `crates/jazz-tools/src/sync_manager/permissions.rs`     | Permission-check routing                   |
 | `crates/jazz-tools/src/query_manager/server_queries.rs` | Server-side query subscription handling    |
+| `specs/status-quo/batches.md`                           | Batch lifecycle and settlement model       |

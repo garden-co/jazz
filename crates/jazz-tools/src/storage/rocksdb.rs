@@ -417,7 +417,6 @@ impl Storage for RocksDBStorage {
                 .map(|row| VisibleRowBytes {
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
-                    current_batch_id: row.current_batch_id,
                     bytes: &row.bytes,
                 })
                 .collect::<Vec<_>>();

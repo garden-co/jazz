@@ -51,6 +51,7 @@ It is useful for tests, demos, and environments that do not want a dedicated wor
 - translating typed query builders into runtime queries
 - creating or reusing `JazzClient` instances
 - exposing `all`, `one`, `insert`, `update`, `delete`, and subscription APIs
+- exposing explicit `beginDirectBatch(...)` and `beginTransaction(...)` APIs
 - waiting for the worker bridge when a call needs worker-backed durability
 
 From the application's point of view, it is just "the database object". Internally, it is the coordinator for the main-thread runtime plus any worker bridge.
@@ -88,6 +89,7 @@ The worker is the durable browser runtime host. It owns:
 - upstream `/events` connection
 - upstream `/sync` POSTs
 - replay of sync messages to the main thread runtime
+- durable local batch records, authoritative settlements, and sealed transactional submissions
 
 That is why the browser architecture can stay faithful to the rest of Jazz. The worker is not just a storage helper; it is a real runtime tier.
 
@@ -105,8 +107,13 @@ That is why the browser architecture can stay faithful to the rest of Jazz. The 
 1. App calls `db.insert(...)` / `db.update(...)` / `db.delete(...)`.
 2. Main-thread runtime applies the local write immediately.
 3. Outbound sync is forwarded to the worker.
-4. Worker persists and, when configured, forwards upstream.
-5. Durable APIs resolve when the requested tier is confirmed.
+4. Worker persists the row-batch and any replayable batch bookkeeping.
+5. Worker forwards upstream when configured.
+6. Durable APIs resolve when the requested tier is confirmed.
+
+The same path also handles explicit `db.beginDirectBatch(...)` and `db.beginTransaction(...)`
+flows. The difference is whether the worker is persisting an already-visible direct batch or a
+sealed transactional batch that still needs an authority decision.
 
 ### Query
 

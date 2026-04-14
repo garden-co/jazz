@@ -125,7 +125,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub(crate) fn transactional_batch_members(
         &self,
         batch_id: BatchId,
-    ) -> Result<Vec<SealedBatchMember>, RuntimeError> {
+    ) -> Result<(crate::object::BranchName, Vec<SealedBatchMember>), RuntimeError> {
         let row_locators = self
             .storage
             .scan_row_locators()
@@ -156,11 +156,26 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        let mut members: Vec<_> = latest_by_row
-            .into_values()
+        let latest_rows: Vec<_> = latest_by_row.into_values().collect();
+        let Some(first_row) = latest_rows.first() else {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot seal empty transactional batch {batch_id:?}"
+            )));
+        };
+        let target_branch_name = crate::object::BranchName::new(&first_row.branch);
+        if latest_rows
+            .iter()
+            .any(|row| row.branch.as_str() != target_branch_name.as_str())
+        {
+            return Err(RuntimeError::WriteError(format!(
+                "transactional batch {batch_id:?} spans multiple target branches"
+            )));
+        }
+
+        let mut members: Vec<_> = latest_rows
+            .into_iter()
             .map(|row| SealedBatchMember {
                 object_id: row.row_id,
-                branch_name: crate::object::BranchName::new(&row.branch),
                 row_digest: row.content_digest(),
             })
             .collect();
@@ -169,31 +184,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 .uuid()
                 .as_bytes()
                 .cmp(right.object_id.uuid().as_bytes())
-                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
                 .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
         });
-        Ok(members)
+        Ok((target_branch_name, members))
     }
 
     pub(crate) fn transactional_batch_submission(
         &self,
         batch_id: BatchId,
     ) -> Result<SealedBatchSubmission, RuntimeError> {
-        let members = self.transactional_batch_members(batch_id)?;
-        let Some(first_member) = members.first() else {
-            return Err(RuntimeError::WriteError(format!(
-                "cannot seal empty transactional batch {batch_id:?}"
-            )));
-        };
-        let target_branch_name = first_member.branch_name;
-        if members
-            .iter()
-            .any(|member| member.branch_name != target_branch_name)
-        {
-            return Err(RuntimeError::WriteError(format!(
-                "transactional batch {batch_id:?} spans multiple target branches"
-            )));
-        }
+        let (target_branch_name, members) = self.transactional_batch_members(batch_id)?;
         let captured_frontier = self
             .storage
             .capture_family_visible_frontier(target_branch_name)
