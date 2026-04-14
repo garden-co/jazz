@@ -268,11 +268,12 @@ impl SyncSender for RnSyncSender {
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Mutex<RnCoreType>,
+    sync_sender: RnSyncSender,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
@@ -333,11 +334,12 @@ impl RnRuntime {
             let scheduler = RnScheduler::default();
             let sync_sender = RnSyncSender::default();
 
-            let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
 
             Ok(Arc::new(Self {
                 core: Mutex::new(core),
+                sync_sender,
                 upstream_server_id: Mutex::new(None),
                 declared_schema,
                 subscription_queries: Mutex::new(HashMap::new()),
@@ -365,10 +367,7 @@ impl RnRuntime {
         callback: Option<Box<dyn SyncMessageCallback>>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("on_sync_message_to_send", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.sync_sender().set_callback(callback);
+            self.sync_sender.set_callback(callback);
             Ok(())
         })
     }

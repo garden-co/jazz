@@ -175,7 +175,7 @@ fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,6 +262,7 @@ impl Scheduler for NapiScheduler {
 /// (destinationKind, destinationId, payloadJson, isCatalogue)
 type SyncCallbackParams = (String, String, String, bool);
 
+#[derive(Clone)]
 pub struct NapiSyncSender {
     callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
 }
@@ -351,7 +352,7 @@ fn build_napi_runtime(
     let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let core = RuntimeCore::new(schema_manager, storage, scheduler);
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -393,6 +394,7 @@ fn build_napi_runtime(
 
     Ok(NapiRuntime {
         core: core_arc,
+        sync_sender,
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
@@ -406,6 +408,7 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
+    sync_sender: NapiSyncSender,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
@@ -1055,11 +1058,7 @@ impl NapiRuntime {
             SyncCallbackParams,
         >,
     ) -> napi::Result<()> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(callback);
+        self.sync_sender.set_callback(callback);
         Ok(())
     }
 

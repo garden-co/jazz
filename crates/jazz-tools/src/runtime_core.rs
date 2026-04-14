@@ -1,8 +1,8 @@
 //! RuntimeCore - Unified synchronous runtime logic for both native and WASM.
 //!
 //! This module provides the shared core logic that both jazz-tokio
-//! and jazz-wasm wrap. RuntimeCore is generic over `Storage`, `Scheduler`,
-//! and `SyncSender` which provide platform-specific behavior.
+//! and jazz-wasm wrap. RuntimeCore is generic over `Storage` and `Scheduler`
+//! which provide platform-specific behavior.
 //!
 //! ## Design
 //!
@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler);
 //! runtime.insert(
 //!     "users",
 //!     std::collections::HashMap::from([
@@ -223,16 +223,17 @@ struct PendingOneShotQuery {
 
 /// Unified runtime core for both native and WASM platforms.
 ///
-/// Generic over `Storage` for data persistence, `Scheduler` for tick scheduling,
-/// and `SyncSender` for network message dispatch.
+/// Generic over `Storage` for data persistence and `Scheduler` for tick scheduling.
 /// All business logic is synchronous.
-pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
+pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     schema_manager: SchemaManager,
     pub(crate) storage: S,
     scheduler: Sch,
-    sync_sender: Sy,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
+    /// Transport handle for WebSocket sync (Task 6+).
+    #[cfg(feature = "transport")]
+    pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -262,13 +263,12 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     tier_label: &'static str,
 }
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(
         mut schema_manager: SchemaManager,
         mut storage: S,
         scheduler: Sch,
-        sync_sender: Sy,
     ) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
 
@@ -276,8 +276,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             schema_manager,
             storage,
             scheduler,
-            sync_sender,
             storage_write_pending_flush: false,
+            #[cfg(feature = "transport")]
+            transport: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -329,11 +330,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Used for cold-start testing to transfer driver state.
     pub fn into_storage(self) -> S {
         self.storage
-    }
-
-    /// Get reference to the SyncSender.
-    pub fn sync_sender(&self) -> &Sy {
-        &self.sync_sender
     }
 
     /// Get reference to the Scheduler.
@@ -428,6 +424,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get access to the underlying SchemaManager.
     pub fn schema_manager(&self) -> &SchemaManager {
         &self.schema_manager
+    }
+}
+
+#[cfg(feature = "transport")]
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    /// Attach a transport handle. Replaces any existing transport.
+    pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
+        self.transport = Some(handle);
+    }
+
+    /// Detach the transport handle and remove its server from sync state.
+    pub fn clear_transport(&mut self) {
+        if let Some(h) = self.transport.take() {
+            self.remove_server(h.server_id);
+        }
     }
 }
 

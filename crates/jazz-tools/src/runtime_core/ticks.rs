@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     // =========================================================================
     // Tick Methods
     // =========================================================================
@@ -221,9 +221,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if !outbox.is_empty() {
             debug!(count = outbox.len(), "flushing outbox");
         }
+        // TODO(Task 7): drain outbox via self.transport when feature = "transport"
+        #[cfg(feature = "transport")]
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
+            if let Some(ref h) = self.transport {
+                h.send_outbox(msg);
+            }
         }
+        #[cfg(not(feature = "transport"))]
+        let _ = outbox;
 
         // 2. Process parked sync messages
         self.handle_sync_messages();
@@ -239,9 +245,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if !outbox.is_empty() {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
+        // TODO(Task 7): drain post-process outbox via self.transport when feature = "transport"
+        #[cfg(feature = "transport")]
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
+            if let Some(ref h) = self.transport {
+                h.send_outbox(msg);
+            }
         }
+        #[cfg(not(feature = "transport"))]
+        let _ = outbox;
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {

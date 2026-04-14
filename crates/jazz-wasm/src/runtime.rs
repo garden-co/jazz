@@ -291,7 +291,7 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 
 // ============================================================================
 // WasmScheduler
@@ -431,6 +431,7 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
     tier_label: &'static str,
@@ -511,7 +512,7 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
@@ -530,6 +531,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            sync_sender,
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
@@ -642,7 +644,7 @@ impl WasmRuntime {
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core.borrow().sync_sender().set_callback(callback);
+        self.sync_sender.set_callback(callback);
     }
 
     // =========================================================================
@@ -1418,7 +1420,7 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
@@ -1437,6 +1439,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            sync_sender,
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
