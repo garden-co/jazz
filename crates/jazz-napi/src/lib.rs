@@ -1235,6 +1235,60 @@ impl NapiRuntime {
         let verifying_key = identity::derive_verifying_key(&seed);
         Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop as a Tokio task.
+    #[napi]
+    pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
+        let auth: jazz_tools::transport_manager::AuthConfig =
+            serde_json::from_str(&auth_json)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let tick = NapiTickNotifier {
+            core: Arc::clone(&self.core),
+        };
+        let (handle, manager) =
+            jazz_tools::transport_manager::create::<
+                jazz_tools::ws_stream::NativeWsStream,
+                NapiTickNotifier,
+            >(url, auth, tick);
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .set_transport(handle);
+        tokio::spawn(manager.run());
+        Ok(())
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    #[napi]
+    pub fn disconnect(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            core.clear_transport();
+        }
+    }
+}
+
+// ============================================================================
+// NapiTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the NAPI (Node.js) runtime.
+///
+/// Holds a weak-upgradeable reference to `RuntimeCore` and schedules a
+/// `batched_tick` on the Node.js event loop whenever the transport layer
+/// needs to wake up.
+struct NapiTickNotifier {
+    core: Arc<Mutex<NapiCoreType>>,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for NapiTickNotifier {
+    fn notify(&self) {
+        if let Ok(core) = self.core.lock() {
+            core.scheduler().schedule_batched_tick();
+        }
+    }
 }
 
 // ============================================================================

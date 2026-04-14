@@ -9,7 +9,9 @@ crate-type = ["cdylib"]
 [dependencies]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
   "test-utils",
+  "transport-websocket",
 ] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }
 napi-derive = "3"
