@@ -49,21 +49,18 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
+  static deriveUserId(seedB64: string): string
+  static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+  static getPublicKeyBase64url(seedB64: string): string
   /**
    * Connect to a Jazz server over WebSocket.
    *
-   * Parses `authJson` into AuthConfig, wires a TransportManager into RuntimeCore,
-   * and spawns the manager loop as a Tokio task.
-   *
-   * NOTE: this declaration was added manually; regenerate with `pnpm --filter @jazz/napi build`
-   * once the NAPI-RS codegen pipeline is wired for the new methods.
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore`, and spawns the manager loop as a Tokio task.
    */
   connect(url: string, authJson: string): void
   /** Disconnect from the Jazz server and drop the transport handle. */
   disconnect(): void
-  static deriveUserId(seedB64: string): string
-  static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
-  static getPublicKeyBase64url(seedB64: string): string
 }
 
 export declare class TestingServer {

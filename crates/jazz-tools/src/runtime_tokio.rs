@@ -218,7 +218,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+        // Install the callback as the runtime's fallback outbox sink so
+        // server-side fanout (or any code path without a TransportHandle)
+        // still delivers OutboxEntries.
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));

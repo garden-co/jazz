@@ -216,7 +216,6 @@ impl ServerBuilder {
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                // Record outgoing server message to tracer if present
                 if let Some(ref tracer) = tracer_for_outgoing {
                     tracer.record_outgoing("server", &entry.destination, &entry.payload);
                 }

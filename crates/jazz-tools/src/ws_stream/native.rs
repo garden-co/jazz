@@ -27,7 +27,9 @@ impl StreamAdapter for NativeWsStream {
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
                 Some(Ok(Message::Close(_))) | None => return Ok(None),
                 Some(Ok(Message::Text(_))) => {
-                    tracing::debug!("received unexpected text frame on binary-only WS connection; ignoring");
+                    tracing::debug!(
+                        "received unexpected text frame on binary-only WS connection; ignoring"
+                    );
                     continue;
                 }
                 Some(Ok(Message::Frame(_))) => continue, // raw frame: send-only, cannot arrive on read
@@ -60,7 +62,9 @@ mod tests {
                 ws.send(msg).await.unwrap();
             }
         });
-        let mut stream = NativeWsStream::connect(&format!("ws://{addr}")).await.unwrap();
+        let mut stream = NativeWsStream::connect(&format!("ws://{addr}"))
+            .await
+            .unwrap();
         ready_rx.await.unwrap();
         stream.send(b"hello ws").await.unwrap();
         assert_eq!(stream.recv().await.unwrap().unwrap(), b"hello ws".to_vec());
@@ -75,7 +79,9 @@ mod tests {
             let mut ws = accept_async(tcp).await.unwrap();
             let _ = ws.close(None).await;
         });
-        let mut stream = NativeWsStream::connect(&format!("ws://{addr}")).await.unwrap();
+        let mut stream = NativeWsStream::connect(&format!("ws://{addr}"))
+            .await
+            .unwrap();
         assert!(stream.recv().await.unwrap().is_none());
     }
 }

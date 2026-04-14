@@ -1877,12 +1877,11 @@ fn pump_3tier(s: &mut ThreeTierRC) {
 
         // A outbox → B
         s.a.batched_tick();
-        let a_out = s
-            .a
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox();
+        let a_out =
+            s.a.schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut()
+                .take_outbox();
         for entry in a_out {
             if entry.destination == Destination::Server(s.b_server_for_a) {
                 any_messages = true;
@@ -1897,12 +1896,11 @@ fn pump_3tier(s: &mut ThreeTierRC) {
         s.b.batched_tick();
         s.b.immediate_tick();
         s.b.batched_tick();
-        let b_out = s
-            .b
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox();
+        let b_out =
+            s.b.schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut()
+                .take_outbox();
         for entry in b_out {
             match entry.destination {
                 Destination::Client(cid) if cid == s.a_client_of_b => {
@@ -1927,12 +1925,11 @@ fn pump_3tier(s: &mut ThreeTierRC) {
         s.c.batched_tick();
         s.c.immediate_tick();
         s.c.batched_tick();
-        let c_out = s
-            .c
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox();
+        let c_out =
+            s.c.schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut()
+                .take_outbox();
         for entry in c_out {
             if entry.destination == Destination::Client(s.b_client_of_c) {
                 any_messages = true;
@@ -1956,12 +1953,11 @@ fn pump_3tier(s: &mut ThreeTierRC) {
 /// Pump only A → B (one hop, no C).
 fn pump_a_to_b(s: &mut ThreeTierRC) {
     s.a.batched_tick();
-    let a_out = s
-        .a
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let a_out =
+        s.a.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     for entry in a_out {
         if entry.destination == Destination::Server(s.b_server_for_a) {
             s.b.park_sync_message(InboxEntry {
@@ -1977,12 +1973,11 @@ fn pump_a_to_b(s: &mut ThreeTierRC) {
 /// Route B's outbox to both A and C as appropriate.
 fn route_b_outbox(s: &mut ThreeTierRC) {
     s.b.batched_tick();
-    let b_out = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let b_out =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     for entry in b_out {
         match entry.destination {
             Destination::Client(cid) if cid == s.a_client_of_b => {
@@ -2020,12 +2015,11 @@ fn pump_b_to_c(s: &mut ThreeTierRC) {
 fn pump_c_to_b_to_a(s: &mut ThreeTierRC) {
     // C → B
     s.c.batched_tick();
-    let c_out = s
-        .c
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let c_out =
+        s.c.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     for entry in c_out {
         if entry.destination == Destination::Client(s.b_client_of_c) {
             s.b.park_sync_message(InboxEntry {
@@ -2184,12 +2178,11 @@ fn rc_replays_active_queries_on_upstream_reconnect() {
             .unwrap();
     pump_a_to_b(&mut s);
 
-    let initial_forwarded = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let initial_forwarded =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
         "Expected initial QuerySubscription forwarding from B to C"
@@ -2200,12 +2193,11 @@ fn rc_replays_active_queries_on_upstream_reconnect() {
     s.b.add_server(s.c_server_for_b);
     s.b.batched_tick();
 
-    let replayed_forwarded = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let replayed_forwarded =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b) > 0,
         "Expected active QuerySubscription replay after upstream reconnect"
@@ -2221,12 +2213,11 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
             .unwrap();
     pump_a_to_b(&mut s);
 
-    let initial_forwarded = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let initial_forwarded =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
         "Expected initial QuerySubscription forwarding from B to C"
@@ -2244,12 +2235,11 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
     s.b.add_server(s.c_server_for_b);
     s.b.batched_tick();
 
-    let replayed_forwarded = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let replayed_forwarded =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
     assert_eq!(
         count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b),
         0,
@@ -3016,12 +3006,11 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     // Deliver A -> B query subscription and let B compute response traffic.
     pump_a_to_b(&mut s);
     s.b.batched_tick();
-    let b_out = s
-        .b
-        .schema_manager_mut()
-        .query_manager_mut()
-        .sync_manager_mut()
-        .take_outbox();
+    let b_out =
+        s.b.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
 
     // Force QuerySettled before row delivery to expose ordering assumptions.
     let mut settled_to_a = Vec::new();

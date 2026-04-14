@@ -319,7 +319,6 @@ impl ServerState {
         client_id: ClientId,
         payload: &[u8],
     ) -> Result<(), String> {
-        // Primary: OutboxEntry shape
         if let Ok(entry) =
             serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
         {
@@ -333,7 +332,6 @@ impl ServerState {
                 .map_err(|e| e.to_string());
         }
 
-        // Fallback: raw SyncBatchRequest
         match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
             Ok(batch) => {
                 for p in batch.payloads {

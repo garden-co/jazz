@@ -234,6 +234,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Transport handle for WebSocket sync (Task 6+).
     #[cfg(feature = "transport")]
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
+    /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
+    /// the server side, where the runtime fans out via `ConnectionEventHub`
+    /// instead of a WebSocket connection).
+    pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -265,11 +269,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
-    pub fn new(
-        mut schema_manager: SchemaManager,
-        mut storage: S,
-        scheduler: Sch,
-    ) -> Self {
+    pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
 
         Self {
@@ -279,6 +279,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage_write_pending_flush: false,
             #[cfg(feature = "transport")]
             transport: None,
+            sync_sender: None,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -439,6 +440,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if let Some(h) = self.transport.take() {
             self.remove_server(h.server_id);
         }
+    }
+}
+
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    /// Install a fallback sync sender used when no `TransportHandle` is set.
+    /// On the server side, this is the bridge from the runtime's outbox into
+    /// the per-connection `ConnectionEventHub` channels.
+    pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
+        self.sync_sender = Some(sender);
     }
 }
 

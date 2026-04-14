@@ -3,8 +3,8 @@
 //! TransportHandle is held by RuntimeCore (replaces SyncSender).
 //! TransportManager owns the live WebSocket connection and reconnects on failure.
 
-use futures::channel::mpsc;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
+use futures::channel::mpsc;
 
 pub trait TickNotifier: 'static {
     fn notify(&self);
@@ -51,7 +51,8 @@ impl TransportHandle {
         let _ = self.outbox_tx.unbounded_send(entry);
     }
     pub fn has_ever_connected(&self) -> bool {
-        self.ever_connected.load(std::sync::atomic::Ordering::Acquire)
+        self.ever_connected
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -72,12 +73,24 @@ impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthConfig")
             .field("jwt_token", &self.jwt_token.as_ref().map(|_| "<redacted>"))
-            .field("backend_secret", &self.backend_secret.as_ref().map(|_| "<redacted>"))
-            .field("admin_secret", &self.admin_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "backend_secret",
+                &self.backend_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "admin_secret",
+                &self.admin_secret.as_ref().map(|_| "<redacted>"),
+            )
             // backend_session may itself contain secrets; redact presence only.
-            .field("backend_session", &self.backend_session.as_ref().map(|_| "<redacted>"))
+            .field(
+                "backend_session",
+                &self.backend_session.as_ref().map(|_| "<redacted>"),
+            )
             .field("local_mode", &self.local_mode)
-            .field("local_token", &self.local_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "local_token",
+                &self.local_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -103,8 +116,12 @@ pub struct ReconnectState {
 }
 
 impl ReconnectState {
-    pub fn new() -> Self { Self::default() }
-    pub fn reset(&mut self) { self.attempt = 0; }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn reset(&mut self) {
+        self.attempt = 0;
+    }
 
     pub async fn backoff(&mut self) {
         // I-2: cap applied AFTER adding jitter so the 10_000 ceiling is meaningful
@@ -113,11 +130,16 @@ impl ReconnectState {
         let jitter = (rand::random::<u8>() as u64 * 200) / 255;
         let delay_ms = (base_ms + jitter).min(10_000);
         #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-tokio"))]
-        { tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await; }
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
         // M-7: WASM / no-tokio: no real sleep is available. Yield one poll cycle to avoid
         // a tight spin; outer reconnect loop relies on network I/O awaits for real backpressure.
         #[cfg(any(target_arch = "wasm32", not(feature = "runtime-tokio")))]
-        { let _ = delay_ms; futures::future::ready(()).await; }
+        {
+            let _ = delay_ms;
+            futures::future::ready(()).await;
+        }
         self.attempt += 1;
     }
 }
@@ -147,14 +169,22 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     let (inbound_tx, inbound_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = TransportHandle {
-        server_id, client_id,
-        outbox_tx, inbound_rx,
+        server_id,
+        client_id,
+        outbox_tx,
+        inbound_rx,
         ever_connected: ever_connected.clone(),
     };
     let manager = TransportManager {
-        server_id, url, auth, outbox_rx, inbound_tx,
-        tick, reconnect: ReconnectState::new(),
-        client_id, ever_connected,
+        server_id,
+        url,
+        auth,
+        outbox_rx,
+        inbound_tx,
+        tick,
+        reconnect: ReconnectState::new(),
+        client_id,
+        ever_connected,
         _stream: std::marker::PhantomData,
     };
     (handle, manager)
@@ -162,7 +192,10 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
 
 /// Encode a payload as a 4-byte big-endian length-prefixed frame.
 pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    debug_assert!(payload.len() <= u32::MAX as usize, "frame payload exceeds u32 limit");
+    debug_assert!(
+        payload.len() <= u32::MAX as usize,
+        "frame payload exceeds u32 limit"
+    );
     let mut out = Vec::with_capacity(4 + payload.len());
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     out.extend_from_slice(payload);
@@ -171,14 +204,21 @@ pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
 
 /// Decode a 4-byte big-endian length-prefixed frame, returning the payload slice.
 pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
-    if data.len() < 4 { return None; }
+    if data.len() < 4 {
+        return None;
+    }
     let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-    if data.len() < 4 + len { return None; }
+    if data.len() < 4 + len {
+        return None;
+    }
     Some(&data[4..4 + len])
 }
 
 #[cfg(feature = "runtime-tokio")]
-enum ConnectedExit { HandleDropped, NetworkError }
+enum ConnectedExit {
+    HandleDropped,
+    NetworkError,
+}
 
 #[cfg(feature = "runtime-tokio")]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
@@ -195,7 +235,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         Ok(resp) => {
                             // TODO(later tasks): resp.connection_id is currently dropped; wire it
                             // through once the protocol layer consumes it.
-                            self.ever_connected.store(true, std::sync::atomic::Ordering::Release);
+                            self.ever_connected
+                                .store(true, std::sync::atomic::Ordering::Release);
                             let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
                                 catalogue_state_hash: resp.catalogue_state_hash,
                                 next_sync_seq: resp.next_sync_seq,
@@ -203,9 +244,14 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             self.tick.notify();
                             self.reconnect.reset();
                             match self.run_connected(&mut ws).await {
-                                ConnectedExit::HandleDropped => { ws.close().await; return; }
+                                ConnectedExit::HandleDropped => {
+                                    ws.close().await;
+                                    return;
+                                }
                                 ConnectedExit::NetworkError => {
-                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Disconnected);
+                                    let _ = self
+                                        .inbound_tx
+                                        .unbounded_send(TransportInbound::Disconnected);
                                     self.tick.notify();
                                     ws.close().await;
                                 }
@@ -232,7 +278,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         let payload = serde_json::to_vec(&handshake).map_err(|e| e.to_string())?;
         let frame = frame_encode(&payload);
         ws.send(&frame).await.map_err(|e| e.to_string())?;
-        let resp_bytes = ws.recv().await.map_err(|e| e.to_string())?
+        let resp_bytes = ws
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| "server closed before handshake response".to_string())?;
         let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
         serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
@@ -288,7 +337,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 // WASM-compatible run() — uses `futures::select!` instead of `tokio::select!`.
 // Activated when `transport` is enabled but `runtime-tokio` is not (i.e. WASM).
 #[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
-enum WasmConnectedExit { HandleDropped, NetworkError }
+enum WasmConnectedExit {
+    HandleDropped,
+    NetworkError,
+}
 
 #[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
@@ -297,38 +349,45 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     pub async fn run(mut self) {
         loop {
             match W::connect(&self.url).await {
-                Ok(mut ws) => {
-                    match self.wasm_perform_auth_handshake(&mut ws).await {
-                        Ok(resp) => {
-                            self.ever_connected.store(true, std::sync::atomic::Ordering::Release);
-                            let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
-                                catalogue_state_hash: resp.catalogue_state_hash,
-                                next_sync_seq: resp.next_sync_seq,
-                            });
-                            self.tick.notify();
-                            self.reconnect.reset();
-                            match self.wasm_run_connected(&mut ws).await {
-                                WasmConnectedExit::HandleDropped => { ws.close().await; return; }
-                                WasmConnectedExit::NetworkError => {
-                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Disconnected);
-                                    self.tick.notify();
-                                    ws.close().await;
-                                }
+                Ok(mut ws) => match self.wasm_perform_auth_handshake(&mut ws).await {
+                    Ok(resp) => {
+                        self.ever_connected
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
+                            catalogue_state_hash: resp.catalogue_state_hash,
+                            next_sync_seq: resp.next_sync_seq,
+                        });
+                        self.tick.notify();
+                        self.reconnect.reset();
+                        match self.wasm_run_connected(&mut ws).await {
+                            WasmConnectedExit::HandleDropped => {
+                                ws.close().await;
+                                return;
+                            }
+                            WasmConnectedExit::NetworkError => {
+                                let _ = self
+                                    .inbound_tx
+                                    .unbounded_send(TransportInbound::Disconnected);
+                                self.tick.notify();
+                                ws.close().await;
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("ws auth handshake failed: {e}");
-                            ws.close().await;
-                        }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("ws auth handshake failed: {e}");
+                        ws.close().await;
+                    }
+                },
                 Err(e) => tracing::warn!("ws connect failed: {e}"),
             }
             self.reconnect.backoff().await;
         }
     }
 
-    async fn wasm_perform_auth_handshake(&mut self, ws: &mut W) -> Result<ConnectedResponse, String> {
+    async fn wasm_perform_auth_handshake(
+        &mut self,
+        ws: &mut W,
+    ) -> Result<ConnectedResponse, String> {
         let handshake = AuthHandshake {
             client_id: self.client_id.to_string(),
             auth: self.auth.clone(),
@@ -337,7 +396,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         let payload = serde_json::to_vec(&handshake).map_err(|e| e.to_string())?;
         let frame = frame_encode(&payload);
         ws.send(&frame).await.map_err(|e| e.to_string())?;
-        let resp_bytes = ws.recv().await.map_err(|e| e.to_string())?
+        let resp_bytes = ws
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| "server closed before handshake response".to_string())?;
         let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
         serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
@@ -394,9 +456,9 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::collections::VecDeque;
 
     struct MockStream {
         sent: Vec<Vec<u8>>,
@@ -416,10 +478,14 @@ mod tests {
             let frame = frame_encode(&payload);
             let mut inbound = VecDeque::new();
             inbound.push_back(frame);
-            Ok(MockStream { sent: Vec::new(), inbound })
+            Ok(MockStream {
+                sent: Vec::new(),
+                inbound,
+            })
         }
         async fn send(&mut self, data: &[u8]) -> Result<(), Self::Error> {
-            self.sent.push(data.to_vec()); Ok(())
+            self.sent.push(data.to_vec());
+            Ok(())
         }
         async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
             Ok(self.inbound.pop_front())
@@ -430,25 +496,30 @@ mod tests {
     #[derive(Clone)]
     struct CountingTick(Arc<AtomicUsize>);
     impl TickNotifier for CountingTick {
-        fn notify(&self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn notify(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[tokio::test]
     async fn handshake_marks_ever_connected_and_notifies_tick() {
         let counter = Arc::new(AtomicUsize::new(0));
         let tick = CountingTick(counter.clone());
-        let (handle, manager) = create::<MockStream, CountingTick>(
-            "mock://".to_string(),
-            AuthConfig::default(),
-            tick,
-        );
+        let (handle, manager) =
+            create::<MockStream, CountingTick>("mock://".to_string(), AuthConfig::default(), tick);
         let task = tokio::spawn(manager.run());
 
         // Give the manager time to run the handshake.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        assert!(handle.has_ever_connected(), "handshake should have set ever_connected");
-        assert!(counter.load(Ordering::SeqCst) >= 1, "tick should have been notified");
+        assert!(
+            handle.has_ever_connected(),
+            "handshake should have set ever_connected"
+        );
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "tick should have been notified"
+        );
 
         drop(handle);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;

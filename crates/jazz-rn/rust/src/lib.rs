@@ -898,11 +898,10 @@ impl RnRuntime {
                 .scheduler()
                 .clone();
             let tick = RnTickNotifier { scheduler };
-            let (handle, manager) =
-                jazz_tools::transport_manager::create::<
-                    jazz_tools::ws_stream::NativeWsStream,
-                    RnTickNotifier,
-                >(url, auth, tick);
+            let (handle, manager) = jazz_tools::transport_manager::create::<
+                jazz_tools::ws_stream::NativeWsStream,
+                RnTickNotifier,
+            >(url, auth, tick);
             self.core
                 .lock()
                 .map_err(|_| JazzRnError::Internal {
