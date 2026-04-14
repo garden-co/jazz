@@ -181,7 +181,6 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
-            ws_connections: tokio::sync::Mutex::new(HashMap::new()),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits

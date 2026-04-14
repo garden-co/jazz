@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
@@ -1474,11 +1474,106 @@ async fn health_handler() -> impl IntoResponse {
 /// Clients send an `AuthHandshake` binary frame (4-byte length prefix + JSON),
 /// receive a `ConnectedResponse` frame, then exchange binary frames
 /// bidirectionally until the connection closes.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<ServerState>>,
-) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerState>>) -> Response {
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+}
+
+/// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
+/// `events_handler`.
+enum WsClientSetup {
+    Backend,
+    Session(crate::query_manager::session::Session),
+}
+
+/// Authenticate a WebSocket `AuthHandshake`.
+///
+/// Builds a synthetic `HeaderMap` from the auth fields in the handshake and
+/// runs the same dispatch as `events_handler`:
+/// - backend secret (no session header) → `WsClientSetup::Backend`
+/// - otherwise → `extract_session` → `WsClientSetup::Session`
+///
+/// Returns `Err(message)` on auth failure; the caller should send a
+/// `ServerEvent::Error` frame before closing.
+async fn authenticate_ws_handshake(
+    handshake: &crate::transport_manager::AuthHandshake,
+    state: &Arc<ServerState>,
+) -> Result<WsClientSetup, String> {
+    use axum::http::HeaderValue;
+    use base64::Engine as _;
+
+    let auth = &handshake.auth;
+
+    // Build a synthetic HeaderMap from the handshake auth fields.
+    let mut headers = HeaderMap::new();
+
+    if let Some(jwt) = &auth.jwt_token {
+        let value = HeaderValue::from_str(&format!("Bearer {jwt}"))
+            .map_err(|e| format!("invalid jwt_token header value: {e}"))?;
+        headers.insert(axum::http::header::AUTHORIZATION, value);
+    }
+    if let Some(secret) = &auth.backend_secret {
+        let value = HeaderValue::from_str(secret)
+            .map_err(|e| format!("invalid backend_secret header value: {e}"))?;
+        headers.insert("X-Jazz-Backend-Secret", value);
+    }
+    if let Some(admin) = &auth.admin_secret {
+        let value = HeaderValue::from_str(admin)
+            .map_err(|e| format!("invalid admin_secret header value: {e}"))?;
+        headers.insert("X-Jazz-Admin-Secret", value);
+    }
+    if let Some(session_val) = &auth.backend_session {
+        let json = serde_json::to_string(session_val)
+            .map_err(|e| format!("failed to serialise backend_session: {e}"))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let value = HeaderValue::from_str(&b64)
+            .map_err(|e| format!("invalid backend_session header value: {e}"))?;
+        headers.insert("X-Jazz-Session", value);
+    }
+
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
+    let backend_secret = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    if backend_secret.is_some() && !has_session_header {
+        validate_backend_secret(backend_secret, &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Backend);
+    }
+
+    let session = {
+        let external_identities = state.external_identities.read().await;
+        extract_session(
+            &headers,
+            state.app_id,
+            &state.auth_config,
+            Some(&external_identities),
+            state.jwks_cache.as_deref(),
+        )
+        .await
+        .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?
+    };
+
+    let session =
+        session.ok_or_else(|| "Session required. Provide JWT or backend secret.".to_string())?;
+
+    Ok(WsClientSetup::Session(session))
+}
+
+/// Send a `ServerEvent::Error` frame on the socket, best-effort.
+async fn send_ws_error(socket: &mut WebSocket, message: &str) {
+    use crate::jazz_transport::ErrorCode;
+    let event = crate::jazz_transport::ServerEvent::Error {
+        message: message.to_string(),
+        code: ErrorCode::Unauthorized,
+    };
+    if let Ok(bytes) = serde_json::to_vec(&event) {
+        let _ = socket
+            .send(Message::Binary(crate::transport_manager::frame_encode(
+                &bytes,
+            )))
+            .await;
+    }
 }
 
 async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
@@ -1506,50 +1601,76 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
             }
         };
 
-    // 2. Authenticate.
-    if let Err(_e) = authenticate_ws_handshake(&handshake, &state).await {
-        let _ = socket.close().await;
-        return;
+    // 2. Parse client_id.
+    let client_id = match crate::sync_manager::ClientId::parse(&handshake.client_id) {
+        Some(id) => id,
+        None => {
+            send_ws_error(&mut socket, "missing or invalid client_id").await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    // 3. Authenticate.
+    let setup = match authenticate_ws_handshake(&handshake, &state).await {
+        Ok(s) => s,
+        Err(msg) => {
+            send_ws_error(&mut socket, &msg).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    // 4. Register with ConnectionEventHub (mirrors events_handler).
+    let connection_id = state
+        .next_connection_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (next_sync_seq, mut sync_rx) = state
+        .connection_event_hub
+        .register_connection(connection_id, client_id);
+    {
+        let mut connections = state.connections.write().await;
+        connections.insert(connection_id, ConnectionState { client_id });
+    }
+    state.on_client_connected(client_id).await;
+
+    // 5. Ensure the client state in the runtime.
+    match setup {
+        WsClientSetup::Backend => {
+            let _ = state.runtime.ensure_client_as_backend(client_id);
+        }
+        WsClientSetup::Session(session) => {
+            let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
     }
 
-    // 3. Determine client_id.
-    let client_id = parse_client_id_from_handshake(&handshake)
-        .unwrap_or_default();
-
-    // 4. Register the outbound channel.
-    let (outbound_tx, mut outbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::jazz_transport::ServerEvent>();
-    state
-        .register_ws_connection(client_id, outbound_tx.clone())
-        .await;
-
-    // 5. Send the Connected response.
+    // 6. Send the Connected response.
     let resp = crate::transport_manager::ConnectedResponse {
-        connection_id: uuid::Uuid::new_v4().to_string(),
+        connection_id: connection_id.to_string(),
         client_id: client_id.to_string(),
-        next_sync_seq: None,
+        next_sync_seq: Some(next_sync_seq),
         catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
     };
     let resp_bytes = match serde_json::to_vec(&resp) {
         Ok(b) => b,
         Err(_) => {
-            state.unregister_ws_connection(client_id).await;
+            ws_cleanup(&state, connection_id, client_id).await;
             let _ = socket.close().await;
             return;
         }
     };
     if socket
-        .send(Message::Binary(
-            crate::transport_manager::frame_encode(&resp_bytes),
-        ))
+        .send(Message::Binary(crate::transport_manager::frame_encode(
+            &resp_bytes,
+        )))
         .await
         .is_err()
     {
-        state.unregister_ws_connection(client_id).await;
+        ws_cleanup(&state, connection_id, client_id).await;
         return;
     }
 
-    // 6. Bidirectional loop.
+    // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
@@ -1565,8 +1686,12 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
                 Some(Ok(Message::Close(_))) | None => break,
                 _ => continue,
             },
-            evt = outbound_rx.recv() => {
-                let Some(event) = evt else { break };
+            update = sync_rx.recv() => {
+                let Some(u) = update else { break };
+                let event = crate::jazz_transport::ServerEvent::SyncUpdate {
+                    seq: Some(u.seq),
+                    payload: Box::new(u.payload),
+                };
                 let bytes = match serde_json::to_vec(&event) {
                     Ok(b) => b,
                     Err(_) => continue,
@@ -1584,30 +1709,20 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     }
 
-    state.unregister_ws_connection(client_id).await;
+    ws_cleanup(&state, connection_id, client_id).await;
     let _ = socket.close().await;
 }
 
-/// Authenticate a WebSocket handshake.
-///
-/// TODO(auth): this is a stub — it accepts any non-empty client_id.
-/// Full JWT / backend-secret validation (mirroring events_handler) is deferred
-/// to a later task once the WS session flow is wired into extract_session.
-async fn authenticate_ws_handshake(
-    handshake: &crate::transport_manager::AuthHandshake,
-    _state: &Arc<ServerState>,
-) -> Result<(), String> {
-    if handshake.client_id.is_empty() {
-        return Err("missing client_id".into());
+/// Disconnect cleanup: mirrors the drop path in `events_handler`.
+async fn ws_cleanup(state: &Arc<ServerState>, connection_id: u64, client_id: ClientId) {
+    {
+        let mut connections = state.connections.write().await;
+        connections.remove(&connection_id);
     }
-    Ok(())
-}
-
-/// Parse the `ClientId` carried in an `AuthHandshake`.
-fn parse_client_id_from_handshake(
-    handshake: &crate::transport_manager::AuthHandshake,
-) -> Option<crate::sync_manager::ClientId> {
-    crate::sync_manager::ClientId::parse(&handshake.client_id)
+    state
+        .connection_event_hub
+        .unregister_connection(connection_id);
+    state.on_connection_closed(client_id).await;
 }
 
 #[cfg(test)]

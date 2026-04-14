@@ -10,7 +10,7 @@ use crate::middleware::auth::JwksCache;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, SyncPayload};
+use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
 mod external_identity_store;
@@ -189,10 +189,6 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
-    /// Active WebSocket connections: client_id → outbound sender.
-    pub(crate) ws_connections: tokio::sync::Mutex<
-        HashMap<ClientId, mpsc::UnboundedSender<crate::jazz_transport::ServerEvent>>,
-    >,
 }
 
 /// State for a single SSE connection.
@@ -312,31 +308,47 @@ impl ServerState {
         *self.client_ttl.write().await = ttl;
     }
 
-    /// Register a WebSocket connection's outbound channel.
-    pub async fn register_ws_connection(
-        &self,
-        client_id: ClientId,
-        tx: mpsc::UnboundedSender<crate::jazz_transport::ServerEvent>,
-    ) {
-        self.ws_connections.lock().await.insert(client_id, tx);
-    }
-
-    /// Remove a WebSocket connection's outbound channel.
-    pub async fn unregister_ws_connection(&self, client_id: ClientId) {
-        self.ws_connections.lock().await.remove(&client_id);
-    }
-
-    /// Process a raw binary payload received from a WebSocket client.
+    /// Process a raw binary payload received from a WebSocket client and push it
+    /// into the runtime sync inbox.
     ///
-    /// MVP stub — accepts and drops the frame. Task 10 / 14 will wire this
-    /// into the existing sync processing pipeline.
+    /// Frames are expected to be `OutboxEntry` JSON (as serialised by
+    /// `TransportManager::run_connected`). If that parse fails we fall back to a
+    /// raw `SyncBatchRequest` shape, which some callers send directly.
     pub async fn process_ws_client_frame(
         &self,
-        _client_id: ClientId,
-        _payload: &[u8],
+        client_id: ClientId,
+        payload: &[u8],
     ) -> Result<(), String> {
-        tracing::debug!(payload_len = _payload.len(), "received ws client sync frame (stub)");
-        Ok(())
+        // Primary: OutboxEntry shape
+        if let Ok(entry) =
+            serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
+        {
+            let inbox = InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            };
+            return self
+                .runtime
+                .push_sync_inbox(inbox)
+                .map_err(|e| e.to_string());
+        }
+
+        // Fallback: raw SyncBatchRequest
+        match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
+            Ok(batch) => {
+                for p in batch.payloads {
+                    let inbox = InboxEntry {
+                        source: Source::Client(client_id),
+                        payload: p,
+                    };
+                    self.runtime
+                        .push_sync_inbox(inbox)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("invalid ws payload: {e}")),
+        }
     }
 }
 
