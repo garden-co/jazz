@@ -15,6 +15,7 @@ import type { DefinedMigration } from "./migrations.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { Lens, SqlType } from "./schema.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "./schema-loader.js";
+import { collectMissingExplicitPolicyDiagnostics } from "./schema-permissions.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
@@ -101,6 +102,12 @@ export async function validate(options: BuildOptions): Promise<void> {
     console.log(
       "Use `jazz-tools permissions status` or `jazz-tools permissions push` for auth publication.",
     );
+  }
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }

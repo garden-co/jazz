@@ -14,7 +14,7 @@ use crate::sync_manager::{
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
-use super::policy_graph::PolicyGraph;
+use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
@@ -345,7 +345,12 @@ impl QueryManager {
             CommitId([0; 32]),
             provenance.clone(),
         );
-        let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
+        let evaluator = PolicyContextEvaluator::new(
+            auth_schema,
+            session,
+            branch_name.as_str(),
+            self.row_policy_mode,
+        );
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
             self.load_row_for_authorization_context(
@@ -402,9 +407,10 @@ impl QueryManager {
         let table_name = TableName::new(&table);
         let Some(select_policy) = auth_schema
             .get(&table_name)
-            .and_then(|table_schema| table_schema.policies.select.using.as_ref())
+            .and_then(|table_schema| table_schema.policies.select_policy())
         else {
-            return auth_schema.contains_key(&table_name);
+            return !self.row_policy_mode.denies_missing_explicit_policy()
+                && auth_schema.contains_key(&table_name);
         };
         let Some(session) = session else {
             return false;
@@ -445,9 +451,10 @@ impl QueryManager {
             return Vec::new();
         };
 
-        if auth_schema
-            .values()
-            .all(|table_schema| table_schema.policies.select.using.is_none())
+        if !self.row_policy_mode.denies_missing_explicit_policy()
+            && auth_schema
+                .values()
+                .all(|table_schema| table_schema.policies.select.using.is_none())
         {
             return graph.current_result();
         }
@@ -498,9 +505,10 @@ impl QueryManager {
             return HashSet::new();
         };
 
-        if auth_schema
-            .values()
-            .all(|table_schema| table_schema.policies.select.using.is_none())
+        if !self.row_policy_mode.denies_missing_explicit_policy()
+            && auth_schema
+                .values()
+                .all(|table_schema| table_schema.policies.select.using.is_none())
         {
             return graph.sync_scope_object_ids();
         }
@@ -729,11 +737,25 @@ impl QueryManager {
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
+            let compile_row_policy_mode = if self
+                .authorization_schema_for_context(
+                    &subscription_context.env,
+                    &subscription_context.user_branch,
+                )
+                .as_ref()
+                .map(|(auth_schema, _)| auth_schema.as_ref() != schema_for_compile.as_ref())
+                .unwrap_or(false)
+            {
+                crate::query_manager::types::RowPolicyMode::PermissiveLocal
+            } else {
+                self.row_policy_mode
+            };
             let graph = Self::compile_graph(
                 &query_for_compile,
                 &schema_for_compile,
                 session_for_policy.clone(),
                 &subscription_context,
+                compile_row_policy_mode,
             );
 
             let Ok(mut graph) = graph else {
@@ -1247,7 +1269,7 @@ impl QueryManager {
         }
 
         let policy = match check.operation {
-            Operation::Insert => auth_table_schema.policies.insert.with_check.as_ref(),
+            Operation::Insert => auth_table_schema.policies.insert_policy(),
             Operation::Update => unreachable!(),
             Operation::Delete => auth_table_schema.policies.effective_delete_using(),
             Operation::Select => {
@@ -1259,7 +1281,15 @@ impl QueryManager {
         let policy = match policy {
             Some(p) => p,
             None => {
-                self.sync_manager.approve_permission_check(storage, check);
+                if self.row_policy_mode.denies_missing_explicit_policy() {
+                    let reason = format!(
+                        "{:?} denied on table {} - missing explicit policy",
+                        check.operation, table_name.0
+                    );
+                    self.sync_manager.reject_permission_check(check, reason);
+                } else {
+                    self.sync_manager.approve_permission_check(storage, check);
+                }
                 return;
             }
         };
@@ -1277,11 +1307,19 @@ impl QueryManager {
         let content = match content {
             Some(content) if !content.is_empty() => content,
             None => {
-                self.sync_manager.approve_permission_check(storage, check);
+                let reason = format!(
+                    "{:?} denied on table {} - missing row content",
+                    check.operation, table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
                 return;
             }
             Some(_) => {
-                self.sync_manager.approve_permission_check(storage, check);
+                let reason = format!(
+                    "{:?} denied on table {} - empty row content",
+                    check.operation, table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
                 return;
             }
         };
@@ -1368,14 +1406,24 @@ impl QueryManager {
             );
             return;
         };
-        let using_policy = table_schema.policies.update.using.as_ref();
-        let check_policy = table_schema.policies.update.with_check.as_ref();
+        let using_policy = table_schema.policies.update_using_policy();
+        let check_policy = table_schema.policies.update_check_policy();
         let source_branch_schema_map = self.branch_schema_map.clone();
         let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
         let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
-            self.sync_manager.approve_permission_check(storage, check);
+            if self.row_policy_mode.denies_missing_explicit_policy() {
+                self.sync_manager.reject_permission_check(
+                    check,
+                    format!(
+                        "Update denied on table {} - missing explicit update policy",
+                        table_name.0
+                    ),
+                );
+            } else {
+                self.sync_manager.approve_permission_check(storage, check);
+            }
             return;
         }
 
@@ -1429,7 +1477,13 @@ impl QueryManager {
             let new_content = match check.new_content.as_ref() {
                 Some(c) => c,
                 None => {
-                    self.sync_manager.approve_permission_check(storage, check);
+                    self.sync_manager.reject_permission_check(
+                        check,
+                        format!(
+                            "Update denied by WITH CHECK policy on table {} - missing new content",
+                            table_name.0
+                        ),
+                    );
                     return;
                 }
             };
@@ -1479,7 +1533,7 @@ impl QueryManager {
         _table: &TableName,
         session: &Session,
         branch: &str,
-    ) -> Vec<PolicyGraph> {
+    ) -> Option<Vec<PolicyGraph>> {
         let mut graphs = Vec::new();
 
         for clause in clauses {
@@ -1516,22 +1570,19 @@ impl QueryManager {
                         };
 
                     // Get parent's policy for the specified operation
-                    let parent_schema = match self.schema.get(&parent_table) {
-                        Some(s) => s,
-                        None => continue, // Parent table not in schema
-                    };
+                    let parent_schema = self.schema.get(&parent_table)?;
 
                     let parent_policy = match operation {
-                        Operation::Select => parent_schema.policies.select.using.as_ref(),
-                        Operation::Insert => parent_schema.policies.insert.with_check.as_ref(),
-                        Operation::Update => parent_schema.policies.update.using.as_ref(),
+                        Operation::Select => parent_schema.policies.select_policy(),
+                        Operation::Insert => parent_schema.policies.insert_policy(),
+                        Operation::Update => parent_schema.policies.update_using_policy(),
                         Operation::Delete => parent_schema.policies.effective_delete_using(),
                     };
-
-                    // If parent has no policy, INHERITS passes
-                    let parent_policy = match parent_policy {
-                        Some(p) => p,
-                        None => continue,
+                    let Some(parent_policy) = parent_policy else {
+                        if self.row_policy_mode.denies_missing_explicit_policy() {
+                            return None;
+                        }
+                        continue;
                     };
 
                     // Create policy graph for INHERITS
@@ -1541,10 +1592,12 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
-                        branch,
-                        1,
+                        PolicyGraphBuildOptions::new(branch, self.row_policy_mode)
+                            .with_initial_depth(1),
                     ) {
                         graphs.push(graph);
+                    } else {
+                        return None;
                     }
                 }
                 ComplexClause::Exists { table, condition } => {
@@ -1555,13 +1608,24 @@ impl QueryManager {
                         session,
                         &self.schema,
                         branch,
+                        self.row_policy_mode,
                     ) {
                         graphs.push(graph);
+                    } else {
+                        return None;
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
-                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, branch) {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(
+                        rel,
+                        &self.schema,
+                        branch,
+                        Some(session.clone()),
+                        self.row_policy_mode,
+                    ) {
                         graphs.push(graph);
+                    } else {
+                        return None;
                     }
                 }
                 ComplexClause::InheritsReferencing { .. } => {
@@ -1570,7 +1634,7 @@ impl QueryManager {
             }
         }
 
-        graphs
+        Some(graphs)
     }
 
     /// Settle active policy checks and finalize completed ones.

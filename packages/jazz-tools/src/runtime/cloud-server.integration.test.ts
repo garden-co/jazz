@@ -983,6 +983,21 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
     definePermissions(socialApp, ({ policy, anyOf, allowedTo, session }) => {
       const sessionPersonId = session.user_id;
 
+      policy.profiles.allowInsert.always();
+      policy.profiles.allowUpdate.always();
+      policy.profiles.allowDelete.always();
+
+      policy.people.allowInsert.always();
+      policy.people.allowUpdate.always();
+      policy.people.allowDelete.always();
+
+      policy.friendships.allowRead.where(
+        anyOf([{ personAPrincipal: sessionPersonId }, { personBPrincipal: sessionPersonId }]),
+      );
+      policy.friendships.allowInsert.always();
+      policy.friendships.allowUpdate.always();
+      policy.friendships.allowDelete.always();
+
       if (style === "split") {
         policy.people.allowRead.where((person) =>
           anyOf([
@@ -1247,7 +1262,7 @@ async function runSocialReadPermissionsScenario(style: SocialPolicyStyle): Promi
       10000,
       "carol session query(friendships) timed out",
     );
-    expect(carolFriendships).toHaveLength(2);
+    expect(carolFriendships).toEqual([]);
     const carolProfiles = await withTimeout(
       carolSession.query(queryAllProfiles),
       10000,
@@ -1928,6 +1943,11 @@ function buildOwnedItemsSchema(): WasmSchema {
   const permissions = normalizePermissionsForWasm(
     definePermissions(app, ({ policy, session }) => {
       policy.owned_items.allowRead.where({ ownerId: session.user_id });
+      policy.owned_items.allowInsert.where({ ownerId: session.user_id });
+      policy.owned_items.allowUpdate
+        .whereOld({ ownerId: session.user_id })
+        .whereNew({ ownerId: session.user_id });
+      policy.owned_items.allowDelete.where({ ownerId: session.user_id });
     }),
   );
 
