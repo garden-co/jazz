@@ -41,6 +41,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
 
   async saveSecret(secret: string): Promise<void> {
     await this.store.setItemAsync(this.key, secret);
+    this.cachedPromise = Promise.resolve(secret);
   }
 
   async clearSecret(): Promise<void> {
