@@ -18,8 +18,8 @@ use crate::test_row_history::load_test_row_tip_ids;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
-type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSyncSender>;
+type TestCore = RuntimeCore<MemoryStorage, NoopScheduler>;
+type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler>;
 
 struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
@@ -909,12 +909,7 @@ fn create_runtime_with_schema_and_sync_manager(
 ) -> TestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -927,7 +922,7 @@ fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemorySt
     let app_id = AppId::from_name(app_name);
     let schema_manager =
         SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -940,7 +935,7 @@ fn create_runtime_with_boxed_storage(
     let app_id = AppId::from_name(app_name);
     let schema_manager =
         SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1066,7 +1061,12 @@ fn pump_client_messages_to_server(
     client_id: ClientId,
 ) {
     client.batched_tick();
-    for entry in client.sync_sender().take() {
+    for entry in client
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox()
+    {
         if entry.destination == Destination::Server(server_id) {
             server.park_sync_message(InboxEntry {
                 source: Source::Client(client_id),
@@ -1097,7 +1097,12 @@ fn pump_server_with_three_clients(
         let mut any_messages = false;
 
         writer.batched_tick();
-        for entry in writer.sync_sender().take() {
+        for entry in writer
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Server(writer_server_id) {
                 any_messages = true;
                 server.park_sync_message(InboxEntry {
@@ -1108,7 +1113,12 @@ fn pump_server_with_three_clients(
         }
 
         alice_reader.batched_tick();
-        for entry in alice_reader.sync_sender().take() {
+        for entry in alice_reader
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Server(alice_reader_server_id) {
                 any_messages = true;
                 server.park_sync_message(InboxEntry {
@@ -1119,7 +1129,12 @@ fn pump_server_with_three_clients(
         }
 
         bob_reader.batched_tick();
-        for entry in bob_reader.sync_sender().take() {
+        for entry in bob_reader
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Server(bob_reader_server_id) {
                 any_messages = true;
                 server.park_sync_message(InboxEntry {
@@ -1130,7 +1145,11 @@ fn pump_server_with_three_clients(
         }
 
         server.batched_tick();
-        let server_out = server.sync_sender().take();
+        let server_out = server
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
         server_outputs.extend(server_out.iter().cloned());
         for entry in server_out {
             match entry.destination {
@@ -1235,7 +1254,11 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     restarted.add_server(server_id);
     restarted.batched_tick();
 
-    let messages = restarted.sync_sender().take();
+    let messages = restarted
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     let synced_row = messages.iter().find(|message| match &message.payload {
         SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
         _ => false,
@@ -1411,8 +1434,16 @@ fn rc_user_inserted_row_stays_hidden_from_other_sessions() {
     // Clear any connection-startup traffic so this test only inspects the write under test.
     client.batched_tick();
     server.batched_tick();
-    client.sync_sender().take();
-    server.sync_sender().take();
+    client
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     let (document_id, row_values) = client
         .insert(
@@ -1772,32 +1803,17 @@ fn create_3tier_rc() -> ThreeTierRC {
     // A = client (no tier)
     let sm_a = SyncManager::new();
     let mgr_a = SchemaManager::new(sm_a, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = RuntimeCore::new(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     // B = Worker server
     let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = RuntimeCore::new(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     // C = EdgeServer
     let sm_c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mgr_c = SchemaManager::new(sm_c, schema, app_id, "dev", "main").unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = RuntimeCore::new(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -1830,9 +1846,18 @@ fn create_3tier_rc() -> ThreeTierRC {
     a.batched_tick();
     b.batched_tick();
     c.batched_tick();
-    a.sync_sender().take();
-    b.sync_sender().take();
-    c.sync_sender().take();
+    a.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    c.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     ThreeTierRC {
         a,
@@ -1852,7 +1877,12 @@ fn pump_3tier(s: &mut ThreeTierRC) {
 
         // A outbox → B
         s.a.batched_tick();
-        let a_out = s.a.sync_sender().take();
+        let a_out = s
+            .a
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
         for entry in a_out {
             if entry.destination == Destination::Server(s.b_server_for_a) {
                 any_messages = true;
@@ -1867,17 +1897,22 @@ fn pump_3tier(s: &mut ThreeTierRC) {
         s.b.batched_tick();
         s.b.immediate_tick();
         s.b.batched_tick();
-        let b_out = s.b.sync_sender().take();
+        let b_out = s
+            .b
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
         for entry in b_out {
-            match &entry.destination {
-                Destination::Client(cid) if *cid == s.a_client_of_b => {
+            match entry.destination {
+                Destination::Client(cid) if cid == s.a_client_of_b => {
                     any_messages = true;
                     s.a.park_sync_message(InboxEntry {
                         source: Source::Server(s.b_server_for_a),
                         payload: entry.payload,
                     });
                 }
-                Destination::Server(sid) if *sid == s.c_server_for_b => {
+                Destination::Server(sid) if sid == s.c_server_for_b => {
                     any_messages = true;
                     s.c.park_sync_message(InboxEntry {
                         source: Source::Client(s.b_client_of_c),
@@ -1892,7 +1927,12 @@ fn pump_3tier(s: &mut ThreeTierRC) {
         s.c.batched_tick();
         s.c.immediate_tick();
         s.c.batched_tick();
-        let c_out = s.c.sync_sender().take();
+        let c_out = s
+            .c
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
         for entry in c_out {
             if entry.destination == Destination::Client(s.b_client_of_c) {
                 any_messages = true;
@@ -1916,7 +1956,12 @@ fn pump_3tier(s: &mut ThreeTierRC) {
 /// Pump only A → B (one hop, no C).
 fn pump_a_to_b(s: &mut ThreeTierRC) {
     s.a.batched_tick();
-    let a_out = s.a.sync_sender().take();
+    let a_out = s
+        .a
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     for entry in a_out {
         if entry.destination == Destination::Server(s.b_server_for_a) {
             s.b.park_sync_message(InboxEntry {
@@ -1932,16 +1977,21 @@ fn pump_a_to_b(s: &mut ThreeTierRC) {
 /// Route B's outbox to both A and C as appropriate.
 fn route_b_outbox(s: &mut ThreeTierRC) {
     s.b.batched_tick();
-    let b_out = s.b.sync_sender().take();
+    let b_out = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     for entry in b_out {
-        match &entry.destination {
-            Destination::Client(cid) if *cid == s.a_client_of_b => {
+        match entry.destination {
+            Destination::Client(cid) if cid == s.a_client_of_b => {
                 s.a.park_sync_message(InboxEntry {
                     source: Source::Server(s.b_server_for_a),
                     payload: entry.payload,
                 });
             }
-            Destination::Server(sid) if *sid == s.c_server_for_b => {
+            Destination::Server(sid) if sid == s.c_server_for_b => {
                 s.c.park_sync_message(InboxEntry {
                     source: Source::Client(s.b_client_of_c),
                     payload: entry.payload,
@@ -1970,7 +2020,12 @@ fn pump_b_to_c(s: &mut ThreeTierRC) {
 fn pump_c_to_b_to_a(s: &mut ThreeTierRC) {
     // C → B
     s.c.batched_tick();
-    let c_out = s.c.sync_sender().take();
+    let c_out = s
+        .c
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     for entry in c_out {
         if entry.destination == Destination::Client(s.b_client_of_c) {
             s.b.park_sync_message(InboxEntry {
@@ -2007,12 +2062,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
 
     let mgr_a =
         SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = RuntimeCore::new(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     let mgr_b = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::Worker),
@@ -2022,12 +2072,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
         "main",
     )
     .unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = RuntimeCore::new(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     let mgr_c = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
@@ -2037,12 +2082,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
         "main",
     )
     .unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = RuntimeCore::new(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -2065,16 +2105,30 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     a.batched_tick();
     b.batched_tick();
     c.batched_tick();
-    a.sync_sender().take();
-    b.sync_sender().take();
-    c.sync_sender().take();
+    a.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    c.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     // Downstream client A subscribes before B has an upstream.
     let _handle = a.subscribe(Query::new("users"), |_delta| {}, None).unwrap();
 
     // Deliver only A -> B messages.
     a.batched_tick();
-    for entry in a.sync_sender().take() {
+    for entry in a
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox()
+    {
         if entry.destination == Destination::Server(b_server_for_a) {
             b.park_sync_message(InboxEntry {
                 source: Source::Client(a_client_of_b),
@@ -2085,7 +2139,10 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     b.batched_tick();
     b.immediate_tick();
     b.batched_tick();
-    b.sync_sender().take();
+    b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     // Bring up B <-> C after B already has active downstream query state.
     {
@@ -2099,8 +2156,10 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     b.batched_tick();
 
     let forwarded_query_subscriptions = b
-        .sync_sender()
-        .take()
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox()
         .into_iter()
         .filter(|entry| {
             matches!(
@@ -2125,7 +2184,12 @@ fn rc_replays_active_queries_on_upstream_reconnect() {
             .unwrap();
     pump_a_to_b(&mut s);
 
-    let initial_forwarded = s.b.sync_sender().take();
+    let initial_forwarded = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
         "Expected initial QuerySubscription forwarding from B to C"
@@ -2136,7 +2200,12 @@ fn rc_replays_active_queries_on_upstream_reconnect() {
     s.b.add_server(s.c_server_for_b);
     s.b.batched_tick();
 
-    let replayed_forwarded = s.b.sync_sender().take();
+    let replayed_forwarded = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b) > 0,
         "Expected active QuerySubscription replay after upstream reconnect"
@@ -2152,7 +2221,12 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
             .unwrap();
     pump_a_to_b(&mut s);
 
-    let initial_forwarded = s.b.sync_sender().take();
+    let initial_forwarded = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     assert!(
         count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
         "Expected initial QuerySubscription forwarding from B to C"
@@ -2160,14 +2234,22 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
 
     s.a.unsubscribe(handle);
     pump_a_to_b(&mut s);
-    s.b.sync_sender().take(); // Drain unsubscription forwarding and unrelated traffic.
+    s.b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox(); // Drain unsubscription forwarding and unrelated traffic.
 
     // Reconnect upstream and ensure replay no longer includes this query.
     s.b.remove_server(s.c_server_for_b);
     s.b.add_server(s.c_server_for_b);
     s.b.batched_tick();
 
-    let replayed_forwarded = s.b.sync_sender().take();
+    let replayed_forwarded = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     assert_eq!(
         count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b),
         0,
@@ -2218,14 +2300,21 @@ fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
     let server_id = ServerId::new();
     core.add_server(server_id);
     core.batched_tick();
-    core.sync_sender().take();
+    core.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     let (row_id, _row_values) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
     core.batched_tick();
 
-    let messages = core.sync_sender().take();
+    let messages = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     let row_sync = messages
         .iter()
         .find(|entry| matches!(&entry.payload, SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_id))
@@ -2901,7 +2990,10 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         .unwrap();
     s.b.immediate_tick();
     s.b.batched_tick();
-    s.b.sync_sender().take();
+    s.b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     // One-shot settled query on A should wait for Worker settlement.
     let mut future = s.a.query_with_propagation(
@@ -2924,7 +3016,12 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     // Deliver A -> B query subscription and let B compute response traffic.
     pump_a_to_b(&mut s);
     s.b.batched_tick();
-    let b_out = s.b.sync_sender().take();
+    let b_out = s
+        .b
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
 
     // Force QuerySettled before row delivery to expose ordering assumptions.
     let mut settled_to_a = Vec::new();
@@ -3490,12 +3587,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
     // NO immediate_tick() here — matches WASM openPersistent flow
 
     // persist_schema — stages a catalogue object before the first tick
@@ -3509,7 +3601,11 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     core.batched_tick();
 
     // Check that the catalogue was sent
-    let messages = core.sync_sender().take();
+    let messages = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     let catalogue_msg = messages.iter().find(|m| {
         if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
             entry.object_id == schema_obj_id
@@ -3561,12 +3657,7 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
     let schema_hash = SchemaHash::compute(&schema);
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     core.persist_schema();
     core.publish_permissions_bundle(
@@ -3583,7 +3674,11 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
     core.add_server(server_id);
     core.batched_tick();
 
-    let messages = core.sync_sender().take();
+    let messages = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     let bundle_msg = messages.iter().find(|m| {
         if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
             entry
@@ -3623,12 +3718,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     let schema_obj_id = core.persist_schema();
     let (row_object_id, _) = core
@@ -3641,7 +3731,11 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     core.add_server_with_catalogue_state_hash(server_id, Some(&catalogue_state_hash));
     core.batched_tick();
 
-    let messages = core.sync_sender().take();
+    let messages = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
     let catalogue_msg = messages.iter().find(|m| {
         matches!(
             &m.payload,
@@ -3699,12 +3793,7 @@ fn create_fk_runtime() -> TestCore {
     let app_id = AppId::from_name("fk-test");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }

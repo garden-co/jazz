@@ -794,7 +794,7 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
-    use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+    use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
@@ -890,8 +890,7 @@ mod tests {
             "main",
         )
         .expect("seed schema manager");
-        let mut runtime =
-            RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+        let mut runtime = RuntimeCore::new(schema_manager, storage, NoopScheduler);
         runtime.persist_schema();
         runtime.publish_schema(bundled_schema.clone());
         let lens = runtime
