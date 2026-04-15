@@ -303,6 +303,11 @@ export class WorkerBridge {
     this.runtime.addServer();
   }
 
+  disconnectUpstream(): void {
+    if (this.isDisposedLike()) return;
+    this.worker.postMessage({ type: "disconnect-upstream" });
+  }
+
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
   }

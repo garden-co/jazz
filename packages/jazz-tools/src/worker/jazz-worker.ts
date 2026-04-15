@@ -505,6 +505,18 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       break;
     }
 
+    case "disconnect-upstream": {
+      if (runtime) {
+        try {
+          runtime.disconnect?.();
+          post({ type: "upstream-disconnected" });
+        } catch (e) {
+          console.error("[worker] runtime.disconnect failed:", e);
+        }
+      }
+      break;
+    }
+
     case "shutdown":
       _isShuttingDown = true;
       initComplete = false;

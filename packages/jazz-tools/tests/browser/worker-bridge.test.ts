@@ -1198,6 +1198,10 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await blockTestingServerNetwork(serverUrl);
+    // Disconnect the WS transport so the block takes effect immediately.
+    // Playwright route blocking only intercepts new connections; the existing
+    // WebSocket must be closed explicitly for the offline simulation to hold.
+    (dbA as any).workerBridge?.disconnectUpstream?.();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
