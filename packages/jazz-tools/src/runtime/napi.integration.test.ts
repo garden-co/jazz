@@ -19,6 +19,10 @@ import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.j
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
+type RuntimeRowWithBatchId = Row & {
+  batchId: string;
+};
+
 type SimpleTodo = {
   id: string;
   title: string;
@@ -657,8 +661,8 @@ describe("NAPI integration", () => {
       "main",
       dataPath,
     ) as unknown as {
-      insert(table: string, values: unknown): Row;
-      update(objectId: string, updates: Record<string, unknown>): void;
+      insert(table: string, values: unknown): RuntimeRowWithBatchId;
+      update(objectId: string, updates: Record<string, unknown>): { batchId: string };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -672,6 +676,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
+      expect(insertedRow.batchId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -686,10 +691,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
+      expect(secondRow.batchId).toEqual(expect.any(String));
 
-      runtime.update(secondRow.id, {
+      const updateResult = runtime.update(secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
+      expect(updateResult.batchId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);
@@ -820,6 +827,7 @@ describe("NAPI integration", () => {
 
     expect(rawCalls.every((call) => isNestedOutboxCall(call))).toBe(true);
     expect(insertedRow.id).toEqual(expect.any(String));
+    expect(insertedRow.batchId).toEqual(expect.any(String));
   }, 20_000);
 
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {

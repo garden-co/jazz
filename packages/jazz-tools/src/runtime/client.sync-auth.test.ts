@@ -77,7 +77,7 @@ function makeRuntime() {
   const close = vi.fn();
 
   const runtime: Runtime = {
-    insert: () => ({ id: "row-1", values: [] }),
+    insert: () => ({ id: "row-1", values: [], batchId: "batch-1" }),
     insertDurable: async () => ({ id: "row-1", values: [] }),
     update: () => {},
     updateDurable: async () => {},

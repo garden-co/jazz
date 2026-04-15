@@ -48,8 +48,12 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues): Row;
-  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
+  insert(table: string, values: InsertValues): DirectInsertResult;
+  insertWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectInsertResult;
   insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
   insertDurableWithSession?(
     table: string,
@@ -57,12 +61,12 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
-  update(object_id: string, values: Record<string, Value>): void;
+  update(object_id: string, values: Record<string, Value>): DirectMutationResult | void;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): void;
+  ): DirectMutationResult | void;
   updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
@@ -70,8 +74,11 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
-  delete(object_id: string): void;
-  deleteWithSession?(object_id: string, write_context_json?: string | null): void;
+  delete(object_id: string): DirectMutationResult | void;
+  deleteWithSession?(
+    object_id: string,
+    write_context_json?: string | null,
+  ): DirectMutationResult | void;
   deleteDurable(object_id: string, tier: string): Promise<void>;
   deleteDurableWithSession?(
     object_id: string,
@@ -212,6 +219,14 @@ export interface LocalBatchRecord {
 export interface Row {
   id: string;
   values: Value[];
+}
+
+export interface DirectInsertResult extends Row {
+  batchId: string;
+}
+
+export interface DirectMutationResult {
+  batchId: string;
 }
 
 interface WriteContextPayload {
@@ -704,7 +719,7 @@ export class Transaction {
     return batchId;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     this.ensureWritable();
     return this.client.createInternal(
       table,
@@ -799,7 +814,7 @@ export class DirectBatch {
     return this.batchContext.batchId;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     return this.client.createInternal(
       table,
       values,
@@ -1648,7 +1663,7 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     return this.createInternal(table, values);
   }
 
@@ -1662,7 +1677,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-  ): Row {
+  ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined || batchContext
@@ -1806,17 +1821,16 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-  ): void {
+  ): DirectMutationResult | void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext) {
-      this.requireSessionWriteMethod("updateWithSession")(
+      return this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
         this.encodeWriteContext(effectiveSession, attribution, batchContext),
       );
-      return;
     }
-    this.runtime.update(objectId, updates);
+    return this.runtime.update(objectId, updates);
   }
 
   /**
@@ -1901,16 +1915,15 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-  ): void {
+  ): DirectMutationResult | void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext) {
-      this.requireSessionWriteMethod("deleteWithSession")(
+      return this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
         this.encodeWriteContext(effectiveSession, attribution, batchContext),
       );
-      return;
     }
-    this.runtime.delete(objectId);
+    return this.runtime.delete(objectId);
   }
 
   /**

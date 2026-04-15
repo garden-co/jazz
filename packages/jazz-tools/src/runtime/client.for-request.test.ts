@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Row, type Runtime } from "./client.js";
+import { JazzClient, type DirectInsertResult, type Row, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
 
 const schemaWithTodos = {
@@ -28,8 +28,8 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-function mockRow(id = "todo-1"): Row {
-  return { id, values: [] };
+function mockRow(id = "todo-1"): DirectInsertResult {
+  return { id, values: [], batchId: `batch-${id}` };
 }
 
 function makeClient() {
@@ -43,7 +43,11 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
     update: () => {},
     delete: () => {},
     query: async (
@@ -122,7 +126,11 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
     update: () => {},
     delete: () => {},
     query: async () => [],

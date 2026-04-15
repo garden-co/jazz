@@ -82,7 +82,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Transactional" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-tx",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-tx-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-tx-update", undefined);
     const persistedDelete = makePendingWrite("batch-tx-delete", undefined);
@@ -179,6 +180,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Session transaction" },
           { type: "Boolean", value: true },
         ],
+        batchId: "batch-session-tx",
       })),
       createPersisted: vi.fn(() =>
         makePendingWrite("batch-session-persisted", {
@@ -239,6 +241,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Closed" },
           { type: "Boolean", value: false },
         ],
+        batchId: "batch-closed",
       })),
       createPersisted: vi.fn(),
       update: vi.fn(),
@@ -322,7 +325,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Direct batch" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-direct",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-direct-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-direct-update", undefined);
     const persistedDelete = makePendingWrite("batch-direct-delete", undefined);

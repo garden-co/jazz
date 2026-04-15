@@ -16,6 +16,7 @@ This spec makes the common API reflect that.
 
 - [App Surface — Status Quo](../../status-quo/ts_client.md)
 - [Opt-In Transactions, Replayable Reconciliation, and Strict Visibility](opt_in_transactions_replayable_reconciliation.md)
+- [WriteHandle `wait({ tier })` Implementation](write_handle_wait_tier.md)
 
 ## Goals
 

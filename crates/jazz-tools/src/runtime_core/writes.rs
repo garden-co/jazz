@@ -290,7 +290,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         table: &str,
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
-    ) -> Result<InsertedRow, RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let result = self
@@ -299,6 +299,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
+        let batch_id = result.batch_id;
         if write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct)
@@ -306,7 +307,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         {
             self.track_local_batch(
                 row_id,
-                result.batch_id,
+                batch_id,
                 BatchMode::Transactional,
                 self.default_requested_tier_for_transaction(),
             )?;
@@ -314,7 +315,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         debug!(object_id = %row_id, "inserted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok((row_id, row_values))
+        Ok(((row_id, row_values), batch_id))
     }
 
     /// Update a row (partial update by column name).
@@ -323,7 +324,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let batch_id = self
@@ -345,7 +346,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(())
+        Ok(batch_id)
     }
 
     /// Delete a row.
@@ -353,13 +354,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let batch_id = handle.batch_id;
         if write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct)
@@ -367,7 +369,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         {
             self.track_local_batch(
                 object_id,
-                handle.batch_id,
+                batch_id,
                 BatchMode::Transactional,
                 self.default_requested_tier_for_transaction(),
             )?;
@@ -375,7 +377,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         debug!("deleted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(())
+        Ok(batch_id)
     }
 
     // =========================================================================

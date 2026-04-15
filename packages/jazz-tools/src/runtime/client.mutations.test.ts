@@ -55,7 +55,11 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const runtimeBase: Runtime = {
     insert: (table: string, values: Record<string, unknown>) => {
       insertCalls.push([table, values]);
-      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
+      return {
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [],
+        batchId: "plain-insert-batch",
+      };
     },
     insertWithSession: (
       table: string,
@@ -63,7 +67,11 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       insertWithSessionCalls.push([table, values, writeContextJson ?? undefined]);
-      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
+      return {
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [],
+        batchId: "plain-insert-session-batch",
+      };
     },
     insertDurable: async () => ({
       id: "00000000-0000-0000-0000-000000000001",
@@ -305,6 +313,28 @@ describe("JazzClient mutation durability split", () => {
 
     expect(updateCalls).toEqual([["row-1", updates]]);
     expect(deleteCalls).toEqual(["row-1"]);
+  });
+
+  it("returns direct-write batch ids from plain runtime mutations when available", () => {
+    const { client } = makeClient({
+      insert: () => ({
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [],
+        batchId: "batch-insert",
+      }),
+      update: () => ({ batchId: "batch-update" }),
+      delete: () => ({ batchId: "batch-delete" }),
+    });
+
+    const created = client.createInternal("todos", {});
+    const updated = client.updateInternal("row-1", {
+      done: { type: "Boolean" as const, value: true },
+    });
+    const deleted = client.deleteInternal("row-1");
+
+    expect(created).toMatchObject({ batchId: "batch-insert" });
+    expect(updated).toEqual({ batchId: "batch-update" });
+    expect(deleted).toEqual({ batchId: "batch-delete" });
   });
 
   it("routes updateDurable/deleteDurable through durability-aware runtime methods", async () => {

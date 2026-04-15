@@ -549,7 +549,7 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let (object_id, row_values) = core
+        let ((object_id, row_values), batch_id) = core
             .insert(&table, values.0, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
@@ -562,6 +562,7 @@ impl NapiRuntime {
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
+            "batchId": batch_id.to_string(),
         }))
     }
 
@@ -578,7 +579,7 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let (object_id, row_values) = core
+        let ((object_id, row_values), batch_id) = core
             .insert(&table, values.0, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
@@ -591,6 +592,7 @@ impl NapiRuntime {
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
+            "batchId": batch_id.to_string(),
         }))
     }
 
@@ -599,7 +601,7 @@ impl NapiRuntime {
         &self,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-    ) -> napi::Result<()> {
+    ) -> napi::Result<serde_json::Value> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -610,10 +612,13 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.update(oid, updates, None)
+        let batch_id = core
+            .update(oid, updates, None)
             .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?;
 
-        Ok(())
+        Ok(serde_json::json!({
+            "batchId": batch_id.to_string(),
+        }))
     }
 
     #[napi(js_name = "updateWithSession")]
@@ -622,7 +627,7 @@ impl NapiRuntime {
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
-    ) -> napi::Result<()> {
+    ) -> napi::Result<serde_json::Value> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -634,14 +639,17 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.update(oid, updates, write_context.as_ref())
+        let batch_id = core
+            .update(oid, updates, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
 
-        Ok(())
+        Ok(serde_json::json!({
+            "batchId": batch_id.to_string(),
+        }))
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> napi::Result<()> {
+    pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -650,10 +658,13 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.delete(oid, None)
+        let batch_id = core
+            .delete(oid, None)
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
-        Ok(())
+        Ok(serde_json::json!({
+            "batchId": batch_id.to_string(),
+        }))
     }
 
     #[napi(js_name = "deleteWithSession")]
@@ -661,7 +672,7 @@ impl NapiRuntime {
         &self,
         object_id: String,
         write_context_json: Option<String>,
-    ) -> napi::Result<()> {
+    ) -> napi::Result<serde_json::Value> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -671,10 +682,13 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.delete(oid, write_context.as_ref())
+        let batch_id = core
+            .delete(oid, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
-        Ok(())
+        Ok(serde_json::json!({
+            "batchId": batch_id.to_string(),
+        }))
     }
 
     // =========================================================================
