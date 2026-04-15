@@ -137,7 +137,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Define your schema
 
-Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
@@ -368,7 +368,7 @@ For production deployment and hosting options, see [Server Setup](/docs/getting-
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;anonymous, demo, and external JWT auth
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed

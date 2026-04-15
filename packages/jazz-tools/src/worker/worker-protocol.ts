@@ -23,8 +23,6 @@ export interface InitMessage {
   serverUrl?: string;
   serverPathPrefix?: string;
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
@@ -80,8 +78,6 @@ export interface PeerCloseMessage {
 export interface UpdateAuthMessage {
   type: "update-auth";
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
 }
 
 /** Request graceful shutdown. */

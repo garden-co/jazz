@@ -8,6 +8,11 @@ import { app, type Profile } from "../../schema.js";
 // load would create a duplicate profile.
 const createdForUser = new Set<string>();
 
+/** Reset the module-level guard. Needed in tests that remount with different appIds. */
+export function resetProfileGuard() {
+  createdForUser.clear();
+}
+
 export function useMyProfile(): Profile | null {
   const db = useDb();
   const session = useSession();

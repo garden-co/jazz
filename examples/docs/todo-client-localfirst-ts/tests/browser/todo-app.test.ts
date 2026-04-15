@@ -270,16 +270,14 @@ describe("Vanilla TS Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-a",
+      auth: { localFirstSecret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68" },
       adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-b",
+      auth: { localFirstSecret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE" },
       adminSecret: ADMIN_SECRET,
     });
 

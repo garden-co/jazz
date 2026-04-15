@@ -24,6 +24,12 @@ the runtime does four things:
 
 That is the entire shape of query-scoped sync in Jazz.
 
+On enforcing runtimes, that server-side graph is compiled against the active
+authorization schema. Missing explicit read policies filter rows out, and the
+same deny-by-default behavior shapes the current sync scope. Runtimes without a
+loaded policy bundle may stay permissive locally, but upstream query scope is
+still computed by the enforcing side.
+
 ## Initial Subscription Flow
 
 ```text

@@ -1,7 +1,0 @@
-node_modules/
-bin/
-.pulumi/
-Pulumi.*.yaml
-!Pulumi.yaml
-!Pulumi.dev.yaml
-.deploy-secrets-*.env

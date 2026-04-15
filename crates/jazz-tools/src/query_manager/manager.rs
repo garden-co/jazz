@@ -26,8 +26,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
+    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, RowPolicyMode,
+    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
     build_ordered_delta_with_post_ids,
 };
 
@@ -350,6 +350,7 @@ pub struct CatalogueUpdate {
 pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
+    pub(super) row_policy_mode: RowPolicyMode,
     pub(super) authorization_schema: Option<Arc<Schema>>,
     pub(super) authorization_schema_required: bool,
 
@@ -454,6 +455,7 @@ impl QueryManager {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
             authorization_schema: None,
             authorization_schema_required: false,
             pending_catalogue_updates: Vec::new(),
@@ -476,11 +478,31 @@ impl QueryManager {
     /// Must be called before queries. Can only be called once.
     /// Creates indices for the current schema's branch.
     pub fn set_current_schema(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        let row_policy_mode = if Self::schema_has_any_explicit_policies(&schema) {
+            RowPolicyMode::Enforcing
+        } else {
+            RowPolicyMode::PermissiveLocal
+        };
+        self.set_current_schema_with_policy_mode(schema, env, user_branch, row_policy_mode);
+    }
+
+    pub fn set_current_schema_with_policy_mode(
+        &mut self,
+        schema: Schema,
+        env: &str,
+        user_branch: &str,
+        row_policy_mode: RowPolicyMode,
+    ) {
         self.schema_context
             .set_current(schema.clone(), env, user_branch);
         self.schema = Arc::new(schema.clone());
-        self.authorization_schema = Some(Arc::new(schema.clone()));
-        self.authorization_schema_required = true;
+        self.row_policy_mode = row_policy_mode;
+        self.authorization_schema = if matches!(row_policy_mode, RowPolicyMode::Enforcing) {
+            Some(Arc::new(schema.clone()))
+        } else {
+            None
+        };
+        self.authorization_schema_required = false;
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -492,11 +514,13 @@ impl QueryManager {
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
+        self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
     }
 
     pub fn require_authorization_schema(&mut self) {
+        self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
     }
 
@@ -565,8 +589,15 @@ impl QueryManager {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Result<QueryGraph, QueryCompileError> {
-        QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
+        QueryGraph::try_compile_with_schema_context(
+            query,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
     }
 
     pub(super) fn local_subscription_uses_explicit_authorization(
@@ -594,6 +625,12 @@ impl QueryManager {
         } else {
             self.schema.as_ref().clone()
         }
+    }
+
+    pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
+        schema
+            .values()
+            .any(|table_schema| table_schema.policies.has_any_explicit_policy())
     }
 
     /// Mark all subscriptions for recompilation.
@@ -687,11 +724,17 @@ impl QueryManager {
                 };
 
                 // Recompile the graph
+                let compile_row_policy_mode = if uses_explicit_authorization_filtering {
+                    RowPolicyMode::PermissiveLocal
+                } else {
+                    self.row_policy_mode
+                };
                 match Self::compile_graph(
                     &sub.query,
                     &compile_schema,
                     sub.session.clone(),
                     &current_schema_context,
+                    compile_row_policy_mode,
                 ) {
                     Ok(new_graph) => {
                         sub.graph = new_graph;
@@ -754,6 +797,7 @@ impl QueryManager {
                     &compile_schema,
                     sub.session.clone(),
                     &sub.schema_context,
+                    RowPolicyMode::PermissiveLocal,
                 ) {
                     Ok(new_graph) => {
                         sub.branches = Self::resolved_server_query_branches(

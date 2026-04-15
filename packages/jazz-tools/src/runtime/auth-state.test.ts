@@ -66,49 +66,4 @@ describe("auth-state", () => {
       "Changing auth principal on a live client is not supported. Recreate the Db.",
     );
   });
-
-  it("rejects anonymous-to-jwt swap on a live client", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    expect(() => store.applyJwtToken(makeJwt({ sub: "alice" }))).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
-  });
-
-  it("rejects logout principal change on a live client", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    expect(() => store.applyJwtToken(undefined)).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
-  });
-
-  it("falls back to local auth when jwt cannot be parsed", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      jwtToken: "not-a-jwt",
-      localAuthMode: "demo",
-      localAuthToken: "device-token",
-    });
-
-    expect(store.getState()).toMatchObject({
-      status: "authenticated",
-      transport: "local",
-      session: {
-        claims: {
-          auth_mode: "local",
-          local_mode: "demo",
-        },
-      },
-    });
-  });
 });

@@ -123,7 +123,7 @@ See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and
 columns.
 
 On clients, writes are automatically attributed to the current session user. On backends,
-`context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
+`await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
 
 ### Attribution without impersonation
@@ -133,7 +133,7 @@ edit metadata. Use the attribution helpers for this:
 
 - `context.withAttribution(userId)`&hairsp;—&hairsp;stamps writes as the given user ID
 - `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
-- `context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
+- `await context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
 
 <include cwd lang="ts">
   ../examples/docs/todo-server-ts/src/request-context.ts#backend-attribution-ts
@@ -141,7 +141,7 @@ edit metadata. Use the attribution helpers for this:
 
 These differ from `forRequest` / `forSession` in one key way:
 
-- `forRequest` / `forSession` change both permission evaluation **and** authorship
+- `await context.forRequest(...)` / `context.forSession(...)` change both permission evaluation **and** authorship
 - `withAttribution*` only changes authorship&hairsp;—&hairsp;permissions stay at the backend level
 - `asBackend()` and unscoped `db()` writes default to `jazz:system`
 

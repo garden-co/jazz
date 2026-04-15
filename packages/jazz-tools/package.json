@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.26",
+  "version": "2.0.0-alpha.27",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -47,9 +47,21 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
+    "./dev/next": {
+      "types": "./dist/dev/next.d.ts",
+      "default": "./dist/dev/next.js"
+    },
     "./dev/vite": {
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
+    },
+    "./dev/expo": {
+      "types": "./dist/dev/expo.d.ts",
+      "default": "./dist/dev/expo.js"
+    },
+    "./dev/sveltekit": {
+      "types": "./dist/dev/sveltekit.d.ts",
+      "default": "./dist/dev/sveltekit.js"
     },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
@@ -65,6 +77,19 @@
       "types": "./dist/expo/polyfills.d.ts",
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
+    },
+    "./expo/auth-secret-store": {
+      "types": "./dist/expo/auth-secret-store.d.ts",
+      "react-native": "./dist/expo/auth-secret-store.js",
+      "default": "./dist/expo/auth-secret-store.js"
+    },
+    "./passphrase": {
+      "types": "./dist/passphrase.d.ts",
+      "default": "./dist/passphrase.js"
+    },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
     },
     "./package.json": "./package.json"
   },
@@ -85,12 +110,14 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
+    "esbuild": "^0.27.0",
     "jazz-rn": "workspace:*",
     "jazz-wasm": "workspace:*",
+    "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
-    "tsx": "^4.0.0",
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
@@ -114,6 +141,8 @@
   },
   "peerDependencies": {
     "expo": ">=54",
+    "expo-crypto": ">=14.0.0",
+    "expo-secure-store": ">=14.0.0",
     "react": "^18 || ^19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
@@ -121,6 +150,12 @@
   },
   "peerDependenciesMeta": {
     "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-secure-store": {
       "optional": true
     },
     "react": {

@@ -35,13 +35,15 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, Tuple, TupleDelta,
+    TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,17 @@ fn resolve_branch_schema_hash(schema_context: &SchemaContext, branch: &str) -> O
         .all_live_hashes()
         .into_iter()
         .find(|hash| hash.short() == composed.schema_hash.short())
+}
+
+fn effective_select_policy(
+    table_schema: &crate::query_manager::types::TableSchema,
+    row_policy_mode: RowPolicyMode,
+) -> Option<PolicyExpr> {
+    table_schema.policies.select_policy().cloned().or_else(|| {
+        row_policy_mode
+            .denies_missing_explicit_policy()
+            .then_some(PolicyExpr::False)
+    })
 }
 
 /// A node in the query graph (type-erased).
@@ -470,6 +483,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
         .ok()
     }
@@ -486,6 +500,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -507,6 +522,12 @@ impl QueryGraph {
             branches,
             session,
             RelationCompileFeatures::default(),
+            if crate::query_manager::manager::QueryManager::schema_has_any_explicit_policies(schema)
+            {
+                RowPolicyMode::Enforcing
+            } else {
+                RowPolicyMode::PermissiveLocal
+            },
         )
     }
 
@@ -516,6 +537,7 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let default_branches = vec!["main".to_string()];
         let branches: &[String] = if branches.is_empty() {
@@ -532,7 +554,13 @@ impl QueryGraph {
         )?;
         validate_execution_plan(&plan, schema).ok()?;
         let schema_context = Self::default_schema_context(schema);
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            &schema_context,
+            row_policy_mode,
+        )
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -550,6 +578,7 @@ impl QueryGraph {
             session,
             schema_context,
             RelationCompileFeatures::default(),
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -560,6 +589,7 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let plan = lower_relation_to_execution_plan(
             relation,
@@ -569,7 +599,13 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
     }
 
     fn compile_execution_plan_with_schema_context(
@@ -577,6 +613,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
         // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
@@ -610,12 +647,13 @@ impl QueryGraph {
                 &branches,
                 session.clone(),
                 schema_context,
+                row_policy_mode,
             );
         }
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = table_schema.policies.select.using.clone();
+        let select_policy = effective_select_policy(table_schema, row_policy_mode);
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -738,13 +776,14 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
+            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
                 branch_for_policy,
+                row_policy_mode,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -811,7 +850,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor = Some(current_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -820,6 +859,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -881,7 +921,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -890,6 +930,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -971,7 +1012,14 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        Self::try_compile_with_schema_context(query, schema, session, schema_context).ok()
+        Self::try_compile_with_schema_context(
+            query,
+            schema,
+            session,
+            schema_context,
+            RowPolicyMode::PermissiveLocal,
+        )
+        .ok()
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -982,6 +1030,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
@@ -1009,13 +1058,18 @@ impl QueryGraph {
 
         validate_execution_plan(&plan, schema)?;
 
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
-            .ok_or_else(|| {
-                QueryCompileError::InvalidPlan(
-                    "unsupported relation_ir shape for schema-context query compilation"
-                        .to_string(),
-                )
-            })
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -1320,6 +1374,7 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
         for schema_hash in schema_context.all_live_hashes() {
@@ -1393,20 +1448,22 @@ impl QueryGraph {
 
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
-        if let (Some(session), Some(policy)) =
-            (&session, base_table_schema.policies.select.using.clone())
-        {
+        if let (Some(session), Some(policy)) = (
+            &session,
+            effective_select_policy(base_table_schema, row_policy_mode),
+        ) {
             let branch_for_policy = branches
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
+            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                 base_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
                 branch_for_policy,
+                row_policy_mode,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1498,20 +1555,22 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) =
-                (&session, right_table_schema.policies.select.using.clone())
-            {
+            if let (Some(session), Some(policy)) = (
+                &session,
+                effective_select_policy(right_table_schema, row_policy_mode),
+            ) {
                 let branch_for_policy = branches
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch(
+                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
                     branch_for_policy,
+                    row_policy_mode,
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1615,7 +1674,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor_after_magic = Some(output_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1624,6 +1683,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1682,7 +1742,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1691,6 +1751,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -3600,6 +3661,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3638,6 +3700,7 @@ mod tests {
                 array_subqueries: query_with_arrays.array_subqueries,
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3666,6 +3729,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: Some(vec!["name".to_string()]),
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 

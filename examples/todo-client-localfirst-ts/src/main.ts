@@ -1,10 +1,4 @@
-import {
-  createDb,
-  createSyntheticUserSwitcher,
-  getActiveSyntheticAuth,
-  type DbConfig,
-  type Db,
-} from "jazz-tools";
+import { createDb, BrowserAuthSecretStore, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
 
 function readEnvAppId(): string | undefined {
@@ -58,14 +52,15 @@ export async function startApp(
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
   const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
-  const activeAuth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
+
+  const secret =
+    config?.auth?.localFirstSecret ?? (await BrowserAuthSecretStore.getOrCreateSecret());
 
   const resolvedConfig: DbConfig = {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: activeAuth.localAuthMode,
-    localAuthToken: activeAuth.localAuthToken,
+    auth: { localFirstSecret: secret },
     ...config,
   };
 
@@ -76,16 +71,6 @@ export async function startApp(
   const sessionUserId = session?.user_id ?? null;
 
   // Build DOM
-  const authControls = document.createElement("div");
-  authControls.id = "auth-controls";
-  container.appendChild(authControls);
-
-  const switcher = createSyntheticUserSwitcher({
-    appId: resolvedConfig.appId,
-    container: authControls,
-    defaultMode: "demo",
-  });
-
   const h1 = document.createElement("h1");
   h1.textContent = "Todos";
   container.appendChild(h1);
@@ -112,9 +97,26 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
+  const errorMessage = document.createElement("p");
+  errorMessage.id = "error-message";
+  errorMessage.hidden = true;
+  errorMessage.setAttribute("role", "alert");
+  container.appendChild(errorMessage);
+
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
+
+  const setErrorMessage = (message: string) => {
+    errorMessage.textContent = message;
+    errorMessage.hidden = false;
+  };
+
+  const clearErrorMessage = () => {
+    errorMessage.textContent = "";
+    errorMessage.hidden = true;
+  };
+
   // Subscribe to all todos.
   const query = app.todos;
   const unsubscribe = db.subscribeAll(query, ({ all: todos }) => {
@@ -146,6 +148,7 @@ export async function startApp(
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!sessionUserId) return;
+    clearErrorMessage();
     const selectedParentId = parentSelect.value;
     db.insert(app.todos, {
       title: input.value,
@@ -165,9 +168,20 @@ export async function startApp(
 
     if (target.classList.contains("toggle")) {
       const checkbox = target as HTMLInputElement;
-      db.update(app.todos, id, { done: checkbox.checked });
+      try {
+        db.update(app.todos, id, { done: checkbox.checked });
+        clearErrorMessage();
+      } catch {
+        checkbox.checked = !checkbox.checked;
+        setErrorMessage("You don't have permission to update this task");
+      }
     } else if (target.classList.contains("delete-btn")) {
-      db.delete(app.todos, id);
+      try {
+        db.delete(app.todos, id);
+        clearErrorMessage();
+      } catch {
+        setErrorMessage("You don't have permission to delete this task");
+      }
     }
   });
 
@@ -175,7 +189,6 @@ export async function startApp(
     db,
     destroy: async () => {
       unsubscribe();
-      switcher.destroy();
       await db.shutdown();
       container.innerHTML = "";
     },

@@ -110,11 +110,17 @@ impl QueryManager {
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
         let compile_schema = self.local_subscription_compile_schema(session.as_ref());
+        let compile_row_policy_mode = if uses_explicit_authorization_filtering {
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal
+        } else {
+            self.row_policy_mode
+        };
         let graph = Self::compile_graph(
             &query,
             &compile_schema,
             session.clone(),
             &self.schema_context,
+            compile_row_policy_mode,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
@@ -196,8 +202,14 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
-            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            session.clone(),
+            schema_context,
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
