@@ -32,6 +32,12 @@ pub enum TransportInbound {
     Disconnected,
 }
 
+#[derive(Debug)]
+pub enum TransportControl {
+    Shutdown,
+    UpdateAuth(AuthConfig),
+}
+
 // M-6: derive Debug — all fields implement Debug.
 #[derive(Debug)]
 pub struct TransportHandle {
@@ -40,6 +46,7 @@ pub struct TransportHandle {
     pub outbox_tx: mpsc::UnboundedSender<OutboxEntry>,
     pub inbound_rx: mpsc::UnboundedReceiver<TransportInbound>,
     pub ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub control_tx: mpsc::UnboundedSender<TransportControl>,
 }
 
 impl TransportHandle {
@@ -53,6 +60,14 @@ impl TransportHandle {
     pub fn has_ever_connected(&self) -> bool {
         self.ever_connected
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn disconnect(&self) {
+        let _ = self.control_tx.unbounded_send(TransportControl::Shutdown);
+    }
+    pub fn update_auth(&self, auth: AuthConfig) {
+        let _ = self
+            .control_tx
+            .unbounded_send(TransportControl::UpdateAuth(auth));
     }
 }
 
@@ -155,6 +170,7 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     reconnect: ReconnectState,
     pub client_id: ClientId,
     ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    control_rx: mpsc::UnboundedReceiver<TransportControl>,
     _stream: std::marker::PhantomData<W>,
 }
 
@@ -167,6 +183,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     let client_id = ClientId::new();
     let (outbox_tx, outbox_rx) = mpsc::unbounded();
     let (inbound_tx, inbound_rx) = mpsc::unbounded();
+    let (control_tx, control_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = TransportHandle {
         server_id,
@@ -174,6 +191,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         outbox_tx,
         inbound_rx,
         ever_connected: ever_connected.clone(),
+        control_tx,
     };
     let manager = TransportManager {
         server_id,
@@ -185,6 +203,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         reconnect: ReconnectState::new(),
         client_id,
         ever_connected,
+        control_rx,
         _stream: std::marker::PhantomData,
     };
     (handle, manager)
