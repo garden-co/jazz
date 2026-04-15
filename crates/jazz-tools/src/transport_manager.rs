@@ -942,4 +942,27 @@ mod tests {
         handle.disconnect();
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
     }
+
+    #[tokio::test]
+    async fn handle_dropped_is_shutdown() {
+        let controller = Arc::new(TestStreamController::default());
+        controller.connect_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(handle);
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), task)
+            .await
+            .expect("dropping the handle should shut down the manager")
+            .unwrap();
+    }
 }
