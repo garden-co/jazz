@@ -34,7 +34,6 @@ import nativeModule, {
   type UniffiForeignFutureCompleteVoid,
   type UniffiVTableCallbackInterfaceBatchedTickCallback,
   type UniffiVTableCallbackInterfaceSubscriptionCallback,
-  type UniffiVTableCallbackInterfaceSyncMessageCallback,
 } from './jazz_rn-ffi';
 import {
   type FfiConverter,
@@ -236,75 +235,6 @@ const uniffiCallbackInterfaceSubscriptionCallback: {
 // FfiConverter protocol for callback interfaces
 const FfiConverterTypeSubscriptionCallback =
   new FfiConverterCallback<SubscriptionCallback>();
-
-export interface SyncMessageCallback {
-  /**
-   * Called by Rust when it has an outbox message to send.
-   */
-  onSyncMessage(
-    destinationKind: string,
-    destinationId: string,
-    payloadJson: string,
-    isCatalogue: boolean
-  ): void;
-}
-
-// Put the implementation in a struct so we don't pollute the top-level namespace
-const uniffiCallbackInterfaceSyncMessageCallback: {
-  vtable: UniffiVTableCallbackInterfaceSyncMessageCallback;
-  register: () => void;
-} = {
-  // Create the VTable using a series of closures.
-  // ts automatically converts these into C callback functions.
-  vtable: {
-    onSyncMessage: (
-      uniffiHandle: bigint,
-      destinationKind: Uint8Array,
-      destinationId: Uint8Array,
-      payloadJson: Uint8Array,
-      isCatalogue: number
-    ) => {
-      const uniffiMakeCall = (): void => {
-        const jsCallback =
-          FfiConverterTypeSyncMessageCallback.lift(uniffiHandle);
-        return jsCallback.onSyncMessage(
-          FfiConverterString.lift(destinationKind),
-          FfiConverterString.lift(destinationId),
-          FfiConverterString.lift(payloadJson),
-          FfiConverterBool.lift(isCatalogue)
-        );
-      };
-      const uniffiResult = UniffiResult.ready<void>();
-      const uniffiHandleSuccess = (obj: any) => {};
-      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
-        UniffiResult.writeError(uniffiResult, code, errBuf);
-      };
-      uniffiTraitInterfaceCall(
-        /*makeCall:*/ uniffiMakeCall,
-        /*handleSuccess:*/ uniffiHandleSuccess,
-        /*handleError:*/ uniffiHandleError,
-        /*lowerString:*/ FfiConverterString.lower
-      );
-      return uniffiResult;
-    },
-    uniffiFree: (uniffiHandle: UniffiHandle): void => {
-      // SyncMessageCallback: this will throw a stale handle error if the handle isn't found.
-      FfiConverterTypeSyncMessageCallback.drop(uniffiHandle);
-    },
-    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
-      return FfiConverterTypeSyncMessageCallback.clone(uniffiHandle);
-    },
-  },
-  register: () => {
-    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_syncmessagecallback(
-      uniffiCallbackInterfaceSyncMessageCallback.vtable
-    );
-  },
-};
-
-// FfiConverter protocol for callback interfaces
-const FfiConverterTypeSyncMessageCallback =
-  new FfiConverterCallback<SyncMessageCallback>();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -758,12 +688,6 @@ export interface RnRuntimeInterface {
     messageJson: string
   ) /*throws*/ : void;
   /**
-   * Register a JS callback for outbound sync messages.
-   */
-  onSyncMessageToSend(
-    callback: SyncMessageCallback | undefined
-  ) /*throws*/ : void;
-  /**
    * One-shot query returning a JSON string:
    * `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
    */
@@ -1152,27 +1076,6 @@ export class RnRuntime
   }
 
   /**
-   * Register a JS callback for outbound sync messages.
-   */
-  onSyncMessageToSend(
-    callback: SyncMessageCallback | undefined
-  ): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_to_send(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterOptionalTypeSyncMessageCallback.lower(callback),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  /**
    * One-shot query returning a JSON string:
    * `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
    */
@@ -1405,11 +1308,6 @@ const FfiConverterOptionalTypeBatchedTickCallback = new FfiConverterOptional(
   FfiConverterTypeBatchedTickCallback
 );
 
-// FfiConverter for SyncMessageCallback | undefined
-const FfiConverterOptionalTypeSyncMessageCallback = new FfiConverterOptional(
-  FfiConverterTypeSyncMessageCallback
-);
-
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
@@ -1595,14 +1493,6 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_to_send() !==
-    58836
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_to_send'
-    );
-  }
-  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query() !==
     24218
   ) {
@@ -1682,18 +1572,9 @@ function uniffiEnsureInitialized() {
       'uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update'
     );
   }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message() !==
-    45812
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message'
-    );
-  }
 
   uniffiCallbackInterfaceBatchedTickCallback.register();
   uniffiCallbackInterfaceSubscriptionCallback.register();
-  uniffiCallbackInterfaceSyncMessageCallback.register();
 }
 
 export default Object.freeze({
