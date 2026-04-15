@@ -342,7 +342,8 @@ async fn deep_update_history(server: &TestingServer) {
             DurabilityTier::EdgeServer,
         )
         .await
-        .expect("create persisted todo");
+        .expect("create persisted todo")
+        .value;
 
     // This test is about replaying a deep server history for a fresh client,
     // not about transport reordering. Make each revision edge-durable before
