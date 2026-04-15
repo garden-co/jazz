@@ -125,9 +125,10 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
+    const root = await tempRoots.create("jazz-sveltekit-jwks-test-");
     const plugin = jazzSvelteKit({ server: { port: 19995, adminSecret: "jwks-admin" } });
     const viteServer: ViteDevServer = {
-      config: { root: "/proj", command: "serve", env: {}, server: { port: 3000 } },
+      config: { root, command: "serve", env: {}, server: { port: 3000 } },
       httpServer: { once() {} },
       ws: { send() {} },
     };
@@ -153,9 +154,10 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     try {
+      const root = await tempRoots.create("jazz-sveltekit-apporigin-test-");
       const plugin = jazzSvelteKit({ server: { port: 19994, adminSecret: "app-origin-admin" } });
       const viteServer: ViteDevServer = {
-        config: { root: "/proj", command: "serve", env: {}, server: { port: 3000 } },
+        config: { root, command: "serve", env: {}, server: { port: 3000 } },
         httpServer: { once() {} },
         ws: { send() {} },
       };
@@ -250,9 +252,10 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close });
 
+    const root = await tempRoots.create("jazz-sveltekit-close-test-");
     let capturedCloseCallback: (() => void) | undefined;
     const viteServer: ViteDevServer = {
-      config: { root: "/proj", command: "serve", env: {} },
+      config: { root, command: "serve", env: {} },
       httpServer: {
         once(event, cb) {
           if (event === "close") capturedCloseCallback = cb;
@@ -283,9 +286,10 @@ describe("jazzSvelteKit", () => {
     vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(new Error("schema push failed"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
+    const root = await tempRoots.create("jazz-sveltekit-hmr-test-");
     const wsSend = vi.fn();
     const viteServer: ViteDevServer = {
-      config: { root: "/proj", command: "serve", env: {} },
+      config: { root, command: "serve", env: {} },
       httpServer: { once() {} },
       ws: { send: wsSend },
     };
