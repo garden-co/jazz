@@ -1,0 +1,95 @@
+---
+title: What is Jazz?
+description: A draft outline for introducing Jazz, when it clicks, and why it exists.
+author: Jazz team
+date: "2026-04-15"
+---
+
+Jazz is a local-first relational database for apps where data needs to sync across users,
+devices, agents, and the cloud without feeling like networking.
+
+## Why This Post Exists
+
+- What problem category Jazz is trying to solve.
+- Why databases, sync engines, backend frameworks, and collaboration layers keep bleeding into one another.
+- Why existing stacks feel compositional in the wrong places.
+
+## The Trigger: When You Should Reach For Jazz
+
+- Signs that your app has outgrown request-response CRUD.
+- Why local-first UX, collaboration, permissions, and schema evolution tend to show up together.
+- Cases where Jazz is still overkill.
+
+## What Jazz Is
+
+- The shortest accurate definition of Jazz.
+- Why it is a database, not only a sync layer.
+- What it means for Jazz to run across frontend, backend, and cloud.
+
+## Why Not Just Stitch Existing Tools Together
+
+- The shape of a typical stitched stack.
+- Where the seams show up in correctness, latency, auth, history, and operations.
+- Why Jazz treats these as one design problem.
+
+## Why Not Other Modern Databases Or Sync Engines
+
+- Database-first versus sync-native design.
+- Cache or offline support versus durable local state.
+- Collaboration and history as first-class data concerns.
+- Schema evolution as compatibility, not just migration.
+
+## Local-First Data With Tunable Consistency
+
+- What local-first buys you in actual product feel.
+- Why eventual consistency is the right default for much of app interaction.
+- Where globally consistent transactions still matter.
+- How both models coexist in Jazz.
+
+## Row-Level Security And Per-Query Auth
+
+- Why permissions should shape synced data, not only server responses.
+- What zero-roundtrip security means in a local-first system.
+- How Jazz treats policies, auth, and queries together.
+
+## Real-Time Collaboration And Deep Histories
+
+- Why multiplayer behavior is no longer niche.
+- Why agents increase both collaboration intensity and the need for traceability.
+- What deep edit history enables for undo, auditability, and reasoning about past state.
+
+## Fluid Schema Evolution
+
+- Why schema evolution becomes the bottleneck for fast teams.
+- Why stop-the-world migrations are a poor fit for distributed clients.
+- How compatibility-layer migrations help with old clients, staged rollouts, and feature flags.
+
+## Replacing Most Of The Backend And Infra
+
+- Which backend responsibilities Jazz intentionally absorbs.
+- Which infrastructure components become unnecessary or less central.
+- What still sits outside Jazz.
+
+## Where Jazz Cloud Fits
+
+- What stays open-source and self-hostable.
+- What Jazz Cloud is responsible for.
+- Why some capabilities are much easier to deliver well as a managed global service.
+
+## Pricing Philosophy
+
+- Why self-serve pricing is usage-based.
+- Why the public units are I/O, storage, and egress.
+- Why those metrics aim to be predictable without hiding the underlying infrastructure.
+
+## How We Got Here
+
+- The ecosystem changes that made Jazz feel necessary.
+- What existing tools got right.
+- Which repeated limitations pushed toward a fresh design.
+
+## Who Jazz Is For Right Now
+
+- Which teams and products should pay attention immediately.
+- Which workflows benefit most.
+- What adopting Jazz is meant to simplify.
