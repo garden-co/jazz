@@ -338,8 +338,8 @@ pub async fn push_catalogue_in_memory(
     let client_id = ClientId::new();
     state
         .runtime
-        .ensure_client_as_backend(client_id)
-        .map_err(|e| format!("register backend client: {e:?}"))?;
+        .ensure_client_as_admin(client_id)
+        .map_err(|e| format!("register admin client: {e:?}"))?;
 
     let in_flight_pushes = Arc::new(AtomicUsize::new(0));
     let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
