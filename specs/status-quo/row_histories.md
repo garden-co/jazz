@@ -15,8 +15,13 @@ If you are new to the internals, it helps to picture one user table as two engin
 
 ```text
 todos
-  visible: (branch, row_id) -> current visible winner
-  history: (row_id, branch, batch_id) -> every stored row batch entry
+  visible namespaces:
+    one namespace per (visible, todos, full_schema_hash)
+    local key: (branch, row_id)
+
+  history namespaces:
+    one namespace per (history, todos, full_schema_hash)
+    local key: (row_id, branch, batch_id)
 ```
 
 The visible region is the hot path for ordinary queries. The history region is the source of truth for replay, ancestry, and tier-aware fallbacks.
@@ -81,11 +86,11 @@ The important engine fields are:
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
-For history rows, that identity now lives in the storage key rather than the payload columns. For
-visible rows, `(branch_name, row_id)` comes from the key and the current visible `batch_id` stays
-in the flat visible payload. The important idea is still that visibility, ancestry, durability,
-and deletion are expressed directly in the engine-managed row shape without repeating the full
-key-derived identity inside the payload.
+For history rows, that identity now lives in the namespace-local storage key rather than the
+payload columns. For visible rows, `(branch_name, row_id)` comes from the namespace-local key and
+the current visible `batch_id` stays in the flat visible payload. Namespace headers carry the
+general storage format version, full schema hash, and table name, so flat row decoding no longer
+needs to discover descriptors by scanning all historical catalogue schemas.
 
 ## How a Direct Write Lands
 

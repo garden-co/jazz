@@ -1,10 +1,6 @@
-use crate::object::ObjectId;
-use crate::row_histories::{BatchId, HistoryScan};
-
 use super::key_codec::{
-    decode_history_row_key, history_row_batches_prefix, history_row_key, history_row_prefix,
-    increment_string, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
-    strip_raw_table_key, visible_row_key, visible_row_prefix,
+    history_namespace_row_key, increment_string, raw_table_entry_key, raw_table_prefix,
+    raw_table_scan_prefix, strip_raw_table_key, visible_namespace_row_key,
 };
 use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
 
@@ -105,95 +101,26 @@ pub(super) fn raw_table_scan_range_keys_core(
 
 #[allow(dead_code)]
 pub(super) fn append_history_region_row_bytes_core(
-    table: &str,
+    _table: &str,
     rows: &[HistoryRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, row.row_id, row.branch, row.batch_id);
-        set(&key, row.bytes)?;
+        let key = history_namespace_row_key(row.row_id, row.branch, row.batch_id);
+        raw_table_put_core(row.namespace_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
 pub(super) fn upsert_visible_region_row_bytes_core(
-    table: &str,
+    _table: &str,
     rows: &[VisibleRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = visible_row_key(table, row.branch, row.row_id);
-        set(&key, row.bytes)?;
+        let key = visible_namespace_row_key(row.branch, row.row_id);
+        raw_table_put_core(row.namespace_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-pub(super) fn load_history_row_batch_bytes_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    batch_id: BatchId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = history_row_key(table, row_id, branch, batch_id);
-    get(&key)
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_region_row_bytes_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    get(&key)
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_history_region_bytes_core(
-    table: &str,
-    scan: HistoryScan,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<Vec<u8>>, StorageError> {
-    let prefix = match scan {
-        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
-        HistoryScan::Row { row_id } => history_row_batches_prefix(table, row_id),
-    };
-
-    Ok(scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| bytes)
-        .collect())
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_bytes_core(
-    table: &str,
-    branch: &str,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<Vec<u8>>, StorageError> {
-    let prefix = visible_row_prefix(table, branch);
-    Ok(scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| bytes)
-        .collect())
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_row_batch_branches_core(
-    table: &str,
-    row_id: ObjectId,
-    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
-) -> Result<Vec<String>, StorageError> {
-    let prefix = history_row_batches_prefix(table, row_id);
-    let mut branches = scan_prefix_keys(&prefix)?
-        .into_iter()
-        .map(|key| decode_history_row_key(table, &key).map(|(_, branch, _)| branch))
-        .collect::<Result<Vec<_>, _>>()?;
-    branches.sort();
-    branches.dedup();
-    Ok(branches)
 }

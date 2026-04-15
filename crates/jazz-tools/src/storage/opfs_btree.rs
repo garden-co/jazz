@@ -29,11 +29,9 @@ use super::{
     HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_row_bytes_core, load_history_row_batch_bytes_core,
-        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
-        scan_visible_region_bytes_core, scan_visible_region_row_batch_branches_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
@@ -325,7 +323,10 @@ impl Storage for OpfsBTreeStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        load_visible_region_row_bytes_core(table, branch, row_id, |key| self.tree_read(key))
+        Ok(
+            super::load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+                .map(|row| row.bytes),
+        )
     }
 
     fn scan_visible_region_bytes(
@@ -333,7 +334,12 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        scan_visible_region_bytes_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
+        Ok(
+            super::scan_visible_row_bytes_with_storage(self, table, branch)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn scan_visible_region_row_batches(
@@ -341,9 +347,8 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let branches = scan_visible_region_row_batch_branches_core(table, row_id, |prefix| {
-            self.tree_scan_prefix_keys(prefix)
-        })?;
+        let branches =
+            super::scan_visible_region_row_batch_branches_with_storage(self, table, row_id)?;
 
         let mut rows = Vec::new();
         for branch in branches {
@@ -362,9 +367,10 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
         batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        load_history_row_batch_bytes_core(table, branch, row_id, batch_id, |key| {
-            self.tree_read(key)
-        })
+        Ok(super::load_history_row_batch_row_bytes_with_storage(
+            self, table, branch, row_id, batch_id,
+        )?
+        .map(|row| row.bytes))
     }
 
     fn scan_history_region_bytes(
@@ -372,7 +378,12 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         scan: HistoryScan,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        scan_history_region_bytes_core(table, scan, |prefix| self.tree_scan_prefix(prefix))
+        Ok(
+            super::scan_history_row_bytes_with_storage(self, table, scan)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn flush(&self) {

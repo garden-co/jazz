@@ -1,4 +1,5 @@
 use super::*;
+use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
 use crate::storage::metadata_from_row_locator;
 
@@ -7,7 +8,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &self,
         batch_id: crate::row_histories::BatchId,
     ) -> Vec<(
-        ObjectId,
+        LocalBatchMember,
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
@@ -16,30 +17,35 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         };
 
         let mut rows = Vec::new();
-        for row_id in record.touched_rows {
-            let Ok(Some(row_locator)) = self.storage.load_row_locator(row_id) else {
-                continue;
-            };
-            let Ok(history_rows) = self
+        for member in record.members {
+            let row_locator = self
                 .storage
-                .scan_history_row_batches(row_locator.table.as_str(), row_id)
-            else {
+                .load_row_locator(member.object_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| crate::storage::RowLocator {
+                    table: member.table_name.clone().into(),
+                    origin_schema_hash: None,
+                });
+            let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
+                member.table_name.as_str(),
+                member.schema_hash,
+                member.branch_name.as_str(),
+                member.object_id,
+                batch_id,
+            ) else {
                 continue;
             };
-
-            for row in history_rows {
-                if row.batch_id == batch_id {
-                    rows.push((row_id, row_locator.clone(), row));
-                }
-            }
+            rows.push((member, row_locator, row));
         }
 
         rows.sort_by(
-            |(left_row_id, left_locator, left_row), (right_row_id, right_locator, right_row)| {
-                left_row_id
+            |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
+                left_member
+                    .object_id
                     .uuid()
                     .as_bytes()
-                    .cmp(right_row_id.uuid().as_bytes())
+                    .cmp(right_member.object_id.uuid().as_bytes())
                     .then_with(|| {
                         left_locator
                             .table
@@ -47,6 +53,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                             .cmp(right_locator.table.as_str())
                     })
                     .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
+                    .then_with(|| {
+                        left_member
+                            .schema_hash
+                            .as_bytes()
+                            .cmp(right_member.schema_hash.as_bytes())
+                    })
                     .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
             },
         );
@@ -162,7 +174,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     fn mark_local_batch_rows_rejected(&mut self, batch_id: crate::row_histories::BatchId) {
         let mut cleared_rows = Vec::new();
 
-        for (row_id, row_locator, row) in self.local_batch_rows(batch_id) {
+        for (member, row_locator, row) in self.local_batch_rows(batch_id) {
             if !matches!(
                 row.state,
                 RowState::VisibleDirect | RowState::StagingPending | RowState::Superseded
@@ -170,8 +182,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 continue;
             }
 
-            let _ = self.storage.patch_row_region_rows_by_batch(
+            let row_id = member.object_id;
+            let _ = self.storage.patch_exact_row_batch_for_schema_hash(
                 row_locator.table.as_str(),
+                member.schema_hash,
+                row.branch.as_str(),
+                row_id,
                 row.batch_id(),
                 Some(RowState::Rejected),
                 None,
@@ -230,8 +246,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let rows_to_retransmit = self
             .local_batch_rows(batch_id)
             .into_iter()
-            .map(|(row_id, row_locator, row)| {
-                (row_id, metadata_from_row_locator(&row_locator), row)
+            .map(|(member, row_locator, row)| {
+                (
+                    member.object_id,
+                    metadata_from_row_locator(&row_locator),
+                    row,
+                )
             })
             .collect::<Vec<_>>();
 

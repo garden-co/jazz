@@ -232,6 +232,40 @@ impl Storage for RowRegionReadFailingStorage {
             .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
+    fn patch_exact_row_batch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .patch_exact_row_batch(table, branch, row_id, batch_id, state, confirmed_tier)
+    }
+
+    fn patch_exact_row_batch_for_schema_hash(
+        &mut self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner.patch_exact_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
+    }
+
     fn scan_visible_region(
         &self,
         table: &str,
@@ -254,6 +288,24 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<crate::row_histories::BatchId>>, StorageError> {
+        self.inner
+            .load_visible_region_frontier(table, branch, row_id)
+    }
+
+    fn capture_family_visible_frontier(
+        &self,
+        target_branch_name: crate::object::BranchName,
+    ) -> Result<Vec<crate::batch_fate::CapturedFrontierMember>, StorageError> {
+        self.inner
+            .capture_family_visible_frontier(target_branch_name)
+    }
+
     fn scan_visible_region_row_batches(
         &self,
         table: &str,
@@ -268,6 +320,84 @@ impl Storage for RowRegionReadFailingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_row_batches(table, row_id)
+    }
+
+    fn load_history_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_row_batch_for_schema_hash(
+        &self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.load_history_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+        )
+    }
+
+    fn load_history_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn row_batch_exists(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<bool, StorageError> {
+        self.inner.row_batch_exists(table, branch, row_id, batch_id)
+    }
+
+    fn scan_row_branch_tip_ids(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::BatchId>, StorageError> {
+        self.inner.scan_row_branch_tip_ids(table, branch, row_id)
     }
 
     fn load_history_row_batch_bytes(
@@ -486,6 +616,40 @@ impl Storage for LegacyPersistenceObservingStorage {
             .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
+    fn patch_exact_row_batch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .patch_exact_row_batch(table, branch, row_id, batch_id, state, confirmed_tier)
+    }
+
+    fn patch_exact_row_batch_for_schema_hash(
+        &mut self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner.patch_exact_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
+    }
+
     fn scan_visible_region(
         &self,
         table: &str,
@@ -503,6 +667,24 @@ impl Storage for LegacyPersistenceObservingStorage {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<crate::row_histories::BatchId>>, StorageError> {
+        self.inner
+            .load_visible_region_frontier(table, branch, row_id)
+    }
+
+    fn capture_family_visible_frontier(
+        &self,
+        target_branch_name: crate::object::BranchName,
+    ) -> Result<Vec<crate::batch_fate::CapturedFrontierMember>, StorageError> {
+        self.inner
+            .capture_family_visible_frontier(target_branch_name)
+    }
+
     fn scan_visible_region_row_batches(
         &self,
         table: &str,
@@ -517,6 +699,84 @@ impl Storage for LegacyPersistenceObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_row_batches(table, row_id)
+    }
+
+    fn load_history_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_row_batch_for_schema_hash(
+        &self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.load_history_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+        )
+    }
+
+    fn load_history_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn row_batch_exists(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<bool, StorageError> {
+        self.inner.row_batch_exists(table, branch, row_id, batch_id)
+    }
+
+    fn scan_row_branch_tip_ids(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::BatchId>, StorageError> {
+        self.inner.scan_row_branch_tip_ids(table, branch, row_id)
     }
 
     fn load_history_row_batch_bytes(
@@ -747,6 +1007,40 @@ impl Storage for RowMutationObservingStorage {
             .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
+    fn patch_exact_row_batch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .patch_exact_row_batch(table, branch, row_id, batch_id, state, confirmed_tier)
+    }
+
+    fn patch_exact_row_batch_for_schema_hash(
+        &mut self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+        state: Option<crate::row_histories::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<bool, StorageError> {
+        self.inner.patch_exact_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+            state,
+            confirmed_tier,
+        )
+    }
+
     fn scan_visible_region(
         &self,
         table: &str,
@@ -764,6 +1058,24 @@ impl Storage for RowMutationObservingStorage {
         self.inner.load_visible_region_row(table, branch, row_id)
     }
 
+    fn load_visible_region_frontier(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<Vec<crate::row_histories::BatchId>>, StorageError> {
+        self.inner
+            .load_visible_region_frontier(table, branch, row_id)
+    }
+
+    fn capture_family_visible_frontier(
+        &self,
+        target_branch_name: crate::object::BranchName,
+    ) -> Result<Vec<crate::batch_fate::CapturedFrontierMember>, StorageError> {
+        self.inner
+            .capture_family_visible_frontier(target_branch_name)
+    }
+
     fn scan_visible_region_row_batches(
         &self,
         table: &str,
@@ -778,6 +1090,84 @@ impl Storage for RowMutationObservingStorage {
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
         self.inner.scan_history_row_batches(table, row_id)
+    }
+
+    fn load_history_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn load_history_row_batch_for_schema_hash(
+        &self,
+        table: &str,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.load_history_row_batch_for_schema_hash(
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            batch_id,
+        )
+    }
+
+    fn load_history_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn load_history_query_row_batch_any_branch(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<Option<crate::row_histories::QueryRowBatch>, StorageError> {
+        self.inner
+            .load_history_query_row_batch_any_branch(table, row_id, batch_id)
+    }
+
+    fn row_batch_exists(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<bool, StorageError> {
+        self.inner.row_batch_exists(table, branch, row_id, batch_id)
+    }
+
+    fn scan_row_branch_tip_ids(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::BatchId>, StorageError> {
+        self.inner.scan_row_branch_tip_ids(table, branch, row_id)
     }
 
     fn load_history_row_batch_bytes(

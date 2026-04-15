@@ -48,22 +48,57 @@ The two modes are:
 `BatchId` is stored as raw 16-byte `Bytea` in row payloads and encoded as 32 hex characters in
 string keys and public API surfaces.
 
-### Row-history keys
+### Row namespaces
 
-The storage layer keeps three row-oriented key families per user table:
+Row storage is now being split into schema-qualified namespaces instead of one mixed raw table per
+logical table.
+
+Each namespace is identified by:
+
+- storage kind: `visible` or `history`
+- logical table name
+- full schema/layout hash
+
+Conceptually that means one namespace per:
 
 ```text
-row:<table>:0:<branch>:<row_id_hex>
-  -> current visible row entry for one (branch, row_id)
-
-row:<table>:1:<row_id_hex>:<branch>:<batch_id_hex>
-  -> one stored row batch entry in history
+(storage_kind, logical_table, full_schema_hash)
 ```
 
-The `:0:` / `:1:` split is the simplest way to read the current layout:
+So one logical table can have several durable visible/history namespaces at once during schema
+evolution, but every individual namespace has exactly one row layout.
 
-- `:0:` is the visible region
-- `:1:` is the history region
+Each namespace has a small durable header containing:
+
+- general storage format version
+- full schema hash
+- logical table name
+
+That header is enough to recover the exact row descriptor from the catalogue without scanning all
+historical catalogue entries or depending on branch-name short hashes as part of row decoding.
+
+### Row keys inside a namespace
+
+Within one namespace, the row keys only carry row identity for that layout:
+
+```text
+visible namespace:
+  <branch>:<row_id_hex>
+
+history namespace:
+  <row_id_hex>:<branch>:<batch_id_hex>
+```
+
+The namespace already says which storage kind, logical table, and full schema/layout those keys
+belong to, so the per-row key no longer needs to repeat that context.
+
+Lookup uses that namespace model directly:
+
+- exact point loads prefer the row locator's persisted full `schema_hash`
+- branch scans union all namespaces for that logical table and filter on the branch key
+
+So ordinary storage reads no longer need branch-name short-hash matching to find the right row
+namespace.
 
 ### Flat history rows
 
@@ -85,8 +120,8 @@ The current history system columns are:
 - `_jazz_is_deleted`
 - `_jazz_metadata`
 
-For history rows, `(row_id, branch_name, batch_id)` now comes from the storage key rather than the
-payload.
+For history rows, `(row_id, branch_name, batch_id)` comes from the namespace-local storage key
+rather than the payload.
 
 ### Flat visible rows
 
@@ -111,9 +146,9 @@ Then they append:
 - `_jazz_edge_batch_id`
 - `_jazz_global_batch_id`
 
-The visible-row storage key still carries `(branch_name, row_id)`, while the current visible
-`batch_id` lives directly in the flat visible row payload. Application columns again follow after
-the reserved prefix.
+The visible-row namespace-local key still carries `(branch_name, row_id)`, while the current
+visible `batch_id` lives directly in the flat visible row payload. Application columns again
+follow after the reserved prefix.
 
 This is why visible rows can answer ordinary queries quickly while still remembering lower-tier
 visible winners and branch-frontier ancestry.
@@ -146,6 +181,7 @@ The current local batch record row stores:
 - `mode`
 - `requested_tier`
 - `sealed`
+- `members` with `(object_id, table_name, branch_name, schema_hash, row_digest)`
 - `sealed_submission`
 - `latest_settlement`
 
@@ -198,8 +234,20 @@ This is the main hot-path query shape.
 - `mode`
 - requested durability tier
 - `sealed`
+- `members: Vec<LocalBatchMember>`
 - optional `sealed_submission`
 - optional `latest_settlement`
+
+Each `LocalBatchMember` carries:
+
+- `object_id`
+- logical `table_name`
+- `branch_name`
+- full `schema_hash`
+- `row_digest`
+
+That means reconnect/rejection/retransmit can address the exact history namespace for each member
+directly instead of rediscovering batch membership from ambient row-history scans.
 
 For direct batches, `sealed` is immediately `true` because no explicit seal step is required. For
 transactional batches, `sealed` becomes `true` only after `commit()` / `seal_batch()`.
@@ -273,6 +321,7 @@ The row-history reducer updates:
 
 - `mode = Direct`
 - `sealed = true`
+- `members` is updated in place as rows in that batch are overwritten
 - the local runtime can immediately synthesize a `DurableDirect` settlement up to its max local tier
 
 ### 5. Sync and remote durability
@@ -317,8 +366,7 @@ The runtime creates a `LocalBatchRecord` with:
 
 `commit()` on the transaction handle, or `seal_batch(batch_id)` at the client/runtime layer:
 
-- scans the current staged members for that batch
-- computes one `row_digest` per member
+- reads the current member set from the replayable `LocalBatchRecord`
 - computes one `batch_digest` over the sorted member set
 - captures the family-visible frontier
 - persists a `SealedBatchSubmission`

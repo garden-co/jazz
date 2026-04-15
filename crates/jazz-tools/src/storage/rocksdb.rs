@@ -15,11 +15,9 @@ use rocksdb::{
 use super::{
     HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
-        append_history_region_row_bytes_core, load_history_row_batch_bytes_core,
-        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
-        scan_visible_region_bytes_core, scan_visible_region_row_batch_branches_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
@@ -394,13 +392,33 @@ impl Storage for RocksDBStorage {
         visible_entries: &[VisibleRowEntry],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
+        let encoded_history_rows =
+            super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
+        let encoded_visible_rows =
+            super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
+        let mut seen_namespaces = std::collections::HashSet::new();
+        for row in &encoded_history_rows {
+            if seen_namespaces.insert(row.namespace.raw_table_name()) {
+                self.upsert_row_namespace_header(
+                    &row.namespace,
+                    &super::RowNamespaceHeader::v1(table, row.namespace.schema_hash),
+                )?;
+            }
+        }
+        for row in &encoded_visible_rows {
+            if seen_namespaces.insert(row.namespace.raw_table_name()) {
+                self.upsert_row_namespace_header(
+                    &row.namespace,
+                    &super::RowNamespaceHeader::v1(table, row.namespace.schema_hash),
+                )?;
+            }
+        }
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            let encoded_history_rows =
-                super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
             let borrowed_history_rows = encoded_history_rows
                 .iter()
                 .map(|row| HistoryRowBytes {
+                    namespace_raw_table: row.namespace_raw_table.as_str(),
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
                     batch_id: row.batch_id,
@@ -410,11 +428,10 @@ impl Storage for RocksDBStorage {
             append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
-            let encoded_visible_rows =
-                super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
             let borrowed_visible_rows = encoded_visible_rows
                 .iter()
                 .map(|row| VisibleRowBytes {
+                    namespace_raw_table: row.namespace_raw_table.as_str(),
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
                     bytes: &row.bytes,
@@ -450,11 +467,10 @@ impl Storage for RocksDBStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_row_bytes_core(table, branch, row_id, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
+        Ok(
+            super::load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+                .map(|row| row.bytes),
+        )
     }
 
     fn scan_visible_region_bytes(
@@ -462,11 +478,12 @@ impl Storage for RocksDBStorage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            scan_visible_region_bytes_core(table, branch, |prefix| {
-                Self::scan_prefix_from_db(&inner.db, prefix)
-            })
-        })
+        Ok(
+            super::scan_visible_row_bytes_with_storage(self, table, branch)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn scan_visible_region_row_batches(
@@ -474,11 +491,8 @@ impl Storage for RocksDBStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let branches = self.with_inner(|inner| {
-            scan_visible_region_row_batch_branches_core(table, row_id, |prefix| {
-                Self::scan_prefix_keys_from_db(&inner.db, prefix)
-            })
-        })?;
+        let branches =
+            super::scan_visible_region_row_batch_branches_with_storage(self, table, row_id)?;
 
         let mut rows = Vec::new();
         for branch in branches {
@@ -497,11 +511,10 @@ impl Storage for RocksDBStorage {
         row_id: ObjectId,
         batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            load_history_row_batch_bytes_core(table, branch, row_id, batch_id, |key| {
-                Self::get_from_db(&inner.db, key)
-            })
-        })
+        Ok(super::load_history_row_batch_row_bytes_with_storage(
+            self, table, branch, row_id, batch_id,
+        )?
+        .map(|row| row.bytes))
     }
 
     fn scan_history_region_bytes(
@@ -509,11 +522,12 @@ impl Storage for RocksDBStorage {
         table: &str,
         scan: HistoryScan,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            scan_history_region_bytes_core(table, scan, |prefix| {
-                Self::scan_prefix_from_db(&inner.db, prefix)
-            })
-        })
+        Ok(
+            super::scan_history_row_bytes_with_storage(self, table, scan)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn flush(&self) {
