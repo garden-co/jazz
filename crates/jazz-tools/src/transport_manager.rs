@@ -477,7 +477,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct MockStream {
         sent: Vec<Vec<u8>>,
@@ -510,6 +511,89 @@ mod tests {
             Ok(self.inbound.pop_front())
         }
         async fn close(&mut self) {}
+    }
+
+    #[derive(Default)]
+    struct TestStreamController {
+        pub connect_pending: AtomicBool,
+        pub recv_pending: AtomicBool,
+        pub handshake_response: Mutex<Option<Vec<u8>>>,
+        pub recv_queue: Mutex<VecDeque<Vec<u8>>>,
+        pub close_calls: AtomicUsize,
+        pub connect_calls: AtomicUsize,
+    }
+
+    struct TestStreamAdapter {
+        controller: Arc<TestStreamController>,
+        handshake_delivered: bool,
+    }
+
+    thread_local! {
+        static TEST_CONTROLLER: std::cell::RefCell<Option<Arc<TestStreamController>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    fn install_controller(c: Arc<TestStreamController>) {
+        TEST_CONTROLLER.with(|slot| *slot.borrow_mut() = Some(c));
+    }
+
+    fn take_controller() -> Arc<TestStreamController> {
+        TEST_CONTROLLER
+            .with(|slot| slot.borrow().clone())
+            .expect("controller installed")
+    }
+
+    impl StreamAdapter for TestStreamAdapter {
+        type Error = &'static str;
+
+        async fn connect(_url: &str) -> Result<Self, Self::Error> {
+            let controller = take_controller();
+            controller.connect_calls.fetch_add(1, Ordering::SeqCst);
+            if controller.connect_pending.load(Ordering::SeqCst) {
+                futures::future::pending::<()>().await;
+                unreachable!();
+            }
+            Ok(Self {
+                controller,
+                handshake_delivered: false,
+            })
+        }
+
+        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+            if !self.handshake_delivered {
+                if let Some(frame) = self.controller.handshake_response.lock().unwrap().clone() {
+                    self.handshake_delivered = true;
+                    return Ok(Some(frame));
+                }
+            }
+            if let Some(frame) = self.controller.recv_queue.lock().unwrap().pop_front() {
+                return Ok(Some(frame));
+            }
+            if self.controller.recv_pending.load(Ordering::SeqCst) {
+                futures::future::pending::<Option<Vec<u8>>>().await;
+                unreachable!();
+            }
+            Ok(None)
+        }
+
+        async fn close(&mut self) {
+            self.controller.close_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn make_handshake_response_frame() -> Vec<u8> {
+        let resp = ConnectedResponse {
+            connection_id: "conn-1".into(),
+            client_id: "client-1".into(),
+            next_sync_seq: Some(0),
+            catalogue_state_hash: None,
+        };
+        let payload = serde_json::to_vec(&resp).unwrap();
+        frame_encode(&payload)
     }
 
     #[derive(Clone)]
