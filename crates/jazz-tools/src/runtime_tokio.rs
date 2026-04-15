@@ -700,13 +700,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 /// Holds a clone of the `TokioScheduler` and calls
 /// `schedule_batched_tick()` whenever the transport layer needs to wake
 /// up `batched_tick` (on connect, on incoming sync frames, on disconnect).
-#[cfg(feature = "transport")]
 #[derive(Clone)]
 pub struct NativeTickNotifier<S: Storage + Send + 'static> {
     scheduler: TokioScheduler<S>,
 }
 
-#[cfg(feature = "transport")]
 impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();

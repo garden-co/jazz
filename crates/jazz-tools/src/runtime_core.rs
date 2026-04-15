@@ -231,8 +231,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     scheduler: Sch,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
-    /// Transport handle for WebSocket sync (Task 6+).
-    #[cfg(feature = "transport")]
+    /// Transport handle for WebSocket sync.
     pub(crate) transport: Option<crate::transport_manager::TransportHandle>,
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
     /// the server side, where the runtime fans out via `ConnectionEventHub`
@@ -277,7 +276,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage,
             scheduler,
             storage_write_pending_flush: false,
-            #[cfg(feature = "transport")]
             transport: None,
             sync_sender: None,
             parked_sync_messages: Vec::new(),
@@ -428,7 +426,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 }
 
-#[cfg(feature = "transport")]
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Attach a transport handle. Replaces any existing transport.
     pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
