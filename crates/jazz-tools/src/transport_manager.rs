@@ -602,6 +602,7 @@ mod tests {
         pub recv_queue: Mutex<VecDeque<Vec<u8>>>,
         pub close_calls: AtomicUsize,
         pub connect_calls: AtomicUsize,
+        pub sent_frames: Mutex<Vec<Vec<u8>>>,
     }
 
     struct TestStreamAdapter {
@@ -640,7 +641,12 @@ mod tests {
             })
         }
 
-        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+        async fn send(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+            self.controller
+                .sent_frames
+                .lock()
+                .unwrap()
+                .push(data.to_vec());
             Ok(())
         }
 
@@ -821,5 +827,53 @@ mod tests {
 
         drop(handle);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+    }
+
+    #[tokio::test]
+    async fn update_auth_during_backoff() {
+        let controller = Arc::new(TestStreamController::default());
+        // No handshake response → handshake fails → enter backoff.
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let initial_auth = AuthConfig::default();
+        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            initial_auth,
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let calls_before = controller.connect_calls.load(Ordering::SeqCst);
+
+        let mut new_auth = AuthConfig::default();
+        new_auth.jwt_token = Some("refreshed".into());
+        handle.update_auth(new_auth);
+
+        // Manager should skip the remaining backoff and reconnect ~immediately.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let calls_after = controller.connect_calls.load(Ordering::SeqCst);
+        assert!(
+            calls_after > calls_before,
+            "UpdateAuth during backoff should trigger immediate reconnect (before={calls_before}, after={calls_after})"
+        );
+
+        let frames = controller.sent_frames.lock().unwrap().clone();
+        let latest_handshake = frames
+            .iter()
+            .rev()
+            .find_map(|f| {
+                let payload = frame_decode(f)?;
+                serde_json::from_slice::<AuthHandshake>(payload).ok()
+            })
+            .expect("at least one AuthHandshake frame sent after update_auth");
+        assert_eq!(
+            latest_handshake.auth.jwt_token.as_deref(),
+            Some("refreshed")
+        );
+
+        handle.disconnect();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
     }
 }
