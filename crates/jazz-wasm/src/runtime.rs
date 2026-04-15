@@ -374,33 +374,45 @@ impl Scheduler for WasmScheduler {
 /// the Rust-owned WebSocket transport (`WasmRuntime::connect`) instead; any
 /// `"server"` destination that arrives here is silently dropped by the JS
 /// callback registered in `jazz-worker.ts`.
-pub struct JsSyncSender {
+struct JsSyncSenderInner {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
 }
 
+#[derive(Clone)]
+pub struct JsSyncSender {
+    inner: Rc<JsSyncSenderInner>,
+}
+
+// SAFETY: WASM is single-threaded; the JS callback never crosses threads.
+// `Send` is required only because `RuntimeCore::sync_sender` is typed
+// `Box<dyn SyncSender + Send>` for the multi-threaded Tokio backend.
+unsafe impl Send for JsSyncSender {}
+
 impl JsSyncSender {
     fn new(use_binary_encoding: bool) -> Self {
         Self {
-            callback: RefCell::new(None),
-            use_binary_encoding,
+            inner: Rc::new(JsSyncSenderInner {
+                callback: RefCell::new(None),
+                use_binary_encoding,
+            }),
         }
     }
 
     fn set_callback(&self, callback: Function) {
-        *self.callback.borrow_mut() = Some(callback);
+        *self.inner.callback.borrow_mut() = Some(callback);
     }
 }
 
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        if let Some(ref callback) = *self.callback.borrow() {
+        if let Some(ref callback) = *self.inner.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
             let (destination_kind, destination_id) = match message.destination {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
-            if self.use_binary_encoding || destination_kind == "client" {
+            if self.inner.use_binary_encoding || destination_kind == "client" {
                 if let Ok(payload_bytes) = message.payload.to_bytes() {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
                     let _ = callback.call4(
@@ -525,6 +537,9 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        // Install the JS-callback sender so `batched_tick` drains outbox
+        // entries to the worker bridge (no transport handle here).
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -1433,6 +1448,9 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        // Install the JS-callback sender so `batched_tick` drains outbox
+        // entries to the worker bridge (no transport handle here).
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
