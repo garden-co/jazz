@@ -67,6 +67,8 @@ let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
 let currentAuth: Record<string, string> = {};
+// Stored after init so reconnect-upstream can re-establish the WS.
+let currentWsUrl: string | null = null;
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -284,6 +286,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     initComplete = false;
     _isShuttingDown = false;
     currentAuth = {};
+    currentWsUrl = null;
     peerRuntimeClientByPeerId.clear();
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
@@ -391,6 +394,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
       }
       currentAuth = mergeAuth(currentAuth, msg.jwtToken);
       const wsUrl = composeConnectUrl(msg.serverUrl, msg.serverPathPrefix);
+      currentWsUrl = wsUrl;
       performUpstreamConnect(runtime, post, wsUrl, JSON.stringify(currentAuth));
     }
   } catch (e: any) {
@@ -511,8 +515,15 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
           runtime.disconnect?.();
           post({ type: "upstream-disconnected" });
         } catch (e) {
-          console.error("[worker] runtime.disconnect failed:", e);
+          console.error("[worker] disconnect-upstream failed:", e);
         }
+      }
+      break;
+    }
+
+    case "reconnect-upstream": {
+      if (runtime && currentWsUrl) {
+        performUpstreamConnect(runtime, post, currentWsUrl, JSON.stringify(currentAuth));
       }
       break;
     }

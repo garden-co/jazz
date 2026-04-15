@@ -308,6 +308,11 @@ export class WorkerBridge {
     this.worker.postMessage({ type: "disconnect-upstream" });
   }
 
+  reconnectUpstream(): void {
+    if (this.isDisposedLike()) return;
+    this.worker.postMessage({ type: "reconnect-upstream" });
+  }
+
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
   }
