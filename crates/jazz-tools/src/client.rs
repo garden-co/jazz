@@ -1235,19 +1235,6 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.result_element_index.is_none()
 }
 
-async fn wait_for_persisted_write(
-    receiver: futures::channel::oneshot::Receiver<()>,
-    operation: &str,
-    tier: DurabilityTier,
-) -> Result<()> {
-    receiver.await.map_err(|_| {
-        JazzError::Sync(format!(
-            "{operation} was cancelled before reaching {tier:?} durability"
-        ))
-    })?;
-    Ok(())
-}
-
 fn align_row_values_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
