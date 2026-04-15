@@ -29,7 +29,7 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
 
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
-    const canvas = db.insert(app.canvases, {
+    const { value: canvas } = db.insert(app.canvases, {
       chatId,
       createdAt: new Date(),
     });

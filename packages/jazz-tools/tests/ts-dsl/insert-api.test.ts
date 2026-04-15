@@ -18,7 +18,7 @@ describe("TS Insert API", () => {
   });
 
   it("returns the inserted row", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
 
     expect(project).toEqual({
@@ -26,7 +26,7 @@ describe("TS Insert API", () => {
       name: "Test Project",
     });
 
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: true,
       tags: ["tag1", "tag2"],
@@ -86,7 +86,7 @@ describe("TS Insert API", () => {
   it("uses default values missing from the insert data", async () => {
     const project = insertProject(db);
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       projectId: project.id,
       ownerId: owner.id,
@@ -104,9 +104,9 @@ describe("TS Insert API", () => {
   });
 
   it("support schema defaults for all data types", async () => {
-    const row_with_defaults = db.insert(app.table_with_defaults, {});
+    const { value: rowWithDefaults } = db.insert(app.table_with_defaults, {});
 
-    expect(row_with_defaults).toEqual({
+    expect(rowWithDefaults).toEqual({
       id: expect.any(String),
       integer: 1,
       float: 1,
@@ -124,12 +124,12 @@ describe("TS Insert API", () => {
   });
 
   it("allows explicit null for nullable fields without triggering defaults", async () => {
-    const row_with_defaults = db.insert(app.table_with_defaults, {
+    const { value: rowWithDefaults } = db.insert(app.table_with_defaults, {
       nullable: null,
       refId: null,
     });
 
-    expect(row_with_defaults).toEqual({
+    expect(rowWithDefaults).toEqual({
       id: expect.any(String),
       integer: 1,
       float: 1,

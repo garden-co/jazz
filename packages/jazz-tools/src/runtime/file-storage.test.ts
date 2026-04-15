@@ -5,7 +5,7 @@ import {
   MAX_FILE_PART_BYTES,
   type FileStorageDb,
 } from "./file-storage.js";
-import type { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type { QueryBuilder, QueryOptions, TableProxy, WriteHandle } from "./db.js";
 
 interface StoredFile {
   id: string;
@@ -77,8 +77,8 @@ class FakeDb implements FileStorageDb {
   readonly files = new Map<string, StoredFile>();
   readonly fileParts = new Map<string, StoredFilePart>();
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
-    return this.store(table, data, false) as T;
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteHandle<T> {
+    return { value: this.store(table, data, false) as T };
   }
 
   async insertDurable<T, Init>(

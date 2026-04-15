@@ -17,7 +17,7 @@ export const CreateChatRedirect = () => {
     if (initialized.current || !userId || !myProfile) return;
     initialized.current = true;
 
-    const chat = db.insert(app.chats, {
+    const { value: chat } = db.insert(app.chats, {
       isPublic: true,
       createdBy: userId,
     });

@@ -65,7 +65,7 @@ export function CreateProject() {
   const session = useSession();
 
   async function handleCreate() {
-    const project = db.insert(app.projects, {
+    const { value: project } = db.insert(app.projects, {
       name: "Website redesign",
     });
 

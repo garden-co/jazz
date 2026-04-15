@@ -109,7 +109,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Transactional", done: false });
+    const { value: inserted } = tx.insert(table, { title: "Transactional", done: false });
     tx.update(table, "todo-1", { done: true });
     tx.delete(table, "todo-1");
     const persisted = tx.insertPersisted(
@@ -212,7 +212,7 @@ describe("Db transactions", () => {
     );
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Session transaction", done: true });
+    const { value: inserted } = tx.insert(table, { title: "Session transaction", done: true });
     const persisted = tx.insertPersisted(table, {
       title: "Session transaction",
       done: true,
@@ -350,7 +350,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const batch = db.beginDirectBatch(table);
-    const inserted = batch.insert(table, { title: "Direct batch", done: false });
+    const { value: inserted } = batch.insert(table, { title: "Direct batch", done: false });
     batch.update(table, "todo-direct-1", { done: true });
     batch.delete(table, "todo-direct-1");
     const persisted = batch.insertPersisted(
