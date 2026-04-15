@@ -706,6 +706,10 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : /*u64*/ bigint;
   unsubscribe(handle: /*u64*/ bigint) /*throws*/ : void;
   update(objectId: string, valuesJson: string) /*throws*/ : void;
+  /**
+   * Push updated auth credentials into the live transport.
+   */
+  updateAuth(authJson: string) /*throws*/ : void;
   updateWithSession(
     objectId: string,
     valuesJson: string,
@@ -1194,6 +1198,25 @@ export class RnRuntime
     );
   }
 
+  /**
+   * Push updated auth credentials into the live transport.
+   */
+  updateAuth(authJson: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(authJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   updateWithSession(
     objectId: string,
     valuesJson: string,
@@ -1538,6 +1561,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_update'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth() !==
+    57633
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_update_auth'
     );
   }
   if (
