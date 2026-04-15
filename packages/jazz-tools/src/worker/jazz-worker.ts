@@ -421,10 +421,21 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       }
       break;
 
-    case "update-auth":
-      // With the Rust-owned transport, re-connecting with a new token is handled
-      // by disconnecting and reconnecting. Not yet wired; left as no-op.
+    case "update-auth": {
+      if (msg.jwtToken) {
+        currentAuth.jwt_token = msg.jwtToken;
+      } else {
+        delete currentAuth.jwt_token;
+      }
+      if (runtime) {
+        try {
+          runtime.updateAuth(JSON.stringify(currentAuth));
+        } catch (e) {
+          console.error("[worker] runtime.updateAuth failed:", e);
+        }
+      }
       break;
+    }
 
     case "shutdown":
       _isShuttingDown = true;
