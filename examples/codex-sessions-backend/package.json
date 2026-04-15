@@ -1,0 +1,25 @@
+{
+  "name": "codex-sessions-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build:schema": "node ../../packages/jazz-tools/dist/cli.js build --schema-dir ./schema",
+    "smoke": "tsx src/smoke.ts",
+    "sync": "tsx src/cli.ts sync",
+    "watch": "tsx src/cli.ts watch",
+    "watch:completions": "tsx src/cli.ts watch-completions",
+    "test": "vitest run tests"
+  },
+  "dependencies": {
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
