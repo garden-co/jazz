@@ -258,6 +258,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     crate::transport_manager::TransportInbound::Disconnected => {
                         self.remove_server(server_id);
                     }
+                    crate::transport_manager::TransportInbound::AuthFailure { reason } => {
+                        self.remove_server(server_id);
+                        if let Some(ref cb) = self.auth_failure_callback {
+                            cb(reason);
+                        }
+                    }
                 }
             }
         }

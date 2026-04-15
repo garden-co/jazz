@@ -1563,6 +1563,27 @@ impl WasmRuntime {
         }
         Ok(())
     }
+
+    /// Register a JS callback that fires when the Rust transport receives an
+    /// auth failure (Unauthorized) from the server during the WS handshake.
+    ///
+    /// The callback receives a single string argument: a human-readable reason.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn on_auth_failure(&self, callback: Function) {
+        // WASM is single-threaded; wrapping Function in a Send marker is safe here.
+        struct SendFunction(Function);
+        // SAFETY: WASM runs on a single thread; no concurrent access is possible.
+        unsafe impl Send for SendFunction {}
+
+        let send_fn = SendFunction(callback);
+        self.core
+            .borrow_mut()
+            .set_auth_failure_callback(move |reason| {
+                let reason_js = JsValue::from_str(&reason);
+                let _ = send_fn.0.call1(&JsValue::NULL, &reason_js);
+            });
+    }
 }
 
 // ============================================================================
