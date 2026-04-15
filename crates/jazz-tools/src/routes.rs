@@ -1074,18 +1074,19 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerStat
 }
 
 /// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
-/// `events_handler`.
+/// the old `/sync` + `/events` handlers.
 enum WsClientSetup {
+    Admin,
     Backend,
     Session(crate::query_manager::session::Session),
 }
 
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
-/// Builds a synthetic `HeaderMap` from the auth fields in the handshake and
-/// runs the same dispatch as `events_handler`:
-/// - backend secret (no session header) → `WsClientSetup::Backend`
-/// - otherwise → `extract_session` → `WsClientSetup::Session`
+/// Priority matches the old HTTP handler pair:
+/// 1. `admin_secret` valid → `WsClientSetup::Admin` (full catalogue access)
+/// 2. `backend_secret` present + no session header → `WsClientSetup::Backend`
+/// 3. Otherwise → `extract_session` → `WsClientSetup::Session`
 ///
 /// Returns `Err(message)` on auth failure; the caller should send a
 /// `ServerEvent::Error` frame before closing.
@@ -1125,17 +1126,29 @@ async fn authenticate_ws_handshake(
         headers.insert("X-Jazz-Session", value);
     }
 
+    // 1. Admin secret — highest privilege, checked first.
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+    if admin_secret.is_some() {
+        validate_admin_secret(admin_secret, &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Admin);
+    }
+
     let has_session_header = headers.get("X-Jazz-Session").is_some();
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|v| v.to_str().ok());
 
+    // 2. Backend secret without session impersonation.
     if backend_secret.is_some() && !has_session_header {
         validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, msg)| msg.to_string())?;
         return Ok(WsClientSetup::Backend);
     }
 
+    // 3. JWT / session-impersonation path.
     let session = {
         let external_identities = state.external_identities.read().await;
         extract_session(
@@ -1231,6 +1244,9 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
 
     // 5. Ensure the client state in the runtime.
     match setup {
+        WsClientSetup::Admin => {
+            let _ = state.runtime.ensure_client_as_admin(client_id);
+        }
         WsClientSetup::Backend => {
             let _ = state.runtime.ensure_client_as_backend(client_id);
         }
