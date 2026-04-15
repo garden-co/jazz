@@ -40,6 +40,7 @@ use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, S
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type DirectInsertResult = (ObjectId, Vec<Value>, BatchId);
 type PersistedWriteResult = (
     (ObjectId, Vec<Value>),
     BatchId,
@@ -263,10 +264,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
-    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core.insert(table, values, write_context)?;
-        Ok(result)
+        let ((object_id, row_values), batch_id) = core.insert(table, values, write_context)?;
+        Ok((object_id, row_values, batch_id))
     }
 
     /// Insert a row into a table.
@@ -275,7 +276,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: HashMap<String, Value>,
         session: Option<&Session>,
-    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.insert_with_write_context(table, values, owned.as_ref())
     }
@@ -286,10 +287,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.update(object_id, values, write_context)?;
-        Ok(())
+        Ok(core.update(object_id, values, write_context)?)
     }
 
     /// Update a row (partial update by column name).
@@ -298,7 +298,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         session: Option<&Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_with_write_context(object_id, values, owned.as_ref())
     }
@@ -308,10 +308,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.delete(object_id, write_context)?;
-        Ok(())
+        Ok(core.delete(object_id, write_context)?)
     }
 
     /// Delete a row.
@@ -319,7 +318,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         object_id: ObjectId,
         session: Option<&Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.delete_with_write_context(object_id, owned.as_ref())
     }

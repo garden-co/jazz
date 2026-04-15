@@ -58,7 +58,7 @@ function createRuntimeMock(): {
   const removeServerCalls = { count: 0 };
 
   const runtime: Runtime = {
-    insert: () => ({ id: "id", values: [] }),
+    insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
     update: () => undefined,
     delete: () => undefined,
     query: async () => [],

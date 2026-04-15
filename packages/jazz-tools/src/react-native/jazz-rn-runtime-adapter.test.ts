@@ -14,9 +14,11 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
+    insert: vi.fn((_table, _valuesJson) =>
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
+    ),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
-      JSON.stringify({ id: "row-1", values: [] }),
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
     ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
@@ -53,7 +55,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -156,7 +158,7 @@ describe("JazzRnRuntimeAdapter", () => {
       { title: { type: "Text", value: "milk" } },
       writeContextJson,
     );
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-2" });
     expect(binding.insertWithSession).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -182,6 +184,7 @@ describe("JazzRnRuntimeAdapter", () => {
     ).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-2",
     });
     await expect(
       adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
@@ -334,6 +337,7 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-1",
     });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 

@@ -461,7 +461,7 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let (id, row_values) = core
+            let ((id, row_values), batch_id) = core
                 .insert(&table, named_values, None)
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
@@ -473,6 +473,7 @@ impl RnRuntime {
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
+                "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("insert serialization failed: {e}"),
@@ -492,7 +493,7 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let (id, row_values) = core
+            let ((id, row_values), batch_id) = core
                 .insert(&table, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
@@ -504,6 +505,7 @@ impl RnRuntime {
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
+                "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("insert serialization failed: {e}"),

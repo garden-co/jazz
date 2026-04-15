@@ -1,5 +1,5 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
-import type { Row, Runtime } from "../runtime/client.js";
+import type { DirectInsertResult, Row, Runtime } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
@@ -219,23 +219,27 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  insert(table: string, values: InsertValues): Row {
+  insert(table: string, values: InsertValues): DirectInsertResult {
     try {
       const rowJson = this.binding.insert(table, encodeFFIRecordToJson(values));
-      return JSON.parse(rowJson) as Row;
+      return JSON.parse(rowJson) as DirectInsertResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
+  insertWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectInsertResult {
     try {
       const rowJson = this.requireWriteContextMethod("insertWithSession")(
         table,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
-      return JSON.parse(rowJson) as Row;
+      return JSON.parse(rowJson) as DirectInsertResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

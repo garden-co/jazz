@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import type { JazzClient, Row } from "./client.js";
+import type { DirectInsertResult, JazzClient } from "./client.js";
 
 class TestDb extends Db {
   constructor(private readonly testClient: JazzClient) {
@@ -31,12 +31,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => DirectInsertResult>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-schema-order-runtime",
     }));
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
@@ -130,12 +131,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => DirectInsertResult>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-schema-order-generated",
     }));
     const client = {
       getSchema: () => new Map(),

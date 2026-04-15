@@ -30,12 +30,12 @@ declare module "jazz-wasm" {
     );
     schedule?: (task: () => void) => void;
 
-    insert(table: string, values: InsertValues): { id: string; values: any[] };
+    insert(table: string, values: InsertValues): { id: string; values: any[]; batchId: string };
     insertWithSession(
       table: string,
       values: InsertValues,
       sessionJson?: string | null,
-    ): { id: string; values: any[] };
+    ): { id: string; values: any[]; batchId: string };
     insertDurable(
       table: string,
       values: InsertValues,
@@ -47,8 +47,12 @@ declare module "jazz-wasm" {
       sessionJson: string | null | undefined,
       tier: string,
     ): Promise<{ id: string; values: any[] }>;
-    update(objectId: string, values: unknown): void;
-    updateWithSession(objectId: string, values: unknown, sessionJson?: string | null): void;
+    update(objectId: string, values: unknown): { batchId: string };
+    updateWithSession(
+      objectId: string,
+      values: unknown,
+      sessionJson?: string | null,
+    ): { batchId: string };
     updateDurable(objectId: string, values: unknown, tier: string): Promise<void>;
     updateDurableWithSession(
       objectId: string,
@@ -56,8 +60,8 @@ declare module "jazz-wasm" {
       sessionJson: string | null | undefined,
       tier: string,
     ): Promise<void>;
-    delete(objectId: string): void;
-    deleteWithSession(objectId: string, sessionJson?: string | null): void;
+    delete(objectId: string): { batchId: string };
+    deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
     deleteDurable(objectId: string, tier: string): Promise<void>;
     deleteDurableWithSession(
       objectId: string,

@@ -251,12 +251,20 @@ function backendScopedAuthState(session?: Session | null): AuthState {
  * Returned by insert operations. Allows getting the inserted value and
  * waiting for the write to be persisted at a given durability tier.
  */
-export interface WriteHandle<T> {
-  value: T;
-}
+export class WriteHandle<T> {
+  // oxlint-disable-next-line no-unused-private-class-members
+  readonly #batchId: string;
+  // oxlint-disable-next-line no-unused-private-class-members
+  readonly #client: JazzClient;
 
-function createWriteHandle<T>(value: T): WriteHandle<T> {
-  return { value };
+  constructor(
+    readonly value: T,
+    batchId: string,
+    client: JazzClient,
+  ) {
+    this.#batchId = batchId;
+    this.#client = client;
+  }
 }
 
 export class DbPersistedWrite<T> {
@@ -348,7 +356,11 @@ export class DbTransaction {
       table._table,
     );
     const row = this.runtimeTransaction.create(table._table, values);
-    return createWriteHandle(transformRow(row, table._schema, table._table));
+    return new WriteHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.client,
+    );
   }
 
   insertPersisted<T, Init>(
@@ -472,7 +484,11 @@ export class DbDirectBatch {
       table._table,
     );
     const row = this.runtimeBatch.create(table._table, values);
-    return createWriteHandle(transformRow(row, table._schema, table._table));
+    return new WriteHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.client,
+    );
   }
 
   insertPersisted<T, Init>(
@@ -1476,7 +1492,7 @@ export class Db {
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const row = client.create(table._table, values);
-    return createWriteHandle(transformRow(row, table._schema, table._table));
+    return new WriteHandle(transformRow(row, table._schema, table._table), row.batchId, client);
   }
 
   /**
@@ -2046,7 +2062,11 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
     );
-    return createWriteHandle(transformRow(row, table._schema, table._table));
+    return new WriteHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.runtimeClient,
+    );
   }
 
   override async insertDurable<T, Init>(

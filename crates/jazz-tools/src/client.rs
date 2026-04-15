@@ -548,7 +548,7 @@ impl JazzClient {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .runtime
             .insert(table, values, None)
             .map_err(|e| JazzError::Write(e.to_string()))?;
@@ -590,6 +590,7 @@ impl JazzClient {
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
             .update(object_id, updates, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -616,6 +617,7 @@ impl JazzClient {
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -827,7 +829,7 @@ impl<'a> SessionClient<'a> {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .client
             .runtime
             .insert(table, values, Some(&self.session))
@@ -870,6 +872,7 @@ impl<'a> SessionClient<'a> {
         self.client
             .runtime
             .update(object_id, updates, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -895,6 +898,7 @@ impl<'a> SessionClient<'a> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -1020,7 +1024,7 @@ impl<'a> Transaction<'a> {
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
         self.ensure_writable()?;
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .client
             .runtime
             .insert_with_write_context(table, values, Some(&self.write_context))
@@ -1060,6 +1064,7 @@ impl<'a> Transaction<'a> {
         self.client
             .runtime
             .update_with_write_context(object_id, updates, Some(&self.write_context))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -1092,6 +1097,7 @@ impl<'a> Transaction<'a> {
         self.client
             .runtime
             .delete_with_write_context(object_id, Some(&self.write_context))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -1126,7 +1132,7 @@ impl<'a> DirectBatch<'a> {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .client
             .runtime
             .insert_with_write_context(table, values, Some(&self.write_context))
@@ -1164,6 +1170,7 @@ impl<'a> DirectBatch<'a> {
         self.client
             .runtime
             .update_with_write_context(object_id, updates, Some(&self.write_context))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -1194,6 +1201,7 @@ impl<'a> DirectBatch<'a> {
         self.client
             .runtime
             .delete_with_write_context(object_id, Some(&self.write_context))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
