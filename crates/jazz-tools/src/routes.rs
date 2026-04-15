@@ -1126,23 +1126,31 @@ async fn authenticate_ws_handshake(
         headers.insert("X-Jazz-Session", value);
     }
 
-    // 1. Admin secret — highest privilege, checked first.
+    let has_jwt = headers.get(axum::http::header::AUTHORIZATION).is_some();
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
     let admin_secret = headers
         .get("X-Jazz-Admin-Secret")
         .and_then(|v| v.to_str().ok());
-    if admin_secret.is_some() {
+    let backend_secret = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    // 1. Admin secret — only when no user-scoped credential (JWT or session) is
+    //    present.  Browser workers send both admin_secret and jwt_token; the JWT
+    //    must win so the connection carries a session and row-level policies are
+    //    applied correctly.  Pure admin/tooling clients that have no JWT still
+    //    get full Admin access.
+    if admin_secret.is_some() && !has_jwt && !has_session_header {
         validate_admin_secret(admin_secret, &state.auth_config)
             .map_err(|(_, msg)| msg.to_string())?;
         return Ok(WsClientSetup::Admin);
     }
 
-    let has_session_header = headers.get("X-Jazz-Session").is_some();
-    let backend_secret = headers
-        .get("X-Jazz-Backend-Secret")
-        .and_then(|v| v.to_str().ok());
-
-    // 2. Backend secret without session impersonation.
-    if backend_secret.is_some() && !has_session_header {
+    // 2. Backend secret — only when no user-scoped JWT is present.  Clients
+    //    that carry both a backend_secret and a jwt_token (e.g. test helpers
+    //    that mirror the full credential set) must be treated as users so the
+    //    connection carries a session for row-level policy evaluation.
+    if backend_secret.is_some() && !has_jwt && !has_session_header {
         validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, msg)| msg.to_string())?;
         return Ok(WsClientSetup::Backend);
@@ -1161,6 +1169,15 @@ async fn authenticate_ws_handshake(
         .await
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?
     };
+
+    // 4. Fallback: admin secret when JWT auth produced no session (e.g. JWT is
+    //    absent but admin_secret was provided alongside a session header for
+    //    backend impersonation with elevated access).
+    if session.is_none() && admin_secret.is_some() {
+        validate_admin_secret(admin_secret, &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Admin);
+    }
 
     let session =
         session.ok_or_else(|| "Session required. Provide JWT or backend secret.".to_string())?;
