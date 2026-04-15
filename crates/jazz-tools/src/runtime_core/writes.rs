@@ -1,10 +1,12 @@
 use super::*;
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, LocalBatchRecord, SealedBatchMember, SealedBatchSubmission,
-    VisibleBatchMember,
+    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
+    SealedBatchSubmission, VisibleBatchMember,
 };
 use crate::object::BranchName;
+use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
+use crate::storage::RowNamespaceKind;
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -110,7 +112,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 "batch {batch_id:?} reused with conflicting modes"
             )));
         }
-        record.track_touched_row(row_id);
+        for member in self.local_batch_members_for_row(row_id, batch_id)? {
+            record.upsert_member(member);
+        }
         if requested_tier > record.requested_tier {
             record.requested_tier = requested_tier;
         }
@@ -121,6 +125,96 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage
             .upsert_local_batch_record(&record)
             .map_err(|err| RuntimeError::WriteError(format!("persist local batch record: {err}")))
+    }
+
+    fn local_batch_members_for_row(
+        &self,
+        row_id: ObjectId,
+        batch_id: BatchId,
+    ) -> Result<Vec<LocalBatchMember>, RuntimeError> {
+        let row_locator = self
+            .storage
+            .load_row_locator(row_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            .ok_or_else(|| {
+                RuntimeError::WriteError(format!(
+                    "missing row locator while tracking local batch {batch_id:?} for {row_id:?}"
+                ))
+            })?;
+        let mut members = self
+            .storage
+            .scan_history_row_batches(row_locator.table.as_str(), row_id)
+            .map_err(|err| RuntimeError::WriteError(format!("scan history rows: {err}")))?
+            .into_iter()
+            .filter(|row| row.batch_id == batch_id)
+            .map(|row| {
+                let branch_name = BranchName::new(&row.branch);
+                Ok(LocalBatchMember {
+                    object_id: row_id,
+                    table_name: row_locator.table.to_string(),
+                    branch_name,
+                    schema_hash: self.local_batch_member_schema_hash(
+                        row_locator.table.as_str(),
+                        &row_locator,
+                        branch_name,
+                    )?,
+                    row_digest: row.content_digest(),
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        members.sort_by(|left, right| {
+            left.object_id
+                .uuid()
+                .as_bytes()
+                .cmp(right.object_id.uuid().as_bytes())
+                .then_with(|| left.table_name.cmp(&right.table_name))
+                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+                .then_with(|| {
+                    left.schema_hash
+                        .as_bytes()
+                        .cmp(right.schema_hash.as_bytes())
+                })
+                .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
+        });
+        members.dedup();
+        if members.is_empty() {
+            return Err(RuntimeError::WriteError(format!(
+                "missing local batch member rows for {batch_id:?} / {row_id:?}"
+            )));
+        }
+        Ok(members)
+    }
+
+    fn local_batch_member_schema_hash(
+        &self,
+        table: &str,
+        row_locator: &crate::storage::RowLocator,
+        branch_name: BranchName,
+    ) -> Result<SchemaHash, RuntimeError> {
+        if let Some(schema_hash) = row_locator.origin_schema_hash {
+            return Ok(schema_hash);
+        }
+
+        let namespaces = self.storage.scan_row_namespace_headers().map_err(|err| {
+            RuntimeError::WriteError(format!("scan row namespace headers: {err}"))
+        })?;
+
+        let matching_hashes: Vec<_> = namespaces
+            .into_iter()
+            .map(|(namespace, _)| namespace)
+            .filter(|namespace| {
+                namespace.kind == RowNamespaceKind::History && namespace.table_name == table
+            })
+            .map(|namespace| namespace.schema_hash)
+            .collect::<Vec<_>>();
+
+        if let [schema_hash] = matching_hashes.as_slice() {
+            return Ok(*schema_hash);
+        }
+
+        Err(RuntimeError::WriteError(format!(
+            "missing schema hash for local batch member table {table} branch {branch_name}"
+        )))
     }
 
     pub(crate) fn transactional_batch_members(
@@ -136,60 +230,28 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 "missing local batch record for {batch_id:?}"
             )));
         };
-
-        let mut latest_by_row = std::collections::HashMap::<
-            (ObjectId, String),
-            crate::row_histories::StoredRowBatch,
-        >::new();
-        for row_id in record.touched_rows {
-            let Some(row_locator) = self
-                .storage
-                .load_row_locator(row_id)
-                .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
-            else {
-                continue;
-            };
-            let history_rows = self
-                .storage
-                .scan_history_row_batches(row_locator.table.as_str(), row_id)
-                .map_err(|err| RuntimeError::WriteError(format!("scan history rows: {err}")))?;
-            for row in history_rows {
-                if row.batch_id != batch_id
-                    || !matches!(row.state, crate::row_histories::RowState::StagingPending)
-                {
-                    continue;
-                }
-                let key = (row_id, row.branch.to_string());
-                let should_replace = latest_by_row.get(&key).is_none_or(|current| {
-                    (row.updated_at, row.batch_id()) > (current.updated_at, current.batch_id())
-                });
-                if should_replace {
-                    latest_by_row.insert(key, row);
-                }
-            }
-        }
-
-        let latest_rows: Vec<_> = latest_by_row.into_values().collect();
-        let Some(first_row) = latest_rows.first() else {
+        let Some(first_member) = record.members.first() else {
             return Err(RuntimeError::WriteError(format!(
                 "cannot seal empty transactional batch {batch_id:?}"
             )));
         };
-        let target_branch_name = crate::object::BranchName::new(&first_row.branch);
-        if latest_rows
+        let target_branch_name = first_member.branch_name;
+        if record
+            .members
             .iter()
-            .any(|row| row.branch.as_str() != target_branch_name.as_str())
+            .any(|member| member.branch_name != target_branch_name)
         {
             return Err(RuntimeError::WriteError(format!(
                 "transactional batch {batch_id:?} spans multiple target branches"
             )));
         }
 
-        let mut members: Vec<_> = latest_rows
+        let mut members: Vec<_> = record
+            .members
             .into_iter()
-            .map(|row| SealedBatchMember {
-                object_id: row.row_id,
-                row_digest: row.content_digest(),
+            .map(|member| SealedBatchMember {
+                object_id: member.object_id,
+                row_digest: member.row_digest,
             })
             .collect();
         members.sort_by(|left, right| {

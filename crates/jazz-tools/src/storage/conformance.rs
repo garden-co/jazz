@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::ops::Bound;
 
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchMember,
-    SealedBatchSubmission, VisibleBatchMember,
+    BatchMode, BatchSettlement, CapturedFrontierMember, LocalBatchMember, LocalBatchRecord,
+    SealedBatchMember, SealedBatchSubmission, VisibleBatchMember,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -21,7 +21,10 @@ use crate::row_histories::{
     decode_flat_visible_row_entry,
 };
 use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
+use crate::storage::{
+    IndexMutation, RowLocator, RowNamespaceHeader, RowNamespaceId, RowNamespaceKind, Storage,
+    StorageError,
+};
 use crate::sync_manager::DurabilityTier;
 use crate::test_row_history::persist_test_schema;
 
@@ -91,6 +94,26 @@ fn make_visible_entry(
 // ============================================================================
 // Branch ord tests
 // ============================================================================
+
+pub fn test_row_namespace_header_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = SchemaHash::from_bytes([0x11; 32]);
+    let namespace = RowNamespaceId::new(RowNamespaceKind::Visible, "todos", schema_hash);
+    let header = RowNamespaceHeader::v1("todos", schema_hash);
+
+    storage
+        .upsert_row_namespace_header(&namespace, &header)
+        .expect("row namespace header should persist");
+
+    assert_eq!(
+        storage.load_row_namespace_header(&namespace).unwrap(),
+        Some(header.clone())
+    );
+    assert_eq!(
+        storage.scan_row_namespace_headers().unwrap(),
+        vec![(namespace, header)]
+    );
+}
 
 pub fn test_branch_ord_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
@@ -879,8 +902,20 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
             }],
         }),
     );
-    record.track_touched_row(ObjectId::from_uuid(uuid::Uuid::from_u128(94)));
-    record.track_touched_row(ObjectId::from_uuid(uuid::Uuid::from_u128(95)));
+    record.upsert_member(LocalBatchMember {
+        object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(94)),
+        table_name: "users".to_string(),
+        branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        schema_hash: SchemaHash::from_bytes([0xaa; 32]),
+        row_digest: Digest32([11; 32]),
+    });
+    record.upsert_member(LocalBatchMember {
+        object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(95)),
+        table_name: "users".to_string(),
+        branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        schema_hash: SchemaHash::from_bytes([0xaa; 32]),
+        row_digest: Digest32([12; 32]),
+    });
     record.sealed_submission = Some(SealedBatchSubmission::new(
         batch_id,
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
@@ -1539,6 +1574,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn catalogue_entry_nonexistent_returns_none() {
                 conformance::test_catalogue_entry_nonexistent_returns_none(&$factory);
+            }
+
+            #[test]
+            fn row_namespace_header_round_trip() {
+                conformance::test_row_namespace_header_round_trip(&$factory);
             }
 
             #[test]

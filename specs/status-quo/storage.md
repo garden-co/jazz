@@ -70,9 +70,10 @@ At a high level, the durable model looks like this:
 raw user tables
   -> application rows and index keys
 
-row-history regions
-  -> flat history rows keyed by (row_id, branch, batch_id)
-  -> flat visible rows keyed by (branch, row_id)
+row-history namespaces
+  -> one namespace per (storage kind, logical table, full schema hash)
+  -> visible namespace-local keys: (branch, row_id)
+  -> history namespace-local keys: (row_id, branch, batch_id)
 
 system tables
   -> __metadata
@@ -98,14 +99,25 @@ Storage does not invent its own payload format. It relies on `row_format` for:
 This shared binary format is what lets user rows, visible rows, history rows, and catalogue rows
 all move through the system without every layer inventing a different shape.
 
-At the key level, the important row-history families are:
+At the durable storage level, row-history state is moving toward schema-qualified namespaces rather
+than one mixed raw table per logical table. Each namespace carries a small header with:
 
-```text
-row:<table>:0:<branch>:<row_id_hex>
-row:<table>:1:<row_id_hex>:<branch>:<batch_id_hex>
-```
+- general storage format version
+- full schema hash
+- logical table name
 
-The full meaning of those families is documented in [Batches](batches.md).
+Once a caller knows which namespace it is reading, that namespace header is what makes flat row
+bytes self-describing enough to decode in O(1) without scanning all catalogue schema history.
+
+In practice the engine now resolves namespaces like this:
+
+- exact point loads prefer the row locator's persisted `origin_schema_hash`
+- branch scans union all namespaces for that logical table and filter by the branch key inside each namespace
+
+So namespace selection no longer depends on parsing branch-name short hashes during ordinary row
+loads.
+
+The full meaning of those namespaces and their local keys is documented in [Batches](batches.md).
 
 ## Durable Backends
 
