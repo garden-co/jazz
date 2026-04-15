@@ -269,7 +269,21 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 ControlOrPhase::Phase(Ok(ws)) => ws,
                 ControlOrPhase::Phase(Err(e)) => {
                     tracing::warn!("ws connect failed: {e}");
-                    self.reconnect.backoff().await; // temporarily; control check added in Task 4.
+                    let backoff_outcome = tokio::select! {
+                        biased;
+                        ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
+                        _ = self.reconnect.backoff() => ControlOrPhase::Phase(()),
+                    };
+                    match backoff_outcome {
+                        ControlOrPhase::Control(None)
+                        | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                        ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                            self.auth = auth;
+                            self.reconnect.reset();
+                            continue;
+                        }
+                        ControlOrPhase::Phase(()) => {}
+                    }
                     continue;
                 }
             };
@@ -305,7 +319,21 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     ws.close().await;
                 }
             }
-            self.reconnect.backoff().await;
+            let backoff_outcome = tokio::select! {
+                biased;
+                ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
+                _ = self.reconnect.backoff() => ControlOrPhase::Phase(()),
+            };
+            match backoff_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(()) => {}
+            }
         }
     }
 
@@ -648,6 +676,32 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(200), task)
             .await
             .expect("manager should exit promptly after Shutdown during connect")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_backoff() {
+        let controller = Arc::new(TestStreamController::default());
+        // handshake_response is None by default → handshake fails with
+        // "server closed before handshake response", which routes into backoff.
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        // Wait for at least one failed connect/handshake cycle to enter backoff.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        handle.disconnect();
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit during backoff on Shutdown")
             .unwrap();
     }
 
