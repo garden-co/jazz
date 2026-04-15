@@ -216,7 +216,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // 1. Drain inbound transport events.
         // Collect into a Vec first to avoid holding &mut self.transport while
         // calling &mut self methods (remove_server, add_server_with_catalogue_state_hash, etc.).
-        #[cfg(feature = "transport")]
         {
             let events: Vec<crate::transport_manager::TransportInbound> = {
                 let mut buf = Vec::new();
@@ -308,7 +307,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if outbox.is_empty() {
             return;
         }
-        #[cfg(feature = "transport")]
         if let Some(ref h) = self.transport {
             for msg in outbox {
                 h.send_outbox(msg);
@@ -326,11 +324,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// to receive outbox entries. When false, batched_tick skips the outbox
     /// drain so tests can inspect `take_outbox()` directly.
     fn has_outbox_sink(&self) -> bool {
-        #[cfg(feature = "transport")]
-        let has_transport = self.transport.is_some();
-        #[cfg(not(feature = "transport"))]
-        let has_transport = false;
-        has_transport || self.sync_sender.is_some()
+        self.transport.is_some() || self.sync_sender.is_some()
     }
 
     /// Apply parked sync messages and tick.

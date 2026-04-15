@@ -335,14 +335,14 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 }
 
 // WASM-compatible run() — uses `futures::select!` instead of `tokio::select!`.
-// Activated when `transport` is enabled but `runtime-tokio` is not (i.e. WASM).
-#[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
+// Activated when `runtime-tokio` is not (i.e. WASM).
+#[cfg(not(feature = "runtime-tokio"))]
 enum WasmConnectedExit {
     HandleDropped,
     NetworkError,
 }
 
-#[cfg(all(feature = "transport", not(feature = "runtime-tokio")))]
+#[cfg(not(feature = "runtime-tokio"))]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
     /// Returns only when the `TransportHandle` is dropped.
