@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as schemaWatcher from "./schema-watcher.js";
-import { jazzSvelteKit } from "./sveltekit.js";
+import { jazzSvelteKit, __resetJazzSvelteKitPluginForTests } from "./sveltekit.js";
 import type { ViteDevServer } from "./vite.js";
 
 const dev = await import("./index.js");
@@ -26,6 +26,7 @@ function makeViteServer(
 }
 
 afterEach(async () => {
+  await __resetJazzSvelteKitPluginForTests();
   await tempRoots.cleanup();
   vi.restoreAllMocks();
 

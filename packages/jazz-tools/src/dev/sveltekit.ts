@@ -33,12 +33,12 @@ function resolveViteOrigin(viteServer: ViteDevServer): string {
   return `${scheme}://${host}:${port}`;
 }
 
-export function jazzSvelteKit(options: JazzPluginOptions = {}) {
-  const runtime = new ManagedDevRuntime({
-    appId: "PUBLIC_JAZZ_APP_ID",
-    serverUrl: "PUBLIC_JAZZ_SERVER_URL",
-  });
+const runtime = new ManagedDevRuntime({
+  appId: "PUBLIC_JAZZ_APP_ID",
+  serverUrl: "PUBLIC_JAZZ_SERVER_URL",
+});
 
+export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   return {
     name: "jazz-sveltekit",
 
@@ -102,6 +102,10 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       });
     },
   };
+}
+
+export async function __resetJazzSvelteKitPluginForTests(): Promise<void> {
+  await runtime.resetForTests();
 }
 
 function resolveServerWithJwks(
