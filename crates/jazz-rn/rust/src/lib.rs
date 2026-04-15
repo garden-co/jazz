@@ -850,8 +850,25 @@ impl RnRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     pub fn disconnect(&self) {
         if let Ok(mut core) = self.core.lock() {
+            if let Some(handle) = core.transport() {
+                handle.disconnect();
+            }
             core.clear_transport();
         }
+    }
+
+    /// Push updated auth credentials into the live transport.
+    pub fn update_auth(&self, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("update_auth", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            if let Ok(core) = self.core.lock() {
+                if let Some(handle) = core.transport() {
+                    handle.update_auth(auth);
+                }
+            }
+            Ok(())
+        })
     }
 }
 
