@@ -876,4 +876,70 @@ mod tests {
         handle.disconnect();
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
     }
+
+    #[tokio::test]
+    async fn update_auth_during_connected() {
+        let controller = Arc::new(TestStreamController::default());
+        *controller.handshake_response.lock().unwrap() = Some(make_handshake_response_frame());
+        controller.recv_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (mut handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(handle.has_ever_connected());
+        let initial_close_calls = controller.close_calls.load(Ordering::SeqCst);
+
+        let mut new_auth = AuthConfig::default();
+        new_auth.jwt_token = Some("refreshed".into());
+        handle.update_auth(new_auth);
+
+        // Expect: Disconnected emitted; stream closed; reconnect reaches Connected again.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut events = Vec::new();
+        while let Some(msg) = handle.try_recv_inbound() {
+            events.push(msg);
+        }
+        let has_disconnected = events
+            .iter()
+            .any(|e| matches!(e, TransportInbound::Disconnected));
+        let connected_count = events
+            .iter()
+            .filter(|e| matches!(e, TransportInbound::Connected { .. }))
+            .count();
+        assert!(
+            has_disconnected,
+            "UpdateAuth while connected must emit Disconnected"
+        );
+        assert!(
+            connected_count >= 1,
+            "Expected at least one fresh Connected after auth refresh"
+        );
+        assert!(controller.close_calls.load(Ordering::SeqCst) > initial_close_calls);
+
+        // Verify the latest handshake frame carried the refreshed JWT.
+        let frames = controller.sent_frames.lock().unwrap().clone();
+        let latest_handshake = frames
+            .iter()
+            .rev()
+            .find_map(|f| {
+                let payload = frame_decode(f)?;
+                serde_json::from_slice::<AuthHandshake>(payload).ok()
+            })
+            .expect("at least one AuthHandshake frame");
+        assert_eq!(
+            latest_handshake.auth.jwt_token.as_deref(),
+            Some("refreshed")
+        );
+
+        handle.disconnect();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
+    }
 }
