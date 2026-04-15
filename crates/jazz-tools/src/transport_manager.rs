@@ -365,7 +365,6 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             ws.close().await;
                         }
                         ConnectedExit::UpdateAuth(auth) => {
-                            // Implemented fully in Task 8; placeholder path exits-and-reconnects for now.
                             self.auth = auth;
                             let _ = self
                                 .inbound_tx
