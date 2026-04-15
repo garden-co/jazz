@@ -1519,7 +1519,26 @@ impl WasmRuntime {
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
     pub fn disconnect(&self) {
-        self.core.borrow_mut().clear_transport();
+        let mut core = self.core.borrow_mut();
+        // Signal the manager to shut down before dropping the handle.
+        if let Some(handle) = core.transport() {
+            handle.disconnect();
+        }
+        // Drop the borrow before mutably clearing.
+        core.clear_transport();
+    }
+
+    /// Push updated auth credentials into the live transport.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn update_auth(&self, auth_json: String) -> Result<(), JsValue> {
+        let auth: jazz_tools::transport_manager::AuthConfig =
+            serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let core = self.core.borrow();
+        if let Some(handle) = core.transport() {
+            handle.update_auth(auth);
+        }
+        Ok(())
     }
 }
 
