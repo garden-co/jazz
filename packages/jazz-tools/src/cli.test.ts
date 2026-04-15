@@ -2019,6 +2019,25 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("Schema file not found");
   });
 
+  it("fails when multiple schema.ts candidate locations are present", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+    await mkdir(join(root, "src", "lib"), { recursive: true });
+    await writeFile(
+      join(root, "src", "lib", "schema.ts"),
+      rootSchemaWithoutInlinePermissions(distIndexPath),
+    );
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Ambiguous schema location");
+  });
+
   it("rejects the removed build alias with a validate hint", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
