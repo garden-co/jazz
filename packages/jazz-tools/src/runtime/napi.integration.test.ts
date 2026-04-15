@@ -478,6 +478,7 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath: writerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        adminSecret,
       });
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
@@ -487,6 +488,7 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        adminSecret,
       });
       await settleAsyncSyncWork();
 
@@ -541,6 +543,7 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath: readerRuntimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
+        adminSecret,
       });
       await settleAsyncSyncWork();
       const refreshedReader = readerContext.asBackend();

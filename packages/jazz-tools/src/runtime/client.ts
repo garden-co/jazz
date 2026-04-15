@@ -1307,17 +1307,19 @@ export class JazzClient {
   /**
    * Connect to a Jazz server over WebSocket using the Rust transport layer.
    *
-   * Serialises `auth` to JSON and delegates to the underlying runtime's
-   * `connect(url, auth_json)` method (available on NapiRuntime and WasmRuntime).
+   * Accepts an HTTP/HTTPS server URL (e.g. "http://localhost:4000") and
+   * converts it to the corresponding WebSocket `/ws` endpoint URL before
+   * passing it to the underlying Rust runtime's `connect()`.  Already-WS URLs
+   * are passed through unchanged.
    *
-   * @param url  WebSocket URL of the Jazz server (e.g. "ws://localhost:4000").
+   * @param url  Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
    * @param auth Authentication credentials for the connection.
    */
   connectTransport(url: string, auth: AuthConfig): void {
     if (!this.runtime.connect) {
       throw new Error("Underlying runtime does not support connect()");
     }
-    this.runtime.connect(url, JSON.stringify(auth));
+    this.runtime.connect(httpUrlToWs(url), JSON.stringify(auth));
   }
 
   /**
@@ -1515,4 +1517,33 @@ export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<Wa
   }
 
   return wasmModule;
+}
+
+/**
+ * Convert an HTTP(S) server URL to the WebSocket `/ws` endpoint URL.
+ *
+ * Mirrors the Rust `http_url_to_ws` helper in `crates/jazz-tools/src/client.rs`.
+ *
+ * - `http://host/prefix`  → `ws://host/prefix/ws`
+ * - `https://host`        → `wss://host/ws`
+ * - `ws://host`           → `ws://host/ws`  (if `/ws` suffix is absent)
+ * - `ws://host/ws`        → unchanged
+ */
+function httpUrlToWs(serverUrl: string): string {
+  const trimmed = serverUrl.replace(/\/+$/, "");
+  if (trimmed.startsWith("http://")) {
+    const rest = trimmed.slice("http://".length);
+    return `ws://${rest}/ws`;
+  }
+  if (trimmed.startsWith("https://")) {
+    const rest = trimmed.slice("https://".length);
+    return `wss://${rest}/ws`;
+  }
+  // Already a WS URL — append /ws if not already present.
+  if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) {
+    return trimmed.endsWith("/ws") ? trimmed : `${trimmed}/ws`;
+  }
+  throw new Error(
+    `Invalid server URL "${serverUrl}": expected http://, https://, ws://, or wss://`,
+  );
 }

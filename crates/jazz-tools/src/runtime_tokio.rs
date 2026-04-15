@@ -82,15 +82,19 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
             let flag = self.scheduled.clone();
 
             tokio::spawn(async move {
-                // Call batched_tick on the core
+                // Clear the debounce flag BEFORE running batched_tick so that
+                // messages arriving while the tick executes can successfully
+                // schedule a follow-up tick.  Without this, a message parked
+                // between the drain inside batched_tick and the flag.store(false)
+                // below would be silently dropped — no tick would ever wake up
+                // to process it.
+                flag.store(false, Ordering::SeqCst);
+
                 if let Some(core_arc) = core_ref.upgrade()
                     && let Ok(mut core) = core_arc.lock()
                 {
                     core.batched_tick();
                 }
-
-                // Clear the scheduled flag AFTER tick completes
-                flag.store(false, Ordering::SeqCst);
             });
         }
     }
