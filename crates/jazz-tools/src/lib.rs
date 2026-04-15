@@ -2,6 +2,7 @@ pub mod batch_fate;
 pub mod binding_support;
 pub mod catalogue;
 pub mod digest;
+pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;

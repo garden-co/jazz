@@ -142,7 +142,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
     let alice = make_client(server, schema.clone(), "alice-bulk", "todos").await;
 
     let mut expected_titles: BTreeSet<String> = BTreeSet::new();
-    for i in 0..ROW_COUNT {
+    for i in 0..(ROW_COUNT - 1) {
         let title = format!("todo-{i:03}");
         expected_titles.insert(title.clone());
         alice
@@ -157,11 +157,25 @@ async fn large_dataset_correctness(server: &TestingServer) {
             .expect("create todo");
     }
 
+    let final_title = format!("todo-{:03}", ROW_COUNT - 1);
+    expected_titles.insert(final_title.clone());
+    alice
+        .create_persisted(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text(final_title)),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("create final persisted todo");
+
     wait_for_query(
         &alice,
         QueryBuilder::new("todos").build(),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(120),
+        Duration::from_secs(30),
         format!("alice sees {ROW_COUNT} todos"),
         |rows| (rows.len() == ROW_COUNT).then_some(()),
     )
@@ -173,7 +187,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
         &bob,
         QueryBuilder::new("todos").build(),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(120),
+        Duration::from_secs(30),
         format!("bob sees {ROW_COUNT} todos"),
         |rows| (rows.len() == ROW_COUNT).then_some(rows),
     )
@@ -322,29 +336,35 @@ async fn deep_update_history(server: &TestingServer) {
     let alice = make_client(server, schema.clone(), "alice-deep", "todos").await;
 
     let (todo_id, _) = alice
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
-        .expect("create todo");
+        .expect("create persisted todo");
 
-    let final_title = format!("revision-{UPDATE_COUNT:03}");
+    // This test is about replaying a deep server history for a fresh client,
+    // not about transport reordering. Make each revision edge-durable before
+    // sending the next so Bob observes one causal history.
     for rev in 1..=UPDATE_COUNT {
         alice
-            .update(
+            .update_persisted(
                 todo_id,
                 vec![(
                     "title".to_string(),
                     Value::Text(format!("revision-{rev:03}")),
                 )],
+                DurabilityTier::EdgeServer,
             )
             .await
-            .expect("update todo");
+            .expect("persist todo update");
     }
+
+    let final_title = format!("revision-{UPDATE_COUNT:03}");
 
     wait_for_query(
         &alice,

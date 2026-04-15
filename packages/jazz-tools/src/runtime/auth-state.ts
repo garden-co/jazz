@@ -7,7 +7,7 @@ export type { AuthFailureReason } from "./sync-transport.js";
 export type AuthState =
   | {
       status: "authenticated";
-      transport: "bearer" | "local" | "backend";
+      transport: "bearer" | "backend";
       session: Session | null;
     }
   | {
@@ -95,8 +95,6 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       const nextState = deriveAuthenticatedState({
         appId: input.appId,
         jwtToken,
-        localAuthMode: input.localAuthMode,
-        localAuthToken: input.localAuthToken,
       });
 
       const currentUserId = authUserId(state);

@@ -1,110 +1,27 @@
-import { useState } from "react";
-import {
-  getActiveSyntheticAuth,
-  JazzProvider,
-  SyntheticUserSwitcher,
-  useLinkExternalIdentity,
-} from "jazz-tools/react";
+import { use } from "react";
+import { BrowserAuthSecretStore } from "jazz-tools";
+import { JazzProvider } from "jazz-tools/react";
 
 function TodoApp() {
   return null;
 }
 
-// #region auth-anon-react
-export function AnonymousAuthApp() {
+// #region auth-localfirst-react
+export function LocalFirstAuthApp() {
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+
   return (
     <JazzProvider
       config={{
         appId: "my-app",
-        env: "dev",
-        userBranch: "main",
+        auth: { localFirstSecret: secret },
       }}
     >
       <TodoApp />
     </JazzProvider>
   );
 }
-// #endregion auth-anon-react
-
-// #region auth-anon-token-react
-export function AnonymousAuthWithTokenApp() {
-  return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-        localAuthMode: "anonymous",
-        localAuthToken: "device-token-123",
-      }}
-    >
-      <TodoApp />
-    </JazzProvider>
-  );
-}
-// #endregion auth-anon-token-react
-
-// #region auth-demo-react
-const demoAuthAppId = "my-app";
-const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-
-export function DemoAuthApp() {
-  return (
-    <>
-      <SyntheticUserSwitcher appId={demoAuthAppId} defaultMode="demo" />
-      <JazzProvider
-        config={{
-          appId: demoAuthAppId,
-          serverUrl: "http://127.0.0.1:4200",
-          localAuthMode: demoAuthActive.localAuthMode,
-          localAuthToken: demoAuthActive.localAuthToken,
-        }}
-      >
-        <TodoApp />
-      </JazzProvider>
-    </>
-  );
-}
-// #endregion auth-demo-react
-
-// #region auth-external-react
-const appId = "my-app";
-const jazzServerUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-
-export function ExternalAuthApp() {
-  const [hasJwt, setHasJwt] = useState(false);
-  const linkExternalIdentity = useLinkExternalIdentity({
-    appId,
-    serverUrl: jazzServerUrl,
-    defaultMode: "anonymous",
-  });
-
-  async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: providerJwt });
-    setHasJwt(true);
-  }
-
-  return (
-    <JazzProvider
-      key={hasJwt ? "jwt" : "local"}
-      config={
-        hasJwt
-          ? {
-              appId,
-              serverUrl: jazzServerUrl,
-              jwtToken: providerJwt,
-            }
-          : {
-              appId,
-              serverUrl: jazzServerUrl,
-            }
-      }
-    >
-      <button onClick={() => onSignedIn()}>Sign in</button>
-      <TodoApp />
-    </JazzProvider>
-  );
-}
-// #endregion auth-external-react
+// #endregion auth-localfirst-react
 
 // #region auth-jwt-react
 export function JwtAuthApp() {
@@ -122,16 +39,36 @@ export function JwtAuthApp() {
 }
 // #endregion auth-jwt-react
 
-// #region auth-offline-react
-export function OfflineOnlyAuthApp() {
-  return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-      }}
-    >
-      <TodoApp />
-    </JazzProvider>
-  );
+// #region auth-localfirst-react-backup
+export async function getRecoveryPhraseForBackup(): Promise<string | null> {
+  const secret = await BrowserAuthSecretStore.loadSecret();
+  if (!secret) return null;
+  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
+  return RecoveryPhrase.fromSecret(secret);
 }
-// #endregion auth-offline-react
+// #endregion auth-localfirst-react-backup
+
+// #region auth-localfirst-react-restore
+export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
+  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
+  const secret = RecoveryPhrase.toSecret(userInput);
+  await BrowserAuthSecretStore.saveSecret(secret);
+}
+// #endregion auth-localfirst-react-restore
+
+// #region auth-localfirst-react-passkey-backup
+export async function backupWithPasskey(secret: string): Promise<void> {
+  const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
+  const pb = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
+  await pb.backup(secret);
+}
+// #endregion auth-localfirst-react-passkey-backup
+
+// #region auth-localfirst-react-passkey-restore
+export async function restoreWithPasskey(): Promise<void> {
+  const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
+  const pb = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
+  const secret = await pb.restore();
+  await BrowserAuthSecretStore.saveSecret(secret);
+}
+// #endregion auth-localfirst-react-passkey-restore

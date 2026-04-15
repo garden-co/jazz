@@ -49,8 +49,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     env: TEST_ENV,
     userBranch: TEST_BRANCH,
     adminSecret: ADMIN_SECRET,
-    localAuthMode: "demo",
-    localAuthToken: "test-token",
+    auth: { localFirstSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" },
   });
 
   const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);

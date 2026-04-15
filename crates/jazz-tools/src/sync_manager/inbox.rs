@@ -864,6 +864,9 @@ impl SyncManager {
                     }
                 }
             }
+            SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
+                super::log_connection_schema_diagnostics(&diagnostics, Some("server"));
+            }
             SyncPayload::Error(err) => {
                 // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
@@ -1185,6 +1188,12 @@ impl SyncManager {
                     %client_id,
                     query_id = query_id.0,
                     "client attempted to send QueryScopeSnapshot payload; ignoring"
+                );
+            }
+            SyncPayload::ConnectionSchemaDiagnostics(_) => {
+                tracing::warn!(
+                    %client_id,
+                    "client attempted to send ConnectionSchemaDiagnostics payload; ignoring"
                 );
             }
             // Clients shouldn't send these

@@ -931,6 +931,9 @@ impl<'a> Normalizer<'a> {
             SyncPayload::SchemaWarning(w) => {
                 format!("query:{} table:{}", w.query_id.0, w.table_name)
             }
+            SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
+                format!("client_schema:{}", diagnostics.client_schema_hash.short())
+            }
             SyncPayload::Error(e) => {
                 format!("{:?}", e)
             }
@@ -1049,6 +1052,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::SchemaWarning(w) => {
             format!("query:{} table:{}", w.query_id.0, w.table_name)
+        }
+        SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
+            format!("client_schema:{}", diagnostics.client_schema_hash.short())
         }
         SyncPayload::Error(e) => {
             format!("{:?}", e)

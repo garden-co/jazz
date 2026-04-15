@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Row, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
-import { deriveLocalPrincipalId } from "./client-session.js";
 
 const schemaWithTodos = {
   todos: {
@@ -572,80 +571,6 @@ describe("JazzClient schema order", () => {
       done: { type: "Boolean", value: false },
     });
     expect(insertDurable).not.toHaveBeenCalled();
-  });
-
-  it("uses the local auth session for direct queries and subscriptions", async () => {
-    const query = vi.fn(async () => []);
-    const createSubscription = vi.fn(() => 0);
-    const runtime: Runtime = {
-      insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
-      query,
-      subscribe: () => 0,
-      createSubscription,
-      executeSubscription: () => {},
-      unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
-      onSyncMessageReceived: () => {},
-      onSyncMessageToSend: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
-      getSchema: () =>
-        new Map([
-          [
-            "todos",
-            {
-              columns: [
-                {
-                  name: "title",
-                  column_type: { type: "Text" as const },
-                  nullable: false,
-                },
-              ],
-            },
-          ],
-        ]),
-      getSchemaHash: () => "schema-hash",
-    };
-    const client = JazzClient.connectWithRuntime(runtime, {
-      appId: "test-app",
-      schema: {
-        todos: {
-          columns: [
-            {
-              name: "title",
-              column_type: { type: "Text" as const },
-              nullable: false,
-            },
-          ],
-        },
-      },
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    await client.query(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }));
-    client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), () => {});
-
-    const expectedSession = JSON.stringify({
-      user_id: await deriveLocalPrincipalId("test-app", "anonymous", "device-token"),
-      claims: {
-        auth_mode: "local",
-        local_mode: "anonymous",
-      },
-    });
-
-    expect(query).toHaveBeenCalledWith(expect.any(String), expectedSession, "worker", undefined);
-    expect(createSubscription).toHaveBeenCalledWith(
-      expect.any(String),
-      expectedSession,
-      "worker",
-      undefined,
-    );
   });
 
   it("reorders query rows back to the declared schema order", async () => {

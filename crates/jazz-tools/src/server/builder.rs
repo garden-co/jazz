@@ -70,7 +70,10 @@ impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig::default(),
+            auth_config: AuthConfig {
+                allow_local_first_auth: true,
+                ..Default::default()
+            },
             catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_mode: ServerStorageMode::Persistent {
@@ -87,6 +90,11 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
+        self
+    }
+
+    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
+        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 
@@ -370,7 +378,7 @@ fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     )
 }
 
-async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
+async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<Arc<JwksCache>>, String> {
     let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
         return Ok(None);
     };
@@ -386,16 +394,33 @@ async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>,
         .map(Duration::from_secs)
         .unwrap_or(JWKS_MAX_STALE);
 
-    let cache = JwksCache::new(
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
+
+    let cache = Arc::new(JwksCache::new(
         jwks_url.clone(),
-        reqwest::Client::new(),
+        http_client,
         jwks_ttl,
         jwks_max_stale,
-    );
-    cache
-        .load(false)
-        .await
-        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+    ));
+
+    // Warm the cache in the background. The JWKS endpoint may not be
+    // available yet (e.g. Jazz server starts during Next.js config resolution,
+    // before the app is listening). First auth request will block on fetch
+    // if the background warm hasn't completed.
+    {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            if let Err(e) = cache.load(false).await {
+                tracing::warn!(
+                    "Background JWKS warm failed (will retry on first auth request): {e}"
+                );
+            }
+        });
+    }
 
     Ok(Some(cache))
 }
@@ -425,22 +450,14 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
             format!("forward({base_url})")
         }
     };
-    if auth_config.is_configured() {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
-            auth_config.allow_anonymous,
-            auth_config.allow_demo,
-            auth_config.jwks_url.is_some(),
-            auth_config.backend_secret.is_some(),
-            auth_config.admin_secret.is_some(),
-            authority_mode
-        );
-    } else {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
-            auth_config.allow_anonymous, auth_config.allow_demo, authority_mode
-        );
-    }
+    info!(
+        "Auth configured: local_first={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+        auth_config.allow_local_first_auth,
+        auth_config.jwks_url.is_some(),
+        auth_config.backend_secret.is_some(),
+        auth_config.admin_secret.is_some(),
+        authority_mode
+    );
 }
 
 #[cfg(test)]

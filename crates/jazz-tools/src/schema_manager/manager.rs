@@ -7,7 +7,10 @@
 //! - Integrated QueryManager for query/insert/update/delete operations
 //! - Catalogue persistence for schema/lens discovery via sync
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use blake3::Hasher;
 
@@ -17,13 +20,14 @@ use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, Quer
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
+    ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
+    Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
@@ -136,6 +140,29 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
+        let row_policy_mode = if QueryManager::schema_has_any_explicit_policies(&schema) {
+            RowPolicyMode::Enforcing
+        } else {
+            RowPolicyMode::PermissiveLocal
+        };
+        Self::new_with_policy_mode(
+            sync_manager,
+            schema,
+            app_id,
+            env,
+            user_branch,
+            row_policy_mode,
+        )
+    }
+
+    pub fn new_with_policy_mode(
+        sync_manager: SyncManager,
+        schema: Schema,
+        app_id: AppId,
+        env: &str,
+        user_branch: &str,
+        row_policy_mode: RowPolicyMode,
+    ) -> Result<Self, SchemaError> {
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -143,7 +170,12 @@ impl SchemaManager {
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_current_schema(schema.clone(), env, user_branch);
+        query_manager.set_current_schema_with_policy_mode(
+            schema.clone(),
+            env,
+            user_branch,
+            row_policy_mode,
+        );
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
@@ -623,6 +655,68 @@ impl SchemaManager {
                 parent_bundle_object_id: head.parent_bundle_object_id,
                 bundle_object_id: head.bundle_object_id,
             })
+    }
+
+    pub fn connection_schema_diagnostics(
+        &self,
+        client_schema_hash: SchemaHash,
+    ) -> ConnectionSchemaDiagnostics {
+        let active_permissions_hash = self
+            .current_permissions_head
+            .map(|head| head.schema_hash)
+            .or_else(|| self.has_current_schema().then_some(self.current_hash()));
+        let reachable_hashes = self.non_draft_reachable_hashes(client_schema_hash);
+        let disconnected_permissions_schema_hash = active_permissions_hash
+            .filter(|permissions_hash| !reachable_hashes.contains(permissions_hash));
+
+        let mut unreachable_schema_hashes: Vec<_> = self
+            .known_schema_hashes()
+            .into_iter()
+            .filter(|hash| *hash != client_schema_hash)
+            .filter(|hash| !reachable_hashes.contains(hash))
+            .filter(|hash| Some(*hash) != disconnected_permissions_schema_hash)
+            .collect();
+        unreachable_schema_hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        ConnectionSchemaDiagnostics {
+            client_schema_hash,
+            disconnected_permissions_schema_hash,
+            unreachable_schema_hashes,
+        }
+    }
+
+    fn non_draft_reachable_hashes(&self, start_hash: SchemaHash) -> HashSet<SchemaHash> {
+        if !self.is_schema_known(&start_hash) {
+            return HashSet::new();
+        }
+
+        let mut reachable = HashSet::from([start_hash]);
+        let mut queue = VecDeque::from([start_hash]);
+
+        while let Some(current) = queue.pop_front() {
+            for (&(source_hash, target_hash), lens) in &self.context.lenses {
+                if lens.is_draft() {
+                    continue;
+                }
+
+                let next_hash = if source_hash == current {
+                    Some(target_hash)
+                } else if target_hash == current {
+                    Some(source_hash)
+                } else {
+                    None
+                };
+
+                if let Some(next_hash) = next_hash
+                    && self.is_schema_known(&next_hash)
+                    && reachable.insert(next_hash)
+                {
+                    queue.push_back(next_hash);
+                }
+            }
+        }
+
+        reachable
     }
 
     // =========================================================================
@@ -2109,6 +2203,84 @@ mod tests {
         // V2 has 3 columns (id, name, email)
         let v2_desc = manager.get_table_descriptor("users", &v2_hash).unwrap();
         assert_eq!(v2_desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn connection_schema_diagnostics_treat_unknown_client_schema_as_disconnected() {
+        let schema = make_schema_v2();
+        let current_hash = SchemaHash::compute(&schema);
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let diagnostics = manager.connection_schema_diagnostics(SchemaHash::from_bytes([7; 32]));
+
+        assert_eq!(
+            diagnostics.client_schema_hash,
+            SchemaHash::from_bytes([7; 32])
+        );
+        assert_eq!(
+            diagnostics.disconnected_permissions_schema_hash,
+            Some(current_hash)
+        );
+        assert!(diagnostics.unreachable_schema_hashes.is_empty());
+    }
+
+    #[test]
+    fn connection_schema_diagnostics_reports_other_unreachable_server_schemas() {
+        let v1 = make_schema_v1();
+        let v2 = make_schema_v2();
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text)
+                    .nullable_column("nickname", ColumnType::Text),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        manager.add_live_schema(v1).unwrap();
+        manager.add_known_schema(v3);
+
+        let diagnostics = manager.connection_schema_diagnostics(v1_hash);
+
+        assert_eq!(diagnostics.disconnected_permissions_schema_hash, None);
+        assert_eq!(diagnostics.unreachable_schema_hashes, vec![v3_hash]);
+    }
+
+    #[test]
+    fn connection_schema_diagnostics_ignore_draft_lenses() {
+        let v1 = make_schema_v1();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let draft_lens = generate_lens(&v1, &v2);
+
+        assert!(draft_lens.is_draft());
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        manager.add_known_schema(v1);
+        manager.context.register_lens(draft_lens);
+
+        let diagnostics = manager.connection_schema_diagnostics(v1_hash);
+
+        assert_eq!(
+            diagnostics.disconnected_permissions_schema_hash,
+            Some(v2_hash)
+        );
+        assert!(diagnostics.unreachable_schema_hashes.is_empty());
     }
 
     #[test]

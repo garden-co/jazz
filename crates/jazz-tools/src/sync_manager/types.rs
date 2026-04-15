@@ -314,6 +314,9 @@ pub enum SyncPayload {
     /// Warning that rows exist on an older schema branch but are currently unreachable.
     SchemaWarning(SchemaWarning),
 
+    /// Connection-time schema diagnostics for observability.
+    ConnectionSchemaDiagnostics(ConnectionSchemaDiagnostics),
+
     /// Error response.
     Error(SyncError),
 }
@@ -328,6 +331,23 @@ pub struct SchemaWarning {
     pub row_count: usize,
     pub from_hash: SchemaHash,
     pub to_hash: SchemaHash,
+}
+
+/// Warning sent to the client when its schema is either disconnected from the permissions schema
+/// or not connected to other schemas known to the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionSchemaDiagnostics {
+    pub client_schema_hash: SchemaHash,
+    pub disconnected_permissions_schema_hash: Option<SchemaHash>,
+    pub unreachable_schema_hashes: Vec<SchemaHash>,
+}
+
+impl ConnectionSchemaDiagnostics {
+    pub fn has_issues(&self) -> bool {
+        self.disconnected_permissions_schema_hash.is_some()
+            || !self.unreachable_schema_hashes.is_empty()
+    }
 }
 
 /// Sessions contain claims as a JSON object.
@@ -496,6 +516,7 @@ impl SyncPayload {
             SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::SchemaWarning(_) => "SchemaWarning",
+            SyncPayload::ConnectionSchemaDiagnostics(_) => "ConnectionSchemaDiagnostics",
             SyncPayload::Error(_) => "Error",
         }
     }

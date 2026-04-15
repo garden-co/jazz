@@ -5,5 +5,6 @@
 
 ## Hot points
 
-- To use jazz-tools/backend with native bindings, `serverExternalPackages: ["jazz-napi", "jazz-tools"],` is needed `next.config.ts`
-- Due to the symlinks made by pnpm in monorepo, the `serverExternalPackages` is not enough to avoid Next.js to skip the evaluation of crates/jazz-napi. That's why the workaround in `lib/jazz-server.ts`
+- `next.config.ts` uses `withJazz(...)` from `jazz-tools/dev/next`
+- Public Jazz connection vars are `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`
+- The SSR example still keeps `BACKEND_SECRET` explicit because backend access is server-only

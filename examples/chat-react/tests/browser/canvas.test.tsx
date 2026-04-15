@@ -9,7 +9,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,8 +47,7 @@ describe("Canvas E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      auth?: { localFirstSecret: string };
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -82,6 +82,7 @@ describe("Canvas E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
@@ -195,8 +196,7 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `canvas-user-a-${Date.now()}`,
+      auth: { localFirstSecret: await testSecret(`canvas-user-a-${Date.now()}`) },
     });
 
     await waitFor(
@@ -246,8 +246,7 @@ describe("Canvas E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("collab-canvas-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `canvas-user-b-${Date.now()}`,
+      auth: { localFirstSecret: await testSecret(`canvas-user-b-${Date.now()}`) },
     });
 
     // User B should see the canvas

@@ -12,7 +12,9 @@ use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
-use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{
+    OrderedRowDelta, RowDescriptor, Schema, SchemaHash, TableName, Value,
+};
 use crate::row_histories::BatchId;
 use crate::runtime_core::PersistedWriteAck;
 use crate::runtime_core::ReadDurabilityOptions;
@@ -291,7 +293,7 @@ impl JazzClient {
             let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
-            let stream_headers = conn.build_stream_headers();
+            let stream_headers = conn.build_stream_headers(SchemaHash::compute(&declared_schema));
             let server_id_for_stream = server_id;
             let mut initial_stream_ready_tx = initial_stream_ready_tx;
             let tracer_for_incoming = context.sync_tracer.clone();
@@ -1231,6 +1233,19 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.recursive.is_none()
         && query.select_columns.is_none()
         && query.result_element_index.is_none()
+}
+
+async fn wait_for_persisted_write(
+    receiver: futures::channel::oneshot::Receiver<()>,
+    operation: &str,
+    tier: DurabilityTier,
+) -> Result<()> {
+    receiver.await.map_err(|_| {
+        JazzError::Sync(format!(
+            "{operation} was cancelled before reaching {tier:?} durability"
+        ))
+    })?;
+    Ok(())
 }
 
 fn align_row_values_to_declared_schema(

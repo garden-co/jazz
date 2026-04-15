@@ -39,7 +39,14 @@ Those roles decide how incoming writes are handled.
 
 ### User
 
-User writes may require a session and can be queued for permission evaluation before they are applied.
+User writes may require a session and can be queued for permission evaluation
+before they are applied.
+
+Those pending checks carry the client session plus row metadata/content so
+`QueryManager` can evaluate them against the active authorization schema. On an
+enforcing runtime, missing explicit policies are rejected instead of treated as
+implicit grants. If the relevant schema or permissions head is not ready yet,
+the check can remain pending and be retried after catalogue state catches up.
 
 ### Admin
 

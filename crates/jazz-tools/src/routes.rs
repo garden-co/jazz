@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -21,17 +21,14 @@ use crate::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
     SyncPayloadResult, UnauthenticatedResponse,
 };
-use crate::middleware::auth::{
-    derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_backend_secret,
-};
+use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
 use crate::object::ObjectId;
 use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
-use crate::sync_manager::ClientId;
+use crate::sync_manager::{ClientId, SyncPayload};
 
 /// Runs an async closure when this guard is dropped.
 ///
@@ -67,8 +64,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
-        // Link a local anonymous/demo principal to an external identity.
-        .route("/auth/link-external", post(link_external_handler))
         // Health check
         .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http());
@@ -86,6 +81,8 @@ struct EventsParams {
     /// Client-provided ID for reconnect support.
     client_id: Option<String>,
 }
+
+const CLIENT_SCHEMA_HASH_HEADER: &str = "X-Jazz-Client-Schema-Hash";
 
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
@@ -194,14 +191,6 @@ struct PublishMigrationResponse {
     object_id: String,
     from_hash: String,
     to_hash: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LinkExternalResponse {
-    principal_id: String,
-    issuer: String,
-    subject: String,
-    created: bool,
 }
 
 async fn forward_catalogue_request(
@@ -333,6 +322,19 @@ async fn events_handler(
         })?,
         None => ClientId::new(),
     };
+    let client_schema_hash = match headers
+        .get(CLIENT_SCHEMA_HASH_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(hash_text) => Some(parse_schema_hash_param(hash_text).map_err(|message| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response()
+        })?),
+        None => None,
+    };
 
     {
         let _span = tracing::debug_span!("events_handler", %client_id).entered();
@@ -367,7 +369,7 @@ async fn events_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {
@@ -389,7 +391,7 @@ async fn events_handler(
                 return Err((
                     StatusCode::UNAUTHORIZED,
                     Json(UnauthenticatedResponse::missing(
-                        "Session required for event stream. Provide JWT, local auth headers, or backend secret.",
+                        "Session required for event stream. Provide JWT or backend secret.",
                     )),
                 )
                     .into_response());
@@ -419,6 +421,27 @@ async fn events_handler(
         }
         ClientSetup::Session(session) => {
             let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
+    }
+
+    if let Some(client_schema_hash) = client_schema_hash {
+        match state.runtime.with_schema_manager(|schema_manager| {
+            schema_manager.connection_schema_diagnostics(client_schema_hash)
+        }) {
+            Ok(diagnostics) if diagnostics.has_issues() => {
+                state.connection_event_hub.dispatch_payload(
+                    client_id,
+                    SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::error!(
+                    %client_id,
+                    %client_schema_hash,
+                    "failed to compute connection schema diagnostics: {err}"
+                );
+            }
         }
     }
 
@@ -572,7 +595,7 @@ async fn sync_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-                state.jwks_cache.as_ref(),
+                state.jwks_cache.as_deref(),
             )
             .await
             {
@@ -585,7 +608,7 @@ async fn sync_handler(
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(UnauthenticatedResponse::missing(
-                            "Session required for sync. Provide JWT, local auth headers, or backend secret.",
+                            "Session required for sync. Provide JWT or backend secret.",
                         )),
                     )
                         .into_response();
@@ -1433,206 +1456,6 @@ fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-async fn link_external_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let (local_mode, local_token) = match parse_local_auth_headers(&headers) {
-        Ok(Some(local)) => local,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Local auth headers are required for link-external",
-                )),
-            )
-                .into_response();
-        }
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
-        }
-    };
-
-    if !state.auth_config.is_local_mode_enabled(local_mode) {
-        let message = match local_mode {
-            crate::middleware::auth::LocalAuthMode::Anonymous => "Anonymous auth disabled",
-            crate::middleware::auth::LocalAuthMode::Demo => "Demo auth disabled",
-        };
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::unauthorized(message)),
-        )
-            .into_response();
-    }
-
-    let auth_value = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Authorization bearer token is required",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let token = match auth_value.strip_prefix("Bearer ") {
-        Some(token) if !token.trim().is_empty() => token.trim(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "Invalid Authorization header format",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let jwt_result = if let Some(ref cache) = state.jwks_cache {
-        crate::middleware::auth::validate_jwt_with_cache(token, cache).await
-    } else {
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured)
-    };
-
-    let verified = match jwt_result {
-        Ok(verified) => verified,
-        Err(crate::middleware::auth::JwtError::NoKeyConfigured) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::disabled(
-                    "JWT auth is not enabled for this app",
-                )),
-            )
-                .into_response();
-        }
-        Err(crate::middleware::auth::JwtError::Expired) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::expired("JWT has expired")),
-            )
-                .into_response();
-        }
-        Err(crate::middleware::auth::JwtError::Invalid(_)) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(UnauthenticatedResponse::invalid("Invalid JWT")),
-            )
-                .into_response();
-        }
-    };
-
-    let issuer = match verified.issuer.as_deref().map(str::trim) {
-        Some(iss) if !iss.is_empty() => iss.to_string(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(
-                    "JWT issuer (iss) is required for link-external",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let subject = verified.subject.trim().to_string();
-    if subject.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::bad_request("JWT subject (sub) is required")),
-        )
-            .into_response();
-    }
-
-    let local_principal_id = derive_local_principal_id(state.app_id, local_mode, &local_token);
-    if let Some(claim_principal) = verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        && claim_principal != local_principal_id
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::bad_request(
-                "JWT jazz_principal_id claim does not match local principal",
-            )),
-        )
-            .into_response();
-    }
-
-    let existing = match state
-        .external_identity_store
-        .get_external_identity(state.app_id, &issuer, &subject)
-        .await
-    {
-        Ok(row) => row,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    };
-
-    let mut created = false;
-
-    if let Some(row) = existing {
-        if row.principal_id != local_principal_id {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(
-                    "external identity is already linked to a different principal",
-                )),
-            )
-                .into_response();
-        }
-    } else {
-        if let Err(err) = state
-            .external_identity_store
-            .create_external_identity(state.app_id, &issuer, &subject, &local_principal_id)
-            .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-        created = true;
-    }
-
-    {
-        let mut mappings = state.external_identities.write().await;
-        match mappings.get(&(issuer.clone(), subject.clone())) {
-            Some(existing_principal) if existing_principal != &local_principal_id => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::bad_request(
-                        "external identity is already linked to a different principal",
-                    )),
-                )
-                    .into_response();
-            }
-            _ => {
-                mappings.insert(
-                    (issuer.clone(), subject.clone()),
-                    local_principal_id.clone(),
-                );
-            }
-        }
-    }
-
-    Json(LinkExternalResponse {
-        principal_id: local_principal_id,
-        issuer,
-        subject,
-        created,
-    })
-    .into_response()
-}
-
 /// Health check endpoint.
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
@@ -1649,10 +1472,12 @@ mod tests {
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
     };
     use crate::sync_manager::{
-        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+        ClientId, ConnectionSchemaDiagnostics, InboxEntry, QueryId, QueryPropagation, Source,
+        SyncPayload,
     };
     use axum::body;
     use axum::routing::{get, post};
+    use futures::StreamExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -1663,10 +1488,15 @@ mod tests {
         AuthConfig {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: true,
             jwks_url: None,
+            ..Default::default()
         }
+    }
+
+    fn mint_test_token(audience: &str) -> String {
+        let seed = [42u8; 32];
+        crate::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
     }
 
     /// Spin up the full router backed by an in-process runtime.
@@ -1676,9 +1506,9 @@ mod tests {
         let auth_config = AuthConfig {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: false,
             jwks_url: None,
+            ..Default::default()
         };
 
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -1720,6 +1550,7 @@ mod tests {
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
         axum::Router::new()
+            .route("/events", get(events_handler))
             .route("/schema/:hash", get(schema_handler))
             .route("/schemas", get(schema_hashes_handler))
             .route("/admin/schemas", post(publish_schema_handler))
@@ -1761,6 +1592,29 @@ mod tests {
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
+    }
+
+    async fn read_server_events(body: axum::body::Body, expected_count: usize) -> Vec<ServerEvent> {
+        let mut stream = body.into_data_stream();
+        let mut events = Vec::new();
+        let mut buffered = Vec::new();
+
+        while events.len() < expected_count {
+            if let Some((event, consumed)) = ServerEvent::decode_frame(&buffered) {
+                events.push(event);
+                buffered.drain(..consumed);
+                continue;
+            }
+
+            let next_chunk = tokio::time::timeout(Duration::from_millis(250), stream.next())
+                .await
+                .expect("timed out waiting for stream chunk")
+                .expect("stream ended before expected events")
+                .expect("stream chunk should decode");
+            buffered.extend_from_slice(&next_chunk);
+        }
+
+        events
     }
 
     #[tokio::test]
@@ -1895,9 +1749,9 @@ mod tests {
             .with_auth_config(AuthConfig {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
-                allow_anonymous: true,
-                allow_demo: true,
+                allow_local_first_auth: false,
                 jwks_url: None,
+                ..Default::default()
             })
             .with_in_memory_storage()
             .build()
@@ -2972,5 +2826,53 @@ mod tests {
                     .map(|query| query.contains("\"name\""))
                     .unwrap_or(false)
         }));
+    }
+
+    #[tokio::test]
+    async fn events_handler_emits_connection_schema_diagnostics_for_client_schema() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let current_hash = SchemaHash::compute(&schema);
+        let declared_hash = SchemaHash::from_bytes([9; 32]);
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/events")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", mint_test_token("test-app")),
+                    )
+                    .header("X-Jazz-Client-Schema-Hash", declared_hash.to_string())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("events response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = read_server_events(response.into_body(), 2).await;
+        assert!(matches!(events[0], ServerEvent::Connected { .. }));
+
+        match &events[1] {
+            ServerEvent::SyncUpdate { payload, .. } => {
+                assert_eq!(
+                    payload.as_ref(),
+                    &SyncPayload::ConnectionSchemaDiagnostics(ConnectionSchemaDiagnostics {
+                        client_schema_hash: declared_hash,
+                        disconnected_permissions_schema_hash: Some(current_hash),
+                        unreachable_schema_hashes: vec![],
+                    })
+                );
+            }
+            other => panic!("expected SyncUpdate, got {}", other.variant_name()),
+        }
     }
 }
