@@ -119,15 +119,13 @@ impl JazzClient {
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
-        let client_id = match context.storage {
+        // Loaded for its side effect of persisting the client-id file on disk;
+        // the wire ClientId is assigned by `TransportManager::create` at connect
+        // time and is exposed via `runtime.transport_client_id()`.
+        let _client_id = match context.storage {
             ClientStorage::Persistent => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
-
-        // Register client name with tracer so server-side hooks resolve the human name
-        if let Some((ref tracer, ref name)) = context.sync_tracer {
-            tracer.register_client(client_id, name);
-        }
 
         let storage: DynStorage = match context.storage {
             ClientStorage::Persistent => open_persistent_storage(&context.data_dir).await?,
@@ -139,6 +137,12 @@ impl JazzClient {
         // Create runtime. The sync callback is a no-op — the WS TransportManager
         // drives the outbox directly via its own channel.
         let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
+
+        // Attach the tracer to the runtime so all outbox/inbox traffic is
+        // recorded under the participant name.
+        if let Some((ref tracer, ref name)) = context.sync_tracer {
+            runtime.set_sync_tracer(tracer.clone(), name.clone());
+        }
 
         // Persist schema to catalogue for server sync
         runtime
@@ -158,6 +162,15 @@ impl JazzClient {
                 local_token: None,
             };
             runtime.connect(ws_url, auth);
+
+            // Register the transport's wire ClientId with the tracer so the
+            // server's outbox recorder can resolve `Destination::Client(cid)`
+            // to the human-readable participant name.
+            if let Some((ref tracer, ref name)) = context.sync_tracer
+                && let Some(wire_cid) = runtime.transport_client_id()
+            {
+                tracer.register_client(wire_cid, name);
+            }
 
             // Wait until the WS handshake has completed at least once.
             // `batched_tick` handles `TransportInbound::Connected` automatically —

@@ -210,18 +210,18 @@ impl ServerBuilder {
     fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let dispatch_hub = Arc::clone(&connection_event_hub);
-        let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                if let Some(ref tracer) = tracer_for_outgoing {
-                    tracer.record_outgoing("server", &entry.destination, &entry.payload);
-                }
                 dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
+
+        if let Some(ref tracer) = self.sync_tracer {
+            runtime.set_sync_tracer(tracer.clone(), "server".to_string());
+        }
 
         Ok((runtime, connection_event_hub))
     }

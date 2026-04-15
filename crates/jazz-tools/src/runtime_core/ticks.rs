@@ -309,12 +309,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         if let Some(ref h) = self.transport {
             for msg in outbox {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
+                }
                 h.send_outbox(msg);
             }
             return;
         }
         if let Some(ref sender) = self.sync_sender {
             for msg in outbox {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
+                }
                 sender.send_sync_message(msg);
             }
         }
@@ -405,6 +411,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
         trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
+        if let Some((ref tracer, ref name)) = self.sync_tracer {
+            tracer.record_incoming(&message.source, name, &message.payload);
+        }
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();
     }
@@ -425,6 +434,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         "dropping already-applied sequenced sync message"
                     );
                     return;
+                }
+
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_incoming(&message.source, name, &message.payload);
                 }
 
                 self.parked_sync_messages_by_server_seq
