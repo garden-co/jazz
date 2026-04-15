@@ -1668,7 +1668,7 @@ fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_po
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: row_version_created_payload(
+        payload: row_batch_created_payload(
             obj_id,
             "main",
             Some(RowMetadata {
@@ -1695,7 +1695,7 @@ fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_po
 
     let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap_or_default();
     assert!(
-        !tips.contains(&row_version_id_for_commit(obj_id, "main", &commit)),
+        !tips.contains(&row_batch_id_for_commit(obj_id, "main", &commit)),
         "denied sync write should not persist"
     );
 }

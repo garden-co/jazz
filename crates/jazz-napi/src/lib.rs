@@ -26,10 +26,10 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_query_input,
-    parse_read_durability_options as parse_binding_read_durability_options, parse_session_input,
-    parse_write_context_input, query_rows_can_be_schema_aligned, serialize_local_batch_record,
-    serialize_local_batch_records, serialize_outbox_entry, subscription_delta_to_json,
-    parse_runtime_schema_input,
+    parse_read_durability_options as parse_binding_read_durability_options,
+    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
+    serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;

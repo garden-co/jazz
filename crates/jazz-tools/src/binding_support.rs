@@ -493,9 +493,8 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, parse_write_context_input, query_rows_can_be_schema_aligned,
-        serialize_outbox_entry,
-        parse_runtime_schema_input,
+        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
+        query_rows_can_be_schema_aligned, serialize_outbox_entry,
     };
     use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
