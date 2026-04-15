@@ -47,6 +47,11 @@ pub struct TransportHandle {
     pub inbound_rx: mpsc::UnboundedReceiver<TransportInbound>,
     pub ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub control_tx: mpsc::UnboundedSender<TransportControl>,
+    /// Client's current catalogue state hash. The TransportManager reads
+    /// this at each handshake attempt and includes it in `AuthHandshake`
+    /// so the server can dispatch `ConnectionSchemaDiagnostics` when the
+    /// client is on a stale schema. Shared with the manager via `Arc`.
+    pub(crate) catalogue_state_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl TransportHandle {
@@ -68,6 +73,14 @@ impl TransportHandle {
         let _ = self
             .control_tx
             .unbounded_send(TransportControl::UpdateAuth(auth));
+    }
+    /// Update the catalogue state hash sent in subsequent auth handshakes.
+    /// Callers use this when the client's catalogue changes so the next
+    /// reconnect hands the server a fresh hash.
+    pub fn set_catalogue_state_hash(&self, hash: Option<String>) {
+        if let Ok(mut slot) = self.catalogue_state_hash.lock() {
+            *slot = hash;
+        }
     }
 }
 
@@ -171,6 +184,9 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     pub client_id: ClientId,
     ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     control_rx: mpsc::UnboundedReceiver<TransportControl>,
+    /// Shared with `TransportHandle::catalogue_state_hash`. Read at each
+    /// handshake attempt so reconnects can reflect catalogue changes.
+    catalogue_state_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     _stream: std::marker::PhantomData<W>,
 }
 
@@ -185,6 +201,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     let (inbound_tx, inbound_rx) = mpsc::unbounded();
     let (control_tx, control_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let catalogue_state_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let handle = TransportHandle {
         server_id,
         client_id,
@@ -192,6 +209,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         inbound_rx,
         ever_connected: ever_connected.clone(),
         control_tx,
+        catalogue_state_hash: catalogue_state_hash.clone(),
     };
     let manager = TransportManager {
         server_id,
@@ -204,6 +222,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         client_id,
         ever_connected,
         control_rx,
+        catalogue_state_hash,
         _stream: std::marker::PhantomData,
     };
     (handle, manager)
@@ -235,12 +254,18 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
 
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
-    /// Build the length-prefixed handshake frame from the current client identity and auth.
-    fn build_handshake_frame(client_id: ClientId, auth: &AuthConfig) -> Vec<u8> {
+    /// Build the length-prefixed handshake frame from the current client identity, auth,
+    /// and the latest catalogue state hash known to the caller.
+    fn build_handshake_frame(&self) -> Vec<u8> {
+        let catalogue_state_hash = self
+            .catalogue_state_hash
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
         let handshake = AuthHandshake {
-            client_id: client_id.to_string(),
-            auth: auth.clone(),
-            catalogue_state_hash: None,
+            client_id: self.client_id.to_string(),
+            auth: self.auth.clone(),
+            catalogue_state_hash,
         };
         let payload =
             serde_json::to_vec(&handshake).expect("AuthHandshake serialisation infallible");
@@ -322,7 +347,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             // `self.control_rx` (which would violate the single-mutable-borrow rule).
             let mut ws = ws;
             let handshake_outcome = {
-                let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
+                let handshake_frame = self.build_handshake_frame();
                 tokio::select! {
                     biased;
                     ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
@@ -506,7 +531,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             // observed even while waiting for the server's handshake response.
             let mut ws = ws;
             let handshake_outcome = {
-                let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
+                let handshake_frame = self.build_handshake_frame();
                 futures::select! {
                     ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
                     res = Self::do_handshake(&mut ws, handshake_frame).fuse() => ControlOrPhase::Phase(res),

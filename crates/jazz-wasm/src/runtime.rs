@@ -1528,6 +1528,11 @@ impl WasmRuntime {
             crate::ws_stream::WasmWsStream,
             WasmTickNotifier,
         >(url, auth, tick);
+        // Seed the handshake catalogue hash.
+        {
+            let core = self.core.borrow();
+            handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
+        }
         self.core.borrow_mut().set_transport(handle);
         wasm_bindgen_futures::spawn_local(manager.run());
         Ok(())
