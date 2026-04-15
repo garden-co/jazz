@@ -80,16 +80,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             batch_id,
         }];
         let latest_settlement = match mode {
-            BatchMode::Direct => self
-                .schema_manager
-                .query_manager()
-                .sync_manager()
-                .max_local_durability_tier()
-                .map(|confirmed_tier| BatchSettlement::DurableDirect {
-                    batch_id,
-                    confirmed_tier,
-                    visible_members: visible_members.clone(),
-                }),
+            BatchMode::Direct => Some(BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: self.default_requested_tier_for_transaction(),
+                visible_members: visible_members.clone(),
+            }),
             BatchMode::Transactional => None,
         };
 
@@ -300,18 +295,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let row_id = result.row_id;
         let row_values = result.row_values;
         let batch_id = result.batch_id;
-        if write_context
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                row_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(
+            row_id,
+            batch_id,
+            batch_mode,
+            self.default_requested_tier_for_transaction(),
+        )?;
         debug!(object_id = %row_id, "inserted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
@@ -331,18 +323,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        if write_context
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                object_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(
+            object_id,
+            batch_id,
+            batch_mode,
+            self.default_requested_tier_for_transaction(),
+        )?;
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
@@ -362,18 +351,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let batch_id = handle.batch_id;
-        if write_context
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                object_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(
+            object_id,
+            batch_id,
+            batch_mode,
+            self.default_requested_tier_for_transaction(),
+        )?;
         debug!("deleted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
