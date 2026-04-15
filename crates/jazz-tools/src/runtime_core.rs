@@ -438,6 +438,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.remove_server(h.server_id);
         }
     }
+
+    /// Returns a reference to the active transport handle, if any.
+    pub fn transport(&self) -> Option<&crate::transport_manager::TransportHandle> {
+        self.transport.as_ref()
+    }
 }
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
