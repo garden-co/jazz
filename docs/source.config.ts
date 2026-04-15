@@ -29,6 +29,17 @@ export const blogPosts = defineCollections({
   }),
 });
 
+export const presentationSlides = defineCollections({
+  type: "doc",
+  dir: "content/presentations",
+  schema: pageSchema.extend({
+    deck: z.string(),
+    deckTitle: z.string(),
+    order: z.number().int().nonnegative(),
+    notes: z.string().or(z.array(z.string())).optional(),
+  }),
+});
+
 export default defineConfig({
   mdxOptions: {
     remarkPlugins: [remarkMdxMermaid],

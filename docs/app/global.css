@@ -98,3 +98,57 @@
 html {
   font-family: var(--font-sans);
 }
+
+.presentation-slide {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.5rem;
+}
+
+.presentation-slide > :first-child {
+  margin-top: 0;
+}
+
+.presentation-slide > :last-child {
+  margin-bottom: 0;
+}
+
+.presentation-slide h1 {
+  max-width: 12ch;
+  text-wrap: balance;
+  font-size: clamp(3.5rem, 8vw, 7.5rem);
+  font-weight: 900;
+  line-height: 0.9;
+  letter-spacing: -0.05em;
+}
+
+.presentation-slide h2 {
+  max-width: 20ch;
+  text-wrap: balance;
+  font-size: clamp(1.75rem, 3vw, 3rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--color-fd-muted-foreground);
+}
+
+.presentation-slide p,
+.presentation-slide li {
+  max-width: 46rem;
+  font-size: clamp(1.125rem, 1.8vw, 1.6rem);
+  line-height: 1.5;
+  color: var(--color-fd-muted-foreground);
+}
+
+.presentation-slide ul,
+.presentation-slide ol {
+  display: grid;
+  gap: 0.85rem;
+  padding-left: 1.25rem;
+}
+
+.presentation-slide strong {
+  color: inherit;
+}
