@@ -301,27 +301,37 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    /// Drain a batch of outbox entries through the live delivery path:
-    /// transport handle when set, otherwise the fallback `sync_sender`.
+    /// Drain a batch of outbox entries through the live delivery path.
+    ///
+    /// Routing is by destination kind: server-bound entries go through the
+    /// transport handle when present (otherwise fall back to `sync_sender`),
+    /// while client-bound entries always go through `sync_sender` so that
+    /// peer-routed payloads (e.g. a worker thread sending `QuerySettled` back
+    /// to its main-thread peer client) don't get misrouted to the upstream
+    /// WebSocket.
     fn flush_outbox(&self, outbox: Vec<crate::sync_manager::types::OutboxEntry>) {
         if outbox.is_empty() {
             return;
         }
-        if let Some(ref h) = self.transport {
-            for msg in outbox {
-                if let Some((ref tracer, ref name)) = self.sync_tracer {
-                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
-                }
-                h.send_outbox(msg);
+        for msg in outbox {
+            if let Some((ref tracer, ref name)) = self.sync_tracer {
+                tracer.record_outgoing(name, &msg.destination, &msg.payload);
             }
-            return;
-        }
-        if let Some(ref sender) = self.sync_sender {
-            for msg in outbox {
-                if let Some((ref tracer, ref name)) = self.sync_tracer {
-                    tracer.record_outgoing(name, &msg.destination, &msg.payload);
+            match msg.destination {
+                crate::sync_manager::Destination::Client(_) => {
+                    if let Some(ref sender) = self.sync_sender {
+                        sender.send_sync_message(msg);
+                    } else if let Some(ref h) = self.transport {
+                        h.send_outbox(msg);
+                    }
                 }
-                sender.send_sync_message(msg);
+                crate::sync_manager::Destination::Server(_) => {
+                    if let Some(ref h) = self.transport {
+                        h.send_outbox(msg);
+                    } else if let Some(ref sender) = self.sync_sender {
+                        sender.send_sync_message(msg);
+                    }
+                }
             }
         }
     }
