@@ -753,6 +753,24 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .and_then(|c| c.transport.as_ref().map(|h| h.has_ever_connected()))
             .unwrap_or(false)
     }
+
+    /// Returns the wire `ClientId` used by the active transport, if any.
+    ///
+    /// Tests use this to register the transport's client identity with a
+    /// `SyncTracer` so server-originated messages resolve to human names.
+    pub fn transport_client_id(&self) -> Option<ClientId> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.client_id))
+    }
+
+    /// Attach a sync-message tracer to this runtime.
+    pub fn set_sync_tracer(&self, tracer: crate::sync_tracer::SyncTracer, name: String) {
+        if let Ok(mut core) = self.core.lock() {
+            core.set_sync_tracer(tracer, name);
+        }
+    }
 }
 
 #[cfg(test)]

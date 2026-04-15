@@ -264,6 +264,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
+
+    /// Optional sync-message tracer used by tests to record outgoing/incoming
+    /// payloads under a human-readable participant name. `None` in production.
+    pub(crate) sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
 }
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -289,12 +293,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
+            sync_tracer: None,
         }
     }
 
     /// Set the tier label used in tracing spans.
     pub fn set_tier_label(&mut self, label: &'static str) {
         self.tier_label = label;
+    }
+
+    /// Attach a sync-message tracer. All outbox entries this runtime sends
+    /// and all inbox entries it receives will be recorded under `name`.
+    pub fn set_sync_tracer(&mut self, tracer: crate::sync_tracer::SyncTracer, name: String) {
+        self.sync_tracer = Some((tracer, name));
     }
 
     /// Get mutable reference to the Storage.
