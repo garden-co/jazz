@@ -1269,8 +1269,13 @@ impl WasmRuntime {
             .local_batch_record(batch_id)
             .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
         match record {
-            Some(record) => serde_wasm_bindgen::to_value(&serialize_local_batch_record(&record))
-                .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e))),
+            Some(record) => {
+                let serializer =
+                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                serialize_local_batch_record(&record)
+                    .serialize(&serializer)
+                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+            }
             None => Ok(JsValue::null()),
         }
     }
@@ -1281,7 +1286,9 @@ impl WasmRuntime {
         let records = core
             .local_batch_records()
             .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
-        serde_wasm_bindgen::to_value(&serialize_local_batch_records(&records))
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        serialize_local_batch_records(&records)
+            .serialize(&serializer)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 

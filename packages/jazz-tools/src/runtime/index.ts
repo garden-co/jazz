@@ -35,7 +35,7 @@ export {
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,
-  type WriteHandle,
+  type InsertHandle,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";

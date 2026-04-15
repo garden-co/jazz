@@ -37,24 +37,21 @@ describe("TS Delete API", () => {
   });
 
   it("can wait for deletes to be persisted up to a specific durability tier", async () => {
-    const project = await db.insertDurable(
-      app.projects,
-      { name: "Test Project" },
-      { tier: "worker" },
-    );
+    const projectHandle = await db.insert(app.projects, { name: "Test Project" });
+    await projectHandle.wait({ tier: "worker" });
+    const { value: project } = projectHandle;
+
     const owner = insertUser(db);
-    const todo = await db.insertDurable(
-      app.todos,
-      {
-        title: "Test Todo",
-        done: false,
-        tags: ["tag1", "tag2"],
-        projectId: project.id,
-        ownerId: owner.id,
-        assigneesIds: [],
-      },
-      { tier: "worker" },
-    );
+    const todoHandle = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
+    });
+    await todoHandle.wait({ tier: "worker" });
+    const { value: todo } = todoHandle;
 
     const pending = db.deleteDurable(app.todos, todo.id, { tier: "worker" });
     expect(pending).toBeInstanceOf(Promise);

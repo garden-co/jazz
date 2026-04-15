@@ -15,6 +15,7 @@ import {
   WasmModule,
   WasmSchema,
 } from "../index.js";
+import { DirectInsertResult } from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -503,7 +504,7 @@ class DevToolsJazzClient implements JazzClient {
   forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
