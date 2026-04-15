@@ -55,11 +55,11 @@ fn wasm_log_level_from_global() -> tracing::Level {
     }
 }
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use jazz_tools::binding_support::{
     parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]

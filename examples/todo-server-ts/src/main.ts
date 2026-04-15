@@ -120,7 +120,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const todo = db.insert(schemaApp.todos, {
+      const todo = await db.insertDurable(schemaApp.todos, {
         title: body.title,
         done: false,
         description: body.description?.trim(),
