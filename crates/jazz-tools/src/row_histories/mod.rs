@@ -1454,13 +1454,20 @@ pub fn patch_row_batch_state<H: Storage>(
         }
     };
     let visible_entries: Vec<_> = patched_entry.iter().cloned().collect();
-    io.apply_row_mutation(
-        &table,
-        std::slice::from_ref(&patched_row),
-        &visible_entries,
-        &[],
-    )
-    .map_err(RowHistoryError::StorageError)?;
+    if patched_entry.is_some() {
+        io.apply_row_mutation(
+            &table,
+            std::slice::from_ref(&patched_row),
+            &visible_entries,
+            &[],
+        )
+        .map_err(RowHistoryError::StorageError)?;
+    } else {
+        io.append_history_region_rows(&table, std::slice::from_ref(&patched_row))
+            .map_err(RowHistoryError::StorageError)?;
+        io.delete_visible_region_row(&table, branch_name.as_str(), object_id)
+            .map_err(RowHistoryError::StorageError)?;
+    }
 
     let current_visible = patched_entry
         .as_ref()

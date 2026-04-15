@@ -408,9 +408,27 @@ impl QueryManager {
         row_id: ObjectId,
         row_data: &[u8],
     ) {
+        self.retract_local_rejected_row(storage, table, branch, row_id, row_data, false);
+    }
+
+    pub(crate) fn retract_local_rejected_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+        was_visible: bool,
+    ) {
         let table_name = TableName::new(table);
         let Some(table_schema) = self.schema.get(&table_name) else {
-            self.clear_local_pending_row_overlay(table, row_id);
+            if was_visible {
+                self.pending_local_row_batches.remove(&row_id);
+                self.mark_subscriptions_dirty_local(table);
+                self.mark_local_row_deleted_in_subscriptions(table, row_id);
+            } else {
+                self.clear_local_pending_row_overlay(table, row_id);
+            }
             return;
         };
 
@@ -427,10 +445,16 @@ impl QueryManager {
                 branch,
                 object_id = %row_id,
                 %error,
-                "failed to retract local pending transaction indices"
+                "failed to retract local rejected row indices"
             );
         }
 
-        self.clear_local_pending_row_overlay(table, row_id);
+        if was_visible {
+            self.pending_local_row_batches.remove(&row_id);
+            self.mark_subscriptions_dirty_local(table);
+            self.mark_local_row_deleted_in_subscriptions(table, row_id);
+        } else {
+            self.clear_local_pending_row_overlay(table, row_id);
+        }
     }
 }

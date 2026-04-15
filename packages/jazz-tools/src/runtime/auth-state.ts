@@ -18,6 +18,11 @@ export type AuthState =
 
 type AuthStateListener = (state: AuthState) => void;
 
+export interface AuthStateStoreOptions {
+  initialState?: AuthState;
+  lockAuthenticatedState?: boolean;
+}
+
 function authStateEquals(a: AuthState, b: AuthState): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -43,8 +48,8 @@ function authUserId(state: AuthState): string | null {
   return state.session?.user_id ?? null;
 }
 
-export function createAuthStateStore(input: ClientSessionInput) {
-  let state = deriveAuthenticatedState(input);
+export function createAuthStateStore(input: ClientSessionInput, options?: AuthStateStoreOptions) {
+  let state = options?.initialState ?? deriveAuthenticatedState(input);
   const listeners = new Set<AuthStateListener>();
 
   const emit = () => {
@@ -83,6 +88,10 @@ export function createAuthStateStore(input: ClientSessionInput) {
     },
 
     applyJwtToken(jwtToken?: string): AuthState {
+      if (options?.lockAuthenticatedState) {
+        return state;
+      }
+
       const nextState = deriveAuthenticatedState({
         appId: input.appId,
         jwtToken,
