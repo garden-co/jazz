@@ -201,6 +201,39 @@ async function startup(): Promise<void> {
 }
 
 // ============================================================================
+// Pure helpers (exported for unit tests)
+// ============================================================================
+
+/**
+ * Build the WebSocket URL for runtime.connect() from the init message fields.
+ * Delegates scheme conversion and path prefix appending to `httpUrlToWs`.
+ */
+export function composeConnectUrl(serverUrl: string, serverPathPrefix?: string): string {
+  return httpUrlToWs(serverUrl, serverPathPrefix);
+}
+
+/**
+ * Return a new auth object that merges an incoming JWT token (or its absence)
+ * into the existing cached auth record.
+ *
+ * - If `incomingJwtToken` is a non-empty string, it replaces/sets `jwt_token`.
+ * - If `incomingJwtToken` is absent/undefined, `jwt_token` is removed.
+ * - All other fields (e.g. `admin_secret`) are preserved unchanged.
+ */
+export function mergeAuth(
+  currentAuth: Record<string, string>,
+  incomingJwtToken?: string,
+): Record<string, string> {
+  const next = { ...currentAuth };
+  if (incomingJwtToken) {
+    next.jwt_token = incomingJwtToken;
+  } else {
+    delete next.jwt_token;
+  }
+  return next;
+}
+
+// ============================================================================
 // Init: Open persistent runtime, register main thread as client
 // ============================================================================
 
@@ -308,14 +341,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Connect to upstream server via Rust-owned WebSocket transport.
     if (msg.serverUrl) {
-      if (msg.jwtToken) {
-        currentAuth.jwt_token = msg.jwtToken;
-      }
       if (msg.adminSecret) {
         currentAuth.admin_secret = msg.adminSecret;
       }
+      currentAuth = mergeAuth(currentAuth, msg.jwtToken);
       try {
-        const wsUrl = httpUrlToWs(msg.serverUrl, msg.serverPathPrefix);
+        const wsUrl = composeConnectUrl(msg.serverUrl, msg.serverPathPrefix);
         runtime.connect(wsUrl, JSON.stringify(currentAuth));
       } catch (connectError: any) {
         console.error("[worker] runtime.connect failed:", connectError);
@@ -422,11 +453,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       break;
 
     case "update-auth": {
-      if (msg.jwtToken) {
-        currentAuth.jwt_token = msg.jwtToken;
-      } else {
-        delete currentAuth.jwt_token;
-      }
+      currentAuth = mergeAuth(currentAuth, msg.jwtToken);
       if (runtime) {
         try {
           runtime.updateAuth(JSON.stringify(currentAuth));
