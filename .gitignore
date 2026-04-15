@@ -52,3 +52,8 @@ data-multi/
 
 # Turborepo
 .turbo
+
+.ai/internal/
+.jazz2/
+sync/flow-sync.jsonl
+examples/codex-sessions-backend/codex-sessions.db/
