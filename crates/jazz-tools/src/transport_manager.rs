@@ -233,6 +233,33 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     Some(&data[4..4 + len])
 }
 
+/// Handshake helpers shared between the Tokio and WASM run loops.
+impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    /// Build the length-prefixed handshake frame from the current client identity and auth.
+    fn build_handshake_frame(client_id: ClientId, auth: &AuthConfig) -> Vec<u8> {
+        let handshake = AuthHandshake {
+            client_id: client_id.to_string(),
+            auth: auth.clone(),
+            catalogue_state_hash: None,
+        };
+        let payload =
+            serde_json::to_vec(&handshake).expect("AuthHandshake serialisation infallible");
+        frame_encode(&payload)
+    }
+
+    /// Send the pre-built handshake frame and wait for the server's ConnectedResponse.
+    async fn do_handshake(ws: &mut W, frame: Vec<u8>) -> Result<ConnectedResponse, String> {
+        ws.send(&frame).await.map_err(|e| e.to_string())?;
+        let resp_bytes = ws
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "server closed before handshake response".to_string())?;
+        let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
+        serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(feature = "runtime-tokio")]
 enum ConnectedExit {
     HandleDropped,
@@ -288,10 +315,33 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
             };
 
-            // Handshake + Connected phases: implemented in Tasks 5-8. For now, keep existing logic.
+            // Handshake phase: race against control channel so Shutdown/UpdateAuth is
+            // observed even while waiting for the server's handshake response.
+            // Build the outbound frame before entering the select so `self` is not
+            // mutably borrowed through `perform_auth_handshake` at the same time as
+            // `self.control_rx` (which would violate the single-mutable-borrow rule).
             let mut ws = ws;
-            match self.perform_auth_handshake(&mut ws).await {
-                Ok(resp) => {
+            let handshake_outcome = {
+                let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
+                tokio::select! {
+                    biased;
+                    ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
+                    res = Self::do_handshake(&mut ws, handshake_frame) => ControlOrPhase::Phase(res),
+                }
+            };
+            match handshake_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => {
+                    ws.close().await;
+                    return;
+                }
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    ws.close().await;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(Ok(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
@@ -314,7 +364,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         }
                     }
                 }
-                Err(e) => {
+                ControlOrPhase::Phase(Err(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
                     ws.close().await;
                 }
@@ -335,24 +385,6 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 ControlOrPhase::Phase(()) => {}
             }
         }
-    }
-
-    async fn perform_auth_handshake(&mut self, ws: &mut W) -> Result<ConnectedResponse, String> {
-        let handshake = AuthHandshake {
-            client_id: self.client_id.to_string(),
-            auth: self.auth.clone(),
-            catalogue_state_hash: None,
-        };
-        let payload = serde_json::to_vec(&handshake).map_err(|e| e.to_string())?;
-        let frame = frame_encode(&payload);
-        ws.send(&frame).await.map_err(|e| e.to_string())?;
-        let resp_bytes = ws
-            .recv()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "server closed before handshake response".to_string())?;
-        let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
-        serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
     }
 
     async fn run_connected(&mut self, ws: &mut W) -> ConnectedExit {
@@ -417,60 +449,42 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     pub async fn run(mut self) {
         loop {
             match W::connect(&self.url).await {
-                Ok(mut ws) => match self.wasm_perform_auth_handshake(&mut ws).await {
-                    Ok(resp) => {
-                        self.ever_connected
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
-                            catalogue_state_hash: resp.catalogue_state_hash,
-                            next_sync_seq: resp.next_sync_seq,
-                        });
-                        self.tick.notify();
-                        self.reconnect.reset();
-                        match self.wasm_run_connected(&mut ws).await {
-                            WasmConnectedExit::HandleDropped => {
-                                ws.close().await;
-                                return;
-                            }
-                            WasmConnectedExit::NetworkError => {
-                                let _ = self
-                                    .inbound_tx
-                                    .unbounded_send(TransportInbound::Disconnected);
-                                self.tick.notify();
-                                ws.close().await;
+                Ok(mut ws) => {
+                    let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
+                    match Self::do_handshake(&mut ws, handshake_frame).await {
+                        Ok(resp) => {
+                            self.ever_connected
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
+                                catalogue_state_hash: resp.catalogue_state_hash,
+                                next_sync_seq: resp.next_sync_seq,
+                            });
+                            self.tick.notify();
+                            self.reconnect.reset();
+                            match self.wasm_run_connected(&mut ws).await {
+                                WasmConnectedExit::HandleDropped => {
+                                    ws.close().await;
+                                    return;
+                                }
+                                WasmConnectedExit::NetworkError => {
+                                    let _ = self
+                                        .inbound_tx
+                                        .unbounded_send(TransportInbound::Disconnected);
+                                    self.tick.notify();
+                                    ws.close().await;
+                                }
                             }
                         }
+                        Err(e) => {
+                            tracing::warn!("ws auth handshake failed: {e}");
+                            ws.close().await;
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("ws auth handshake failed: {e}");
-                        ws.close().await;
-                    }
-                },
+                }
                 Err(e) => tracing::warn!("ws connect failed: {e}"),
             }
             self.reconnect.backoff().await;
         }
-    }
-
-    async fn wasm_perform_auth_handshake(
-        &mut self,
-        ws: &mut W,
-    ) -> Result<ConnectedResponse, String> {
-        let handshake = AuthHandshake {
-            client_id: self.client_id.to_string(),
-            auth: self.auth.clone(),
-            catalogue_state_hash: None,
-        };
-        let payload = serde_json::to_vec(&handshake).map_err(|e| e.to_string())?;
-        let frame = frame_encode(&payload);
-        ws.send(&frame).await.map_err(|e| e.to_string())?;
-        let resp_bytes = ws
-            .recv()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "server closed before handshake response".to_string())?;
-        let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
-        serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
     }
 
     async fn wasm_run_connected(&mut self, ws: &mut W) -> WasmConnectedExit {
@@ -703,6 +717,32 @@ mod tests {
             .await
             .expect("manager should exit during backoff on Shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_handshake() {
+        let controller = Arc::new(TestStreamController::default());
+        // connect succeeds; handshake pends (recv returns Pending forever until controller flips).
+        controller.recv_pending.store(true, Ordering::SeqCst);
+        // Do NOT pre-stage a handshake response — recv will see the queue empty and pend.
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        handle.disconnect();
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit during handshake on Shutdown")
+            .unwrap();
+        assert!(controller.close_calls.load(Ordering::SeqCst) >= 1);
     }
 
     #[tokio::test]
