@@ -1229,6 +1229,8 @@ describe("Worker Bridge with OPFS", () => {
     ).rejects.toThrow();
 
     await unblockTestingServerNetwork(serverUrl);
+    // Re-establish the worker's upstream WebSocket now that the network is live again.
+    (dbA as any).workerBridge?.reconnectUpstream?.();
     await sleep(250);
 
     (dbA as any).sendLifecycleHint?.("freeze");

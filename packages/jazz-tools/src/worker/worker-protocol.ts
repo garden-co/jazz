@@ -85,6 +85,11 @@ export interface DisconnectUpstreamMessage {
   type: "disconnect-upstream";
 }
 
+/** Reconnect the worker's upstream WebSocket transport (after a disconnect). */
+export interface ReconnectUpstreamMessage {
+  type: "reconnect-upstream";
+}
+
 /** Request graceful shutdown. */
 export interface ShutdownMessage {
   type: "shutdown";
@@ -119,6 +124,7 @@ export type MainToWorkerMessage =
   | PeerCloseMessage
   | UpdateAuthMessage
   | DisconnectUpstreamMessage
+  | ReconnectUpstreamMessage
   | ShutdownMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage
