@@ -21,6 +21,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -1517,33 +1518,4 @@ export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<Wa
   }
 
   return wasmModule;
-}
-
-/**
- * Convert an HTTP(S) server URL to the WebSocket `/ws` endpoint URL.
- *
- * Mirrors the Rust `http_url_to_ws` helper in `crates/jazz-tools/src/client.rs`.
- *
- * - `http://host/prefix`  → `ws://host/prefix/ws`
- * - `https://host`        → `wss://host/ws`
- * - `ws://host`           → `ws://host/ws`  (if `/ws` suffix is absent)
- * - `ws://host/ws`        → unchanged
- */
-function httpUrlToWs(serverUrl: string): string {
-  const trimmed = serverUrl.replace(/\/+$/, "");
-  if (trimmed.startsWith("http://")) {
-    const rest = trimmed.slice("http://".length);
-    return `ws://${rest}/ws`;
-  }
-  if (trimmed.startsWith("https://")) {
-    const rest = trimmed.slice("https://".length);
-    return `wss://${rest}/ws`;
-  }
-  // Already a WS URL — append /ws if not already present.
-  if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) {
-    return trimmed.endsWith("/ws") ? trimmed : `${trimmed}/ws`;
-  }
-  throw new Error(
-    `Invalid server URL "${serverUrl}": expected http://, https://, ws://, or wss://`,
-  );
 }
