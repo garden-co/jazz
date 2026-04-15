@@ -30,6 +30,12 @@ pub enum TransportInbound {
         sequence: Option<u64>,
     },
     Disconnected,
+    /// Server rejected the auth handshake with an Unauthorized error.
+    /// The transport suspends retries and waits for `TransportControl::UpdateAuth`
+    /// or `TransportControl::Shutdown` before attempting a new connection.
+    AuthFailure {
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -252,6 +258,16 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     Some(&data[4..4 + len])
 }
 
+/// Outcome of the auth handshake.
+pub(crate) enum HandshakeResult {
+    /// Server accepted; connection is open.
+    Connected(ConnectedResponse),
+    /// Server rejected the auth credentials.  Transport should suspend.
+    AuthFailure(String),
+    /// Network or protocol error; transport should back off and retry.
+    NetworkError(String),
+}
+
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Build the length-prefixed handshake frame from the current client identity, auth,
@@ -272,16 +288,45 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         frame_encode(&payload)
     }
 
-    /// Send the pre-built handshake frame and wait for the server's ConnectedResponse.
-    async fn do_handshake(ws: &mut W, frame: Vec<u8>) -> Result<ConnectedResponse, String> {
-        ws.send(&frame).await.map_err(|e| e.to_string())?;
-        let resp_bytes = ws
-            .recv()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "server closed before handshake response".to_string())?;
-        let resp_payload = frame_decode(&resp_bytes).ok_or("malformed handshake response")?;
-        serde_json::from_slice::<ConnectedResponse>(resp_payload).map_err(|e| e.to_string())
+    /// Send the pre-built handshake frame and wait for the server's response.
+    ///
+    /// Distinguishes three outcomes:
+    /// - `Connected` — server sent a valid `ConnectedResponse`
+    /// - `AuthFailure` — server sent `ServerEvent::Error { code: Unauthorized }`
+    /// - `NetworkError` — any other failure (network drop, parse error, etc.)
+    async fn do_handshake(ws: &mut W, frame: Vec<u8>) -> HandshakeResult {
+        if let Err(e) = ws.send(&frame).await {
+            return HandshakeResult::NetworkError(e.to_string());
+        }
+        let resp_bytes = match ws.recv().await {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return HandshakeResult::NetworkError(
+                    "server closed before handshake response".to_string(),
+                );
+            }
+            Err(e) => return HandshakeResult::NetworkError(e.to_string()),
+        };
+        let Some(resp_payload) = frame_decode(&resp_bytes) else {
+            return HandshakeResult::NetworkError("malformed handshake response".to_string());
+        };
+
+        // First try to parse as the success path.
+        if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(resp_payload) {
+            return HandshakeResult::Connected(resp);
+        }
+
+        // Fall back: check whether the server sent an explicit Error event.
+        if let Ok(crate::transport_protocol::ServerEvent::Error { message, code }) =
+            serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload)
+        {
+            if code == crate::transport_protocol::ErrorCode::Unauthorized {
+                return HandshakeResult::AuthFailure(message);
+            }
+            return HandshakeResult::NetworkError(format!("server error ({code:?}): {message}"));
+        }
+
+        HandshakeResult::NetworkError("unexpected handshake response".to_string())
     }
 }
 
@@ -366,7 +411,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     self.reconnect.reset();
                     continue;
                 }
-                ControlOrPhase::Phase(Ok(resp)) => {
+                ControlOrPhase::Phase(HandshakeResult::Connected(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
@@ -399,7 +444,24 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         }
                     }
                 }
-                ControlOrPhase::Phase(Err(e)) => {
+                ControlOrPhase::Phase(HandshakeResult::AuthFailure(reason)) => {
+                    tracing::warn!(%reason, "ws auth handshake rejected: unauthorized");
+                    ws.close().await;
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::AuthFailure { reason });
+                    self.tick.notify();
+                    // Suspend reconnect loop; wait for UpdateAuth or Shutdown.
+                    match self.control_rx.next().await {
+                        None | Some(TransportControl::Shutdown) => return,
+                        Some(TransportControl::UpdateAuth(auth)) => {
+                            self.auth = auth;
+                            self.reconnect.reset();
+                        }
+                    }
+                    continue;
+                }
+                ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
                     ws.close().await;
                 }
@@ -549,7 +611,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     self.reconnect.reset();
                     continue;
                 }
-                ControlOrPhase::Phase(Ok(resp)) => {
+                ControlOrPhase::Phase(HandshakeResult::Connected(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
@@ -582,7 +644,25 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         }
                     }
                 }
-                ControlOrPhase::Phase(Err(e)) => {
+                ControlOrPhase::Phase(HandshakeResult::AuthFailure(reason)) => {
+                    tracing::warn!(%reason, "ws auth handshake rejected: unauthorized");
+                    ws.close().await;
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::AuthFailure { reason });
+                    self.tick.notify();
+                    // Suspend reconnect loop; wait for UpdateAuth or Shutdown.
+                    use futures::StreamExt as _;
+                    match self.control_rx.next().await {
+                        None | Some(TransportControl::Shutdown) => return,
+                        Some(TransportControl::UpdateAuth(auth)) => {
+                            self.auth = auth;
+                            self.reconnect.reset();
+                        }
+                    }
+                    continue;
+                }
+                ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
                     ws.close().await;
                 }

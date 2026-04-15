@@ -268,6 +268,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Optional sync-message tracer used by tests to record outgoing/incoming
     /// payloads under a human-readable participant name. `None` in production.
     pub(crate) sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
+
+    /// Called when the transport rejects auth during the WS handshake.
+    /// The String argument is a human-readable reason (e.g. "Unauthorized").
+    pub(crate) auth_failure_callback: Option<Box<dyn Fn(String) + Send + 'static>>,
 }
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -294,12 +298,20 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,
+            auth_failure_callback: None,
         }
     }
 
     /// Set the tier label used in tracing spans.
     pub fn set_tier_label(&mut self, label: &'static str) {
         self.tier_label = label;
+    }
+
+    /// Register a callback that fires when the transport receives an auth failure
+    /// from the server during the WS handshake.  The callback receives a
+    /// human-readable reason string (e.g. "Unauthorized").
+    pub fn set_auth_failure_callback(&mut self, cb: impl Fn(String) + Send + 'static) {
+        self.auth_failure_callback = Some(Box::new(cb));
     }
 
     /// Attach a sync-message tracer. All outbox entries this runtime sends

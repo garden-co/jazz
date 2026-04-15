@@ -9,6 +9,7 @@
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
+import type { AuthFailureReason } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 import {
   readWorkerRuntimeWasmUrl,
@@ -205,6 +206,19 @@ async function startup(): Promise<void> {
 // ============================================================================
 
 /**
+ * Map a Rust auth-failure reason string to a typed `AuthFailureReason`.
+ * The Rust transport sends the server's error message verbatim; we look for
+ * well-known sub-strings and fall back to "invalid" for anything unrecognised.
+ */
+export function mapAuthReason(reason: string): AuthFailureReason {
+  const lower = reason.toLowerCase();
+  if (lower.includes("expired")) return "expired";
+  if (lower.includes("missing")) return "missing";
+  if (lower.includes("disabled")) return "disabled";
+  return "invalid";
+}
+
+/**
  * Build the WebSocket URL for runtime.connect() from the init message fields.
  * Delegates scheme conversion and path prefix appending to `httpUrlToWs`.
  */
@@ -288,6 +302,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Register main thread as a Peer client
     mainClientId = runtime.addClient();
     runtime.setClientRole(mainClientId, "peer");
+
+    // Register auth failure callback so the worker can notify the main thread
+    // when the Rust transport is rejected by the server (e.g. expired JWT).
+    runtime.onAuthFailure?.((reason: string) => {
+      post({ type: "upstream-disconnected" });
+      post({ type: "auth-failed", reason: mapAuthReason(reason) });
+    });
 
     // Set up outbox routing — only the worker-bridge (client-bound) path.
     // Server sync is handled by the Rust-owned WebSocket transport below.
