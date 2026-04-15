@@ -83,6 +83,10 @@
       "types": "./dist/passphrase.d.ts",
       "default": "./dist/passphrase.js"
     },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
