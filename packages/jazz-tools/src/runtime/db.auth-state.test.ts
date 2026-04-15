@@ -56,11 +56,52 @@ describe("Db auth state", () => {
 
     db.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
 
-    expect(runtimeClient.updateAuthToken).toHaveBeenCalledTimes(1);
+    expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
       status: "authenticated",
       transport: "backend",
       session,
+    });
+  });
+
+  it("does not leak scoped auth updates into a shared runtime client", () => {
+    const runtimeClient = {
+      updateAuthToken: vi.fn(),
+    };
+
+    const sharedDb = createDbFromClient(
+      {
+        appId: "test-app",
+        jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+      },
+      runtimeClient as any,
+    );
+    const scopedDb = createDbFromClient(
+      {
+        appId: "test-app",
+        jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+      },
+      runtimeClient as any,
+      { user_id: "bob", claims: { role: "writer" } },
+      "bob@writer",
+    );
+
+    scopedDb.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
+
+    expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
+    expect(sharedDb.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "bearer",
+      session: {
+        user_id: "alice",
+      },
+    });
+    expect(scopedDb.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "backend",
+      session: {
+        user_id: "bob",
+      },
     });
   });
 

@@ -1934,6 +1934,8 @@ export class Db {
 }
 
 class ClientBackedDb extends Db {
+  private readonly hasScopedAuthState: boolean;
+
   constructor(
     config: DbConfig,
     private readonly runtimeClient: JazzClient,
@@ -1951,9 +1953,14 @@ class ClientBackedDb extends Db {
           }
         : undefined,
     );
+    this.hasScopedAuthState = scopedAuthState !== undefined;
   }
 
   override updateAuthToken(jwtToken: string | null): void {
+    if (this.hasScopedAuthState) {
+      return;
+    }
+
     if (!this.applyAuthUpdate(jwtToken)) {
       return;
     }
