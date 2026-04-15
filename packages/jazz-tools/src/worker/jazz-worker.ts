@@ -588,6 +588,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       }
       try {
         runtime.__debugSeedLiveSchema(normalizeRuntimeSchemaJson(msg.schemaJson));
+        // Flush the BTree to OPFS so the seeded catalogue entries survive shutdown.
+        runtime.flushWal?.();
         post({ type: "debug-seed-live-schema-ok" });
       } catch (error: any) {
         post({
