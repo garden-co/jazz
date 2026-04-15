@@ -1207,8 +1207,24 @@ impl NapiRuntime {
     #[napi]
     pub fn disconnect(&self) {
         if let Ok(mut core) = self.core.lock() {
+            if let Some(handle) = core.transport() {
+                handle.disconnect();
+            }
             core.clear_transport();
         }
+    }
+
+    /// Push updated auth credentials into the live transport.
+    #[napi]
+    pub fn update_auth(&self, auth_json: String) -> napi::Result<()> {
+        let auth: jazz_tools::transport_manager::AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if let Ok(core) = self.core.lock()
+            && let Some(handle) = core.transport()
+        {
+            handle.update_auth(auth);
+        }
+        Ok(())
     }
 }
 
