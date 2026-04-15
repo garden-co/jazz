@@ -60,6 +60,8 @@ export declare class NapiRuntime {
   connect(url: string, authJson: string): void
   /** Disconnect from the Jazz server and drop the transport handle. */
   disconnect(): void
+  /** Push updated auth credentials into the live transport. */
+  updateAuth(authJson: string): void
 }
 
 export declare class TestingServer {
