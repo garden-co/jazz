@@ -193,6 +193,7 @@ On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer tok
 the same principal:
 
 - `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
+- Backend-scoped wrappers from `createJazzContext().asBackend()`, `.forRequest()`, and `.forSession()` do not own shared bearer auth and ignore `updateAuthToken(...)`.
 - Do not use `db.updateAuthToken(null)` for logout or anonymous fallback on a live client.
 - Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
   Recreate `Db` or `JazzProvider` when the authenticated user changes.

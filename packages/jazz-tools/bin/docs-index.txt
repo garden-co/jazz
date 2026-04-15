@@ -1064,7 +1064,7 @@ All Jazz apps use the same migration workflow, including Rust backends.
 # 1) Edit schema.ts during development and watch for Jazz migration warnings.
 
 # 2) Generate a typed migration stub after Jazz reports the old/new hashes.
-npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
 
 # 3) Fill in migrate, rename the file, then publish the reviewed edge.
 npx jazz-tools@alpha migrations push <fromHash> <toHash>
@@ -1077,14 +1077,14 @@ npx jazz-tools@alpha migrations push <fromHash> <toHash>
 # 1) Edit schema.ts during development and watch for Jazz migration warnings.
 
 # 2) Generate a typed migration stub after Jazz reports the old/new hashes.
-npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
 
 # 3) Fill in migrate, rename the file, then publish the reviewed edge.
 npx jazz-tools@alpha migrations push <fromHash> <toHash>
 
 ```
 
-When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact short-hash `migrations create <fromHash> <toHash>` command to run next.
+When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact short-hash `migrations create --fromHash <fromHash> --toHash <toHash>` command to run next.
 
 ## Generated Stub
 
@@ -3979,7 +3979,7 @@ That warning is the handoff from day-to-day schema editing to reviewed compatibi
 `migrations create` connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
 
 ```bash
-npx jazz-tools migrations create <fromHash> <toHash>
+npx jazz-tools migrations create --fromHash <fromHash> --toHash <toHash>
 ```
 
 The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate` and replace `unnamed` in the filename with a real migration name.
