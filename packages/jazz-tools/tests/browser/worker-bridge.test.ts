@@ -623,7 +623,8 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = db.insert(todos, { title: "Original", done: false });
+    const { value: inserted } = db.insert(todos, { title: "Original", done: false });
+    const { id } = inserted;
     const result = db.update(todos, id, { done: true });
     expect(result).toBeUndefined();
 
@@ -663,7 +664,8 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = db.insert(todos, { title: "Ephemeral", done: false });
+    const { value: inserted } = db.insert(todos, { title: "Ephemeral", done: false });
+    const { id } = inserted;
     expect((await db.all(allTodos)).length).toBe(1);
 
     const result = db.delete(todos, id);

@@ -155,7 +155,7 @@ export function StressTest() {
     // Generate projects first so we can assign them to todos
     const projectIds: string[] = [];
     for (let i = 0; i < PROJECT_COUNT; i++) {
-      const row = db.insert(app.projects, {
+      const { value: row } = db.insert(app.projects, {
         name: PROJECT_NAMES[i % PROJECT_NAMES.length],
       });
       projectIds.push(row.id);

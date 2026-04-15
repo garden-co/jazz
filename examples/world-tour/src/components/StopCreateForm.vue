@@ -160,7 +160,7 @@ function submit() {
   if (venueMode.value === "existing" && selectedVenueId.value) {
     venueId = selectedVenueId.value;
   } else if (venueMode.value === "new") {
-    const venue = db.insert(app.venues, {
+    const { value: venue } = db.insert(app.venues, {
       name: newVenue.name,
       city: newVenue.city,
       country: newVenue.country,

@@ -53,7 +53,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = db.insert(table, { title: "Buy milk", done: false });
+    const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Buy milk" },
@@ -152,7 +152,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = db.insert(table, { title: "Buy milk", done: false });
+    const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Buy milk" },

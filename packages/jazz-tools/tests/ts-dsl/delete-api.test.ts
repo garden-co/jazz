@@ -18,9 +18,9 @@ describe("TS Delete API", () => {
   });
 
   it("deletes rows synchronously without returning a promise", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],

@@ -19,7 +19,7 @@ export const ChatList = () => {
   const createPublicChat = () => {
     if (!userId || !myProfile) return;
 
-    const chat = db.insert(app.chats, {
+    const { value: chat } = db.insert(app.chats, {
       isPublic: true,
       createdBy: userId,
     });
@@ -38,7 +38,7 @@ export const ChatList = () => {
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const chat = db.insert(app.chats, {
+    const { value: chat } = db.insert(app.chats, {
       isPublic: false,
       createdBy: userId,
       joinCode: shareCode,

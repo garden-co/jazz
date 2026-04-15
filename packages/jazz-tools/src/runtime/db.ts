@@ -247,6 +247,18 @@ function backendScopedAuthState(session?: Session | null): AuthState {
   };
 }
 
+/**
+ * Returned by insert operations. Allows getting the inserted value and
+ * waiting for the write to be persisted at a given durability tier.
+ */
+export interface WriteHandle<T> {
+  value: T;
+}
+
+function createWriteHandle<T>(value: T): WriteHandle<T> {
+  return { value };
+}
+
 export class DbPersistedWrite<T> {
   constructor(
     private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
@@ -328,7 +340,7 @@ export class DbTransaction {
     return batchId;
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteHandle<T> {
     this.ensureWritable();
     const values = toInsertRecord(
       data as Record<string, unknown>,
@@ -336,7 +348,7 @@ export class DbTransaction {
       table._table,
     );
     const row = this.runtimeTransaction.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return createWriteHandle(transformRow(row, table._schema, table._table));
   }
 
   insertPersisted<T, Init>(
@@ -453,14 +465,14 @@ export class DbDirectBatch {
     return this.runtimeBatch.batchId();
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteHandle<T> {
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
     const row = this.runtimeBatch.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return createWriteHandle(transformRow(row, table._schema, table._table));
   }
 
   insertPersisted<T, Init>(
@@ -635,7 +647,7 @@ function isLeaderDebugEnabled(): boolean {
  * const db = await createDb({ appId: "my-app", driver });
  *
  * // Mutations
- * const inserted = db.insert(app.todos, { title: "Buy milk", done: false });
+ * const { value: inserted } = db.insert(app.todos, { title: "Buy milk", done: false });
  * db.update(app.todos, inserted.id, { done: true });
  * db.delete(app.todos, inserted.id);
  *
@@ -1456,15 +1468,15 @@ export class Db {
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @returns Inserted row
+   * @returns Insert handle containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteHandle<T> {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const row = client.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return createWriteHandle(transformRow(row, table._schema, table._table));
   }
 
   /**
@@ -2024,7 +2036,7 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
   }
 
-  override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  override insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteHandle<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
@@ -2034,7 +2046,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
     );
-    return transformRow(row, table._schema, table._table);
+    return createWriteHandle(transformRow(row, table._schema, table._table));
   }
 
   override async insertDurable<T, Init>(

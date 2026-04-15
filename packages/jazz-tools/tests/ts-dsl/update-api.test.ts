@@ -77,9 +77,9 @@ describe("TS Update API", () => {
   });
 
   it("updates rows synchronously without returning a promise", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
@@ -96,9 +96,9 @@ describe("TS Update API", () => {
   });
 
   it("can wait for updates to be persisted up to a specific durability tier", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
@@ -112,7 +112,9 @@ describe("TS Update API", () => {
 
     await pending;
 
-    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), {
+      tier: "worker",
+    });
     expect(updated!.done).toBe(true);
   });
 });
