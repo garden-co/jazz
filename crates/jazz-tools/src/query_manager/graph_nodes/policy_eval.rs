@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs, evaluate_expr_recursive,
-    normalize_recursive_max_depth,
+    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs,
+    evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
@@ -277,12 +277,13 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => evaluate_expr_recursive(
+            _ => evaluate_expr_recursive_with_row_id(
                 expr,
                 &row.data,
                 &row.provenance,
                 descriptor,
                 self.session,
+                Some(row.id),
                 depth,
             ),
         }
