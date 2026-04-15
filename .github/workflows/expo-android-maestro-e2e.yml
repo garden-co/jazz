@@ -178,7 +178,7 @@ jobs:
         env:
           VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID || 'team_xiRKInFi7lBd1gTqyAGuzmkC' }}
         run: |
           set -euo pipefail
 
@@ -276,7 +276,7 @@ jobs:
         env:
           VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID || 'team_xiRKInFi7lBd1gTqyAGuzmkC' }}
         run: |
           set -euo pipefail
           SCOPE=()
@@ -295,7 +295,7 @@ jobs:
         env:
           VERCEL_SANDBOXES_TOKEN: ${{ secrets.VERCEL_SANDBOXES_TOKEN }}
           VERCEL_SANDBOXES_PROJECT_ID: ${{ secrets.VERCEL_SANDBOXES_PROJECT_ID }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID || 'team_xiRKInFi7lBd1gTqyAGuzmkC' }}
         run: |
           if [ -z "${SANDBOX_ID:-}" ]; then exit 0; fi
           SCOPE=()
