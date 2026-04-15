@@ -1553,7 +1553,7 @@ impl WasmRuntime {
 
     /// Push updated auth credentials into the live transport.
     #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = "updateAuth")]
     pub fn update_auth(&self, auth_json: String) -> Result<(), JsValue> {
         let auth: jazz_tools::transport_manager::AuthConfig =
             serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1569,7 +1569,7 @@ impl WasmRuntime {
     ///
     /// The callback receives a single string argument: a human-readable reason.
     #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = "onAuthFailure")]
     pub fn on_auth_failure(&self, callback: Function) {
         // WASM is single-threaded; wrapping Function in a Send marker is safe here.
         struct SendFunction(Function);
