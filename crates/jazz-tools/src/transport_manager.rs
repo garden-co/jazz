@@ -262,7 +262,6 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 
 #[cfg(feature = "runtime-tokio")]
 enum ConnectedExit {
-    HandleDropped,
     NetworkError,
     Shutdown,
     UpdateAuth(AuthConfig),
@@ -353,7 +352,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     self.tick.notify();
                     self.reconnect.reset();
                     match self.run_connected(&mut ws).await {
-                        ConnectedExit::HandleDropped | ConnectedExit::Shutdown => {
+                        ConnectedExit::Shutdown => {
                             ws.close().await;
                             return;
                         }
@@ -404,7 +403,9 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         loop {
             tokio::select! {
                 out = self.outbox_rx.next() => {
-                    let Some(entry) = out else { return ConnectedExit::HandleDropped; };
+                    // outbox closed = handle dropped; control_rx will also return None shortly.
+                    // Route to Shutdown so the same clean-exit path is taken.
+                    let Some(entry) = out else { return ConnectedExit::Shutdown; };
                     let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return ConnectedExit::NetworkError; }
