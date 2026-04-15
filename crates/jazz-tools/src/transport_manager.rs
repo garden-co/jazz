@@ -240,49 +240,70 @@ enum ConnectedExit {
 }
 
 #[cfg(feature = "runtime-tokio")]
+enum ControlOrPhase<T> {
+    Control(Option<TransportControl>),
+    Phase(T),
+}
+
+#[cfg(feature = "runtime-tokio")]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
-    /// Returns only when the `TransportHandle` is dropped.
-    ///
-    /// Note: termination during connect/handshake/backoff requires the caller to abort the
-    /// spawned task; `HandleDropped` is only detected inside `run_connected`.
+    /// Returns only when the `TransportHandle` is dropped or a Shutdown control is received.
     pub async fn run(mut self) {
+        use futures::StreamExt as _;
         loop {
-            match W::connect(&self.url).await {
-                Ok(mut ws) => {
-                    match self.perform_auth_handshake(&mut ws).await {
-                        Ok(resp) => {
-                            // TODO(later tasks): resp.connection_id is currently dropped; wire it
-                            // through once the protocol layer consumes it.
-                            self.ever_connected
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
-                                catalogue_state_hash: resp.catalogue_state_hash,
-                                next_sync_seq: resp.next_sync_seq,
-                            });
-                            self.tick.notify();
-                            self.reconnect.reset();
-                            match self.run_connected(&mut ws).await {
-                                ConnectedExit::HandleDropped => {
-                                    ws.close().await;
-                                    return;
-                                }
-                                ConnectedExit::NetworkError => {
-                                    let _ = self
-                                        .inbound_tx
-                                        .unbounded_send(TransportInbound::Disconnected);
-                                    self.tick.notify();
-                                    ws.close().await;
-                                }
-                            }
+            // Phase: Connect.
+            let connect_outcome = tokio::select! {
+                biased;
+                ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
+                res = W::connect(&self.url) => ControlOrPhase::Phase(res),
+            };
+            let ws = match connect_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(Ok(ws)) => ws,
+                ControlOrPhase::Phase(Err(e)) => {
+                    tracing::warn!("ws connect failed: {e}");
+                    self.reconnect.backoff().await; // temporarily; control check added in Task 4.
+                    continue;
+                }
+            };
+
+            // Handshake + Connected phases: implemented in Tasks 5-8. For now, keep existing logic.
+            let mut ws = ws;
+            match self.perform_auth_handshake(&mut ws).await {
+                Ok(resp) => {
+                    self.ever_connected
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
+                        catalogue_state_hash: resp.catalogue_state_hash,
+                        next_sync_seq: resp.next_sync_seq,
+                    });
+                    self.tick.notify();
+                    self.reconnect.reset();
+                    match self.run_connected(&mut ws).await {
+                        ConnectedExit::HandleDropped => {
+                            ws.close().await;
+                            return;
                         }
-                        Err(e) => {
-                            tracing::warn!("ws auth handshake failed: {e}");
+                        ConnectedExit::NetworkError => {
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
                             ws.close().await;
                         }
                     }
                 }
-                Err(e) => tracing::warn!("ws connect failed: {e}"),
+                Err(e) => {
+                    tracing::warn!("ws auth handshake failed: {e}");
+                    ws.close().await;
+                }
             }
             self.reconnect.backoff().await;
         }
@@ -602,6 +623,32 @@ mod tests {
         fn notify(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_connect() {
+        let controller = Arc::new(TestStreamController::default());
+        controller.connect_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        // Let connect() start.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(controller.connect_calls.load(Ordering::SeqCst) >= 1);
+
+        handle.disconnect();
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit promptly after Shutdown during connect")
+            .unwrap();
     }
 
     #[tokio::test]
