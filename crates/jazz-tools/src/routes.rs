@@ -1307,6 +1307,11 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
     }
 
     // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
+    //    Also fires a periodic heartbeat so idle connections don't look half-open.
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    // Don't emit a heartbeat immediately after Connected — wait a full tick.
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
@@ -1332,6 +1337,19 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
+                if socket
+                    .send(Message::Binary(
+                        crate::transport_manager::frame_encode(&bytes),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            _ = heartbeat.tick() => {
+                let event = crate::jazz_transport::ServerEvent::Heartbeat;
+                let Ok(bytes) = serde_json::to_vec(&event) else { continue };
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),

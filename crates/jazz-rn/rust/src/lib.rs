@@ -830,6 +830,13 @@ impl RnRuntime {
                 jazz_tools::ws_stream::NativeWsStream,
                 RnTickNotifier,
             >(url, auth, tick);
+            // Seed the handshake catalogue hash.
+            {
+                let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
+            }
             self.core
                 .lock()
                 .map_err(|_| JazzRnError::Internal {
