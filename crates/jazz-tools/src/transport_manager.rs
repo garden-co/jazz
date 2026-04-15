@@ -267,7 +267,6 @@ enum ConnectedExit {
     UpdateAuth(AuthConfig),
 }
 
-#[cfg(feature = "runtime-tokio")]
 enum ControlOrPhase<T> {
     Control(Option<TransportControl>),
     Phase(T),
@@ -457,52 +456,126 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 // Activated when `runtime-tokio` is not (i.e. WASM).
 #[cfg(not(feature = "runtime-tokio"))]
 enum WasmConnectedExit {
-    HandleDropped,
     NetworkError,
+    Shutdown,
+    UpdateAuth(AuthConfig),
 }
 
 #[cfg(not(feature = "runtime-tokio"))]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
-    /// Returns only when the `TransportHandle` is dropped.
+    /// Returns only when the `TransportHandle` is dropped or a Shutdown control is received.
     pub async fn run(mut self) {
+        use futures::{FutureExt as _, StreamExt as _};
         loop {
-            match W::connect(&self.url).await {
-                Ok(mut ws) => {
-                    let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
-                    match Self::do_handshake(&mut ws, handshake_frame).await {
-                        Ok(resp) => {
-                            self.ever_connected
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
-                                catalogue_state_hash: resp.catalogue_state_hash,
-                                next_sync_seq: resp.next_sync_seq,
-                            });
-                            self.tick.notify();
+            // Phase: Connect.
+            let connect_outcome = futures::select! {
+                ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
+                res = W::connect(&self.url).fuse() => ControlOrPhase::Phase(res),
+            };
+            let ws = match connect_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(Ok(ws)) => ws,
+                ControlOrPhase::Phase(Err(e)) => {
+                    tracing::warn!("ws connect failed: {e}");
+                    let backoff_outcome = futures::select! {
+                        ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
+                        _ = self.reconnect.backoff().fuse() => ControlOrPhase::Phase(()),
+                    };
+                    match backoff_outcome {
+                        ControlOrPhase::Control(None)
+                        | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                        ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                            self.auth = auth;
                             self.reconnect.reset();
-                            match self.wasm_run_connected(&mut ws).await {
-                                WasmConnectedExit::HandleDropped => {
-                                    ws.close().await;
-                                    return;
-                                }
-                                WasmConnectedExit::NetworkError => {
-                                    let _ = self
-                                        .inbound_tx
-                                        .unbounded_send(TransportInbound::Disconnected);
-                                    self.tick.notify();
-                                    ws.close().await;
-                                }
-                            }
+                            continue;
                         }
-                        Err(e) => {
-                            tracing::warn!("ws auth handshake failed: {e}");
+                        ControlOrPhase::Phase(()) => {}
+                    }
+                    continue;
+                }
+            };
+
+            // Handshake phase: race against control channel so Shutdown/UpdateAuth is
+            // observed even while waiting for the server's handshake response.
+            let mut ws = ws;
+            let handshake_outcome = {
+                let handshake_frame = Self::build_handshake_frame(self.client_id, &self.auth);
+                futures::select! {
+                    ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
+                    res = Self::do_handshake(&mut ws, handshake_frame).fuse() => ControlOrPhase::Phase(res),
+                }
+            };
+            match handshake_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => {
+                    ws.close().await;
+                    return;
+                }
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    ws.close().await;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(Ok(resp)) => {
+                    self.ever_connected
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
+                        catalogue_state_hash: resp.catalogue_state_hash,
+                        next_sync_seq: resp.next_sync_seq,
+                    });
+                    self.tick.notify();
+                    self.reconnect.reset();
+                    match self.wasm_run_connected(&mut ws).await {
+                        WasmConnectedExit::Shutdown => {
                             ws.close().await;
+                            return;
+                        }
+                        WasmConnectedExit::NetworkError => {
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
+                            ws.close().await;
+                        }
+                        WasmConnectedExit::UpdateAuth(auth) => {
+                            self.auth = auth;
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
+                            ws.close().await;
+                            self.reconnect.reset();
+                            continue;
                         }
                     }
                 }
-                Err(e) => tracing::warn!("ws connect failed: {e}"),
+                ControlOrPhase::Phase(Err(e)) => {
+                    tracing::warn!("ws auth handshake failed: {e}");
+                    ws.close().await;
+                }
             }
-            self.reconnect.backoff().await;
+            let backoff_outcome = futures::select! {
+                ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
+                _ = self.reconnect.backoff().fuse() => ControlOrPhase::Phase(()),
+            };
+            match backoff_outcome {
+                ControlOrPhase::Control(None)
+                | ControlOrPhase::Control(Some(TransportControl::Shutdown)) => return,
+                ControlOrPhase::Control(Some(TransportControl::UpdateAuth(auth))) => {
+                    self.auth = auth;
+                    self.reconnect.reset();
+                    continue;
+                }
+                ControlOrPhase::Phase(()) => {}
+            }
         }
     }
 
@@ -511,7 +584,9 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         loop {
             futures::select! {
                 out = self.outbox_rx.next().fuse() => {
-                    let Some(entry) = out else { return WasmConnectedExit::HandleDropped; };
+                    // outbox closed = handle dropped; control_rx will also return None shortly.
+                    // Route to Shutdown so the same clean-exit path is taken.
+                    let Some(entry) = out else { return WasmConnectedExit::Shutdown; };
                     let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return WasmConnectedExit::NetworkError; }
@@ -546,6 +621,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             }
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
+                    }
+                }
+                ctrl = self.control_rx.next().fuse() => {
+                    match ctrl {
+                        None | Some(TransportControl::Shutdown) => return WasmConnectedExit::Shutdown,
+                        Some(TransportControl::UpdateAuth(auth)) => return WasmConnectedExit::UpdateAuth(auth),
                     }
                 }
             }
