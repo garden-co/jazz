@@ -40,32 +40,30 @@ This spec makes the common API reflect that.
 
 ```ts
 const inserted = db.insert(app.todos, { title: "Ship spec", done: false });
-inserted.data.id;
-await inserted.wait();
+inserted.value.id;
+await inserted.wait({ tier: "edge" });
 
 const updated = db.update(app.todos, todoId, { done: true });
-await updated.wait();
+await updated.wait({ tier: "global" });
 
 const deleted = db.delete(app.todos, todoId);
-await deleted.wait();
+await deleted.wait({ tier: "edge" });
 ```
 
-Each method accepts optional write options:
+Each method accepts no tier. The tier can be specified when calling `.wait()`:
 
 ```ts
-const inserted = db.insert(app.todos, { title: "Ship spec", done: false }, { tier: "edge" });
-await inserted.wait();
+const inserted = db.insert(app.todos, { title: "Ship spec", done: false });
+await inserted.wait({ tier: "edge" });
 ```
 
 Return shapes:
 
-- `insert(...) -> { data: Row; wait: Promise<void> }`
-- `update(...) -> { wait: Promise<void> }`
-- `delete(...) -> { wait: Promise<void> }`
+- `insert(...) -> { value: Row; wait: ({ tier: DurabilityTier }) => Promise<void> }`
+- `update(...) -> { wait: ({ tier: DurabilityTier }) => Promise<void> }`
+- `delete(...) -> { wait: ({ tier: DurabilityTier }) => Promise<void> }`
 
 `wait` resolves when the requested tier confirms the write, or rejects if the write is rejected.
-
-If no tier is provided, `wait` resolves immediately after local application.
 
 ### What gets removed
 
@@ -90,7 +88,7 @@ That means:
 
 - local state updates immediately
 - ordinary queries and subscriptions keep their current local-first behavior
-- asking for `tier` changes settlement behavior, not visibility mode
+- asking for `tier` on `.wait()` changes settlement behavior, not visibility mode
 
 This is important. `tier` on an ordinary write means:
 
@@ -116,11 +114,7 @@ This keeps simple writes simple and avoids smuggling transaction semantics into 
 
 `wait` is the per-call ergonomic path for handling async mutation completion and async mutation failure.
 
-Rules:
-
-- if no tier was requested, `wait` resolves immediately
-- if a tier was requested, `wait` resolves when replayable settlement reaches that tier or higher
-- if the write later reaches a replayable terminal failure, `wait` rejects
+`wait` resolves when replayable settlement reaches that tier or higher. If the write later reaches a replayable terminal failure, `wait` rejects.
 
 The current replayable batch-settlement model is the source of truth for this decision. `wait` should resolve or reject from replayable settlement state, not only from live one-shot callbacks.
 
@@ -175,22 +169,32 @@ New:
 
 ```ts
 const inserted = db.insert(app.todos, data);
-const durableUpdate = db.update(app.todos, inserted.data.id, patch, { tier: "edge" });
-const globalWrite = db.insert(app.todos, data, { tier: "global" });
+const durableUpdate = db.update(app.todos, inserted.value.id, patch);
+const globalWrite = db.insert(app.todos, data);
 
-await durableUpdate.wait();
-await globalWrite.wait();
+await durableUpdate.wait({ tier: "edge" });
+await globalWrite.wait({ tier: "global" });
 ```
 
 If an app wants "visible on confirm" behavior, that write must use a transaction API rather than plain `db.insert(...)`:
 
 ```ts
-const tx = db.beginTransaction(app.todos);
-const pendingInsert = tx.insert(app.todos, data, { tier: "global" });
-// `pendingInsert.data` is available, even though it's not visible for other queries/transactions
-console.log({ pendingData: pendingInsert.data });
+const tx = db.beginTransaction(app.todos, { tier: "global" });
+const pendingInsert = tx.insert(app.todos, data);
+// `pendingInsert.value` is available, even though it's not visible for other queries/transactions
+console.log({ pendingData: pendingInsert.value });
 const committed = tx.commit();
 // pendingInsert.wait and commited.wait are equivalent, since both promises are resolved once
 // the core server confirms the write
 await committed.wait();
 ```
+
+## Required tasks
+
+- [ ] Introduce a shared `WriteHandle<T>` type on the Typescript runtime surface and make `insert(...)` return a handle with `{ value }` instead of returning the row directly. Do this first without changing wait behavior yet. Update TypeScript typing, runtime wrappers, examples, and tests that currently assume `insert(...)` returns a row directly.
+- [ ] Add `wait({ tier })` to `WriteHandle<T>` for insert handles. Teach insert handles to resolve or reject `wait()` from replayable batch-settlement state instead of the old `insertDurable` / `insertPersisted` split.
+- [ ] Change `update(...)` and `delete(...)` to return write handles as well, with no immediate value and with `wait()`.
+- [ ] Migrate existing `insertDurable` / `updateDurable` / `deleteDurable` call sites and tests to the unified handle + `wait()` shape.
+- [ ] Migrate existing `insertPersisted` / `updatePersisted` / `deletePersisted` call sites and tests to the unified handle shape, then remove those user-facing methods.
+- [ ] Add a global mutation error registration API backed by replayable batch-settlement state so late failures can still surface after reconnect and restart.
+- [ ] Update transaction-facing examples and tests so the docs clearly distinguish direct writes that merely wait for settlement from transactions that provide confirm-gated visibility.
