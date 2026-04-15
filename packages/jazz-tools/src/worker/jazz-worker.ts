@@ -15,6 +15,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
+import { httpUrlToWs } from "../runtime/url.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -64,6 +65,7 @@ const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
+let currentAuth: Record<string, string> = {};
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -210,6 +212,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     _isShuttingDown = false;
+    currentAuth = {};
     peerRuntimeClientByPeerId.clear();
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
@@ -305,15 +308,15 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
     // Connect to upstream server via Rust-owned WebSocket transport.
     if (msg.serverUrl) {
-      const auth: Record<string, string> = {};
       if (msg.jwtToken) {
-        auth["jwt_token"] = msg.jwtToken;
+        currentAuth.jwt_token = msg.jwtToken;
       }
       if (msg.adminSecret) {
-        auth["admin_secret"] = msg.adminSecret;
+        currentAuth.admin_secret = msg.adminSecret;
       }
       try {
-        runtime.connect(msg.serverUrl, JSON.stringify(auth));
+        const wsUrl = httpUrlToWs(msg.serverUrl, msg.serverPathPrefix);
+        runtime.connect(wsUrl, JSON.stringify(currentAuth));
       } catch (connectError: any) {
         console.error("[worker] runtime.connect failed:", connectError);
       }
