@@ -32,7 +32,6 @@ import {
 } from "./store.js";
 import {
   buildSessionProjectionFromRollout,
-  completionEventsFromProjection,
   type SyncedProjectionEvent,
   syncCodexRollouts,
   syncCodexSessionRollout,
@@ -41,6 +40,7 @@ import {
   syncSessionsByPrefix,
   watchCodexRollouts,
 } from "./projector.js";
+import { collectRecentCompletionEvents, trackEmittedId } from "./completion-watcher.js";
 
 interface SessionLookupRow {
   id: string;
@@ -463,18 +463,6 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function trackEmittedId(ids: Set<string>, order: string[], id: string): void {
-  ids.add(id);
-  order.push(id);
-  if (order.length <= 512) {
-    return;
-  }
-  const staleIds = order.splice(0, order.length - 320);
-  for (const staleId of staleIds) {
-    ids.delete(staleId);
-  }
 }
 
 function normalizeQuery(query: string): string {
@@ -1917,6 +1905,8 @@ async function watchRecentCompletionEvents(
   options: CompletionRolloutWatcherOptions,
 ): Promise<void> {
   const seenRolloutMtimes = new Map<string, number>();
+  const emittedIds = new Set<string>();
+  const emittedOrder: string[] = [];
   const bootstrapCutoff = Date.now() - options.bootstrapWindowMs;
 
   while (!options.signal?.aborted) {
@@ -1946,14 +1936,17 @@ async function watchRecentCompletionEvents(
         continue;
       }
 
-      const completionEvents = completionEventsFromProjection(built.projection).filter((event) => {
-        if (previousMtime !== undefined) {
-          return event.completedAt.getTime() >= previousMtime;
-        }
-        return event.completedAt.getTime() >= bootstrapCutoff;
+      const completionEvents = collectRecentCompletionEvents({
+        projection: built.projection,
+        previousMtime,
+        bootstrapCutoff,
+        emittedIds,
       });
       if (completionEvents.length > 0) {
         options.onEvents(completionEvents);
+        for (const event of completionEvents) {
+          trackEmittedId(emittedIds, emittedOrder, event.id);
+        }
       }
     }
 
