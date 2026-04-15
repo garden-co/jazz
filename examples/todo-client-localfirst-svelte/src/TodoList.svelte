@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getDb, getSession, QuerySubscription } from 'jazz-tools/svelte';
 	import { toast } from 'svelte-sonner';
-	import { app } from '../schema.js';
+	import { app } from './lib/schema.js';
 
 	// #region reading-reactive-svelte
 	const db = getDb();

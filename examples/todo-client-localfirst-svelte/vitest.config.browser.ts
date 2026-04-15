@@ -5,7 +5,7 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), svelte({ hot: false })],
+  plugins: [wasm(), topLevelAwait(), svelte()],
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },

@@ -59,6 +59,10 @@
       "types": "./dist/dev/expo.d.ts",
       "default": "./dist/dev/expo.js"
     },
+    "./dev/sveltekit": {
+      "types": "./dist/dev/sveltekit.d.ts",
+      "default": "./dist/dev/sveltekit.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",
