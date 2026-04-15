@@ -33,7 +33,8 @@ vi.mock("jazz-wasm", () => ({
   initSync: vi.fn(),
 }));
 
-import { composeConnectUrl, mergeAuth } from "./jazz-worker.js";
+import { composeConnectUrl, mergeAuth, performUpstreamConnect } from "./jazz-worker.js";
+import type { WorkerToMainMessage } from "./worker-protocol.js";
 
 describe("worker URL + auth wiring", () => {
   it("normalizes serverUrl with serverPathPrefix via httpUrlToWs", () => {
@@ -60,5 +61,35 @@ describe("worker URL + auth wiring", () => {
     const afterUpdate = mergeAuth(afterInit, undefined);
     expect(afterUpdate.jwt_token).toBeUndefined();
     expect(afterUpdate.admin_secret).toBe("s");
+  });
+});
+
+describe("performUpstreamConnect", () => {
+  it("posts upstream-connected after runtime.connect succeeds", () => {
+    const connect = vi.fn();
+    const posted: WorkerToMainMessage[] = [];
+
+    performUpstreamConnect(
+      { connect },
+      (msg) => posted.push(msg),
+      "ws://example/ws",
+      '{"jwt_token":"x"}',
+    );
+
+    expect(connect).toHaveBeenCalledWith("ws://example/ws", '{"jwt_token":"x"}');
+    expect(posted).toEqual([{ type: "upstream-connected" }]);
+  });
+
+  it("posts upstream-disconnected when runtime.connect throws", () => {
+    const connect = vi.fn(() => {
+      throw new Error("ws handshake failed");
+    });
+    const posted: WorkerToMainMessage[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    performUpstreamConnect({ connect }, (msg) => posted.push(msg), "ws://example/ws", "{}");
+
+    expect(posted).toEqual([{ type: "upstream-disconnected" }]);
+    errorSpy.mockRestore();
   });
 });

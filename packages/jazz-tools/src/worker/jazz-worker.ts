@@ -233,6 +233,30 @@ export function mergeAuth(
   return next;
 }
 
+/**
+ * Open the upstream WebSocket via the Rust transport and notify the main
+ * thread whether the bridge should treat the upstream edge as live.
+ *
+ * Posts `upstream-connected` on success so the bridge releases any queries
+ * gated on `waitForUpstreamServerConnection`. Posts `upstream-disconnected`
+ * if `runtime.connect` throws synchronously so the bridge keeps the edge
+ * marked as down instead of optimistically assuming it is up.
+ */
+export function performUpstreamConnect(
+  runtime: { connect?: (url: string, auth: string) => void },
+  post: (msg: WorkerToMainMessage) => void,
+  wsUrl: string,
+  authJson: string,
+): void {
+  try {
+    runtime.connect?.(wsUrl, authJson);
+    post({ type: "upstream-connected" });
+  } catch (err) {
+    console.error("[worker] runtime.connect failed:", err);
+    post({ type: "upstream-disconnected" });
+  }
+}
+
 // ============================================================================
 // Init: Open persistent runtime, register main thread as client
 // ============================================================================
@@ -345,12 +369,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
         currentAuth.admin_secret = msg.adminSecret;
       }
       currentAuth = mergeAuth(currentAuth, msg.jwtToken);
-      try {
-        const wsUrl = composeConnectUrl(msg.serverUrl, msg.serverPathPrefix);
-        runtime.connect(wsUrl, JSON.stringify(currentAuth));
-      } catch (connectError: any) {
-        console.error("[worker] runtime.connect failed:", connectError);
-      }
+      const wsUrl = composeConnectUrl(msg.serverUrl, msg.serverPathPrefix);
+      performUpstreamConnect(runtime, post, wsUrl, JSON.stringify(currentAuth));
     }
   } catch (e: any) {
     post({ type: "error", message: `Init failed: ${e.message}` });
