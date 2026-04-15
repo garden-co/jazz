@@ -1,8 +1,58 @@
 use super::*;
-use crate::row_histories::{RowState, patch_row_batch_state};
+use crate::row_histories::RowState;
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+    fn local_batch_rows(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(
+        ObjectId,
+        crate::storage::RowLocator,
+        crate::row_histories::StoredRowBatch,
+    )> {
+        let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id) else {
+            return Vec::new();
+        };
+
+        let mut rows = Vec::new();
+        for row_id in record.touched_rows {
+            let Ok(Some(row_locator)) = self.storage.load_row_locator(row_id) else {
+                continue;
+            };
+            let Ok(history_rows) = self
+                .storage
+                .scan_history_row_batches(row_locator.table.as_str(), row_id)
+            else {
+                continue;
+            };
+
+            for row in history_rows {
+                if row.batch_id == batch_id {
+                    rows.push((row_id, row_locator.clone(), row));
+                }
+            }
+        }
+
+        rows.sort_by(
+            |(left_row_id, left_locator, left_row), (right_row_id, right_locator, right_row)| {
+                left_row_id
+                    .uuid()
+                    .as_bytes()
+                    .cmp(right_row_id.uuid().as_bytes())
+                    .then_with(|| {
+                        left_locator
+                            .table
+                            .as_str()
+                            .cmp(right_locator.table.as_str())
+                    })
+                    .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
+                    .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
+            },
+        );
+        rows
+    }
+
     fn resolve_ack_watchers_for_key(
         &mut self,
         row_batch_key: crate::sync_manager::RowBatchKey,
@@ -110,61 +160,62 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     }
 
     fn mark_local_batch_rows_rejected(&mut self, batch_id: crate::row_histories::BatchId) {
-        let Ok(row_locators) = self.storage.scan_row_locators() else {
-            return;
-        };
-        let mut cleared_overlays = Vec::new();
+        let mut cleared_rows = Vec::new();
 
-        for (row_id, row_locator) in row_locators {
-            let Ok(history_rows) = self
-                .storage
-                .scan_history_row_batches(row_locator.table.as_str(), row_id)
-            else {
+        for (row_id, row_locator, row) in self.local_batch_rows(batch_id) {
+            if !matches!(
+                row.state,
+                RowState::VisibleDirect | RowState::StagingPending | RowState::Superseded
+            ) {
                 continue;
-            };
-
-            for row in history_rows {
-                if row.batch_id != batch_id
-                    || !matches!(row.state, RowState::StagingPending | RowState::Superseded)
-                {
-                    continue;
-                }
-
-                let branch_name = crate::object::BranchName::new(&row.branch);
-                let _ = patch_row_batch_state(
-                    &mut self.storage,
-                    row_id,
-                    &branch_name,
-                    row.batch_id(),
-                    Some(RowState::Rejected),
-                    None,
-                );
-                cleared_overlays.push((
-                    row_locator.table.to_string(),
-                    row.branch.to_string(),
-                    row_id,
-                    row.data.to_vec(),
-                ));
             }
+
+            let _ = self.storage.patch_row_region_rows_by_batch(
+                row_locator.table.as_str(),
+                row.batch_id(),
+                Some(RowState::Rejected),
+                None,
+            );
+            if matches!(row.state, RowState::VisibleDirect) {
+                let _ = self.storage.delete_visible_region_row(
+                    row_locator.table.as_str(),
+                    row.branch.as_str(),
+                    row_id,
+                );
+            }
+            cleared_rows.push((
+                row_locator.table.to_string(),
+                row.branch.to_string(),
+                row_id,
+                row.data.to_vec(),
+                matches!(row.state, RowState::VisibleDirect),
+            ));
         }
 
         let query_manager = self.schema_manager.query_manager_mut();
-        for (table, branch, row_id, row_data) in cleared_overlays {
-            query_manager.retract_local_pending_transaction_row(
-                &mut self.storage,
-                &table,
-                &branch,
-                row_id,
-                &row_data,
-            );
+        for (table, branch, row_id, row_data, was_visible) in cleared_rows {
+            if was_visible {
+                query_manager.retract_local_rejected_row(
+                    &mut self.storage,
+                    &table,
+                    &branch,
+                    row_id,
+                    &row_data,
+                    true,
+                );
+            } else {
+                query_manager.retract_local_pending_transaction_row(
+                    &mut self.storage,
+                    &table,
+                    &branch,
+                    row_id,
+                    &row_data,
+                );
+            }
         }
     }
 
     fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
-        let Ok(row_locators) = self.storage.scan_row_locators() else {
-            return;
-        };
-
         let sealed_submission = self
             .storage
             .load_local_batch_record(batch_id)
@@ -176,21 +227,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     .flatten()
             });
 
-        let mut rows_to_retransmit = Vec::new();
-        for (row_id, row_locator) in row_locators {
-            let Ok(history_rows) = self
-                .storage
-                .scan_history_row_batches(row_locator.table.as_str(), row_id)
-            else {
-                continue;
-            };
-
-            for row in history_rows {
-                if row.batch_id == batch_id {
-                    rows_to_retransmit.push((row_id, metadata_from_row_locator(&row_locator), row));
-                }
-            }
-        }
+        let rows_to_retransmit = self
+            .local_batch_rows(batch_id)
+            .into_iter()
+            .map(|(row_id, row_locator, row)| {
+                (row_id, metadata_from_row_locator(&row_locator), row)
+            })
+            .collect::<Vec<_>>();
 
         let sync_manager = self.schema_manager.query_manager_mut().sync_manager_mut();
         for (row_id, metadata, row) in rows_to_retransmit {

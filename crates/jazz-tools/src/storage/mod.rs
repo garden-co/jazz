@@ -807,38 +807,49 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
     }
 
     let mut rebuilt_visible_entries = Vec::new();
-    for (branch, row_id) in affected_visible_rows {
-        let Some(existing_entry) = storage.load_visible_region_entry(table, &branch, row_id)?
+    let mut rows_without_visible_head = Vec::new();
+    for (branch, row_id) in &affected_visible_rows {
+        let Some(existing_entry) = storage.load_visible_region_entry(table, branch, *row_id)?
         else {
             continue;
         };
 
         let history_rows = history_by_visible_row
-            .remove(&(branch.clone(), row_id))
+            .remove(&(branch.clone(), *row_id))
             .unwrap_or_default();
-        let current_row = history_rows
+        if let Some(current_row) = history_rows
             .iter()
             .find(|row| row.batch_id() == existing_entry.current_row.batch_id())
             .cloned()
-            .unwrap_or_else(|| {
-                let mut current = existing_entry.current_row.clone();
-                if current.batch_id == batch_id {
-                    if let Some(state) = state {
-                        current.state = state;
-                    }
-                    current.confirmed_tier = match (current.confirmed_tier, confirmed_tier) {
-                        (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                        (Some(existing), None) => Some(existing),
-                        (None, incoming) => incoming,
-                    };
-                }
-                current
-            });
-        rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current_row, &history_rows));
+        {
+            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current_row, &history_rows));
+            continue;
+        }
+
+        let mut current = existing_entry.current_row.clone();
+        if current.batch_id == batch_id {
+            if let Some(state) = state {
+                current.state = state;
+            }
+            current.confirmed_tier = match (current.confirmed_tier, confirmed_tier) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (Some(existing), None) => Some(existing),
+                (None, incoming) => incoming,
+            };
+        }
+
+        if current.state.is_visible() {
+            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current, &history_rows));
+        } else {
+            rows_without_visible_head.push((branch.clone(), *row_id));
+        }
     }
 
     if !rebuilt_visible_entries.is_empty() {
         storage.upsert_visible_region_rows(table, &rebuilt_visible_entries)?;
+    }
+    for (branch, row_id) in rows_without_visible_head {
+        storage.delete_visible_region_row(table, &branch, row_id)?;
     }
 
     Ok(())
@@ -1746,6 +1757,15 @@ pub trait Storage {
         self.upsert_visible_region_row_bytes(table, &borrowed_rows)
     }
 
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.raw_table_delete(table, &key_codec::visible_row_key(table, branch, row_id))
+    }
+
     fn patch_row_region_rows_by_batch(
         &mut self,
         _table: &str,
@@ -2459,6 +2479,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).upsert_visible_region_rows(table, entries)
     }
 
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        (**self).delete_visible_region_row(table, branch, row_id)
+    }
+
     fn upsert_visible_region_row_bytes(
         &mut self,
         table: &str,
@@ -3045,6 +3074,24 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        let Some(regions) = self.row_histories.get_mut(table) else {
+            return Ok(());
+        };
+        if let Some(rows) = regions.visible.get_mut(branch) {
+            rows.remove(&row_id);
+            if rows.is_empty() {
+                regions.visible.remove(branch);
+            }
+        }
+        Ok(())
+    }
+
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
@@ -3171,6 +3218,52 @@ impl Storage for MemoryStorage {
                 .and_then(|rows| rows.get(&row_id))
                 .map(|entry| entry.branch_frontier.clone())
         }))
+    }
+
+    fn capture_family_visible_frontier(
+        &self,
+        target_branch_name: BranchName,
+    ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
+        let family_branches: BTreeSet<_> = self
+            .row_histories
+            .values()
+            .flat_map(|regions| regions.visible.keys())
+            .filter_map(|branch_name| {
+                let branch_name = BranchName::new(branch_name.as_str());
+                branch_matches_transaction_family(branch_name, target_branch_name)
+                    .then_some(branch_name.as_str().to_string())
+            })
+            .collect();
+        if family_branches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut frontier = Vec::new();
+        for regions in self.row_histories.values() {
+            for branch_name in &family_branches {
+                let Some(rows) = regions.visible.get(branch_name.as_str()) else {
+                    continue;
+                };
+                for entry in rows.values() {
+                    frontier.push(CapturedFrontierMember {
+                        object_id: entry.current_row.row_id,
+                        branch_name: BranchName::new(branch_name),
+                        batch_id: entry.current_row.batch_id(),
+                    });
+                }
+            }
+        }
+
+        frontier.sort_by(|left, right| {
+            left.object_id
+                .uuid()
+                .as_bytes()
+                .cmp(right.object_id.uuid().as_bytes())
+                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+                .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
+        });
+        frontier.dedup();
+        Ok(frontier)
     }
 
     fn load_visible_region_row_for_tier(

@@ -29,6 +29,41 @@ function makeDbWithJwt(jwtToken: string) {
 }
 
 describe("Db auth state", () => {
+  it("reports backend-scoped auth state for session-backed dbs", () => {
+    const session = {
+      user_id: "alice",
+      claims: { role: "writer" },
+    };
+    const runtimeClient = {
+      updateAuthToken: vi.fn(),
+    };
+
+    const db = createDbFromClient(
+      {
+        appId: "test-app",
+        jwtToken: makeJwt({ sub: "bob", claims: { role: "reader" } }),
+      },
+      runtimeClient as any,
+      session,
+      "alice@writer",
+    );
+
+    expect(db.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "backend",
+      session,
+    });
+
+    db.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
+
+    expect(runtimeClient.updateAuthToken).toHaveBeenCalledTimes(1);
+    expect(db.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "backend",
+      session,
+    });
+  });
+
   it("returns the initial bearer auth state", () => {
     const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
 

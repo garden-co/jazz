@@ -43,7 +43,10 @@ impl SyncManager {
     ) {
         if let SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } =
             &check.payload
-            && matches!(row.state, RowState::StagingPending)
+            && matches!(
+                row.state,
+                RowState::StagingPending | RowState::VisibleDirect
+            )
         {
             let settlement = BatchSettlement::Rejected {
                 batch_id: row.batch_id,

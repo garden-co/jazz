@@ -14,7 +14,7 @@ use crate::storage::{
 };
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
-    SyncManager, SyncPayload,
+    SyncError, SyncManager, SyncPayload,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,8 @@ type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSync
 
 struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
+    fail_visible_row_reads: bool,
+    fail_row_locator_scans: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,16 @@ impl RowRegionReadFailingStorage {
     fn new() -> Self {
         Self {
             inner: MemoryStorage::new(),
+            fail_visible_row_reads: true,
+            fail_row_locator_scans: false,
+        }
+    }
+
+    fn with_row_locator_scan_failure() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            fail_visible_row_reads: false,
+            fail_row_locator_scans: true,
         }
     }
 }
@@ -107,6 +119,11 @@ impl Storage for RowRegionReadFailingStorage {
     }
 
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        if self.fail_row_locator_scans {
+            return Err(StorageError::IoError(
+                "row-locator scans deliberately disabled in this test".to_string(),
+            ));
+        }
         self.inner.scan_row_locators()
     }
 
@@ -195,6 +212,15 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.upsert_visible_region_rows(table, entries)
     }
 
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_visible_region_row(table, branch, row_id)
+    }
+
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
@@ -216,13 +242,16 @@ impl Storage for RowRegionReadFailingStorage {
 
     fn load_visible_region_row(
         &self,
-        _table: &str,
-        _branch: &str,
-        _row_id: ObjectId,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
     ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
-        Err(StorageError::IoError(
-            "row-history reads deliberately disabled in this test".to_string(),
-        ))
+        if self.fail_visible_row_reads {
+            return Err(StorageError::IoError(
+                "row-history reads deliberately disabled in this test".to_string(),
+            ));
+        }
+        self.inner.load_visible_region_row(table, branch, row_id)
     }
 
     fn scan_visible_region_row_batches(
@@ -435,6 +464,15 @@ impl Storage for LegacyPersistenceObservingStorage {
         entries: &[crate::row_histories::VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_visible_region_row(table, branch, row_id)
     }
 
     fn patch_row_region_rows_by_batch(
@@ -675,6 +713,15 @@ impl Storage for RowMutationObservingStorage {
         entries: &[crate::row_histories::VisibleRowEntry],
     ) -> Result<(), StorageError> {
         self.inner.upsert_visible_region_rows(table, entries)
+    }
+
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_visible_region_row(table, branch, row_id)
     }
 
     fn apply_row_mutation(
@@ -2772,6 +2819,79 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
 }
 
 #[test]
+fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "direct-reject-replay-test",
+        Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
+    );
+
+    let ((row_id, _row_values), mut receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lacks publish rights".to_string(),
+            },
+        },
+    });
+    core.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Err(crate::runtime_core::PersistedWriteRejection {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        }))),
+        "replayed direct-batch rejections should resolve persisted waits"
+    );
+    assert_eq!(
+        core.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .and_then(|record| record.latest_settlement),
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+    );
+    assert_eq!(
+        core.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "replayed direct-batch rejection should retract the optimistic visible row"
+    );
+    assert_eq!(
+        core.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()[0]
+            .state,
+        crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
 fn rc_same_row_direct_batch_overwrites_in_place() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
@@ -3813,6 +3933,135 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
 }
 
 #[test]
+fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
+    let schema = test_schema();
+    let mut alice = create_runtime_with_schema(schema.clone(), "direct-reject-test");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "direct-reject-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .set_authorization_schema(users_insert_denied_authorization_schema());
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    worker.add_client(client_id, Some(alice_session.clone()));
+    alice.add_server(server_id);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::User);
+
+    alice.batched_tick();
+    worker.batched_tick();
+    alice.sync_sender().take();
+    worker.sync_sender().take();
+
+    let write_context = WriteContext::from_session(alice_session);
+    let ((row_id, _row_values), mut receiver) = alice
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let batch_id = alice
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap()[0]
+        .batch_id;
+    let branch_name = alice.schema_manager().branch_name();
+
+    pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
+
+    let worker_outbox = worker.sync_sender().take();
+    assert!(
+        worker_outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. },
+                },
+            } if *id == client_id && *settled_batch_id == batch_id
+        )),
+        "direct permission denials should be replayed as rejected batch settlements"
+    );
+    assert!(
+        !worker_outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            } if *id == client_id
+        )),
+        "direct permission denials should not fall back to the non-replayable error path"
+    );
+
+    for entry in worker_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            alice.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    alice.batched_tick();
+
+    match receiver.try_recv() {
+        Ok(Some(Err(rejection))) => {
+            assert_eq!(rejection.batch_id, batch_id);
+            assert_eq!(rejection.code, "permission_denied");
+            assert!(
+                rejection.reason.contains("denied"),
+                "unexpected direct rejection reason: {}",
+                rejection.reason
+            );
+        }
+        other => panic!(
+            "live direct permission denials should resolve persisted waits with a replayable rejection, got {other:?}"
+        ),
+    }
+    assert!(matches!(
+        alice
+            .storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .and_then(|record| record.latest_settlement),
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id: settled_batch_id,
+            code,
+            reason,
+        }) if settled_batch_id == batch_id
+            && code == "permission_denied"
+            && reason.contains("denied")
+    ));
+    assert_eq!(
+        alice
+            .storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "live direct permission denials should retract the optimistic visible row"
+    );
+    assert_eq!(
+        alice
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()[0]
+            .state,
+        crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
 fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     // alice -> worker
     //   alice stages one transactional batch locally
@@ -4582,6 +4831,79 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
         local_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::Missing { batch_id })
     );
+}
+
+#[test]
+fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_locator_scans() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "missing-batch-retransmit-scanless-test",
+        Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    let batch_id = history_rows[0].batch_id;
+    let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
+    let row_digest = history_rows[0].content_digest();
+    core.seal_batch(batch_id).unwrap();
+
+    core.batched_tick();
+    core.sync_sender().take();
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Missing { batch_id },
+        },
+    });
+    core.batched_tick();
+
+    let replay_outbox = core.sync_sender().take();
+    assert!(replay_outbox.iter().any(|entry| {
+        matches!(
+            &entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowBatchCreated { row, .. }
+                    | SyncPayload::RowBatchNeeded { row, .. },
+            } if *id == server_id && row.row_id == row_id && row.batch_id == batch_id
+        )
+    }));
+    assert!(replay_outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::SealBatch { submission },
+        } if *id == server_id
+            && submission.batch_id == batch_id
+            && submission.target_branch_name == branch_name
+            && submission.members == vec![SealedBatchMember {
+                object_id: row_id,
+                row_digest,
+            }]
+    )));
 }
 
 #[test]

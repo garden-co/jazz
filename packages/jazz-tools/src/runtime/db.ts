@@ -35,7 +35,7 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
-import { createAuthStateStore, type AuthState } from "./auth-state.js";
+import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -249,6 +249,14 @@ export interface TableProxy<T, Init> {
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+}
+
+function backendScopedAuthState(session?: Session | null): AuthState {
+  return {
+    status: "authenticated",
+    transport: "backend",
+    session: session ?? null,
+  };
 }
 
 export class DbPersistedWrite<T> {
@@ -704,10 +712,14 @@ export class Db {
   /**
    * Protected constructor - use createDb() in regular app code.
    */
-  protected constructor(config: DbConfig, wasmModule: WasmModule | null) {
+  protected constructor(
+    config: DbConfig,
+    wasmModule: WasmModule | null,
+    authStateOptions?: AuthStateStoreOptions,
+  ) {
     this.config = config;
     this.wasmModule = wasmModule;
-    this.authStateStore = createAuthStateStore(config);
+    this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -1927,8 +1939,18 @@ class ClientBackedDb extends Db {
     private readonly runtimeClient: JazzClient,
     private readonly session?: Session,
     private readonly attribution?: string,
+    scopedAuthState?: AuthState,
   ) {
-    super(config, null);
+    super(
+      config,
+      null,
+      scopedAuthState
+        ? {
+            initialState: scopedAuthState,
+            lockAuthenticatedState: true,
+          }
+        : undefined,
+    );
   }
 
   override updateAuthToken(jwtToken: string | null): void {
@@ -2213,6 +2235,14 @@ export function createDbFromClient(
   client: JazzClient,
   session?: Session,
   attribution?: string,
+  scopedAuthState?: AuthState,
 ): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
+  const resolvedConfig = resolveLocalAuthDefaults(config);
+  return new ClientBackedDb(
+    resolvedConfig,
+    client,
+    session,
+    attribution,
+    scopedAuthState ?? (session || attribution ? backendScopedAuthState(session) : undefined),
+  );
 }
