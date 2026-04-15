@@ -24,6 +24,7 @@
 - [**magic-is-local-first-identity-permission**](todo/issues/magic-is-local-first-identity-permission.md) — Add a `$isLocalFirstIdentity: true` magic check in the permissions DSL that resolves to `true` when the current session was established via local-first auth (i.e. `claims.auth_mode === "local-first"`). This gives policy authors a first-class shorthand instead of manually matching on `"claims.auth_mode": "local-first"`.
 - [**nextjs-plugin-tsx-not-loading**](todo/issues/nextjs-plugin-tsx-not-loading.md) — The Next.js dev server plugin fails to load `.tsx` files.
 - [**policy-error-reasons**](todo/issues/policy-error-reasons.md) — Policy-denied errors (e.g. `WriteError("policy denied INSERT on table todos")`) include
+- [**worker-upstream-connected-is-optimistic**](todo/issues/worker-upstream-connected-is-optimistic.md) — The worker posts `upstream-connected` to the main-thread bridge as soon as `runtime.connect()` returns, not when the Rust WebSocket actually opens. Edge/global-tier queries unblock even if the WS is still handshaking or the server is unreachable — they'll then fail at the Rust/WS layer instead of waiting.
 
 ## Ideas
 

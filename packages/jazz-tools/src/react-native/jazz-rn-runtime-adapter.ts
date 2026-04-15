@@ -19,6 +19,8 @@ export interface JazzRnRuntimeBinding {
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
+  connect(url: string, authJson: string): void;
+  disconnect(): void;
   delete_(objectId: string): void;
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
@@ -396,6 +398,16 @@ export class JazzRnRuntimeAdapter implements Runtime {
   onSyncMessageToSend(_callback: Function): void {
     // Server sync is handled by the Rust-owned WebSocket transport (runtime.connect()).
     // The outbox callback is no longer wired through UniFFI for RN.
+  }
+
+  connect(url: string, authJson: string): void {
+    if (this.closed) return;
+    this.binding.connect(url, authJson);
+  }
+
+  disconnect(): void {
+    if (this.closed) return;
+    this.binding.disconnect();
   }
 
   addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {

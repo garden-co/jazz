@@ -7,6 +7,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
     deleteWithSession: vi.fn(),

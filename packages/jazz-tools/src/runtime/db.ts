@@ -586,6 +586,15 @@ export class Db {
         this.attachWorkerBridge(key, client);
       }
 
+      // Direct (non-worker) clients with a serverUrl must open their own
+      // Rust transport — the worker bridge is not doing it for them.
+      if (!this.worker && this.config.serverUrl) {
+        client.connectTransport(this.config.serverUrl, {
+          jwt_token: this.config.jwtToken,
+          admin_secret: this.config.adminSecret,
+        });
+      }
+
       this.clients.set(key, client);
     }
 
