@@ -264,6 +264,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 enum ConnectedExit {
     HandleDropped,
     NetworkError,
+    Shutdown,
+    UpdateAuth(AuthConfig),
 }
 
 #[cfg(feature = "runtime-tokio")]
@@ -351,7 +353,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     self.tick.notify();
                     self.reconnect.reset();
                     match self.run_connected(&mut ws).await {
-                        ConnectedExit::HandleDropped => {
+                        ConnectedExit::HandleDropped | ConnectedExit::Shutdown => {
                             ws.close().await;
                             return;
                         }
@@ -361,6 +363,17 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                                 .unbounded_send(TransportInbound::Disconnected);
                             self.tick.notify();
                             ws.close().await;
+                        }
+                        ConnectedExit::UpdateAuth(auth) => {
+                            // Implemented fully in Task 8; placeholder path exits-and-reconnects for now.
+                            self.auth = auth;
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
+                            ws.close().await;
+                            self.reconnect.reset();
+                            continue;
                         }
                     }
                 }
@@ -427,6 +440,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             }
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
+                    }
+                }
+                ctrl = self.control_rx.next() => {
+                    match ctrl {
+                        None | Some(TransportControl::Shutdown) => return ConnectedExit::Shutdown,
+                        Some(TransportControl::UpdateAuth(auth)) => return ConnectedExit::UpdateAuth(auth),
                     }
                 }
             }
@@ -742,6 +761,42 @@ mod tests {
             .await
             .expect("manager should exit during handshake on Shutdown")
             .unwrap();
+        assert!(controller.close_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_connected() {
+        let controller = Arc::new(TestStreamController::default());
+        *controller.handshake_response.lock().unwrap() = Some(make_handshake_response_frame());
+        controller.recv_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (mut handle, manager) = create::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+        );
+        let task = tokio::spawn(manager.run());
+
+        // Wait for Connected.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(handle.has_ever_connected());
+
+        handle.disconnect();
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit promptly after Shutdown while connected")
+            .unwrap();
+        // Shutdown does NOT emit Disconnected.
+        let mut saw_disconnected = false;
+        while let Some(msg) = handle.try_recv_inbound() {
+            if matches!(msg, TransportInbound::Disconnected) {
+                saw_disconnected = true;
+            }
+        }
+        assert!(!saw_disconnected, "Shutdown must not emit Disconnected");
         assert!(controller.close_calls.load(Ordering::SeqCst) >= 1);
     }
 
