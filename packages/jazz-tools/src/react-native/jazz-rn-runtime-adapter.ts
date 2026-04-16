@@ -21,6 +21,8 @@ export interface JazzRnRuntimeBinding {
   close(): void;
   connect(url: string, authJson: string): void;
   disconnect(): void;
+  updateAuth(authJson: string): void;
+  onAuthFailure(callback: { onFailure(reason: string): void }): void;
   delete_(objectId: string): void;
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
@@ -408,6 +410,24 @@ export class JazzRnRuntimeAdapter implements Runtime {
   disconnect(): void {
     if (this.closed) return;
     this.binding.disconnect();
+  }
+
+  updateAuth(authJson: string): void {
+    if (this.closed) return;
+    this.binding.updateAuth(authJson);
+  }
+
+  onAuthFailure(callback: (reason: string) => void): void {
+    if (this.closed) return;
+    this.binding.onAuthFailure({
+      onFailure: (reason: string) => {
+        try {
+          callback(reason);
+        } catch (error) {
+          swallowCallbackError("onAuthFailure", error);
+        }
+      },
+    });
   }
 
   addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {
