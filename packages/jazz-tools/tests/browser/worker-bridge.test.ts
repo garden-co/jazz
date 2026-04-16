@@ -144,7 +144,7 @@ function summarizeWorkerMessage(
 }
 
 function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
-  const worker = (db as { worker?: Worker | null }).worker;
+  const worker = (db as unknown as { worker?: Worker | null }).worker;
   const startedAt = Date.now();
   const events: WorkerMessageDebugEvent[] = [];
 
@@ -181,7 +181,7 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
 }
 
 function getDbWorkerDebugState(db: Db): Record<string, unknown> {
-  const anyDb = db as {
+  const anyDb = db as unknown as {
     tabRole?: unknown;
     tabId?: unknown;
     currentLeaderTabId?: unknown;
@@ -463,7 +463,9 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // Insert (sync — runs on main-thread in-memory runtime)
-    const { id } = await db.insert(todos, { title: "Buy milk", done: false });
+    const {
+      value: { id },
+    } = db.insert(todos, { title: "Buy milk", done: false });
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -483,9 +485,9 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Task A", done: false });
-    await db.insert(todos, { title: "Task B", done: true });
-    await db.insert(todos, { title: "Task C", done: false });
+    db.insert(todos, { title: "Task A", done: false });
+    db.insert(todos, { title: "Task B", done: true });
+    db.insert(todos, { title: "Task C", done: false });
 
     const results = await db.all(allTodos);
     expect(results.length).toBe(3);
@@ -504,7 +506,9 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // First I/O operation, bridge hasn't been initialized yet.
-    const { id } = db1.insert(todos, { title: "Test", done: false });
+    const {
+      value: { id },
+    } = db1.insert(todos, { title: "Test", done: false });
 
     await waitForCondition(
       async () => {
@@ -556,7 +560,9 @@ describe("Worker Bridge with OPFS", () => {
       return originalPostMessage(message, { transfer });
     }) as Worker["postMessage"];
 
-    const { id } = db1.insert(todos, { title: "Test", done: false });
+    const {
+      value: { id },
+    } = db1.insert(todos, { title: "Test", done: false });
     expect(id).toBeDefined();
 
     worker.postMessage = originalPostMessage;
@@ -709,7 +715,7 @@ describe("Worker Bridge with OPFS", () => {
     const dbName = uniqueDbName("persistence");
 
     const db1 = await createDb({ appId: "test-app", driver: { type: "persistent", dbName } });
-    await db1.insert(todos, { title: "Survive reload", done: true });
+    db1.insert(todos, { title: "Survive reload", done: true });
     const before = await db1.all(allTodos);
     expect(before.length).toBe(1);
     await db1.shutdown();
@@ -808,7 +814,9 @@ describe("Worker Bridge with OPFS", () => {
     const afterDelete = await db.all(allTodos, { tier: "worker" });
     expect(afterDelete).toEqual([]);
 
-    const { id } = await db.insert(todos, { title: "Fresh after delete", done: true });
+    const {
+      value: { id },
+    } = db.insert(todos, { title: "Fresh after delete", done: true });
     const afterReinsert = await db.all(allTodos, { tier: "worker" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
@@ -912,7 +920,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Observed", done: false });
+    db.insert(todos, { title: "Observed", done: false });
 
     // Wait for subscription to fire
     await waitForCondition(
@@ -938,16 +946,20 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const { id: projectId } = await db.insert(projects, { name: "Observed Project" });
+    const {
+      value: { id: projectId },
+    } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
       }),
     );
 
-    await db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const { id: anotherProjectId } = await db.insert(projects, { name: "Ignored Project" });
-    await db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
+    db.insert(todos, { title: "Observed", done: false, project: projectId });
+    const {
+      value: { id: anotherProjectId },
+    } = db.insert(projects, { name: "Ignored Project" });
+    db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
     await waitForCondition(
@@ -1083,7 +1095,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Prime bridge", done: false });
+    db.insert(todos, { title: "Prime bridge", done: false });
     await (db as any).ensureBridgeReady();
 
     const bridge = (db as any).workerBridge;
@@ -1260,7 +1272,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer", db: dbWriter, probe: writerProbe },
-            { name: "probe", db: dbProbe, probe: probeProbe },
+            { name: "probe", db: dbProbe, probe: probeProbe ?? undefined },
           ],
         ),
       );
@@ -1397,7 +1409,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer-a", db: dbA, probe: dbAProbe },
-            { name: "probe", db: dbProbe, probe: dbProbeTrace },
+            { name: "probe", db: dbProbe, probe: dbProbeTrace ?? undefined },
           ],
         ),
       );
@@ -1494,7 +1506,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(latestAfterRemote.some((row) => row.title === remoteTitle)).toBe(false);
 
     const localTitle = `local-only-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await dbB.insert(todos, { title: localTitle, done: true });
+    dbB.insert(todos, { title: localTitle, done: true });
 
     await waitForCondition(
       async () => {
@@ -1536,7 +1548,7 @@ describe("Worker Bridge with OPFS", () => {
       },
     );
 
-    await follower.insert(todos, { title: "Routed via leader", done: false });
+    follower.insert(todos, { title: "Routed via leader", done: false });
 
     await waitForCondition(
       async () => receivedByLeader.includes("Routed via leader"),
@@ -1578,7 +1590,9 @@ describe("Worker Bridge with OPFS", () => {
       "Follower should be promoted to leader after shutdown",
     );
 
-    const { id } = await follower.insert(todos, { title: "Post-failover", done: true });
+    const {
+      value: { id },
+    } = follower.insert(todos, { title: "Post-failover", done: true });
     await waitForCondition(
       async () => {
         const rows = await follower.all(allTodos, { tier: "worker" });
