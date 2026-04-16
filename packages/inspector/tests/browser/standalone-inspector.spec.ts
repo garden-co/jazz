@@ -42,6 +42,7 @@ async function openTodosTable(page: Page) {
   const tableLink = page.getByRole("link", { name: "View todos data" });
   await expect(tableLink).toBeVisible({ timeout: 5_000 });
   await tableLink.click();
+  await page.getByRole("columnheader", { name: "title" }).click();
 
   await expectTodosTableLoaded(page);
 }
