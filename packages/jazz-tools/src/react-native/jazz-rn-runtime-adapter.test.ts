@@ -9,6 +9,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     close: vi.fn(),
     connect: vi.fn(),
     disconnect: vi.fn(),
+    updateAuth: vi.fn(),
+    onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
     deleteWithSession: vi.fn(),
@@ -397,5 +399,34 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.removeServer).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
+  });
+
+  it("forwards updateAuth JSON payload to the native binding", () => {
+    const updateAuth = vi.fn();
+    const binding = createBinding({ updateAuth });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.updateAuth?.(JSON.stringify({ jwt_token: "refreshed" }));
+
+    expect(updateAuth).toHaveBeenCalledWith(JSON.stringify({ jwt_token: "refreshed" }));
+  });
+
+  it("registers onAuthFailure callback with the native binding and invokes it on failure", () => {
+    let captured: { onFailure: (reason: string) => void } | null = null;
+    const onAuthFailure = vi.fn((cb: { onFailure: (reason: string) => void }) => {
+      captured = cb;
+    });
+    const binding = createBinding({ onAuthFailure });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const listener = vi.fn();
+    adapter.onAuthFailure?.(listener);
+
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(captured).not.toBeNull();
+    expect(captured!.onFailure).toBeInstanceOf(Function);
+
+    captured!.onFailure("token expired");
+    expect(listener).toHaveBeenCalledWith("token expired");
   });
 });
