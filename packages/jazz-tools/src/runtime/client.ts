@@ -103,6 +103,8 @@ export interface Runtime {
   connect?(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */
   disconnect?(): void;
+  /** Push updated auth credentials into the live Rust transport. */
+  updateAuth?(auth_json: string): void;
 }
 
 /**
@@ -775,6 +777,10 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken,
     }).session;
+    // Push the refreshed credentials into the Rust transport. `updateAuth`
+    // is optional on the Runtime interface because not every binding exposes
+    // it yet; bindings that do will route this to TransportControl::UpdateAuth.
+    this.runtime.updateAuth?.(JSON.stringify({ jwt_token: jwtToken ?? null }));
   }
 
   private normalizeQueryExecutionOptions(
