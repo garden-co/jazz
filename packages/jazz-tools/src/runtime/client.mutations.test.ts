@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
@@ -236,6 +236,60 @@ describe("JazzClient mutation durability split", () => {
     expect(updateDurableWithSessionCalls).toEqual([["row-1", updates, attributedContext, "edge"]]);
     expect(deleteWithSessionCalls).toEqual([["row-1", attributedContext]]);
     expect(deleteDurableWithSessionCalls).toEqual([["row-1", attributedContext, "global"]]);
+  });
+
+  it("forwards caller-supplied create ids to runtime insert methods", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insert = vi.fn(
+      (table: string, values: Record<string, unknown>, objectId?: string | null) => {
+        return { id: objectId ?? "generated-id", values: [] };
+      },
+    );
+    const insertDurable = vi.fn(
+      async (
+        table: string,
+        values: Record<string, unknown>,
+        tier: string,
+        objectId?: string | null,
+      ) => {
+        return { id: objectId ?? "generated-id", values: [] };
+      },
+    );
+    const { client } = makeClient({ insert, insertDurable });
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+
+    const created = client.create("todos", insertValues, { id: externalId });
+    const createdDurable = await client.createDurable("todos", insertValues, { id: externalId });
+
+    expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", insertValues, "edge", externalId);
+    expect(created.id).toBe(externalId);
+    expect(createdDurable.id).toBe(externalId);
+  });
+
+  it("falls back to update when upsert sees an existing object id", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insert = vi.fn(() => {
+      throw insertError;
+    });
+    const insertDurable = vi.fn(async () => {
+      throw insertError;
+    });
+    const update = vi.fn();
+    const updateDurable = vi.fn(async () => {});
+    const { client } = makeClient({ insert, insertDurable, update, updateDurable });
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+
+    expect(client.upsert("todos", values, { id: externalId })).toBeUndefined();
+    await expect(
+      client.upsertDurable("todos", values, { id: externalId }),
+    ).resolves.toBeUndefined();
+
+    expect(insert).toHaveBeenCalledWith("todos", values, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", values, "edge", externalId);
+    expect(update).toHaveBeenCalledWith(externalId, values);
+    expect(updateDurable).toHaveBeenCalledWith(externalId, values, "edge");
   });
 
   it("encodes session and attribution together when both are provided", () => {

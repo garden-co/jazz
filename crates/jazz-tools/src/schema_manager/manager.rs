@@ -1469,15 +1469,28 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
+    }
+
+    pub fn insert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
         let aligned_values = self.get_insert_values_with_defaults(table, values)?;
-        self.query_manager.insert_on_branch_with_write_context(
-            storage,
-            table,
-            self.context.branch_name().as_str(),
-            &aligned_values,
-            write_context,
-        )
+        self.query_manager
+            .insert_on_branch_with_write_context_and_id(
+                storage,
+                table,
+                self.context.branch_name().as_str(),
+                &aligned_values,
+                object_id,
+                write_context,
+            )
     }
 
     pub fn insert_with_session<H: Storage>(
@@ -1489,6 +1502,74 @@ impl SchemaManager {
     ) -> Result<InsertResult, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.insert_with_write_context(storage, table, values, owned.as_ref())
+    }
+
+    fn validate_external_upsert_object_id(object_id: ObjectId) -> Result<(), QueryError> {
+        if object_id.uuid().get_version_num() != 7 {
+            return Err(QueryError::EncodingError(format!(
+                "external upsert id must be UUIDv7, got version {} for {}",
+                object_id.uuid().get_version_num(),
+                object_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Create or update a row with a caller-supplied UUIDv7.
+    ///
+    /// If a visible row already exists for `object_id`, only the supplied
+    /// columns are updated. Otherwise a new row is inserted with that id.
+    pub fn upsert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        Self::validate_external_upsert_object_id(object_id)?;
+        let _ = self.ensure_current_schema_persisted(storage);
+        let branches = self.all_branch_strings();
+
+        if let Some((existing_table, ..)) = self
+            .query_manager
+            .load_row_for_schema_update(storage, object_id, &branches)
+        {
+            if existing_table != table {
+                return Err(QueryError::EncodingError(format!(
+                    "object {object_id} already exists in table {existing_table}, cannot upsert into {table}"
+                )));
+            }
+
+            return self.update_with_write_context(
+                storage,
+                object_id,
+                &values.into_iter().collect::<Vec<_>>(),
+                write_context,
+            );
+        }
+
+        let inserted = self.insert_with_write_context_and_id(
+            storage,
+            table,
+            values,
+            Some(object_id),
+            write_context,
+        )?;
+        Ok(inserted.row_version_id)
+    }
+
+    pub fn upsert_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.upsert_with_write_context_and_id(storage, table, object_id, values, owned.as_ref())
     }
 
     /// Update a row using current-schema column names, performing copy-on-write

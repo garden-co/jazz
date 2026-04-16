@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
+use jazz_tools::binding_support::parse_external_object_id;
 use js_sys::Function;
 use js_sys::Uint8Array;
 use serde::Serialize;
@@ -654,13 +655,20 @@ impl WasmRuntime {
     /// # Returns
     /// The inserted row as `{ id, values }`.
     #[wasm_bindgen]
-    pub fn insert(&self, table: &str, values: JsValue) -> Result<JsValue, JsError> {
+    pub fn insert(
+        &self,
+        table: &str,
+        values: JsValue,
+        object_id: Option<String>,
+    ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, named_values, None)
+            .insert_with_id(table, named_values, object_id, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
 
         let row = SubscriptionRow {
@@ -680,14 +688,17 @@ impl WasmRuntime {
         table: &str,
         values: JsValue,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, named_values, write_context.as_ref())
+            .insert_with_id(table, named_values, object_id, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
         let row = SubscriptionRow {
@@ -848,14 +859,17 @@ impl WasmRuntime {
         table: &str,
         values: JsValue,
         tier: &str,
+        object_id: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(table, named_values, None, persistence_tier)
+            core.insert_persisted_with_id(table, named_values, object_id, None, persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
         };
 
@@ -882,16 +896,20 @@ impl WasmRuntime {
         values: JsValue,
         write_context_json: Option<String>,
         tier: &str,
+        object_id: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(
+            core.insert_persisted_with_id(
                 table,
                 named_values,
+                object_id,
                 write_context.as_ref(),
                 persistence_tier,
             )

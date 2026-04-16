@@ -71,6 +71,33 @@ describe("react/create-jazz-client integration", () => {
     }
   }, 15000);
 
+  it("RC-I02: uses a caller-supplied uuidv7 for inserts", async () => {
+    let client: JazzClient | null = null;
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+
+    try {
+      client = await createJazzClient({ appId: makeAppId("external-id") });
+
+      const inserted = await client.db.insert(
+        todosTable,
+        { title: "with external id", done: false },
+        { id: externalId },
+      );
+      const rows = await client.db.all(allTodosQuery);
+
+      expect(inserted.id).toBe(externalId);
+      expect(
+        rows.some(
+          (row) => row.id === externalId && row.title === "with external id" && row.done === false,
+        ),
+      ).toBe(true);
+    } finally {
+      if (client) {
+        await client.shutdown();
+      }
+    }
+  }, 15000);
+
   it("RC-I03: shutdown after activity releases resources cleanly", async () => {
     let client: JazzClient | null = null;
 

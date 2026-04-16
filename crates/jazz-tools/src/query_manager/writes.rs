@@ -51,6 +51,36 @@ pub struct RowBranchDelete<'a> {
 }
 
 impl QueryManager {
+    fn resolve_insert_object_id<H: Storage>(
+        &self,
+        storage: &H,
+        external_object_id: Option<ObjectId>,
+    ) -> Result<ObjectId, QueryError> {
+        if let Some(object_id) = external_object_id {
+            if object_id.uuid().get_version_num() != 7 {
+                return Err(QueryError::EncodingError(format!(
+                    "external create id must be UUIDv7, got version {} for {}",
+                    object_id.uuid().get_version_num(),
+                    object_id
+                )));
+            }
+
+            if storage
+                .load_row_locator(object_id)
+                .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
+                .is_some()
+            {
+                return Err(QueryError::EncodingError(format!(
+                    "object already exists: {object_id}"
+                )));
+            }
+
+            return Ok(object_id);
+        }
+
+        Ok(ObjectId::new())
+    }
+
     fn resolve_write_author(write_context: Option<&WriteContext>) -> String {
         write_context
             .map(|write_context| write_context.author_principal().to_string())
@@ -602,6 +632,17 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
+    }
+
+    pub fn insert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
         let table_name = TableName::new(table);
         let table_schema = self
@@ -629,7 +670,7 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
@@ -774,6 +815,25 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_context,
+        )
+    }
+
+    pub fn insert_on_branch_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -795,7 +855,7 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
