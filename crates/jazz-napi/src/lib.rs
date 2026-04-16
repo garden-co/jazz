@@ -1231,6 +1231,26 @@ impl NapiRuntime {
         }
         Ok(())
     }
+
+    /// Register a JS callback that fires when the Rust transport receives an
+    /// auth rejection from the server during the WS handshake.
+    ///
+    /// The callback receives a single string argument: the rejection reason.
+    #[napi(ts_args_type = "callback: (reason: string) => void")]
+    pub fn on_auth_failure(
+        &self,
+        // CalleeHandled=false: JS callback receives (reason) not (error, reason).
+        callback: ThreadsafeFunction<String, (), String, napi::Status, false, false, 0>,
+    ) -> napi::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.set_auth_failure_callback(move |reason| {
+            callback.call(reason, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        Ok(())
+    }
 }
 
 // ============================================================================
