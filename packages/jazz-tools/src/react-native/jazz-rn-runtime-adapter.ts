@@ -25,11 +25,12 @@ export interface JazzRnRuntimeBinding {
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
   getSchemaHash(): string;
-  insert(table: string, valuesJson: string): string;
+  insert(table: string, valuesJson: string, objectId: string | undefined): string;
   insertWithSession?(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
+    objectId: string | undefined,
   ): string;
   onBatchedTickNeeded(
     callback:
@@ -219,21 +220,31 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  insert(table: string, values: InsertValues): Row {
+  insert(table: string, values: InsertValues, object_id?: string | null): Row {
     try {
-      const rowJson = this.binding.insert(table, encodeFFIRecordToJson(values));
+      const rowJson = this.binding.insert(
+        table,
+        encodeFFIRecordToJson(values),
+        object_id ?? undefined,
+      );
       return JSON.parse(rowJson) as Row;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
+  insertWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Row {
     try {
       const rowJson = this.requireWriteContextMethod("insertWithSession")(
         table,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
+        object_id ?? undefined,
       );
       return JSON.parse(rowJson) as Row;
     } catch (error) {

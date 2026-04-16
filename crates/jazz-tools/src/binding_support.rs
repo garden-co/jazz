@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
@@ -332,6 +333,22 @@ pub fn serialize_outbox_entry(message: &OutboxEntry) -> Result<SerializedOutboxE
 
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
+}
+
+pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<ObjectId>, String> {
+    let Some(object_id) = object_id else {
+        return Ok(None);
+    };
+
+    let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
+    if uuid.get_version_num() != 7 {
+        return Err(format!(
+            "Invalid ObjectId: expected UUIDv7, got version {}",
+            uuid.get_version_num()
+        ));
+    }
+
+    Ok(Some(ObjectId::from_uuid(uuid)))
 }
 
 pub fn current_timestamp_ms() -> i64 {
