@@ -1524,16 +1524,12 @@ impl WasmRuntime {
             serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let scheduler = self.core.borrow().scheduler().clone();
         let tick = WasmTickNotifier { scheduler };
-        let (handle, manager) = jazz_tools::transport_manager::create::<
-            crate::ws_stream::WasmWsStream,
-            WasmTickNotifier,
-        >(url, auth, tick);
-        // Seed the handshake catalogue hash.
-        {
-            let core = self.core.borrow();
-            handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
-        }
-        self.core.borrow_mut().set_transport(handle);
+        let manager = {
+            let mut core = self.core.borrow_mut();
+            jazz_tools::runtime_core::install_transport::<_, _, crate::ws_stream::WasmWsStream, _>(
+                &mut core, url, auth, tick,
+            )
+        };
         wasm_bindgen_futures::spawn_local(manager.run());
         Ok(())
     }

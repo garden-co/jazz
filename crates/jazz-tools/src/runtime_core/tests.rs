@@ -944,6 +944,85 @@ fn create_test_runtime() -> TestCore {
     create_runtime_with_schema(test_schema(), "test-app")
 }
 
+// ---------------------------------------------------------------------------
+// install_transport tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "transport-websocket")]
+mod install_transport_tests {
+    use super::*;
+    use crate::transport_manager::{AuthConfig, StreamAdapter, TickNotifier};
+
+    struct NopTick;
+    impl TickNotifier for NopTick {
+        fn notify(&self) {}
+    }
+
+    struct NopStreamAdapter;
+    impl StreamAdapter for NopStreamAdapter {
+        type Error = &'static str;
+        async fn connect(_url: &str) -> Result<Self, Self::Error> {
+            futures::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+        async fn close(&mut self) {}
+    }
+
+    #[test]
+    #[should_panic(expected = "install_transport called while a transport is already installed")]
+    fn install_transport_panics_if_transport_already_installed() {
+        let mut core = create_test_runtime();
+        // Install once.
+        let _first = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        // Install a second time — must panic via debug_assert.
+        let _second = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+    }
+
+    #[test]
+    fn install_transport_seeds_catalogue_hash_and_registers_handle() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        assert!(
+            core.transport.is_some(),
+            "transport handle should be installed"
+        );
+        let expected_hash = core.schema_manager().catalogue_state_hash();
+        let handle_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .catalogue_state_hash_for_test();
+        assert_eq!(
+            handle_hash.as_deref(),
+            Some(expected_hash.as_str()),
+            "install_transport must seed the handle's catalogue_state_hash",
+        );
+    }
+}
+
 fn documents_query_by_title(title: &str) -> Query {
     QueryBuilder::new("documents")
         .filter_eq("title", Value::Text(title.into()))
@@ -4035,5 +4114,32 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
             .get_client(bob)
             .is_some(),
         "bob should be preserved"
+    );
+}
+
+#[cfg(feature = "transport-websocket")]
+#[test]
+fn auth_failure_callback_fires_on_inbound_auth_failure_event() {
+    use crate::transport_manager::TransportInbound;
+    use std::sync::{Arc, Mutex};
+
+    let mut core = create_test_runtime();
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+    core.set_auth_failure_callback(move |reason| {
+        captured_clone.lock().unwrap().push(reason);
+    });
+
+    let dummy_server_id = ServerId::new();
+    core.handle_transport_inbound_for_test(
+        dummy_server_id,
+        TransportInbound::AuthFailure {
+            reason: "Unauthorized".to_string(),
+        },
+    );
+
+    assert_eq!(
+        captured.lock().unwrap().as_slice(),
+        &["Unauthorized".to_string()]
     );
 }

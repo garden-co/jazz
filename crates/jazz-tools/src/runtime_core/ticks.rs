@@ -478,4 +478,47 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             buffered.retain(|seq, _| *seq >= next_sequence);
         }
     }
+
+    /// Test seam: directly dispatch a `TransportInbound` event as if it arrived
+    /// from `server_id`, exercising the same match arm as `batched_tick`.
+    /// Does not touch `self.transport` — no transport needs to be installed.
+    #[cfg(test)]
+    #[cfg(feature = "transport-websocket")]
+    pub(crate) fn handle_transport_inbound_for_test(
+        &mut self,
+        server_id: ServerId,
+        event: crate::transport_manager::TransportInbound,
+    ) {
+        match event {
+            crate::transport_manager::TransportInbound::Connected {
+                catalogue_state_hash,
+                next_sync_seq,
+            } => {
+                self.remove_server(server_id);
+                self.add_server_with_catalogue_state_hash(
+                    server_id,
+                    catalogue_state_hash.as_deref(),
+                );
+                if let Some(seq) = next_sync_seq {
+                    self.set_next_expected_server_sequence(server_id, seq);
+                }
+            }
+            crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
+                if let Some(seq) = sequence {
+                    self.park_sync_message_with_sequence(*entry, seq);
+                } else {
+                    self.park_sync_message(*entry);
+                }
+            }
+            crate::transport_manager::TransportInbound::Disconnected => {
+                self.remove_server(server_id);
+            }
+            crate::transport_manager::TransportInbound::AuthFailure { reason } => {
+                self.remove_server(server_id);
+                if let Some(ref cb) = self.auth_failure_callback {
+                    cb(reason);
+                }
+            }
+        }
+    }
 }

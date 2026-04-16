@@ -4,6 +4,19 @@ import type { AuthFailureReason } from "./sync-transport.js";
 
 export type { AuthFailureReason } from "./sync-transport.js";
 
+/**
+ * Map a Rust auth-failure reason string to a typed `AuthFailureReason`.
+ * The Rust transport sends the server's error message verbatim; we look for
+ * well-known sub-strings and fall back to "invalid" for anything unrecognised.
+ */
+export function mapAuthReason(reason: string): AuthFailureReason {
+  const lower = reason.toLowerCase();
+  if (lower.includes("expired")) return "expired";
+  if (lower.includes("missing")) return "missing";
+  if (lower.includes("disabled")) return "disabled";
+  return "invalid";
+}
+
 export type AuthState =
   | {
       status: "authenticated";
