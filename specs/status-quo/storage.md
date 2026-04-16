@@ -46,7 +46,17 @@ Queries are index-first, so storage also owns index persistence:
 
 ### 3. Row locators and metadata
 
-The engine keeps a row locator that maps a logical row id back to its owning table. That lets query and sync code start from a row id and still find the correct raw table without a separate object catalog.
+The engine keeps a row locator that maps a logical row id back to its owning logical table. That
+is lineage/context metadata, not an exact storage pointer.
+
+Exact raw-table routing now lives in dedicated system tables:
+
+- `__visible_row_table_locator`: maps `(branch_name, row_id)` to the exact visible raw table
+- `__history_row_batch_table_locator`: maps `(row_id, branch_name, batch_id)` to the exact
+  history raw table
+
+That split matters because point loads should be O(1) against the real current row-table instance,
+while `RowLocator` still describes the logical row across schema evolution.
 
 Storage also owns small engine metadata rows used for runtime bookkeeping.
 
@@ -60,6 +70,9 @@ For user data, storage persists both:
 Both regions are raw table instances whose rows are flat `row_format` records containing reserved
 `_jazz_*` columns plus the table's user columns. Storage exposes them through dedicated helpers
 such as history scans, visible-row loads, and row-state patch operations.
+
+Exact visible/history loads use the exact locator tables above and do not scan all row-table
+headers on the hot path. Branch/table scans still union compatible raw tables by logical table.
 
 ### 5. Batch bookkeeping
 

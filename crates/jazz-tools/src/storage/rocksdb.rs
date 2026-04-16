@@ -396,35 +396,59 @@ impl Storage for RocksDBStorage {
             super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
         let encoded_visible_rows =
             super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
-        let mut seen_row_raw_tables = std::collections::HashSet::new();
-        for row in &encoded_history_rows {
-            if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
-                super::ensure_raw_table_header(
-                    self,
-                    &row.row_raw_table_id.raw_table_name(),
-                    &super::RawTableHeader::row_raw_table(
-                        super::RowRawTableKind::History,
-                        table,
-                        row.row_raw_table_id.schema_hash,
-                    ),
-                )?;
-            }
-        }
-        for row in &encoded_visible_rows {
-            if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
-                super::ensure_raw_table_header(
-                    self,
-                    &row.row_raw_table_id.raw_table_name(),
-                    &super::RawTableHeader::row_raw_table(
-                        super::RowRawTableKind::Visible,
-                        table,
-                        row.row_raw_table_id.schema_hash,
-                    ),
-                )?;
-            }
-        }
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
+            let mut seen_row_raw_tables = std::collections::HashSet::new();
+            for row in &encoded_history_rows {
+                if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                    let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                        &row.row_raw_table_id,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        &row.row_raw_table_id.raw_table_name(),
+                        &header,
+                        |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                    )?;
+                }
+            }
+            for row in &encoded_visible_rows {
+                if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                    let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                        &row.row_raw_table_id,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        &row.row_raw_table_id.raw_table_name(),
+                        &header,
+                        |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                    )?;
+                }
+            }
+            if !encoded_history_rows.is_empty() {
+                let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                    super::STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
+                    1,
+                ))?;
+                raw_table_put_core(
+                    super::RAW_TABLE_HEADER_TABLE,
+                    super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                    &header,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
+            if !encoded_visible_rows.is_empty() {
+                let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                    super::STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
+                    1,
+                ))?;
+                raw_table_put_core(
+                    super::RAW_TABLE_HEADER_TABLE,
+                    super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                    &header,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
             let borrowed_history_rows = encoded_history_rows
                 .iter()
                 .map(|row| HistoryRowBytes {
@@ -438,6 +462,23 @@ impl Storage for RocksDBStorage {
             append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
+            for row in &encoded_history_rows {
+                let locator =
+                    super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                        table_name: row.row_raw_table_id.table_name.clone(),
+                        schema_hash: row.row_raw_table_id.schema_hash,
+                    })?;
+                raw_table_put_core(
+                    super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                    &super::history_row_batch_table_locator_key(
+                        row.row_id,
+                        row.branch.as_str(),
+                        row.batch_id,
+                    ),
+                    &locator,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
             let borrowed_visible_rows = encoded_visible_rows
                 .iter()
                 .map(|row| VisibleRowBytes {
@@ -450,6 +491,19 @@ impl Storage for RocksDBStorage {
             upsert_visible_region_row_bytes_core(table, &borrowed_visible_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
+            for row in &encoded_visible_rows {
+                let locator =
+                    super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                        table_name: row.row_raw_table_id.table_name.clone(),
+                        schema_hash: row.row_raw_table_id.schema_hash,
+                    })?;
+                raw_table_put_core(
+                    super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                    &super::visible_row_table_locator_key(row.branch.as_str(), row.row_id),
+                    &locator,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
             Self::apply_index_mutations_on_txn(&txn, index_mutations)?;
             Self::commit_txn(txn.into_inner())
         })

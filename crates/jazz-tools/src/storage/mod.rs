@@ -106,6 +106,8 @@ pub type RawTableKeys = Vec<String>;
 
 const METADATA_TABLE: &str = "__metadata";
 const ROW_LOCATOR_TABLE: &str = "__row_locator";
+const VISIBLE_ROW_TABLE_LOCATOR_TABLE: &str = "__visible_row_table_locator";
+const HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE: &str = "__history_row_batch_table_locator";
 const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
@@ -119,6 +121,8 @@ pub type BranchOrd = i32;
 
 const STORAGE_KIND_METADATA: &str = "metadata";
 const STORAGE_KIND_ROW_LOCATOR: &str = "row_locator";
+const STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR: &str = "visible_row_table_locator";
+const STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR: &str = "history_row_batch_table_locator";
 const STORAGE_KIND_BRANCH_ORD_REGISTRY: &str = "branch_ord_registry";
 const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
@@ -169,6 +173,12 @@ impl RawTableHeader {
 pub struct RowLocator {
     pub table: SharedString,
     pub origin_schema_hash: Option<SchemaHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactRowTableLocator {
+    pub table_name: SharedString,
+    pub schema_hash: SchemaHash,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -394,6 +404,70 @@ fn encode_row_locator(locator: &RowLocator) -> Result<Vec<u8>, StorageError> {
 fn decode_row_locator(bytes: &[u8]) -> Result<RowLocator, StorageError> {
     postcard::from_bytes(bytes)
         .map_err(|err| StorageError::IoError(format!("deserialize row locator: {err}")))
+}
+
+fn exact_row_table_locator_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("table_name", ColumnType::Text),
+        ColumnDescriptor::new("schema_hash", ColumnType::Bytea),
+    ])
+}
+
+fn encode_exact_row_table_locator(locator: &ExactRowTableLocator) -> Result<Vec<u8>, StorageError> {
+    encode_row(
+        &exact_row_table_locator_storage_descriptor(),
+        &[
+            Value::Text(locator.table_name.to_string()),
+            Value::Bytea(locator.schema_hash.as_bytes().to_vec()),
+        ],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode exact row table locator: {err}")))
+}
+
+fn decode_exact_row_table_locator(bytes: &[u8]) -> Result<ExactRowTableLocator, StorageError> {
+    let values = decode_row(&exact_row_table_locator_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode exact row table locator: {err}")))?;
+    let [table_name, schema_hash] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "malformed exact row table locator".to_string(),
+        ));
+    };
+    let table_name = match table_name {
+        Value::Text(raw) => SharedString::from(raw.clone()),
+        other => {
+            return Err(StorageError::IoError(format!(
+                "exact row table locator table_name was {other:?}"
+            )));
+        }
+    };
+    let schema_hash = match schema_hash {
+        Value::Bytea(bytes) => SchemaHash::from_bytes(bytes.clone().try_into().map_err(|_| {
+            StorageError::IoError(
+                "exact row table locator schema_hash must be 32 bytes".to_string(),
+            )
+        })?),
+        other => {
+            return Err(StorageError::IoError(format!(
+                "exact row table locator schema_hash was {other:?}"
+            )));
+        }
+    };
+    Ok(ExactRowTableLocator {
+        table_name,
+        schema_hash,
+    })
+}
+
+fn visible_row_table_locator_key(branch: &str, row_id: ObjectId) -> String {
+    key_codec::visible_row_raw_table_key(branch, row_id)
+}
+
+fn history_row_batch_table_locator_key(
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
+) -> String {
+    key_codec::history_row_raw_table_key(row_id, branch, batch_id)
 }
 
 fn local_batch_record_key(batch_id: BatchId) -> String {
@@ -744,61 +818,34 @@ fn resolved_row_tables_for_table<H: Storage + ?Sized>(
     Ok(tables)
 }
 
-fn resolved_row_tables_for_exact_row<H: Storage + ?Sized>(
+fn resolved_visible_row_table_for_exact_row<H: Storage + ?Sized>(
     storage: &H,
-    kind: RowRawTableKind,
-    table: &str,
+    branch: &str,
     row_id: ObjectId,
-) -> Result<Vec<ResolvedRowTable>, StorageError> {
-    let mut candidates = Vec::new();
-    if let Some(row_locator) = load_row_locator_or_metadata(storage, row_id)?
-        && let Some(schema_hash) = row_locator.origin_schema_hash
-    {
-        candidates.push(RowRawTableId::new(kind, table, schema_hash));
-        if row_locator.table.as_str() != table {
-            candidates.push(RowRawTableId::new(
-                kind,
-                row_locator.table.as_str(),
-                schema_hash,
-            ));
-        }
-    }
-    candidates.extend(row_raw_table_ids_for_table(storage, kind, table)?);
-    candidates.sort_by_key(|candidate| candidate.raw_table_name());
-    candidates.dedup();
-
-    let mut resolved = Vec::new();
-    for candidate in candidates {
-        if let Some(table) = resolved_row_table_from_id(storage, candidate)? {
-            resolved.push(table);
-        }
-    }
-    Ok(resolved)
+) -> Result<Option<ResolvedRowTable>, StorageError> {
+    let Some(locator) = storage.load_visible_row_table_locator(branch, row_id)? else {
+        return Ok(None);
+    };
+    resolved_row_table_from_id(
+        storage,
+        visible_row_raw_table_id(locator.table_name.as_str(), locator.schema_hash),
+    )
 }
 
-fn row_raw_table_ids_for_exact_row<H: Storage + ?Sized>(
+fn resolved_history_row_table_for_exact_batch<H: Storage + ?Sized>(
     storage: &H,
-    kind: RowRawTableKind,
-    table: &str,
+    branch: &str,
     row_id: ObjectId,
-) -> Result<Vec<RowRawTableId>, StorageError> {
-    let mut exact = Vec::new();
-    if let Some(row_locator) = load_row_locator_or_metadata(storage, row_id)?
-        && let Some(schema_hash) = row_locator.origin_schema_hash
-    {
-        exact.push(RowRawTableId::new(kind, table, schema_hash));
-        if row_locator.table.as_str() != table {
-            exact.push(RowRawTableId::new(
-                kind,
-                row_locator.table.as_str(),
-                schema_hash,
-            ));
-        }
-    }
-    exact.extend(row_raw_table_ids_for_table(storage, kind, table)?);
-    exact.sort_by_key(|left| left.raw_table_name());
-    exact.dedup();
-    Ok(exact)
+    batch_id: BatchId,
+) -> Result<Option<ResolvedRowTable>, StorageError> {
+    let Some(locator) = storage.load_history_row_batch_table_locator(branch, row_id, batch_id)?
+    else {
+        return Ok(None);
+    };
+    resolved_row_table_from_id(
+        storage,
+        history_row_raw_table_id(locator.table_name.as_str(), locator.schema_hash),
+    )
 }
 
 fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
@@ -1199,52 +1246,53 @@ pub(super) fn scan_visible_row_bytes_with_storage<H: Storage + ?Sized>(
 
 pub(super) fn load_history_row_batch_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
-    table: &str,
+    _table: &str,
     branch: &str,
     row_id: ObjectId,
     batch_id: BatchId,
 ) -> Result<Option<OwnedHistoryRowBytes>, StorageError> {
-    let row_raw_table_ids =
-        row_raw_table_ids_for_exact_row(storage, RowRawTableKind::History, table, row_id)?;
+    let Some(locator) = storage.load_history_row_batch_table_locator(branch, row_id, batch_id)?
+    else {
+        return Ok(None);
+    };
     let key = key_codec::history_row_raw_table_key(row_id, branch, batch_id);
-    for row_raw_table_id in row_raw_table_ids {
-        let row_raw_table = row_raw_table_id.raw_table_name();
-        if let Some(bytes) = storage.raw_table_get(&row_raw_table, &key)? {
-            return Ok(Some(OwnedHistoryRowBytes {
-                row_raw_table_id,
-                row_raw_table,
-                branch: branch.to_string(),
-                row_id,
-                batch_id,
-                bytes,
-            }));
-        }
-    }
-    Ok(None)
+    let row_raw_table_id =
+        history_row_raw_table_id(locator.table_name.as_str(), locator.schema_hash);
+    let row_raw_table = row_raw_table_id.raw_table_name();
+    Ok(storage
+        .raw_table_get(&row_raw_table, &key)?
+        .map(|bytes| OwnedHistoryRowBytes {
+            row_raw_table_id,
+            row_raw_table,
+            branch: branch.to_string(),
+            row_id,
+            batch_id,
+            bytes,
+        }))
 }
 
 pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
-    table: &str,
+    _table: &str,
     branch: &str,
     row_id: ObjectId,
 ) -> Result<Option<OwnedVisibleRowBytes>, StorageError> {
-    let row_raw_table_ids =
-        row_raw_table_ids_for_exact_row(storage, RowRawTableKind::Visible, table, row_id)?;
+    let Some(locator) = storage.load_visible_row_table_locator(branch, row_id)? else {
+        return Ok(None);
+    };
     let key = key_codec::visible_row_raw_table_key(branch, row_id);
-    for row_raw_table_id in row_raw_table_ids {
-        let row_raw_table = row_raw_table_id.raw_table_name();
-        if let Some(bytes) = storage.raw_table_get(&row_raw_table, &key)? {
-            return Ok(Some(OwnedVisibleRowBytes {
-                row_raw_table_id,
-                row_raw_table,
-                branch: branch.to_string(),
-                row_id,
-                bytes,
-            }));
-        }
-    }
-    Ok(None)
+    let row_raw_table_id =
+        visible_row_raw_table_id(locator.table_name.as_str(), locator.schema_hash);
+    let row_raw_table = row_raw_table_id.raw_table_name();
+    Ok(storage
+        .raw_table_get(&row_raw_table, &key)?
+        .map(|bytes| OwnedVisibleRowBytes {
+            row_raw_table_id,
+            row_raw_table,
+            branch: branch.to_string(),
+            row_id,
+            bytes,
+        }))
 }
 
 pub(super) fn scan_visible_region_row_batch_branches_with_storage<H: Storage + ?Sized>(
@@ -2027,6 +2075,74 @@ pub trait Storage {
         }
     }
 
+    fn load_visible_row_table_locator(
+        &self,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<ExactRowTableLocator>, StorageError> {
+        self.raw_table_get(
+            VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+            &visible_row_table_locator_key(branch, row_id),
+        )?
+        .map(|bytes| decode_exact_row_table_locator(&bytes))
+        .transpose()
+    }
+
+    fn put_visible_row_table_locator(
+        &mut self,
+        branch: &str,
+        row_id: ObjectId,
+        locator: Option<&ExactRowTableLocator>,
+    ) -> Result<(), StorageError> {
+        let key = visible_row_table_locator_key(branch, row_id);
+        if let Some(locator) = locator {
+            ensure_raw_table_header(
+                self,
+                VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                &RawTableHeader::system(STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR, 1),
+            )?;
+            let bytes = encode_exact_row_table_locator(locator)?;
+            self.raw_table_put(VISIBLE_ROW_TABLE_LOCATOR_TABLE, &key, &bytes)
+        } else {
+            self.raw_table_delete(VISIBLE_ROW_TABLE_LOCATOR_TABLE, &key)
+        }
+    }
+
+    fn load_history_row_batch_table_locator(
+        &self,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+    ) -> Result<Option<ExactRowTableLocator>, StorageError> {
+        self.raw_table_get(
+            HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+            &history_row_batch_table_locator_key(row_id, branch, batch_id),
+        )?
+        .map(|bytes| decode_exact_row_table_locator(&bytes))
+        .transpose()
+    }
+
+    fn put_history_row_batch_table_locator(
+        &mut self,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+        locator: Option<&ExactRowTableLocator>,
+    ) -> Result<(), StorageError> {
+        let key = history_row_batch_table_locator_key(row_id, branch, batch_id);
+        if let Some(locator) = locator {
+            ensure_raw_table_header(
+                self,
+                HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                &RawTableHeader::system(STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR, 1),
+            )?;
+            let bytes = encode_exact_row_table_locator(locator)?;
+            self.raw_table_put(HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE, &key, &bytes)
+        } else {
+            self.raw_table_delete(HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE, &key)
+        }
+    }
+
     // ================================================================
     // Ordered raw-table storage
     // ================================================================
@@ -2442,6 +2558,15 @@ pub trait Storage {
                     &row_raw_table_header(&row.row_raw_table_id),
                 )?;
             }
+            self.put_history_row_batch_table_locator(
+                row.branch.as_str(),
+                row.row_id,
+                row.batch_id,
+                Some(&ExactRowTableLocator {
+                    table_name: row.row_raw_table_id.table_name.clone(),
+                    schema_hash: row.row_raw_table_id.schema_hash,
+                }),
+            )?;
         }
         let borrowed_rows = encoded_rows
             .iter()
@@ -2504,6 +2629,14 @@ pub trait Storage {
                     &row_raw_table_header(&row.row_raw_table_id),
                 )?;
             }
+            self.put_visible_row_table_locator(
+                row.branch.as_str(),
+                row.row_id,
+                Some(&ExactRowTableLocator {
+                    table_name: row.row_raw_table_id.table_name.clone(),
+                    schema_hash: row.row_raw_table_id.schema_hash,
+                }),
+            )?;
         }
         let borrowed_rows = encoded_rows
             .iter()
@@ -2519,16 +2652,17 @@ pub trait Storage {
 
     fn delete_visible_region_row(
         &mut self,
-        table: &str,
+        _table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         let key = key_codec::visible_row_raw_table_key(branch, row_id);
-        for row_raw_table_id in
-            row_raw_table_ids_for_exact_row(self, RowRawTableKind::Visible, table, row_id)?
-        {
+        if let Some(locator) = self.load_visible_row_table_locator(branch, row_id)? {
+            let row_raw_table_id =
+                visible_row_raw_table_id(locator.table_name.as_str(), locator.schema_hash);
             self.raw_table_delete(&row_raw_table_id.raw_table_name(), &key)?;
         }
+        self.put_visible_row_table_locator(branch, row_id, None)?;
         Ok(())
     }
 
@@ -2616,22 +2750,20 @@ pub trait Storage {
 
     fn load_visible_region_row(
         &self,
-        table: &str,
+        _table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        let resolved_tables =
-            resolved_row_tables_for_exact_row(self, RowRawTableKind::Visible, table, row_id)?;
+        let Some(resolved) = resolved_visible_row_table_for_exact_row(self, branch, row_id)? else {
+            return Ok(None);
+        };
         let key = key_codec::visible_row_raw_table_key(branch, row_id);
-        for resolved in &resolved_tables {
-            if let Some(bytes) = self.raw_table_get(&resolved.row_raw_table, &key)? {
-                return Ok(Some(
-                    decode_visible_row_entry_bytes_in_table(resolved, row_id, branch, &bytes)?
-                        .current_row,
-                ));
-            }
-        }
-        Ok(None)
+        self.raw_table_get(&resolved.row_raw_table, &key)?
+            .map(|bytes| {
+                decode_visible_row_entry_bytes_in_table(&resolved, row_id, branch, &bytes)
+                    .map(|entry| entry.current_row)
+            })
+            .transpose()
     }
 
     fn load_visible_query_row(
@@ -2682,21 +2814,17 @@ pub trait Storage {
 
     fn load_visible_region_entry(
         &self,
-        table: &str,
+        _table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<VisibleRowEntry>, StorageError> {
-        let resolved_tables =
-            resolved_row_tables_for_exact_row(self, RowRawTableKind::Visible, table, row_id)?;
+        let Some(resolved) = resolved_visible_row_table_for_exact_row(self, branch, row_id)? else {
+            return Ok(None);
+        };
         let key = key_codec::visible_row_raw_table_key(branch, row_id);
-        for resolved in &resolved_tables {
-            if let Some(bytes) = self.raw_table_get(&resolved.row_raw_table, &key)? {
-                return Ok(Some(decode_visible_row_entry_bytes_in_table(
-                    resolved, row_id, branch, &bytes,
-                )?));
-            }
-        }
-        Ok(None)
+        self.raw_table_get(&resolved.row_raw_table, &key)?
+            .map(|bytes| decode_visible_row_entry_bytes_in_table(&resolved, row_id, branch, &bytes))
+            .transpose()
     }
 
     fn load_visible_region_frontier(
@@ -2714,47 +2842,32 @@ pub trait Storage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
-        let branch_names = load_branch_ord_registry(self)?
-            .entries
-            .into_iter()
-            .map(|entry| entry.branch_name)
-            .collect::<Vec<_>>();
-        let family_branches: Vec<_> = branch_names
-            .into_iter()
-            .filter(|branch_name| {
-                branch_matches_transaction_family(*branch_name, target_branch_name)
-            })
-            .collect();
-        if family_branches.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let tables = self
-            .scan_raw_table_headers()?
-            .into_iter()
-            .filter_map(|(raw_table_name, header)| {
-                let Ok(row_raw_table_id) = RowRawTableId::parse_raw_table_name(&raw_table_name)
-                else {
-                    return None;
-                };
-                validate_row_raw_table_header(&row_raw_table_id, header)
-                    .ok()
-                    .map(|_| row_raw_table_id)
-            })
-            .filter(|row_raw_table_id| row_raw_table_id.kind == RowRawTableKind::Visible)
-            .map(|row_raw_table_id| row_raw_table_id.table_name)
-            .collect::<BTreeSet<_>>();
-
         let mut frontier = Vec::new();
-        for table in tables {
-            for branch_name in &family_branches {
-                for current_row in self.scan_visible_region(&table, branch_name.as_str())? {
-                    frontier.push(CapturedFrontierMember {
-                        object_id: current_row.row_id,
-                        branch_name: *branch_name,
-                        batch_id: current_row.batch_id(),
-                    });
+        let visible_tables = scan_row_raw_table_headers_with_storage(self)?
+            .into_iter()
+            .filter(|(row_raw_table_id, _)| row_raw_table_id.kind == RowRawTableKind::Visible)
+            .map(|(row_raw_table_id, header)| {
+                resolved_row_table_from_header(self, row_raw_table_id, header)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for resolved in visible_tables {
+            for (key, bytes) in self.raw_table_scan_prefix(&resolved.row_raw_table, "")? {
+                let (branch, row_id) = key_codec::decode_visible_row_raw_table_key(&key)?;
+                let branch_name = BranchName::new(&branch);
+                if !branch_matches_transaction_family(branch_name, target_branch_name) {
+                    continue;
                 }
+                let entry = decode_visible_row_entry_bytes_in_table(
+                    &resolved,
+                    row_id,
+                    branch.as_str(),
+                    &bytes,
+                )?;
+                frontier.push(CapturedFrontierMember {
+                    object_id: entry.current_row.row_id,
+                    branch_name,
+                    batch_id: entry.current_row.batch_id(),
+                });
             }
         }
 
@@ -2772,22 +2885,22 @@ pub trait Storage {
 
     fn load_history_row_batch(
         &self,
-        table: &str,
+        _table: &str,
         branch: &str,
         row_id: ObjectId,
         batch_id: BatchId,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        let resolved_tables =
-            resolved_row_tables_for_exact_row(self, RowRawTableKind::History, table, row_id)?;
+        let Some(resolved) =
+            resolved_history_row_table_for_exact_batch(self, branch, row_id, batch_id)?
+        else {
+            return Ok(None);
+        };
         let key = key_codec::history_row_raw_table_key(row_id, branch, batch_id);
-        for resolved in &resolved_tables {
-            if let Some(bytes) = self.raw_table_get(&resolved.row_raw_table, &key)? {
-                return Ok(Some(decode_history_row_bytes_in_table(
-                    resolved, row_id, branch, batch_id, &bytes,
-                )?));
-            }
-        }
-        Ok(None)
+        self.raw_table_get(&resolved.row_raw_table, &key)?
+            .map(|bytes| {
+                decode_history_row_bytes_in_table(&resolved, row_id, branch, batch_id, &bytes)
+            })
+            .transpose()
     }
 
     fn load_history_row_batch_for_schema_hash(
@@ -2986,8 +3099,7 @@ pub trait Storage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let resolved_tables =
-            resolved_row_tables_for_exact_row(self, RowRawTableKind::History, table, row_id)?;
+        let resolved_tables = resolved_row_tables_for_table(self, RowRawTableKind::History, table)?;
         let prefix = key_codec::history_row_raw_table_prefix(Some(row_id));
         let mut rows = Vec::new();
         for resolved in &resolved_tables {
@@ -3013,14 +3125,7 @@ pub trait Storage {
         branch: &str,
         scan: HistoryScan,
     ) -> Result<Vec<StoredRowBatch>, StorageError> {
-        let resolved_tables = match scan {
-            HistoryScan::Row { row_id } => {
-                resolved_row_tables_for_exact_row(self, RowRawTableKind::History, table, row_id)?
-            }
-            HistoryScan::Branch | HistoryScan::AsOf { .. } => {
-                resolved_row_tables_for_table(self, RowRawTableKind::History, table)?
-            }
-        };
+        let resolved_tables = resolved_row_tables_for_table(self, RowRawTableKind::History, table)?;
         let prefix = match scan {
             HistoryScan::Branch | HistoryScan::AsOf { .. } => {
                 key_codec::history_row_raw_table_prefix(None)
@@ -4081,14 +4186,32 @@ impl Storage for MemoryStorage {
         rows: &[StoredRowBatch],
     ) -> Result<(), StorageError> {
         let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
-        let regions = self.row_histories.entry(table.to_string()).or_default();
-        let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
-        for row in rows {
-            regions.history.insert(
-                (row.row_id, row.branch.clone(), row.batch_id()),
-                row.clone(),
-            );
+        {
+            let regions = self.row_histories.entry(table.to_string()).or_default();
+            for row in rows {
+                regions.history.insert(
+                    (row.row_id, row.branch.clone(), row.batch_id()),
+                    row.clone(),
+                );
+            }
         }
+        for row in &encoded_rows {
+            ensure_raw_table_header(
+                self,
+                &row.row_raw_table_id.raw_table_name(),
+                &row_raw_table_header(&row.row_raw_table_id),
+            )?;
+            self.put_history_row_batch_table_locator(
+                row.branch.as_str(),
+                row.row_id,
+                row.batch_id,
+                Some(&ExactRowTableLocator {
+                    table_name: row.row_raw_table_id.table_name.clone(),
+                    schema_hash: row.row_raw_table_id.schema_hash,
+                }),
+            )?;
+        }
+        let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in encoded_rows {
             raw_regions.insert(
                 (row.row_id, row.branch.clone().into(), row.batch_id),
@@ -4118,13 +4241,31 @@ impl Storage for MemoryStorage {
         table: &str,
         entries: &[VisibleRowEntry],
     ) -> Result<(), StorageError> {
-        let regions = self.row_histories.entry(table.to_string()).or_default();
-        for entry in entries {
-            regions
-                .visible
-                .entry(entry.current_row.branch.clone())
-                .or_default()
-                .insert(entry.current_row.row_id, entry.clone());
+        let encoded_rows = encode_visible_row_bytes_for_storage(self, table, entries)?;
+        {
+            let regions = self.row_histories.entry(table.to_string()).or_default();
+            for entry in entries {
+                regions
+                    .visible
+                    .entry(entry.current_row.branch.clone())
+                    .or_default()
+                    .insert(entry.current_row.row_id, entry.clone());
+            }
+        }
+        for row in encoded_rows {
+            ensure_raw_table_header(
+                self,
+                &row.row_raw_table_id.raw_table_name(),
+                &row_raw_table_header(&row.row_raw_table_id),
+            )?;
+            self.put_visible_row_table_locator(
+                row.branch.as_str(),
+                row.row_id,
+                Some(&ExactRowTableLocator {
+                    table_name: row.row_raw_table_id.table_name.clone(),
+                    schema_hash: row.row_raw_table_id.schema_hash,
+                }),
+            )?;
         }
         Ok(())
     }
@@ -4144,6 +4285,7 @@ impl Storage for MemoryStorage {
                 regions.visible.remove(branch);
             }
         }
+        self.put_visible_row_table_locator(branch, row_id, None)?;
         Ok(())
     }
 
@@ -4723,6 +4865,7 @@ mod tests {
     struct CountingCatalogueLoadsStorage {
         inner: MemoryStorage,
         catalogue_loads: std::cell::Cell<usize>,
+        raw_table_header_scans: std::cell::Cell<usize>,
     }
 
     impl CountingCatalogueLoadsStorage {
@@ -4730,11 +4873,16 @@ mod tests {
             Self {
                 inner: MemoryStorage::new(),
                 catalogue_loads: std::cell::Cell::new(0),
+                raw_table_header_scans: std::cell::Cell::new(0),
             }
         }
 
         fn catalogue_loads(&self) -> usize {
             self.catalogue_loads.get()
+        }
+
+        fn raw_table_header_scans(&self) -> usize {
+            self.raw_table_header_scans.get()
         }
     }
 
@@ -4811,6 +4959,12 @@ mod tests {
         ) -> Result<Option<CatalogueEntry>, StorageError> {
             self.catalogue_loads.set(self.catalogue_loads.get() + 1);
             self.inner.load_catalogue_entry(object_id)
+        }
+
+        fn scan_raw_table_headers(&self) -> Result<Vec<(String, RawTableHeader)>, StorageError> {
+            self.raw_table_header_scans
+                .set(self.raw_table_header_scans.get() + 1);
+            self.inner.scan_raw_table_headers()
         }
     }
 
@@ -5196,6 +5350,184 @@ mod tests {
             .load_visible_region_row("users", branch, row_id)
             .unwrap();
         assert_eq!(point_loaded, Some(row));
+    }
+
+    #[test]
+    fn exact_visible_row_load_avoids_raw_table_header_scans() {
+        use crate::row_histories::VisibleRowEntry;
+
+        let mut storage = CountingCatalogueLoadsStorage::new();
+        let schema_hash = persist_test_schema(&mut storage, &users_test_schema());
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let row = make_users_row_batch(
+            row_id,
+            "main",
+            "alpha",
+            RowProvenance::for_insert("alice".to_string(), 10),
+            crate::row_histories::RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+            Vec::new(),
+        );
+
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
+            .unwrap();
+
+        storage.raw_table_header_scans.set(0);
+        let loaded = storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap();
+
+        assert_eq!(loaded, Some(row));
+        assert_eq!(storage.raw_table_header_scans(), 0);
+    }
+
+    #[test]
+    fn exact_history_row_load_avoids_raw_table_header_scans() {
+        let mut storage = CountingCatalogueLoadsStorage::new();
+        let schema_hash = persist_test_schema(&mut storage, &users_test_schema());
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "users".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let row = make_users_row_batch(
+            row_id,
+            "main",
+            "alpha",
+            RowProvenance::for_insert("alice".to_string(), 10),
+            crate::row_histories::RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+            Vec::new(),
+        );
+
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
+
+        storage.raw_table_header_scans.set(0);
+        let loaded = storage
+            .load_history_row_batch("users", "main", row_id, row.batch_id())
+            .unwrap();
+
+        assert_eq!(loaded, Some(row));
+        assert_eq!(storage.raw_table_header_scans(), 0);
+    }
+
+    #[test]
+    fn capture_family_visible_frontier_reads_synced_branches_without_branch_ords() {
+        use crate::row_histories::VisibleRowEntry;
+
+        let mut storage = CountingCatalogueLoadsStorage::new();
+        let schema_hash = persist_test_schema(&mut storage, &users_test_schema());
+        let target_row_id = ObjectId::new();
+        let sibling_row_id = ObjectId::new();
+        for row_id in [target_row_id, sibling_row_id] {
+            storage
+                .put_row_locator(
+                    row_id,
+                    Some(&RowLocator {
+                        table: "users".into(),
+                        origin_schema_hash: Some(schema_hash),
+                    }),
+                )
+                .unwrap();
+        }
+
+        let target_branch = "dev-aaaaaaaaaaaa-main";
+        let sibling_branch = "dev-bbbbbbbbbbbb-main";
+        let target_row = make_users_row_batch(
+            target_row_id,
+            target_branch,
+            "alpha",
+            RowProvenance::for_insert("alice".to_string(), 10),
+            crate::row_histories::RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+            Vec::new(),
+        );
+        let sibling_row = make_users_row_batch(
+            sibling_row_id,
+            sibling_branch,
+            "beta",
+            RowProvenance::for_insert("bob".to_string(), 20),
+            crate::row_histories::RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+            Vec::new(),
+        );
+
+        storage
+            .append_history_region_rows("users", &[target_row.clone(), sibling_row.clone()])
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                &[
+                    VisibleRowEntry::rebuild(target_row.clone(), std::slice::from_ref(&target_row)),
+                    VisibleRowEntry::rebuild(
+                        sibling_row.clone(),
+                        std::slice::from_ref(&sibling_row),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .load_branch_ord(BranchName::new(target_branch))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .load_branch_ord(BranchName::new(sibling_branch))
+                .unwrap(),
+            None
+        );
+
+        let frontier = storage
+            .capture_family_visible_frontier(BranchName::new(target_branch))
+            .unwrap();
+
+        assert_eq!(
+            frontier,
+            vec![
+                CapturedFrontierMember {
+                    object_id: target_row_id,
+                    branch_name: BranchName::new(target_branch),
+                    batch_id: target_row.batch_id(),
+                },
+                CapturedFrontierMember {
+                    object_id: sibling_row_id,
+                    branch_name: BranchName::new(sibling_branch),
+                    batch_id: sibling_row.batch_id(),
+                },
+            ]
+        );
     }
 
     #[test]

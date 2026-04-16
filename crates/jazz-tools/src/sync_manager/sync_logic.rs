@@ -1,7 +1,7 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{RowState, StoredRowBatch};
+use crate::row_histories::StoredRowBatch;
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashMap;
 
@@ -227,24 +227,8 @@ impl SyncManager {
             return;
         };
         let metadata = metadata_from_row_locator(&row_locator);
-        let Ok(rows) = storage.scan_history_row_batches(row_locator.table.as_str(), object_id)
-        else {
-            return;
-        };
-
-        let mut sent_any = false;
-        for row in rows
-            .into_iter()
-            .filter(|row| row.branch == branch_name.as_str())
-            .filter(|row| !matches!(row.state, RowState::StagingPending | RowState::Superseded))
-        {
-            self.queue_row_to_client(client_id, object_id, metadata.clone(), row, force_resend);
-            sent_any = true;
-        }
-
-        if !sent_any
-            && let Some(row) =
-                self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
+        if let Some(row) =
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
         }

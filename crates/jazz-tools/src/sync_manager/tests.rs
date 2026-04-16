@@ -111,6 +111,84 @@ fn seed_visible_row(
     .unwrap();
 }
 
+struct FailingHistoryPatchStorage {
+    inner: MemoryStorage,
+    fail_history_load: bool,
+}
+
+impl FailingHistoryPatchStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            fail_history_load: false,
+        }
+    }
+
+    fn inner_mut(&mut self) -> &mut MemoryStorage {
+        &mut self.inner
+    }
+}
+
+impl Storage for FailingHistoryPatchStorage {
+    fn raw_table_put(
+        &mut self,
+        table: &str,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(
+        &mut self,
+        table: &str,
+        key: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(
+        &self,
+        table: &str,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<crate::storage::RawTableRows, crate::storage::StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<crate::storage::RawTableRows, crate::storage::StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn load_history_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+    ) -> Result<Option<StoredRowBatch>, crate::storage::StorageError> {
+        if self.fail_history_load {
+            return Err(crate::storage::StorageError::IoError(format!(
+                "simulated load_history_row_batch failure for {table}/{branch}/{row_id}/{batch_id:?}"
+            )));
+        }
+        self.inner
+            .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+}
+
 fn sealed_submission(
     batch_id: BatchId,
     target_branch_name: &str,
@@ -570,6 +648,38 @@ fn row_batch_state_changed_enqueues_pending_row_update_for_visible_row() {
 }
 
 #[test]
+fn row_batch_state_changed_does_not_ack_when_storage_patch_fails() {
+    let mut sm = SyncManager::new();
+    let mut io = FailingHistoryPatchStorage::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let batch_id = row.batch_id;
+    seed_visible_row(&mut sm, io.inner_mut(), "users", row.clone());
+    io.fail_history_load = true;
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::RowBatchStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    assert!(sm.take_received_row_batch_acks().is_empty());
+    assert!(sm.take_pending_row_visibility_changes().is_empty());
+    let loaded = io
+        .inner
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("visible row should remain present");
+    assert_eq!(loaded.confirmed_tier, None);
+}
+
+#[test]
 fn row_batch_state_changed_relays_to_clients_that_received_row_batch_needed() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
@@ -665,6 +775,60 @@ fn initial_query_sync_replays_current_direct_batch_settlement() {
             }],
         }
     )));
+}
+
+#[test]
+fn initial_query_sync_sends_only_current_row_for_deep_history() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let older = visible_row(row_id, "main", Vec::new(), 1_000, b"older");
+    let newer = visible_row(row_id, "main", vec![older.batch_id()], 2_000, b"newer");
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_users_schema(&mut io);
+    create_test_row_with_id(&mut io, row_id, Some(row_metadata("users")));
+    io.append_history_region_rows("users", &[older.clone(), newer.clone()])
+        .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&VisibleRowEntry::rebuild(
+            newer.clone(),
+            &[older.clone(), newer.clone()],
+        )),
+    )
+    .unwrap();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+
+    let row_payloads: Vec<_> = sm
+        .take_outbox()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::RowBatchNeeded { row, .. },
+            } if id == client_id => Some(row),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        row_payloads.len(),
+        1,
+        "initial sync should send only the current row"
+    );
+    assert_eq!(row_payloads[0].batch_id(), newer.batch_id());
+    assert_eq!(row_payloads[0].data, newer.data);
 }
 
 #[test]

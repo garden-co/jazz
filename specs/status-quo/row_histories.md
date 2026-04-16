@@ -93,11 +93,15 @@ The important engine fields are:
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
-For history rows, that identity now lives in the raw-table-local storage key rather than the
-payload columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and
-the current visible `batch_id` stays in the flat visible payload. Raw table headers carry the
-general storage format version, full schema hash, and table name, so flat row decoding no longer
-needs to discover descriptors by scanning all historical catalogue schemas.
+History rows keep that full engine shape. Visible rows intentionally do not: they keep the current
+batch id, durability/state/provenance columns, user data, and the frontier/tier winner pointers,
+while parents/metadata remain history-owned.
+
+For history rows, the identity now lives in the raw-table-local storage key rather than the payload
+columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and the
+current visible `batch_id` stays in the flat visible payload. Raw table headers carry the general
+storage format version, full schema hash, and table name, so flat row decoding no longer needs to
+discover descriptors by scanning all historical catalogue schemas.
 
 Read paths resolve the exact raw table context first, then decode rows against that already-known
 format. The header is part of resolving the table, not something that gets reread for every row.

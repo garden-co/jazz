@@ -6,7 +6,6 @@ use crate::batch_fate::{
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
-use crate::storage::RowRawTableKind;
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -154,9 +153,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     table_name: row_locator.table.to_string(),
                     branch_name,
                     schema_hash: self.local_batch_member_schema_hash(
-                        row_locator.table.as_str(),
-                        &row_locator,
                         branch_name,
+                        row_id,
+                        row.batch_id(),
                     )?,
                     row_digest: row.content_digest(),
                 })
@@ -187,35 +186,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     fn local_batch_member_schema_hash(
         &self,
-        table: &str,
-        row_locator: &crate::storage::RowLocator,
         branch_name: BranchName,
+        row_id: ObjectId,
+        batch_id: BatchId,
     ) -> Result<SchemaHash, RuntimeError> {
-        if let Some(schema_hash) = row_locator.origin_schema_hash {
-            return Ok(schema_hash);
-        }
-
-        let row_raw_tables = crate::storage::scan_row_raw_table_headers_with_storage(&self.storage)
+        if let Some(locator) = self
+            .storage
+            .load_history_row_batch_table_locator(branch_name.as_str(), row_id, batch_id)
             .map_err(|err| {
-                RuntimeError::WriteError(format!("scan row raw table headers: {err}"))
-            })?;
-
-        let matching_hashes: Vec<_> = row_raw_tables
-            .into_iter()
-            .map(|(row_raw_table_id, _)| row_raw_table_id)
-            .filter(|row_raw_table_id| {
-                row_raw_table_id.kind == RowRawTableKind::History
-                    && row_raw_table_id.table_name == table
-            })
-            .map(|row_raw_table_id| row_raw_table_id.schema_hash)
-            .collect::<Vec<_>>();
-
-        if let [schema_hash] = matching_hashes.as_slice() {
-            return Ok(*schema_hash);
+                RuntimeError::WriteError(format!("load history row batch locator: {err}"))
+            })?
+        {
+            return Ok(locator.schema_hash);
         }
 
         Err(RuntimeError::WriteError(format!(
-            "missing schema hash for local batch member table {table} branch {branch_name}"
+            "missing schema hash for local batch member branch {branch_name} batch {batch_id:?}"
         )))
     }
 
