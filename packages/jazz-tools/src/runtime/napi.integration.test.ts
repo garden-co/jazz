@@ -43,6 +43,41 @@ type TimestampProjectInit = {
   updated_at: Date;
 };
 
+type ByteChunk = {
+  id: string;
+  label: string;
+  data: Uint8Array;
+};
+
+type ByteChunkInit = {
+  label: string;
+  data: Uint8Array;
+};
+
+type StoredFilePart = {
+  id: string;
+  data: Uint8Array;
+};
+
+type StoredFilePartInit = {
+  data: Uint8Array;
+};
+
+type StoredFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  partIds: string[];
+  partSizes: number[];
+};
+
+type StoredFileInit = {
+  name: string;
+  mimeType: string;
+  partIds: string[];
+  partSizes: number[];
+};
+
 type PolicyTodo = {
   id: string;
   title: string;
@@ -113,6 +148,38 @@ const TIMESTAMP_SCHEMA: WasmSchema = {
   },
 };
 
+const BYTEA_SCHEMA: WasmSchema = {
+  byte_chunks: {
+    columns: [
+      { name: "label", column_type: { type: "Text" }, nullable: false },
+      { name: "data", column_type: { type: "Bytea" }, nullable: false },
+    ],
+  },
+};
+
+const FILE_STORAGE_SCHEMA: WasmSchema = {
+  file_parts: {
+    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
+  },
+  files: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "mimeType", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "partIds",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "file_parts",
+      },
+      {
+        name: "partSizes",
+        column_type: { type: "Array", element: { type: "Integer" } },
+        nullable: false,
+      },
+    ],
+  },
+};
+
 let todoServerProjectPromise: Promise<LoadedSchemaProject> | null = null;
 
 async function loadTodoServerProject(): Promise<LoadedSchemaProject> {
@@ -150,6 +217,54 @@ const timestampProjectsTable: TableProxy<TimestampProject, TimestampProjectInit>
   _rowType: undefined as unknown as TimestampProject,
   _initType: undefined as unknown as TimestampProjectInit,
 };
+
+type WhereTable<Row, Init> = TableProxy<Row, Init> & {
+  where(conditions: Record<string, unknown>): QueryBuilder<Row>;
+};
+
+function makeWhereQuery<T>(
+  table: string,
+  schema: WasmSchema,
+  conditions: Record<string, unknown>,
+): QueryBuilder<T> {
+  return {
+    _table: table,
+    _schema: schema,
+    _rowType: undefined as unknown as T,
+    _build() {
+      return JSON.stringify({
+        table,
+        conditions: Object.entries(conditions).map(([column, value]) => ({
+          column,
+          op: "eq",
+          value,
+        })),
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      });
+    },
+  };
+}
+
+function makeWhereTable<Row, Init>(table: string, schema: WasmSchema): WhereTable<Row, Init> {
+  return {
+    _table: table,
+    _schema: schema,
+    _rowType: undefined as unknown as Row,
+    _initType: undefined as unknown as Init,
+    where(conditions: Record<string, unknown>) {
+      return makeWhereQuery<Row>(table, schema, conditions);
+    },
+  };
+}
+
+const byteChunksTable = makeWhereTable<ByteChunk, ByteChunkInit>("byte_chunks", BYTEA_SCHEMA);
+const filePartsTable = makeWhereTable<StoredFilePart, StoredFilePartInit>(
+  "file_parts",
+  FILE_STORAGE_SCHEMA,
+);
+const filesTable = makeWhereTable<StoredFile, StoredFileInit>("files", FILE_STORAGE_SCHEMA);
 
 function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, PolicyTodoInit> {
   return {
@@ -1287,6 +1402,149 @@ describe("NAPI integration", () => {
         created_at: new Date(timestamp),
         updated_at: new Date(timestamp),
       });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("accepts Uint8Array inserts for direct BYTEA columns through backend Db", async () => {
+    const dataRoot = await createTempDir("jazz-napi-bytea-insert-");
+    const dataPath = join(dataRoot, "runtime.skv");
+    let context: {
+      db(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: { wasmSchema: BYTEA_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath },
+      });
+
+      const created = context.db().insert(byteChunksTable, {
+        label: "alpha",
+        data: new Uint8Array([1, 2, 3]),
+      });
+
+      expect(Array.from(created.data)).toEqual([1, 2, 3]);
+
+      const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
+        tier: "worker",
+      });
+
+      expect(reloaded).not.toBeNull();
+      expect(Array.from(reloaded?.data ?? [])).toEqual([1, 2, 3]);
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("accepts Uint8Array updates for direct BYTEA columns through backend Db", async () => {
+    const dataRoot = await createTempDir("jazz-napi-bytea-update-");
+    const dataPath = join(dataRoot, "runtime.skv");
+    const appId = randomUUID();
+    let context: {
+      db(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+    let seedRuntime: {
+      insert(table: string, values: unknown): { id: string };
+      close(): void;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const { NapiRuntime } = await loadNapiModule();
+
+      seedRuntime = new NapiRuntime(
+        serializeRuntimeSchema(BYTEA_SCHEMA),
+        appId,
+        "dev",
+        "main",
+        dataPath,
+        "edge",
+      ) as unknown as {
+        insert(table: string, values: unknown): { id: string };
+        close(): void;
+      };
+
+      // Seed via the raw N-API shape so this test isolates the update path.
+      const created = seedRuntime.insert("byte_chunks", {
+        label: { type: "Text", value: "beta" },
+        data: { type: "Bytea", value: [1, 2, 3] },
+      });
+      seedRuntime.close();
+      seedRuntime = null;
+
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: BYTEA_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath },
+      });
+
+      context.db().update(byteChunksTable, created.id, {
+        data: new Uint8Array([4, 5, 6]),
+      });
+
+      const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
+        tier: "worker",
+      });
+
+      expect(reloaded).not.toBeNull();
+      expect(Array.from(reloaded?.data ?? [])).toEqual([4, 5, 6]);
+    } finally {
+      seedRuntime?.close();
+      if (context) {
+        await context.shutdown();
+      }
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("stores Blob chunks in conventional file_parts.data when using createFileFromBlob", async () => {
+    const dataRoot = await createTempDir("jazz-napi-bytea-file-");
+    const dataPath = join(dataRoot, "runtime.skv");
+    let context: {
+      db(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: { wasmSchema: FILE_STORAGE_SCHEMA },
+        permissions: {},
+        driver: { type: "persistent", dataPath },
+      });
+
+      const file = await context.db().createFileFromBlob(
+        {
+          files: filesTable,
+          file_parts: filePartsTable,
+        },
+        new Blob([new Uint8Array([7, 8, 9])], { type: "application/octet-stream" }),
+        { name: "probe.bin" },
+      );
+
+      const part = await context.db().one(filePartsTable.where({ id: file.partIds[0] }), {
+        tier: "worker",
+      });
+
+      expect(part).not.toBeNull();
+      expect(Array.from(part?.data ?? [])).toEqual([7, 8, 9]);
     } finally {
       if (context) {
         await context.shutdown();

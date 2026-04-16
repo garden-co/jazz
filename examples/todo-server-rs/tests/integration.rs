@@ -759,11 +759,24 @@ async fn test_server_resync() {
 
         // Verify it exists locally
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query.clone(), None).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
-        // Wait for sync to server
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        // Use an EdgeServer query as the causal barrier before shutdown.
+        // This waits until the server has settled the todo, instead of
+        // guessing with a fixed sleep that can flake under CI load.
+        let server_results = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.query(query, Some(DurabilityTier::EdgeServer)),
+        )
+        .await
+        .expect("Writer query with EdgeServer tier should resolve within 10s")
+        .expect("Writer query should succeed");
+        assert_eq!(
+            server_results.len(),
+            1,
+            "Todo should reach the server before shutdown"
+        );
 
         client.shutdown().await.unwrap();
     }
