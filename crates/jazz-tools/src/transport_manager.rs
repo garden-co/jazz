@@ -97,10 +97,6 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     pub admin_secret: Option<String>,
     pub backend_session: Option<serde_json::Value>,
-    #[serde(default)]
-    pub local_mode: Option<String>,
-    #[serde(default)]
-    pub local_token: Option<String>,
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -119,11 +115,6 @@ impl std::fmt::Debug for AuthConfig {
             .field(
                 "backend_session",
                 &self.backend_session.as_ref().map(|_| "<redacted>"),
-            )
-            .field("local_mode", &self.local_mode)
-            .field(
-                "local_token",
-                &self.local_token.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -178,7 +169,6 @@ impl ReconnectState {
     }
 }
 
-#[allow(dead_code)] // fields used in Task 3 run loop
 pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     pub server_id: ServerId,
     pub url: String,

@@ -120,10 +120,6 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
-  /** Local-first auth mode identifier (e.g. "local"). */
-  local_mode?: string;
-  /** Local-first identity token. */
-  local_token?: string;
 }
 
 /**
@@ -1103,7 +1099,6 @@ export class JazzClient {
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    await this.waitForRemoteReadAvailability(normalizedOptions.tier);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -1434,12 +1429,6 @@ export class JazzClient {
     })();
 
     return await this.shutdownPromise;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async waitForRemoteReadAvailability(_tier: DurabilityTier): Promise<void> {
-    // Connection state is managed by the Rust-owned WebSocket transport.
-    // No TS-side wait needed here.
   }
 }
 

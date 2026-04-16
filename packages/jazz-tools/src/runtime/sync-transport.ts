@@ -9,97 +9,6 @@
 
 export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
 
-/** Auth and identity context for sync operations. */
-export interface SyncAuth {
-  jwtToken?: string;
-  backendSecret?: string;
-  adminSecret?: string;
-  clientId?: string;
-  pathPrefix?: string;
-}
-
-type UnauthenticatedPayload = {
-  error?: unknown;
-  code?: unknown;
-  message?: unknown;
-};
-
-export class SyncAuthError extends Error {
-  readonly name = "SyncAuthError";
-
-  constructor(
-    readonly reason: AuthFailureReason,
-    message: string,
-    readonly status = 401,
-  ) {
-    super(message);
-  }
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && typeof error.message === "string") {
-    return error.message;
-  }
-  if (typeof error === "string") return error;
-  return String(error);
-}
-
-export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal): boolean {
-  if (signal?.aborted) return true;
-
-  if (error && typeof error === "object") {
-    const maybeName = (error as { name?: unknown }).name;
-    if (maybeName === "AbortError") return true;
-  }
-
-  const message = errorMessage(error).toLowerCase();
-  if (message.includes("fetch request has been canceled")) return true;
-  if (message.includes("fetch request has been cancelled")) return true;
-  if (message.includes("the operation was aborted")) return true;
-
-  const cause = (error as { cause?: unknown } | null)?.cause;
-  if (cause !== undefined) {
-    const causeMessage = errorMessage(cause).toLowerCase();
-    if (causeMessage.includes("fetch request has been canceled")) return true;
-    if (causeMessage.includes("fetch request has been cancelled")) return true;
-    if (causeMessage.includes("the operation was aborted")) return true;
-  }
-
-  return false;
-}
-
-export async function readSyncAuthError(response: Response): Promise<SyncAuthError | null> {
-  if (response.status !== 401) {
-    return null;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-  }
-
-  try {
-    const body = (await response.json()) as UnauthenticatedPayload;
-    if (body.error !== "unauthenticated") {
-      return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-    }
-
-    const reason: AuthFailureReason =
-      body.code === "expired" ||
-      body.code === "missing" ||
-      body.code === "invalid" ||
-      body.code === "disabled"
-        ? body.code
-        : "invalid";
-
-    const message = typeof body.message === "string" ? body.message : `Unauthenticated (${reason})`;
-
-    return new SyncAuthError(reason, message, response.status);
-  } catch {
-    return new SyncAuthError("invalid", `Sync auth failed: ${response.status}`);
-  }
-}
-
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
   onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
@@ -214,25 +123,6 @@ export function createSyncOutboxRouter(
   };
 }
 
-/**
- * Generate a UUIDv4 client ID.
- *
- * Uses `crypto.randomUUID()` when available and falls back to a
- * standards-compatible template in older environments.
- */
-export function generateClientId(): string {
-  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
-  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
-    return cryptoObj.randomUUID();
-  }
-
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = Math.floor(Math.random() * 16);
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
@@ -257,28 +147,13 @@ export function buildEndpointUrl(serverUrl: string, endpoint: string, pathPrefix
 }
 
 /**
- * Apply end-user auth headers with stable precedence.
- *
- * Sets `Authorization: Bearer <token>` when a JWT is available.
+ * Apply end-user auth headers. Sets `Authorization: Bearer <token>` when a JWT is available.
  */
-export function applyUserAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
+export function applyUserAuthHeaders(
+  headers: Record<string, string>,
+  auth: { jwtToken?: string },
+): void {
   if (auth.jwtToken) {
     headers["Authorization"] = `Bearer ${auth.jwtToken}`;
   }
-}
-
-/**
- * Apply runtime sync auth headers.
- *
- * Precedence:
- * 1. Backend privileged auth (`X-Jazz-Backend-Secret`)
- * 2. End-user auth (JWT/local)
- */
-export function applySyncAuthHeaders(headers: Record<string, string>, auth: SyncAuth): void {
-  if (auth.backendSecret) {
-    headers["X-Jazz-Backend-Secret"] = auth.backendSecret;
-    return;
-  }
-
-  applyUserAuthHeaders(headers, auth);
 }

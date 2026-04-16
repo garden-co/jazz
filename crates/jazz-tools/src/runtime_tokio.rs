@@ -185,11 +185,8 @@ impl From<CoreRuntimeError> for RuntimeError {
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
     core: Arc<Mutex<TokioCoreType<S>>>,
-    /// Kept alive to prevent the callback from being dropped prematurely.
-    ///
-    /// Outbox delivery through this sender is not wired into `batched_tick` yet;
-    /// Task 8 will replace this with the transport-based `connect()` pathway.
-    /// Until then, this field exists solely to keep the callback resources alive.
+    /// Installed as `RuntimeCore::sync_sender` and retained here so the
+    /// backing callback outlives the core Arc's lifetime.
     _sync_sender: CallbackSyncSender,
     /// Cloned handle to the scheduler (shares Arc-based state with the one inside core).
     /// Stored here so `connect()` can build a `NativeTickNotifier` without locking.
