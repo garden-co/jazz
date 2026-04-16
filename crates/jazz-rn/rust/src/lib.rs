@@ -826,23 +826,17 @@ impl RnRuntime {
                 .scheduler()
                 .clone();
             let tick = RnTickNotifier { scheduler };
-            let (handle, manager) = jazz_tools::transport_manager::create::<
-                jazz_tools::ws_stream::NativeWsStream,
-                RnTickNotifier,
-            >(url, auth, tick);
-            // Seed the handshake catalogue hash.
-            {
-                let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let manager = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
-            }
-            self.core
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .set_transport(handle);
+                jazz_tools::runtime_core::install_transport::<
+                    _,
+                    _,
+                    jazz_tools::ws_stream::NativeWsStream,
+                    _,
+                >(&mut core, url, auth, tick)
+            };
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
