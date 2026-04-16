@@ -100,6 +100,7 @@ $ npm create jazz
 ```
 
 Flags:
+
 - `--starter <name>` — skip the interactive picker entirely.
 - `--no-git` — skip `git init` and the initial commit.
 
