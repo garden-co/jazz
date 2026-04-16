@@ -1159,7 +1159,8 @@ impl NapiRuntime {
     /// Connect to a Jazz server over WebSocket.
     ///
     /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
-    /// `RuntimeCore`, and spawns the manager loop as a Tokio task.
+    /// `RuntimeCore` via `install_transport` (which seeds the catalogue state
+    /// hash on the handle), and spawns the manager loop as a Tokio task.
     #[napi]
     pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
         let auth: jazz_tools::transport_manager::AuthConfig = serde_json::from_str(&auth_json)
@@ -1167,22 +1168,26 @@ impl NapiRuntime {
         let tick = NapiTickNotifier {
             core: Arc::clone(&self.core),
         };
-        let (handle, manager) = jazz_tools::transport_manager::create::<
-            jazz_tools::ws_stream::NativeWsStream,
-            NapiTickNotifier,
-        >(url, auth, tick);
-        self.core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .set_transport(handle);
+        let manager = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            jazz_tools::runtime_core::install_transport::<
+                _,
+                _,
+                jazz_tools::ws_stream::NativeWsStream,
+                _,
+            >(&mut core, url, auth, tick)
+        };
         // Spawn the TransportManager loop. If we're inside an active Tokio
         // runtime (typical: Node.js with napi-rs bootstrapping one), use it.
         // Otherwise (e.g. Next.js SSG build workers that load the addon
         // without a runtime) fall back to a dedicated runtime on a background
         // thread so `tokio::spawn` never panics.
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(manager.run());
+            Ok(rt_handle) => {
+                rt_handle.spawn(manager.run());
             }
             Err(_) => {
                 std::thread::spawn(move || {
