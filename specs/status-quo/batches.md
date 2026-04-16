@@ -48,57 +48,59 @@ The two modes are:
 `BatchId` is stored as raw 16-byte `Bytea` in row payloads and encoded as 32 hex characters in
 string keys and public API surfaces.
 
-### Row namespaces
+### Row raw table instances
 
-Row storage is now being split into schema-qualified namespaces instead of one mixed raw table per
-logical table.
+Row storage is now split into schema-qualified raw table instances instead of one mixed raw table
+per logical table.
 
-Each namespace is identified by:
+Each row raw table instance is identified by:
 
 - storage kind: `visible` or `history`
 - logical table name
 - full schema/layout hash
 
-Conceptually that means one namespace per:
+Conceptually that means one raw table instance per:
 
 ```text
 (storage_kind, logical_table, full_schema_hash)
 ```
 
-So one logical table can have several durable visible/history namespaces at once during schema
-evolution, but every individual namespace has exactly one row layout.
+So one logical table can have several durable visible/history raw tables at once during schema
+evolution, but every individual raw table has exactly one row layout.
 
-Each namespace has a small durable header containing:
+Each row raw table has a durable header containing at least:
 
-- general storage format version
+- `storage_kind`
+- `storage_format_version`
 - full schema hash
 - logical table name
 
-That header is enough to recover the exact row descriptor from the catalogue without scanning all
-historical catalogue entries or depending on branch-name short hashes as part of row decoding.
+That header is enough to recover the exact row descriptor from the catalogue. In practice, read
+paths resolve that raw table context once and then decode rows against the already-known format,
+instead of rereading header state for each individual row.
 
-### Row keys inside a namespace
+### Row keys inside a row raw table
 
-Within one namespace, the row keys only carry row identity for that layout:
+Within one raw table, the row keys only carry row identity for that layout:
 
 ```text
-visible namespace:
+visible raw table:
   <branch>:<row_id_hex>
 
-history namespace:
+history raw table:
   <row_id_hex>:<branch>:<batch_id_hex>
 ```
 
-The namespace already says which storage kind, logical table, and full schema/layout those keys
-belong to, so the per-row key no longer needs to repeat that context.
+The raw table header already says which storage kind, logical table, and full schema/layout those
+keys belong to, so the per-row key no longer needs to repeat that context.
 
-Lookup uses that namespace model directly:
+Lookup uses that raw-table model directly:
 
 - exact point loads prefer the row locator's persisted full `schema_hash`
-- branch scans union all namespaces for that logical table and filter on the branch key
+- branch scans union all raw tables for that logical table and filter on the branch key
 
-So ordinary storage reads no longer need branch-name short-hash matching to find the right row
-namespace.
+So ordinary storage reads no longer need branch-name short-hash matching to find the right row raw
+table.
 
 ### Flat history rows
 
@@ -120,7 +122,7 @@ The current history system columns are:
 - `_jazz_is_deleted`
 - `_jazz_metadata`
 
-For history rows, `(row_id, branch_name, batch_id)` comes from the namespace-local storage key
+For history rows, `(row_id, branch_name, batch_id)` comes from the raw-table-local storage key
 rather than the payload.
 
 ### Flat visible rows
@@ -146,7 +148,7 @@ Then they append:
 - `_jazz_edge_batch_id`
 - `_jazz_global_batch_id`
 
-The visible-row namespace-local key still carries `(branch_name, row_id)`, while the current
+The visible-row raw-table-local key still carries `(branch_name, row_id)`, while the current
 visible `batch_id` lives directly in the flat visible row payload. Application columns again
 follow after the reserved prefix.
 
@@ -155,7 +157,7 @@ visible winners and branch-frontier ancestry.
 
 ### Batch bookkeeping tables
 
-Replayable batch lifecycle state is stored in three system tables:
+Replayable batch lifecycle state is stored in three system raw table instances:
 
 ```text
 __local_batch_record
@@ -171,9 +173,9 @@ batch:<batch_id_hex>
 
 Their payloads are:
 
-- `__local_batch_record`: one encoded `LocalBatchRecord`
-- `__authoritative_batch_settlement`: one encoded `BatchSettlement`
-- `__sealed_batch_submission`: one encoded `SealedBatchSubmission`
+- `__local_batch_record`: one uniform `LocalBatchRecord` row format
+- `__authoritative_batch_settlement`: one uniform `BatchSettlement` row format
+- `__sealed_batch_submission`: one uniform `SealedBatchSubmission` row format
 
 The current local batch record row stores:
 
@@ -193,9 +195,12 @@ The current sealed submission row stores:
 - `members` with `(object_id, row_digest)`
 - `captured_frontier` with `(object_id, branch_ord, batch_id)`
 
-Those stored branch ords resolve through the storage-local `__branch_ord_registry` row, which
-persists the full `(branch_ord, branch_name)` mapping set atomically as one durable write rather
-than as separate `name -> ord` and `ord -> name` tables.
+Those stored branch ords resolve through the storage-local `__branch_ord_registry` raw table,
+which persists the full `(branch_ord, branch_name)` mapping set atomically as one durable write
+rather than as separate `name -> ord` and `ord -> name` tables.
+
+Like the row raw tables above, these system tables keep their format version in the raw table
+header, not in every row payload.
 
 ## In-Memory Runtime Shapes
 
@@ -228,7 +233,12 @@ The important design point is that this same struct is used for:
 - `branch_frontier`
 - optional older visible winners for `worker`, `edge`, and `global`
 
-This is the main hot-path query shape.
+This is the main hot-path query shape. In durable storage, the common visible-row case now keeps
+some fields implicit to save bytes:
+
+- empty `_jazz_parents` encodes as `null`
+- empty `_jazz_metadata` encodes as `null`
+- `_jazz_branch_frontier` encodes as `null` when it is just `[current_batch_id]`
 
 ### LocalBatchRecord
 
@@ -250,7 +260,7 @@ Each `LocalBatchMember` carries:
 - full `schema_hash`
 - `row_digest`
 
-That means reconnect/rejection/retransmit can address the exact history namespace for each member
+That means reconnect/rejection/retransmit can address the exact history raw table for each member
 directly instead of rediscovering batch membership from ambient row-history scans.
 
 For direct batches, `sealed` is immediately `true` because no explicit seal step is required. For

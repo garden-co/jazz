@@ -50,9 +50,15 @@ pub fn create_test_row_with_id<H: Storage>(
     metadata: Option<HashMap<String, String>>,
 ) -> ObjectId {
     let metadata = metadata.unwrap_or_default();
-    storage
-        .put_metadata(object_id, metadata)
-        .expect("test row metadata should persist");
+    if let Some(row_locator) = row_locator_from_metadata(&metadata) {
+        storage
+            .put_row_locator(object_id, Some(&row_locator))
+            .expect("test row locator should persist");
+    } else {
+        storage
+            .put_metadata(object_id, metadata)
+            .expect("test row metadata should persist");
+    }
     object_id
 }
 
@@ -61,9 +67,15 @@ pub fn put_test_row_metadata<H: Storage>(
     object_id: ObjectId,
     metadata: HashMap<String, String>,
 ) {
-    storage
-        .put_metadata(object_id, metadata)
-        .expect("test row metadata should persist");
+    if let Some(row_locator) = row_locator_from_metadata(&metadata) {
+        storage
+            .put_row_locator(object_id, Some(&row_locator))
+            .expect("test row locator should persist");
+    } else {
+        storage
+            .put_metadata(object_id, metadata)
+            .expect("test row metadata should persist");
+    }
 }
 
 pub fn apply_test_row_batch<H: Storage>(

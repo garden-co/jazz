@@ -17,9 +17,23 @@ For the current direct/transactional batch lifecycle layered on top of that stor
 
 The current storage layer is responsible for six kinds of data:
 
-### 1. Raw tables
+### 1. Raw table instances
 
-Application tables are stored as raw keyed tables. This is the lowest-level "table first" surface: storage knows how to put, get, delete, and scan raw rows by table name and encoded key.
+The low-level primitive is now a raw table instance:
+
+- one durable header row with free-form key/value metadata
+- one ordered key/value row space under that header
+
+Every raw table instance has at least:
+
+- `storage_kind`
+- `storage_format_version`
+
+Everything durable in Jazz is built from that same primitive:
+
+- visible rows for one logical table + one full schema hash
+- row history for one logical table + one full schema hash
+- system tables such as metadata, row locators, branch ord registry, local batch records, sealed submissions, authoritative settlements, and catalogue entries
 
 ### 2. Indices
 
@@ -43,9 +57,9 @@ For user data, storage persists both:
 - the append-friendly history region for row batch entries
 - the compact visible region for current reads
 
-Both regions are stored as flat `row_format` rows containing reserved `_jazz_*` columns plus the
-table's user columns. Storage exposes them through dedicated helpers such as history scans,
-visible-row loads, and row-state patch operations.
+Both regions are raw table instances whose rows are flat `row_format` records containing reserved
+`_jazz_*` columns plus the table's user columns. Storage exposes them through dedicated helpers
+such as history scans, visible-row loads, and row-state patch operations.
 
 ### 5. Batch bookkeeping
 
@@ -69,6 +83,9 @@ avoids torn `name -> ord` / `ord -> name` state after crashes.
 The batch rows themselves are keyed by `batch:<batch_id_hex>` and let reconnect/restart recover
 batch fate without depending on a live ack having been observed.
 
+These are now just system raw table instances with uniform `row_format` rows. The migration slot
+lives in the raw table header's `storage_format_version`, not inside every row payload.
+
 ### 6. Catalogue entries
 
 Schemas and lenses live in a separate `catalogue` table. They do not reuse the user-row history path, but they do reuse the same underlying storage and row encoding machinery.
@@ -78,25 +95,39 @@ Schemas and lenses live in a separate `catalogue` table. They do not reuse the u
 At a high level, the durable model looks like this:
 
 ```text
-raw user tables
-  -> application rows and index keys
-
-row-history namespaces
-  -> one namespace per (storage kind, logical table, full schema hash)
-  -> visible namespace-local keys: (branch, row_id)
-  -> history namespace-local keys: (row_id, branch, batch_id)
-
-system tables
-  -> __metadata
-  -> __row_locator
-  -> __branch_ord_registry
-  -> __local_batch_record
-  -> __authoritative_batch_settlement
-  -> __sealed_batch_submission
-  -> catalogue
+raw table instances
+  -> raw app/index tables
+  -> visible row tables
+  -> history row tables
+  -> system tables
 ```
 
 That is the core architectural shift to keep in mind while reading the rest of the runtime docs: the engine is organized around raw tables and engine-managed row metadata, not around a second abstraction layer that later gets reinterpreted as rows.
+
+## Raw Table Headers
+
+Headers are free-form, but current row-table headers carry:
+
+- `storage_kind`
+- `storage_format_version`
+- `logical_table_name`
+- `schema_hash`
+
+Current system-table headers carry:
+
+- `storage_kind`
+- `storage_format_version`
+
+Examples:
+
+- visible rows for `todos` at schema `abcd...`: one raw table instance with `storage_kind =
+visible_rows`
+- history rows for `todos` at schema `abcd...`: one raw table instance with `storage_kind =
+row_history`
+- local batch records: one raw table instance with `storage_kind = local_batch_record`
+
+The important rule is that every row in one raw table instance has one uniform key format and one
+uniform value format. Per-row payloads do not need their own format version markers.
 
 ## Shared Row Encoding
 
@@ -111,25 +142,23 @@ Storage does not invent its own payload format. It relies on `row_format` for:
 This shared binary format is what lets user rows, visible rows, history rows, and catalogue rows
 all move through the system without every layer inventing a different shape.
 
-At the durable storage level, row-history state is moving toward schema-qualified namespaces rather
-than one mixed raw table per logical table. Each namespace carries a small header with:
+At the durable storage level, row-history state is stored in schema-qualified raw table instances
+rather than one mixed raw table per logical table.
 
-- general storage format version
-- full schema hash
-- logical table name
-
-Once a caller knows which namespace it is reading, that namespace header is what makes flat row
-bytes self-describing enough to decode in O(1) without scanning all catalogue schema history.
-
-In practice the engine now resolves namespaces like this:
+Read-time routing now works like this:
 
 - exact point loads prefer the row locator's persisted `origin_schema_hash`
-- branch scans union all namespaces for that logical table and filter by the branch key inside each namespace
+- branch scans union all raw row tables for that logical table and filter by the branch key inside each one
+- once a raw table instance has been resolved, the caller already knows the exact row format for that table
 
-So namespace selection no longer depends on parsing branch-name short hashes during ordinary row
-loads.
+That means row decode does not reread the raw table header for each row. The engine resolves raw
+table context once, then decodes all rows in that table against the already-known descriptor.
 
-The full meaning of those namespaces and their local keys is documented in [Batches](batches.md).
+This is also why durable decode no longer depends on branch-name short hashes or scanning all
+historical catalogue schemas.
+
+The full meaning of those row raw tables and their local keys is documented in
+[Batches](batches.md).
 
 ## Durable Backends
 

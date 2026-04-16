@@ -22,8 +22,8 @@ use crate::row_histories::{
 };
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
-    IndexMutation, RowLocator, RowNamespaceHeader, RowNamespaceId, RowNamespaceKind, Storage,
-    StorageError,
+    IndexMutation, RawTableHeader, RowLocator, RowRawTableId, RowRawTableKind, Storage,
+    StorageError, scan_row_raw_table_headers_with_storage,
 };
 use crate::sync_manager::DurabilityTier;
 use crate::test_row_history::persist_test_schema;
@@ -95,23 +95,25 @@ fn make_visible_entry(
 // Branch ord tests
 // ============================================================================
 
-pub fn test_row_namespace_header_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_row_raw_table_header_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-    let namespace = RowNamespaceId::new(RowNamespaceKind::Visible, "todos", schema_hash);
-    let header = RowNamespaceHeader::v1("todos", schema_hash);
+    let row_raw_table_id = RowRawTableId::new(RowRawTableKind::Visible, "todos", schema_hash);
+    let header = RawTableHeader::row_raw_table(RowRawTableKind::Visible, "todos", schema_hash);
 
     storage
-        .upsert_row_namespace_header(&namespace, &header)
-        .expect("row namespace header should persist");
+        .upsert_raw_table_header(&row_raw_table_id.raw_table_name(), &header)
+        .expect("row raw table header should persist");
 
     assert_eq!(
-        storage.load_row_namespace_header(&namespace).unwrap(),
+        storage
+            .load_raw_table_header(&row_raw_table_id.raw_table_name())
+            .unwrap(),
         Some(header.clone())
     );
     assert_eq!(
-        storage.scan_row_namespace_headers().unwrap(),
-        vec![(namespace, header)]
+        scan_row_raw_table_headers_with_storage(&*storage).unwrap(),
+        vec![(row_raw_table_id, header)]
     );
 }
 
@@ -1577,8 +1579,8 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn row_namespace_header_round_trip() {
-                conformance::test_row_namespace_header_round_trip(&$factory);
+            fn row_raw_table_header_round_trip() {
+                conformance::test_row_raw_table_header_round_trip(&$factory);
             }
 
             #[test]

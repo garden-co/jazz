@@ -11,16 +11,17 @@ This is the simplest way to think about Jazz today:
 For the full direct/transactional batch lifecycle, replayable settlement model, and app-facing
 batch APIs, read this together with [Batches](batches.md).
 
-If you are new to the internals, it helps to picture one user table as two engine-managed regions:
+If you are new to the internals, it helps to picture one user table as two families of
+engine-managed raw table instances:
 
 ```text
 todos
-  visible namespaces:
-    one namespace per (visible, todos, full_schema_hash)
+  visible raw tables:
+    one raw table per (visible, todos, full_schema_hash)
     local key: (branch, row_id)
 
-  history namespaces:
-    one namespace per (history, todos, full_schema_hash)
+  history raw tables:
+    one raw table per (history, todos, full_schema_hash)
     local key: (row_id, branch, batch_id)
 ```
 
@@ -69,6 +70,12 @@ Physically, the visible region is also stored as flat `row_format` rows with the
 and a slightly larger `_jazz_*` prefix. That lets ordinary reads stay fast while still allowing
 lower-tier queries to resolve older settled winners when needed.
 
+The visible-row format now also keeps the common case compact by treating some fields as implicit:
+
+- empty parents decode from `null` as `[]`
+- empty metadata decode from `null` as `{}`
+- a frontier that is only `[current_batch_id]` decodes from `null`
+
 ## Reserved Engine Fields
 
 Conceptually, every user table has:
@@ -86,11 +93,14 @@ The important engine fields are:
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
 
-For history rows, that identity now lives in the namespace-local storage key rather than the
-payload columns. For visible rows, `(branch_name, row_id)` comes from the namespace-local key and
-the current visible `batch_id` stays in the flat visible payload. Namespace headers carry the
+For history rows, that identity now lives in the raw-table-local storage key rather than the
+payload columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and
+the current visible `batch_id` stays in the flat visible payload. Raw table headers carry the
 general storage format version, full schema hash, and table name, so flat row decoding no longer
 needs to discover descriptors by scanning all historical catalogue schemas.
+
+Read paths resolve the exact raw table context first, then decode rows against that already-known
+format. The header is part of resolving the table, not something that gets reread for every row.
 
 ## How a Direct Write Lands
 

@@ -396,20 +396,30 @@ impl Storage for RocksDBStorage {
             super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
         let encoded_visible_rows =
             super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
-        let mut seen_namespaces = std::collections::HashSet::new();
+        let mut seen_row_raw_tables = std::collections::HashSet::new();
         for row in &encoded_history_rows {
-            if seen_namespaces.insert(row.namespace.raw_table_name()) {
-                self.upsert_row_namespace_header(
-                    &row.namespace,
-                    &super::RowNamespaceHeader::v1(table, row.namespace.schema_hash),
+            if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                super::ensure_raw_table_header(
+                    self,
+                    &row.row_raw_table_id.raw_table_name(),
+                    &super::RawTableHeader::row_raw_table(
+                        super::RowRawTableKind::History,
+                        table,
+                        row.row_raw_table_id.schema_hash,
+                    ),
                 )?;
             }
         }
         for row in &encoded_visible_rows {
-            if seen_namespaces.insert(row.namespace.raw_table_name()) {
-                self.upsert_row_namespace_header(
-                    &row.namespace,
-                    &super::RowNamespaceHeader::v1(table, row.namespace.schema_hash),
+            if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                super::ensure_raw_table_header(
+                    self,
+                    &row.row_raw_table_id.raw_table_name(),
+                    &super::RawTableHeader::row_raw_table(
+                        super::RowRawTableKind::Visible,
+                        table,
+                        row.row_raw_table_id.schema_hash,
+                    ),
                 )?;
             }
         }
@@ -418,7 +428,7 @@ impl Storage for RocksDBStorage {
             let borrowed_history_rows = encoded_history_rows
                 .iter()
                 .map(|row| HistoryRowBytes {
-                    namespace_raw_table: row.namespace_raw_table.as_str(),
+                    row_raw_table: row.row_raw_table.as_str(),
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
                     batch_id: row.batch_id,
@@ -431,7 +441,7 @@ impl Storage for RocksDBStorage {
             let borrowed_visible_rows = encoded_visible_rows
                 .iter()
                 .map(|row| VisibleRowBytes {
-                    namespace_raw_table: row.namespace_raw_table.as_str(),
+                    row_raw_table: row.row_raw_table.as_str(),
                     branch: row.branch.as_str(),
                     row_id: row.row_id,
                     bytes: &row.bytes,

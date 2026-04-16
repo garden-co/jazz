@@ -1,6 +1,6 @@
 use super::key_codec::{
-    history_namespace_row_key, increment_string, raw_table_entry_key, raw_table_prefix,
-    raw_table_scan_prefix, strip_raw_table_key, visible_namespace_row_key,
+    history_row_raw_table_key, increment_string, raw_table_entry_key, raw_table_prefix,
+    raw_table_scan_prefix, strip_raw_table_key, visible_row_raw_table_key,
 };
 use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
 
@@ -106,8 +106,8 @@ pub(super) fn append_history_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_namespace_row_key(row.row_id, row.branch, row.batch_id);
-        raw_table_put_core(row.namespace_raw_table, &key, row.bytes, &mut set)?;
+        let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
+        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
 }
@@ -119,8 +119,8 @@ pub(super) fn upsert_visible_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = visible_namespace_row_key(row.branch, row.row_id);
-        raw_table_put_core(row.namespace_raw_table, &key, row.bytes, &mut set)?;
+        let key = visible_row_raw_table_key(row.branch, row.row_id);
+        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
 }

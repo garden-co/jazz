@@ -229,7 +229,7 @@ pub(super) fn validate_index_entry_size(
     encode_index_value_segment(table, column, branch, value).map(|_| ())
 }
 
-pub(super) fn visible_namespace_row_key(branch: &str, row_id: ObjectId) -> String {
+pub(super) fn visible_row_raw_table_key(branch: &str, row_id: ObjectId) -> String {
     let mut key = String::with_capacity(branch.len() + 1 + INDEX_ENTRY_UUID_HEX_BYTES);
     key.push_str(branch);
     key.push(':');
@@ -237,31 +237,31 @@ pub(super) fn visible_namespace_row_key(branch: &str, row_id: ObjectId) -> Strin
     key
 }
 
-pub(super) fn visible_namespace_row_prefix(branch: &str) -> String {
+pub(super) fn visible_row_raw_table_prefix(branch: &str) -> String {
     let mut prefix = String::with_capacity(branch.len() + 1);
     prefix.push_str(branch);
     prefix.push(':');
     prefix
 }
 
-pub(super) fn decode_visible_namespace_row_key(
+pub(super) fn decode_visible_row_raw_table_key(
     key: &str,
 ) -> Result<(String, ObjectId), StorageError> {
     let (branch, row_hex) = key.rsplit_once(':').ok_or_else(|| {
         StorageError::IoError(format!(
-            "invalid visible namespace row key '{key}': missing row id"
+            "invalid visible row raw table key '{key}': missing row id"
         ))
     })?;
     Ok((
         branch.to_string(),
         decode_hex_object_id(
             row_hex,
-            &format!("decode visible namespace row key '{key}'"),
+            &format!("decode visible row raw table key '{key}'"),
         )?,
     ))
 }
 
-pub(super) fn history_namespace_row_key(
+pub(super) fn history_row_raw_table_key(
     row_id: ObjectId,
     branch: &str,
     batch_id: BatchId,
@@ -277,7 +277,7 @@ pub(super) fn history_namespace_row_key(
     key
 }
 
-pub(super) fn history_namespace_row_prefix(row_id: Option<ObjectId>) -> String {
+pub(super) fn history_row_raw_table_prefix(row_id: Option<ObjectId>) -> String {
     match row_id {
         Some(row_id) => {
             let mut prefix = String::with_capacity(INDEX_ENTRY_UUID_HEX_BYTES + 1);
@@ -289,28 +289,28 @@ pub(super) fn history_namespace_row_prefix(row_id: Option<ObjectId>) -> String {
     }
 }
 
-pub(super) fn decode_history_namespace_row_key(
+pub(super) fn decode_history_row_raw_table_key(
     key: &str,
 ) -> Result<(ObjectId, String, BatchId), StorageError> {
     let (row_hex, branch_and_batch) = key.split_once(':').ok_or_else(|| {
         StorageError::IoError(format!(
-            "invalid history namespace row key '{key}': missing branch"
+            "invalid history row raw table key '{key}': missing branch"
         ))
     })?;
     let (branch, batch_hex) = branch_and_batch.rsplit_once(':').ok_or_else(|| {
         StorageError::IoError(format!(
-            "invalid history namespace row key '{key}': missing batch id"
+            "invalid history row raw table key '{key}': missing batch id"
         ))
     })?;
     Ok((
         decode_hex_object_id(
             row_hex,
-            &format!("decode history namespace row key '{key}'"),
+            &format!("decode history row raw table key '{key}'"),
         )?,
         branch.to_string(),
         decode_hex_batch_id(
             batch_hex,
-            &format!("decode history namespace row key '{key}'"),
+            &format!("decode history row raw table key '{key}'"),
         )?,
     ))
 }

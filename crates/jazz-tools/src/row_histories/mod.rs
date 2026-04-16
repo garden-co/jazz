@@ -218,7 +218,8 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
             ColumnType::Array {
                 element: Box::new(ColumnType::Bytea),
             },
-        ),
+        )
+        .nullable(),
         ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
         ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
         ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
@@ -234,7 +235,8 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
                     columns: Box::new(metadata_entry_descriptor().clone()),
                 }),
             },
-        ),
+        )
+        .nullable(),
     ]
 }
 
@@ -269,7 +271,8 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
             ColumnType::Array {
                 element: Box::new(ColumnType::Bytea),
             },
-        ),
+        )
+        .nullable(),
         ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
         ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
         ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
@@ -285,7 +288,8 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
                     columns: Box::new(metadata_entry_descriptor().clone()),
                 }),
             },
-        ),
+        )
+        .nullable(),
     ];
     columns.extend([
         ColumnDescriptor::new(
@@ -293,7 +297,8 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
             ColumnType::Array {
                 element: Box::new(ColumnType::Bytea),
             },
-        ),
+        )
+        .nullable(),
         ColumnDescriptor::new("_jazz_worker_batch_id", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_edge_batch_id", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_global_batch_id", ColumnType::Bytea).nullable(),
@@ -304,15 +309,7 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
 fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
     let mut values = vec![
         batch_id_to_value(entry.current_row.batch_id),
-        Value::Array(
-            entry
-                .current_row
-                .parents
-                .iter()
-                .copied()
-                .map(batch_id_to_value)
-                .collect(),
-        ),
+        optional_batch_ids_to_value(&entry.current_row.parents),
         Value::Timestamp(entry.current_row.updated_at),
         Value::Text(entry.current_row.created_by.to_string()),
         Value::Timestamp(entry.current_row.created_at),
@@ -329,10 +326,10 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
             .map(delete_kind_to_value)
             .unwrap_or(Value::Null),
         Value::Boolean(entry.current_row.is_deleted),
-        metadata_to_value(&entry.current_row.metadata),
+        optional_metadata_to_value(&entry.current_row.metadata),
     ];
     values.extend([
-        batch_ids_to_value(&entry.branch_frontier),
+        visible_frontier_to_value(entry),
         optional_batch_id_to_value(entry.worker_batch_id),
         optional_batch_id_to_value(entry.edge_batch_id),
         optional_batch_id_to_value(entry.global_batch_id),
@@ -409,6 +406,7 @@ fn stored_row_batch_from_flat_parts(
         flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
 
     let parents = match &system_values[0] {
+        Value::Null => SmallVec::new(),
         Value::Array(values) => values
             .iter()
             .map(batch_id_from_value)
@@ -496,14 +494,35 @@ pub fn decode_flat_visible_row_entry(
         &values[1..=system_count],
         &values[visible_system_count..],
     )?;
+    let current_batch_id = current_row.batch_id();
 
     Ok(VisibleRowEntry {
         current_row,
-        branch_frontier: batch_ids_from_value(&values[system_count + 1], "branch_frontier")?,
+        branch_frontier: visible_frontier_from_value(&values[system_count + 1], current_batch_id)?,
         worker_batch_id: optional_batch_id_from_value(&values[system_count + 2])?,
         edge_batch_id: optional_batch_id_from_value(&values[system_count + 3])?,
         global_batch_id: optional_batch_id_from_value(&values[system_count + 4])?,
     })
+}
+
+fn visible_frontier_to_value(entry: &VisibleRowEntry) -> Value {
+    if entry.branch_frontier.len() == 1 && entry.branch_frontier[0] == entry.current_row.batch_id()
+    {
+        Value::Null
+    } else {
+        batch_ids_to_value(&entry.branch_frontier)
+    }
+}
+
+fn visible_frontier_from_value(
+    value: &Value,
+    current_batch_id: BatchId,
+) -> Result<Vec<BatchId>, EncodingError> {
+    if matches!(value, Value::Null) {
+        Ok(vec![current_batch_id])
+    } else {
+        batch_ids_from_value(value, "branch_frontier")
+    }
 }
 
 fn row_state_to_value(state: RowState) -> Value {
@@ -613,7 +632,18 @@ fn batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
     Value::Array(batch_ids.iter().copied().map(batch_id_to_value).collect())
 }
 
+fn optional_batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
+    if batch_ids.is_empty() {
+        Value::Null
+    } else {
+        batch_ids_to_value(batch_ids)
+    }
+}
+
 fn batch_ids_from_value(value: &Value, label: &str) -> Result<Vec<BatchId>, EncodingError> {
+    if matches!(value, Value::Null) {
+        return Ok(Vec::new());
+    }
     let Value::Array(values) = value else {
         return Err(malformed(format!("expected {label} array, got {value:?}")));
     };
@@ -633,7 +663,18 @@ fn metadata_to_value(metadata: &RowMetadata) -> Value {
     )
 }
 
+fn optional_metadata_to_value(metadata: &RowMetadata) -> Value {
+    if metadata.is_empty() {
+        Value::Null
+    } else {
+        metadata_to_value(metadata)
+    }
+}
+
 fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
+    if matches!(value, Value::Null) {
+        return Ok(RowMetadata::default());
+    }
     let Value::Array(entries) = value else {
         return Err(malformed(format!("expected metadata array, got {value:?}")));
     };
@@ -989,7 +1030,7 @@ fn row_locator_from_storage<H: Storage>(
     io: &H,
     object_id: ObjectId,
 ) -> Result<RowLocator, RowHistoryError> {
-    io.load_row_locator(object_id)
+    crate::storage::load_row_locator_or_metadata(io, object_id)
         .map_err(RowHistoryError::StorageError)?
         .ok_or(RowHistoryError::ObjectNotFound(object_id))
 }
@@ -1763,6 +1804,26 @@ mod tests {
         assert!(
             descriptor.column("_jazz_branch").is_none(),
             "visible rows should derive branch from the storage key"
+        );
+    }
+
+    #[test]
+    fn flat_visible_row_common_case_omits_empty_arrays_and_metadata() {
+        let descriptor = user_descriptor();
+        let current = visible_row(10, Some(DurabilityTier::Worker));
+        let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
+
+        let encoded =
+            encode_flat_visible_row_entry(&descriptor, &entry).expect("encode visible row");
+        let values = decode_row(&visible_row_physical_descriptor(&descriptor), &encoded)
+            .expect("decode visible row");
+
+        assert_eq!(values[1], Value::Null, "empty parents should be implicit");
+        assert_eq!(values[10], Value::Null, "empty metadata should be implicit");
+        assert_eq!(
+            values[11],
+            Value::Null,
+            "singleton frontier matching current batch should be implicit"
         );
     }
 
