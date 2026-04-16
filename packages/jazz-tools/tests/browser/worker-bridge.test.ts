@@ -1069,6 +1069,29 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
+  it("resolves insert wait at edge tier through the worker bridge", async () => {
+    const sharedLocalAuthToken = generateAuthSecret();
+    const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken);
+
+    const title = `wait-edge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const inserted = db.insert(todos, { title, done: false });
+    const { value: insertedTodo } = inserted;
+
+    await withTimeout(inserted.wait({ tier: "edge" }), 10000, "insert wait(edge) did not resolve");
+
+    expect(insertedTodo.id).toBeTruthy();
+    expect(insertedTodo.title).toBe(title);
+
+    const rowsAtEdge = await waitForTodos(
+      db,
+      (rows) => rows.some((row) => row.id === insertedTodo.id && row.title === title),
+      "insert wait(edge) row becomes queryable at edge",
+      20000,
+      "edge",
+    );
+    expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
+  }, 60000);
+
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
