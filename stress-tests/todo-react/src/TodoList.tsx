@@ -22,15 +22,22 @@ export function TodoList() {
   const sessionUserId = session?.user_id ?? null;
   const [title, setTitle] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sessionUserId) return;
-    db.insert(app.todos, {
+    const todoHandle = db.insert(app.todos, {
       title: title.trim(),
       done: false,
       owner_id: sessionUserId,
     });
     setTitle("");
+    try {
+      console.log({ todoHandle });
+      await todoHandle.wait({ tier: "edge" });
+      console.log("Insert confirmed by server");
+    } catch {
+      console.error("Insert failed");
+    }
   };
 
   return (

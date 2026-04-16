@@ -1116,6 +1116,9 @@ export class JazzClient {
           return (payload: Uint8Array | string, seq?: number | null) => {
             value.call(target, payload, seq);
             this.flushPendingBatchWaiters();
+            queueMicrotask(() => {
+              this.flushPendingBatchWaiters();
+            });
           };
         }
         if (typeof value === "function") {
