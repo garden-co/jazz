@@ -56,10 +56,7 @@ export const auth = betterAuth({
         ok,
         error,
         id: provedUserId,
-      } = verifyLocalFirstIdentityProof(
-        ctx.body?.proofToken,
-        "next-localfirst-signup",
-      );
+      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "next-localfirst-signup");
       if (!ok) {
         throw new APIError("BAD_REQUEST", { message: error });
       }
@@ -80,9 +77,8 @@ export const auth = betterAuth({
         // GenericEndpointContext; we read `body.provedUserId` which was
         // added by the `hooks.before` middleware above.
         before: async (user, context) => {
-          const provedUserId = (
-            context?.body as { provedUserId?: string } | undefined
-          )?.provedUserId;
+          const provedUserId = (context?.body as { provedUserId?: string } | undefined)
+            ?.provedUserId;
           if (provedUserId) {
             return { data: { ...user, id: provedUserId } };
           }

@@ -1,12 +1,4 @@
-import {
-  intro,
-  outro,
-  text,
-  select,
-  spinner,
-  log,
-  isCancel,
-} from "@clack/prompts";
+import { intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
 import pc from "picocolors";
 import * as path from "node:path";
 import { scaffold, validateAppName, type StarterName } from "./scaffold.js";
@@ -35,8 +27,7 @@ async function main() {
 
   // Parse --starter <name> from argv — skips the interactive picker entirely.
   const starterFlagIndex = args.indexOf("--starter");
-  const starterArg =
-    starterFlagIndex !== -1 ? args[starterFlagIndex + 1] : undefined;
+  const starterArg = starterFlagIndex !== -1 ? args[starterFlagIndex + 1] : undefined;
   const gitOptOut = args.includes("--no-git");
 
   // App name is the first non-flag argument
@@ -92,8 +83,7 @@ async function main() {
         { value: "localfirst", label: "Local-first" },
         {
           value: "hybrid",
-          label:
-            "Hybrid (local-first + BetterAuth, optional upgrade to a managed account)",
+          label: "Hybrid (local-first + BetterAuth, optional upgrade to a managed account)",
         },
         {
           value: "betterauth",
