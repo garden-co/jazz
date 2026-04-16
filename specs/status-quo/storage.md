@@ -51,12 +51,23 @@ visible-row loads, and row-state patch operations.
 
 Replayable write state is also durable storage state now. Storage persists:
 
+- branch ord registry in `__branch_ord_registry`
 - local batch records in `__local_batch_record`
 - authoritative settlements in `__authoritative_batch_settlement`
 - sealed transactional submissions in `__sealed_batch_submission`
 
-Those rows are keyed by `batch:<batch_id_hex>` and let reconnect/restart recover batch fate
-without depending on a live ack having been observed.
+The branch ord registry is one durable row that stores:
+
+- general branch-ord registry format version
+- next branch ord counter
+- the full `(branch_ord, branch_name)` mapping set
+
+That single-row shape matters because RocksDB and OPFS do not provide a cross-call atomic
+multi-put primitive through the shared `Storage` trait. Keeping the whole mapping in one row
+avoids torn `name -> ord` / `ord -> name` state after crashes.
+
+The batch rows themselves are keyed by `batch:<batch_id_hex>` and let reconnect/restart recover
+batch fate without depending on a live ack having been observed.
 
 ### 6. Catalogue entries
 
@@ -78,6 +89,7 @@ row-history namespaces
 system tables
   -> __metadata
   -> __row_locator
+  -> __branch_ord_registry
   -> __local_batch_record
   -> __authoritative_batch_settlement
   -> __sealed_batch_submission

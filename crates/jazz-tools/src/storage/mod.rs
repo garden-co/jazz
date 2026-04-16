@@ -109,10 +109,10 @@ const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
 const ROW_NAMESPACE_HEADER_TABLE: &str = "__row_namespace_header";
-const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
-const BRANCH_ORD_BY_ORD_TABLE: &str = "__branch_ord_by_ord";
-const NEXT_BRANCH_ORD_KEY: &str = "!next_ord";
+const BRANCH_ORD_REGISTRY_TABLE: &str = "__branch_ord_registry";
+const BRANCH_ORD_REGISTRY_KEY: &str = "registry";
 const ROW_STORAGE_FORMAT_V1: i32 = 1;
+const BRANCH_ORD_REGISTRY_FORMAT_V1: i32 = 1;
 
 pub type BranchOrd = i32;
 
@@ -211,6 +211,29 @@ impl RowNamespaceHeader {
             storage_format_version: ROW_STORAGE_FORMAT_V1,
             schema_hash,
             table_name: table_name.into().into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BranchOrdRegistryEntry {
+    branch_ord: BranchOrd,
+    branch_name: BranchName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchOrdRegistry {
+    storage_format_version: i32,
+    next_ord: BranchOrd,
+    entries: Vec<BranchOrdRegistryEntry>,
+}
+
+impl Default for BranchOrdRegistry {
+    fn default() -> Self {
+        Self {
+            storage_format_version: BRANCH_ORD_REGISTRY_FORMAT_V1,
+            next_ord: 1,
+            entries: Vec::new(),
         }
     }
 }
@@ -339,26 +362,165 @@ fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
     Ok(BatchId(bytes))
 }
 
-fn branch_ord_key(branch_ord: BranchOrd) -> String {
-    format!("ord:{:08x}", branch_ord as u32)
+fn branch_ord_registry_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("storage_format_version", ColumnType::Integer),
+        ColumnDescriptor::new("next_ord", ColumnType::Integer),
+        ColumnDescriptor::new(
+            "entries",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("branch_ord", ColumnType::Integer),
+                        ColumnDescriptor::new("branch_name", ColumnType::Text),
+                    ])),
+                }),
+            },
+        ),
+    ])
 }
 
-fn encode_branch_ord(branch_ord: BranchOrd) -> Vec<u8> {
-    branch_ord.to_be_bytes().to_vec()
+fn encode_branch_ord_registry(registry: &BranchOrdRegistry) -> Result<Vec<u8>, StorageError> {
+    let mut entries = registry.entries.clone();
+    entries.sort_by_key(|entry| entry.branch_ord);
+    encode_row(
+        &branch_ord_registry_storage_descriptor(),
+        &[
+            Value::Integer(registry.storage_format_version),
+            Value::Integer(registry.next_ord),
+            Value::Array(
+                entries
+                    .into_iter()
+                    .map(|entry| Value::Row {
+                        id: None,
+                        values: vec![
+                            Value::Integer(entry.branch_ord),
+                            Value::Text(entry.branch_name.as_str().to_string()),
+                        ],
+                    })
+                    .collect(),
+            ),
+        ],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode branch ord registry: {err}")))
 }
 
-fn decode_branch_ord(bytes: &[u8], context: &str) -> Result<BranchOrd, StorageError> {
-    let array: [u8; 4] = bytes.try_into().map_err(|_| {
-        StorageError::IoError(format!(
-            "{context}: expected branch ord to be 4 bytes, got {}",
-            bytes.len()
-        ))
-    })?;
-    Ok(BranchOrd::from_be_bytes(array))
+fn decode_branch_ord_registry(bytes: &[u8]) -> Result<BranchOrdRegistry, StorageError> {
+    let values = decode_row(&branch_ord_registry_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode branch ord registry: {err}")))?;
+    let [storage_format_version, next_ord, entries] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "unexpected branch ord registry shape".to_string(),
+        ));
+    };
+
+    let Value::Integer(storage_format_version) = storage_format_version else {
+        return Err(StorageError::IoError(
+            "branch ord registry storage_format_version must be Integer".to_string(),
+        ));
+    };
+    if *storage_format_version != BRANCH_ORD_REGISTRY_FORMAT_V1 {
+        return Err(StorageError::IoError(format!(
+            "unsupported branch ord registry storage format version {}",
+            storage_format_version
+        )));
+    }
+
+    let Value::Integer(next_ord) = next_ord else {
+        return Err(StorageError::IoError(
+            "branch ord registry next_ord must be Integer".to_string(),
+        ));
+    };
+    if *next_ord < 1 {
+        return Err(StorageError::IoError(format!(
+            "branch ord registry next_ord must be >= 1, got {}",
+            next_ord
+        )));
+    }
+
+    let Value::Array(entries) = entries else {
+        return Err(StorageError::IoError(
+            "branch ord registry entries must be Array".to_string(),
+        ));
+    };
+
+    let mut seen_branch_ords = HashSet::new();
+    let mut seen_branch_names = HashSet::new();
+    let mut decoded_entries = entries
+        .iter()
+        .map(|entry| match entry {
+            Value::Row { values, .. } => {
+                let [branch_ord, branch_name] = values.as_slice() else {
+                    return Err(StorageError::IoError(
+                        "expected branch ord registry row to have two values".to_string(),
+                    ));
+                };
+                let branch_ord = match branch_ord {
+                    Value::Integer(branch_ord) => *branch_ord,
+                    other => {
+                        return Err(StorageError::IoError(format!(
+                            "expected branch ord registry branch_ord integer, got {other:?}"
+                        )));
+                    }
+                };
+                let branch_name = match branch_name {
+                    Value::Text(branch_name) => BranchName::new(branch_name.clone()),
+                    other => {
+                        return Err(StorageError::IoError(format!(
+                            "expected branch ord registry branch_name text, got {other:?}"
+                        )));
+                    }
+                };
+                if branch_ord < 1 {
+                    return Err(StorageError::IoError(format!(
+                        "branch ord registry branch ord must be >= 1, got {branch_ord}"
+                    )));
+                }
+                if !seen_branch_ords.insert(branch_ord) {
+                    return Err(StorageError::IoError(format!(
+                        "duplicate branch ord registry branch ord {branch_ord}"
+                    )));
+                }
+                if !seen_branch_names.insert(branch_name) {
+                    return Err(StorageError::IoError(format!(
+                        "duplicate branch ord registry branch name {}",
+                        branch_name.as_str()
+                    )));
+                }
+                Ok(BranchOrdRegistryEntry {
+                    branch_ord,
+                    branch_name,
+                })
+            }
+            other => Err(StorageError::IoError(format!(
+                "expected branch ord registry entry row, got {other:?}"
+            ))),
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    decoded_entries.sort_by_key(|entry| entry.branch_ord);
+
+    Ok(BranchOrdRegistry {
+        storage_format_version: *storage_format_version,
+        next_ord: *next_ord,
+        entries: decoded_entries,
+    })
 }
 
-fn encode_branch_name(branch_name: BranchName) -> Vec<u8> {
-    branch_name.as_str().as_bytes().to_vec()
+fn load_branch_ord_registry<H: Storage + ?Sized>(
+    storage: &H,
+) -> Result<BranchOrdRegistry, StorageError> {
+    match storage.raw_table_get(BRANCH_ORD_REGISTRY_TABLE, BRANCH_ORD_REGISTRY_KEY)? {
+        Some(bytes) => decode_branch_ord_registry(&bytes),
+        None => Ok(BranchOrdRegistry::default()),
+    }
+}
+
+fn store_branch_ord_registry<H: Storage + ?Sized>(
+    storage: &mut H,
+    registry: &BranchOrdRegistry,
+) -> Result<(), StorageError> {
+    let bytes = encode_branch_ord_registry(registry)?;
+    storage.raw_table_put(BRANCH_ORD_REGISTRY_TABLE, BRANCH_ORD_REGISTRY_KEY, &bytes)
 }
 
 fn row_namespace_header_storage_descriptor() -> RowDescriptor {
@@ -477,12 +639,6 @@ fn row_namespace_ids_for_exact_row<H: Storage + ?Sized>(
     }
 
     row_namespace_ids_for_table(storage, kind, table)
-}
-
-fn decode_branch_name(bytes: &[u8], context: &str) -> Result<BranchName, StorageError> {
-    String::from_utf8(bytes.to_vec())
-        .map(BranchName::new)
-        .map_err(|err| StorageError::IoError(format!("{context}: invalid utf8 branch name: {err}")))
 }
 
 fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
@@ -1673,48 +1829,57 @@ pub trait Storage {
     }
 
     fn load_branch_ord(&self, branch_name: BranchName) -> Result<Option<BranchOrd>, StorageError> {
-        self.raw_table_get(BRANCH_ORD_BY_NAME_TABLE, branch_name.as_str())?
-            .map(|bytes| decode_branch_ord(&bytes, "decode branch ord by name"))
-            .transpose()
+        Ok(load_branch_ord_registry(self)?
+            .entries
+            .into_iter()
+            .find(|entry| entry.branch_name == branch_name)
+            .map(|entry| entry.branch_ord))
     }
 
     fn load_branch_name_by_ord(
         &self,
         branch_ord: BranchOrd,
     ) -> Result<Option<BranchName>, StorageError> {
-        self.raw_table_get(BRANCH_ORD_BY_ORD_TABLE, &branch_ord_key(branch_ord))?
-            .map(|bytes| decode_branch_name(&bytes, "decode branch name by ord"))
-            .transpose()
+        Ok(load_branch_ord_registry(self)?
+            .entries
+            .into_iter()
+            .find(|entry| entry.branch_ord == branch_ord)
+            .map(|entry| entry.branch_name))
     }
 
     fn resolve_or_alloc_branch_ord(
         &mut self,
         branch_name: BranchName,
     ) -> Result<BranchOrd, StorageError> {
-        if let Some(existing_ord) = self.load_branch_ord(branch_name)? {
+        let mut registry = load_branch_ord_registry(self)?;
+        if let Some(existing_ord) = registry
+            .entries
+            .iter()
+            .find(|entry| entry.branch_name == branch_name)
+            .map(|entry| entry.branch_ord)
+        {
             return Ok(existing_ord);
         }
 
-        let next_ord = match self.raw_table_get(BRANCH_ORD_BY_ORD_TABLE, NEXT_BRANCH_ORD_KEY)? {
-            Some(bytes) => decode_branch_ord(&bytes, "decode next branch ord counter")?,
-            None => 1,
-        };
-        let branch_name_key = branch_name.as_str().to_string();
-        self.raw_table_put(
-            BRANCH_ORD_BY_NAME_TABLE,
-            &branch_name_key,
-            &encode_branch_ord(next_ord),
-        )?;
-        self.raw_table_put(
-            BRANCH_ORD_BY_ORD_TABLE,
-            &branch_ord_key(next_ord),
-            &encode_branch_name(branch_name),
-        )?;
-        self.raw_table_put(
-            BRANCH_ORD_BY_ORD_TABLE,
-            NEXT_BRANCH_ORD_KEY,
-            &encode_branch_ord(next_ord.saturating_add(1)),
-        )?;
+        let next_ord = registry
+            .next_ord
+            .max(
+                registry
+                    .entries
+                    .iter()
+                    .map(|entry| entry.branch_ord)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            )
+            .max(1);
+        registry.entries.push(BranchOrdRegistryEntry {
+            branch_ord: next_ord,
+            branch_name,
+        });
+        registry.entries.sort_by_key(|entry| entry.branch_ord);
+        registry.next_ord = next_ord.saturating_add(1);
+        store_branch_ord_registry(self, &registry)?;
         Ok(next_ord)
     }
 
@@ -2258,11 +2423,11 @@ pub trait Storage {
         &self,
         target_branch_name: BranchName,
     ) -> Result<Vec<CapturedFrontierMember>, StorageError> {
-        let branch_names = self
-            .raw_table_scan_prefix(BRANCH_ORD_BY_ORD_TABLE, "ord:")?
+        let branch_names = load_branch_ord_registry(self)?
+            .entries
             .into_iter()
-            .map(|(_key, bytes)| decode_branch_name(&bytes, "decode branch name by ord scan"))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|entry| entry.branch_name)
+            .collect::<Vec<_>>();
         let family_branches: Vec<_> = branch_names
             .into_iter()
             .filter(|branch_name| {
@@ -4134,6 +4299,7 @@ impl Storage for MemoryStorage {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
+    use crate::object::BranchName;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema,
     };
@@ -4186,6 +4352,65 @@ mod tests {
             state,
             durability,
         )
+    }
+
+    struct FailOnNthRawPutStorage {
+        inner: MemoryStorage,
+        fail_on_put_number: usize,
+        raw_puts_seen: usize,
+    }
+
+    impl FailOnNthRawPutStorage {
+        fn new(fail_on_put_number: usize) -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                fail_on_put_number,
+                raw_puts_seen: 0,
+            }
+        }
+    }
+
+    impl Storage for FailOnNthRawPutStorage {
+        fn raw_table_put(
+            &mut self,
+            table: &str,
+            key: &str,
+            value: &[u8],
+        ) -> Result<(), StorageError> {
+            self.raw_puts_seen += 1;
+            if self.raw_puts_seen == self.fail_on_put_number {
+                return Err(StorageError::IoError(format!(
+                    "simulated raw_table_put failure #{:?} for {table}:{key}",
+                    self.fail_on_put_number
+                )));
+            }
+            self.inner.raw_table_put(table, key, value)
+        }
+
+        fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+            self.inner.raw_table_delete(table, key)
+        }
+
+        fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.raw_table_get(table, key)
+        }
+
+        fn raw_table_scan_prefix(
+            &self,
+            table: &str,
+            prefix: &str,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_prefix(table, prefix)
+        }
+
+        fn raw_table_scan_range(
+            &self,
+            table: &str,
+            start: Option<&str>,
+            end: Option<&str>,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_range(table, start, end)
+        }
     }
 
     #[test]
@@ -4270,6 +4495,24 @@ mod tests {
         assert_eq!(results.len(), 2, "lookup -0.0 should match both zeros");
         assert!(results.contains(&row_neg));
         assert!(results.contains(&row_pos));
+    }
+
+    #[test]
+    fn branch_ord_allocation_commits_atomically_in_one_put() {
+        let mut storage = FailOnNthRawPutStorage::new(2);
+        let main = BranchName::new("dev-aaaaaaaaaaaa-main");
+
+        let branch_ord = storage
+            .resolve_or_alloc_branch_ord(main)
+            .expect("branch ord allocation should fit in one raw_table_put");
+
+        assert_eq!(branch_ord, 1);
+        assert_eq!(storage.raw_puts_seen, 1);
+        assert_eq!(storage.load_branch_ord(main).unwrap(), Some(branch_ord));
+        assert_eq!(
+            storage.load_branch_name_by_ord(branch_ord).unwrap(),
+            Some(main)
+        );
     }
 
     #[test]

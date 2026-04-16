@@ -193,6 +193,10 @@ The current sealed submission row stores:
 - `members` with `(object_id, row_digest)`
 - `captured_frontier` with `(object_id, branch_ord, batch_id)`
 
+Those stored branch ords resolve through the storage-local `__branch_ord_registry` row, which
+persists the full `(branch_ord, branch_name)` mapping set atomically as one durable write rather
+than as separate `name -> ord` and `ord -> name` tables.
+
 ## In-Memory Runtime Shapes
 
 ### StoredRowBatch
