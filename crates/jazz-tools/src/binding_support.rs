@@ -15,15 +15,7 @@ use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
-use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerializedOutboxEntry {
-    pub destination_kind: String,
-    pub destination_id: String,
-    pub payload_json: String,
-    pub is_catalogue: bool,
-}
+use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct QueryExecutionOptionsWire {
@@ -314,22 +306,6 @@ pub fn subscription_delta_to_json(
     serde_json::Value::Array(delta_obj)
 }
 
-pub fn serialize_outbox_entry(message: &OutboxEntry) -> Result<SerializedOutboxEntry, String> {
-    let payload_json = serde_json::to_string(&message.payload).map_err(|err| err.to_string())?;
-    let is_catalogue = message.payload.is_catalogue();
-    let (destination_kind, destination_id) = match message.destination {
-        Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
-        Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
-    };
-
-    Ok(SerializedOutboxEntry {
-        destination_kind,
-        destination_id,
-        payload_json,
-        is_catalogue,
-    })
-}
-
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
 }
@@ -348,7 +324,7 @@ mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
         parse_read_durability_options, parse_runtime_schema_input,
-        query_rows_can_be_schema_aligned, serialize_outbox_entry,
+        query_rows_can_be_schema_aligned,
     };
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
@@ -356,7 +332,6 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
-    use crate::sync_manager::{Destination, OutboxEntry, QueryId, ServerId, SyncPayload};
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -509,22 +484,5 @@ mod tests {
 
         assert!(!input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));
-    }
-
-    #[test]
-    fn outbox_entries_are_serialized_for_bindings() {
-        let message = OutboxEntry {
-            destination: Destination::Server(ServerId::new()),
-            payload: SyncPayload::QueryUnsubscription {
-                query_id: QueryId(7),
-            },
-        };
-
-        let serialized = serialize_outbox_entry(&message).expect("serialize outbox");
-
-        assert_eq!(serialized.destination_kind, "server");
-        assert!(!serialized.destination_id.is_empty());
-        assert!(!serialized.payload_json.is_empty());
-        assert!(!serialized.is_catalogue);
     }
 }

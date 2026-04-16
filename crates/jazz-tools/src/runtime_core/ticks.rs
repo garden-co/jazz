@@ -309,12 +309,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     /// Drain a batch of outbox entries through the live delivery path.
     ///
-    /// Routing is by destination kind: server-bound entries go through the
-    /// transport handle when present (otherwise fall back to `sync_sender`),
-    /// while client-bound entries always go through `sync_sender` so that
-    /// peer-routed payloads (e.g. a worker thread sending `QuerySettled` back
-    /// to its main-thread peer client) don't get misrouted to the upstream
-    /// WebSocket.
+    /// Routing is by destination kind:
+    /// - Server-bound entries prefer the transport handle, falling back to
+    ///   `sync_sender` (the server-side fanout path has no transport handle).
+    /// - Client-bound entries prefer `sync_sender` so peer-routed payloads
+    ///   (e.g. a worker sending `QuerySettled` back to its main-thread peer
+    ///   client) don't get misrouted to the upstream WebSocket; they fall
+    ///   back to the transport handle only if no `sync_sender` is installed.
     fn flush_outbox(&self, outbox: Vec<crate::sync_manager::types::OutboxEntry>) {
         if outbox.is_empty() {
             return;

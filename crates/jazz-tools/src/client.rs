@@ -158,8 +158,6 @@ impl JazzClient {
                 backend_secret: context.backend_secret.clone(),
                 admin_secret: context.admin_secret.clone(),
                 backend_session: None,
-                local_mode: None,
-                local_token: None,
             };
             runtime.connect(ws_url, auth);
 

@@ -56,7 +56,6 @@ let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
 let initComplete = false;
 let wasmInitialized = false;
-let _isShuttingDown = false;
 let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
@@ -284,7 +283,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
     await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
-    _isShuttingDown = false;
     currentAuth = {};
     currentWsUrl = null;
     peerRuntimeClientByPeerId.clear();
@@ -529,7 +527,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     }
 
     case "shutdown":
-      _isShuttingDown = true;
       initComplete = false;
       if (runtime) {
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
@@ -547,7 +544,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       // Flush WAL buffer to OPFS but do NOT write snapshot.
       // This simulates a crash where writes reached the WAL but no
       // clean checkpoint happened. Recovery must replay the WAL.
-      _isShuttingDown = true;
       initComplete = false;
       if (runtime) {
         runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
