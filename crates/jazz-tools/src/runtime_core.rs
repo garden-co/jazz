@@ -455,7 +455,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 ///
 /// Centralises the boilerplate that would otherwise be duplicated in every
 /// binding (Tokio, NAPI, RN, WASM).
-#[cfg(feature = "transport-websocket")]
+#[cfg(feature = "transport")]
 pub fn install_transport<S, Sch, W, T>(
     core: &mut RuntimeCore<S, Sch>,
     url: String,
