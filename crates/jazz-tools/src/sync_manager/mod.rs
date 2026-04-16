@@ -25,6 +25,9 @@ pub use types::*;
 // SyncManager
 // ============================================================================
 
+const HASH_MAP_ENTRY_OVERHEAD: usize = 48;
+const HASH_SET_ENTRY_OVERHEAD: usize = 32;
+
 /// Manages synchronization state atop storage-backed row and catalogue state.
 ///
 /// Coordinates:
@@ -174,6 +177,127 @@ pub(crate) fn log_connection_schema_diagnostics(
     }
 }
 
+fn serialized_size<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+fn estimate_string_map(map: &HashMap<String, String>) -> usize {
+    map.iter()
+        .map(|(key, value)| key.len() + value.len() + HASH_MAP_ENTRY_OVERHEAD)
+        .sum()
+}
+
+fn estimate_branch_name(branch_name: &BranchName) -> usize {
+    std::mem::size_of::<BranchName>() + branch_name.as_str().len()
+}
+
+fn estimate_session(session: &Session) -> usize {
+    std::mem::size_of::<Session>() + serialized_size(session)
+}
+
+fn estimate_query(query: &Query) -> usize {
+    std::mem::size_of::<Query>() + serialized_size(query)
+}
+
+fn estimate_sync_payload(payload: &SyncPayload) -> usize {
+    std::mem::size_of::<SyncPayload>() + serialized_size(payload)
+}
+
+fn estimate_catalogue_entry(entry: &CatalogueEntry) -> usize {
+    std::mem::size_of::<CatalogueEntry>() + serialized_size(entry)
+}
+
+fn estimate_query_scope(scope: &QueryScope) -> usize {
+    std::mem::size_of::<QueryScope>()
+        + scope
+            .scope
+            .iter()
+            .map(|(object_id, branch_name)| {
+                std::mem::size_of_val(object_id)
+                    + estimate_branch_name(branch_name)
+                    + HASH_SET_ENTRY_OVERHEAD
+            })
+            .sum::<usize>()
+        + scope.session.as_ref().map_or(0, estimate_session)
+}
+
+fn estimate_version_tracking(
+    versions: &HashMap<(ObjectId, BranchName), HashSet<crate::commit::CommitId>>,
+) -> usize {
+    versions
+        .iter()
+        .map(|((object_id, branch_name), commit_ids)| {
+            std::mem::size_of_val(object_id)
+                + estimate_branch_name(branch_name)
+                + HASH_MAP_ENTRY_OVERHEAD
+                + commit_ids
+                    .iter()
+                    .map(|commit_id| std::mem::size_of_val(commit_id) + HASH_SET_ENTRY_OVERHEAD)
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+fn estimate_server_state(state: &ServerState) -> usize {
+    std::mem::size_of::<ServerState>()
+        + estimate_version_tracking(&state.sent_row_versions)
+        + state
+            .sent_metadata
+            .iter()
+            .map(|object_id| std::mem::size_of_val(object_id) + HASH_SET_ENTRY_OVERHEAD)
+            .sum::<usize>()
+}
+
+fn estimate_client_state(state: &ClientState) -> usize {
+    std::mem::size_of::<ClientState>()
+        + state.session.as_ref().map_or(0, estimate_session)
+        + state
+            .queries
+            .iter()
+            .map(|(query_id, scope)| {
+                std::mem::size_of_val(query_id)
+                    + HASH_MAP_ENTRY_OVERHEAD
+                    + estimate_query_scope(scope)
+            })
+            .sum::<usize>()
+        + estimate_version_tracking(&state.sent_row_versions)
+        + state
+            .sent_metadata
+            .iter()
+            .map(|object_id| std::mem::size_of_val(object_id) + HASH_SET_ENTRY_OVERHEAD)
+            .sum::<usize>()
+}
+
+fn estimate_outbox_entry(entry: &OutboxEntry) -> usize {
+    std::mem::size_of::<OutboxEntry>() + estimate_sync_payload(&entry.payload)
+}
+
+fn estimate_inbox_entry(entry: &InboxEntry) -> usize {
+    std::mem::size_of::<InboxEntry>() + estimate_sync_payload(&entry.payload)
+}
+
+fn estimate_pending_query_subscription(subscription: &PendingQuerySubscription) -> usize {
+    std::mem::size_of::<PendingQuerySubscription>()
+        + estimate_query(&subscription.query)
+        + subscription.session.as_ref().map_or(0, estimate_session)
+}
+
+fn estimate_pending_permission_check(check: &PendingPermissionCheck) -> usize {
+    std::mem::size_of::<PendingPermissionCheck>()
+        + estimate_sync_payload(&check.payload)
+        + estimate_session(&check.session)
+        + estimate_string_map(&check.metadata)
+        + check.old_content.as_ref().map_or(0, Vec::len)
+        + check.new_content.as_ref().map_or(0, Vec::len)
+}
+
+fn estimate_row_visibility_change(change: &RowVisibilityChange) -> usize {
+    std::mem::size_of::<RowVisibilityChange>()
+        + serialized_size(&change.row_locator)
+        + serialized_size(&change.row)
+        + change.previous_row.as_ref().map_or(0, serialized_size)
+}
+
 impl SyncManager {
     pub fn new() -> Self {
         Self {
@@ -246,6 +370,118 @@ impl SyncManager {
     /// Return the strongest durability tier this node can attest to locally.
     pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
         self.my_tiers.iter().copied().max()
+    }
+
+    /// Calculate memory usage breakdown for profiling.
+    ///
+    /// Returns a tuple: (row_objects, index_objects, subscriptions, outbox_inbox, total).
+    /// This is a rough estimate based on sync-layer container state and payload sizes.
+    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
+        let row_objects = self
+            .catalogue_entries
+            .iter()
+            .map(|(object_id, entry)| {
+                std::mem::size_of_val(object_id)
+                    + HASH_MAP_ENTRY_OVERHEAD
+                    + estimate_catalogue_entry(entry)
+            })
+            .sum::<usize>()
+            + self
+                .row_version_interest
+                .iter()
+                .map(|(row_version_key, client_ids)| {
+                    std::mem::size_of_val(row_version_key)
+                        + HASH_MAP_ENTRY_OVERHEAD
+                        + client_ids
+                            .iter()
+                            .map(|client_id| {
+                                std::mem::size_of_val(client_id) + HASH_SET_ENTRY_OVERHEAD
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self
+                .received_row_version_acks
+                .iter()
+                .map(|(row_version_key, durability_tier)| {
+                    std::mem::size_of_val(row_version_key) + std::mem::size_of_val(durability_tier)
+                })
+                .sum::<usize>();
+
+        let index_objects = 0usize;
+
+        let subscriptions = self
+            .servers
+            .iter()
+            .map(|(server_id, state)| {
+                std::mem::size_of_val(server_id)
+                    + HASH_MAP_ENTRY_OVERHEAD
+                    + estimate_server_state(state)
+            })
+            .sum::<usize>()
+            + self
+                .clients
+                .iter()
+                .map(|(client_id, state)| {
+                    std::mem::size_of_val(client_id)
+                        + HASH_MAP_ENTRY_OVERHEAD
+                        + estimate_client_state(state)
+                })
+                .sum::<usize>()
+            + self
+                .my_tiers
+                .iter()
+                .map(|tier| std::mem::size_of_val(tier) + HASH_SET_ENTRY_OVERHEAD)
+                .sum::<usize>()
+            + self
+                .query_origin
+                .iter()
+                .map(|(query_id, client_ids)| {
+                    std::mem::size_of_val(query_id)
+                        + HASH_MAP_ENTRY_OVERHEAD
+                        + client_ids
+                            .iter()
+                            .map(|client_id| {
+                                std::mem::size_of_val(client_id) + HASH_SET_ENTRY_OVERHEAD
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+
+        let outbox_inbox = self.outbox.iter().map(estimate_outbox_entry).sum::<usize>()
+            + self.inbox.iter().map(estimate_inbox_entry).sum::<usize>()
+            + self
+                .pending_permission_checks
+                .iter()
+                .map(estimate_pending_permission_check)
+                .sum::<usize>()
+            + self
+                .pending_query_subscriptions
+                .iter()
+                .map(estimate_pending_query_subscription)
+                .sum::<usize>()
+            + self.pending_query_unsubscriptions.len()
+                * std::mem::size_of::<PendingQueryUnsubscription>()
+            + self
+                .pending_row_visibility_changes
+                .iter()
+                .map(estimate_row_visibility_change)
+                .sum::<usize>()
+            + self
+                .pending_catalogue_updates
+                .iter()
+                .map(estimate_catalogue_entry)
+                .sum::<usize>()
+            + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>();
+
+        let total = row_objects + index_objects + subscriptions + outbox_inbox;
+        (
+            row_objects,
+            index_objects,
+            subscriptions,
+            outbox_inbox,
+            total,
+        )
     }
 
     // ========================================================================
