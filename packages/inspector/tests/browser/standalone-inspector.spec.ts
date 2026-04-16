@@ -123,6 +123,10 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"type": "Text"')).toBeVisible();
     await expect(page.getByText('"name": "done"')).toBeVisible();
     await expect(page.getByText('"type": "Boolean"')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "todos permissions" })).toBeVisible();
+    await expect(
+      page.getByText("No published sync-server permissions found for this app."),
+    ).toBeVisible();
   });
 
   test("discards queued inline text edits without persisting them", async ({ page }) => {

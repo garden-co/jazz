@@ -38,8 +38,10 @@ export {
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
-  type FetchStoredWasmSchemaOptions,
   type PublishStoredPermissionsOptions,
+  type FetchStoredPermissionsOptions,
+  type FetchStoredWasmSchemaOptions,
+  type StoredPermissionsResponse,
 } from "./schema-fetch.js";
 export {
   fetchServerSubscriptions,

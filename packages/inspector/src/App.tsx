@@ -106,6 +106,10 @@ export default function App() {
 
     const run = async () => {
       try {
+        const permissionsPromise = fetchStoredPermissions(storedConfig.serverUrl, {
+          adminSecret: storedConfig.adminSecret,
+          pathPrefix: storedConfig.serverPathPrefix,
+        }).catch(() => null);
         const [resolvedClient, { schema }, { hashes }, permissions] = await Promise.all([
           createJazzClient({
             appId: storedConfig.appId,
@@ -126,10 +130,7 @@ export default function App() {
             adminSecret: storedConfig.adminSecret,
             pathPrefix: storedConfig.serverPathPrefix,
           }),
-          fetchStoredPermissions(storedConfig.serverUrl, {
-            adminSecret: storedConfig.adminSecret,
-            pathPrefix: storedConfig.serverPathPrefix,
-          }),
+          permissionsPromise,
         ]);
 
         if (!active) {
