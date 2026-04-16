@@ -3,6 +3,7 @@ import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
+  const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const insertDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
@@ -19,7 +20,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
   const runtimeBase: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insert: (table: string, values: Record<string, unknown>) => {
+      insertCalls.push([table, values]);
+      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
+    },
     insertWithSession: (
       table: string,
       values: Record<string, unknown>,
@@ -107,6 +111,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 
   return {
     client: new JazzClientCtor(runtime, context, "edge"),
+    insertCalls,
     insertWithSessionCalls,
     insertDurableWithSessionCalls,
     updateCalls,
@@ -121,6 +126,41 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 }
 
 describe("JazzClient mutation durability split", () => {
+  it("keeps Bytea mutations as Uint8Array at the runtime boundary", () => {
+    const { client, insertCalls, updateCalls } = makeClient();
+    const payload = new Uint8Array([1, 2, 3]);
+    const insertValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
+    const updateValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
+
+    client.create("todos", insertValues);
+    client.update("row-1", updateValues);
+
+    expect(insertCalls).toHaveLength(1);
+    expect(updateCalls).toHaveLength(1);
+    expect(insertCalls[0]?.[1]).toBe(insertValues);
+    expect(updateCalls[0]?.[1]).toBe(updateValues);
+
+    const insertPayload = insertCalls[0]?.[1].payload as
+      | { type: "Bytea"; value: Uint8Array }
+      | undefined;
+    const updatePayload = updateCalls[0]?.[1].payload as
+      | { type: "Bytea"; value: Uint8Array }
+      | undefined;
+
+    expect(insertPayload?.type).toBe("Bytea");
+    expect(updatePayload?.type).toBe("Bytea");
+    expect(insertPayload?.value).toBeInstanceOf(Uint8Array);
+    expect(updatePayload?.value).toBeInstanceOf(Uint8Array);
+    expect(insertPayload?.value).toBe(payload);
+    expect(updatePayload?.value).toBe(payload);
+    expect(Array.from(insertPayload?.value ?? [])).toEqual([1, 2, 3]);
+    expect(Array.from(updatePayload?.value ?? [])).toEqual([1, 2, 3]);
+  });
+
   it("rethrows synchronous runtime mutation errors", () => {
     const insertError = new Error("Insert failed: indexed value too large");
     const updateError = new Error("Update failed: indexed value too large");

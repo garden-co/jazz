@@ -1694,6 +1694,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "serde",
+ "serde_bytes",
  "serde_json",
  "uuid",
 ]
@@ -1705,6 +1706,7 @@ dependencies = [
  "base64",
  "blake3",
  "futures",
+ "hex",
  "indexmap",
  "jazz-tools",
  "serde",
