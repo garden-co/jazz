@@ -57,12 +57,16 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
-  update(object_id: string, values: any): void;
-  updateWithSession?(object_id: string, values: any, write_context_json?: string | null): void;
-  updateDurable(object_id: string, values: any, tier: string): Promise<void>;
+  update(object_id: string, values: Record<string, Value>): void;
+  updateWithSession?(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): void;
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
-    values: any,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
