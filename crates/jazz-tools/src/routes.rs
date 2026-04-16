@@ -1575,18 +1575,7 @@ mod tests {
     }
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
-        axum::Router::new()
-            .route("/schema/:hash", get(schema_handler))
-            .route("/schemas", get(schema_hashes_handler))
-            .route("/admin/schemas", post(publish_schema_handler))
-            .route("/admin/permissions/head", get(permissions_head_handler))
-            .route("/admin/permissions", post(publish_permissions_handler))
-            .route("/admin/migrations", post(publish_migration_handler))
-            .route(
-                "/admin/introspection/subscriptions",
-                get(admin_subscription_introspection_handler),
-            )
-            .with_state(state)
+        create_router(state)
     }
 
     /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
