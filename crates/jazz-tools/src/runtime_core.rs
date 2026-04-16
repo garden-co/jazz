@@ -449,6 +449,35 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 }
 
+/// Create a `TransportManager`, seed it with the current catalogue state hash,
+/// install its handle on the given core, and return the manager for the caller
+/// to spawn on an appropriate executor.
+///
+/// Centralises the boilerplate that would otherwise be duplicated in every
+/// binding (Tokio, NAPI, RN, WASM).
+#[cfg(feature = "transport-websocket")]
+pub fn install_transport<S, Sch, W, T>(
+    core: &mut RuntimeCore<S, Sch>,
+    url: String,
+    auth: crate::transport_manager::AuthConfig,
+    tick: T,
+) -> crate::transport_manager::TransportManager<W, T>
+where
+    S: crate::storage::Storage,
+    Sch: Scheduler,
+    W: crate::transport_manager::StreamAdapter + 'static,
+    T: crate::transport_manager::TickNotifier + 'static,
+{
+    debug_assert!(
+        core.transport().is_none(),
+        "install_transport called while a transport is already installed; call clear_transport / disconnect first"
+    );
+    let (handle, manager) = crate::transport_manager::create::<W, T>(url, auth, tick);
+    handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
+    core.set_transport(handle);
+    manager
+}
+
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Attach a transport handle. Replaces any existing transport.
     pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
