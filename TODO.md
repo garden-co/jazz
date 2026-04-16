@@ -2,10 +2,6 @@
 
 ## Issues
 
-### Critical
-
-- [**update-auth-noop-breaks-jwt-refresh**](todo/issues/update-auth-noop-breaks-jwt-refresh.md) — The `update-auth` message is now a no-op, so JWT refreshes from `Db.applyAuthUpdate()` never reach the worker's Rust transport. Once the original token expires (or auth context changes), the worker keeps using stale credentials and cannot recover without a full worker restart, which breaks long-lived authenticated sessions.
-
 ### High
 
 - [**change-user-id-on-live-client**](todo/issues/change-user-id-on-live-client.md) — Changing auth principal on a live Jazz client is currently unsupported. We need a focused follow-up
@@ -14,7 +10,6 @@
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**transport-manager-reconnect-loop-leak**](todo/issues/transport-manager-reconnect-loop-leak.md) — `connect()` spawns `manager.run()` and drops the `JoinHandle` immediately, but `TransportManager::run` only exits on dropped handle inside `run_connected` and explicitly requires aborting during connect/backoff phases. If `disconnect()` happens before a successful connection (or while reconnecting), the task keeps retrying indefinitely, leaking background reconnect loops across shutdown/reconnect cycles.
 - [**update-inherits-policy-bug**](todo/issues/update-inherits-policy-bug.md) — UPDATE operations fail with PolicyDenied even when an INHERITS chain should grant access.
-- [**worker-never-emits-auth-failed**](todo/issues/worker-never-emits-auth-failed.md) — When the WebSocket server rejects a JWT, the worker needs to post `{ type: "auth-failed", reason }` back to the main thread so `WorkerBridge` can drive `getAuthState().status` to `"unauthenticated"`. The message type is already defined in `WorkerToMainMessage` and handled in `WorkerBridge`, but `jazz-worker.ts` never emits it. As a result, the main thread never learns of a server-side auth rejection and the auth state machine cannot transition from that path.
 - [**worker-server-url-not-converted-to-ws**](todo/issues/worker-server-url-not-converted-to-ws.md) — `runtime.connect` is called with `msg.serverUrl` verbatim, but worker init receives the app-level `serverUrl`/`serverPathPrefix` config (typically HTTP + optional prefix). Passing raw `http(s)` URLs (or ignoring `serverPathPrefix`) causes the Rust WebSocket transport to dial the wrong endpoint, so worker upstream sync never attaches in those deployments. The worker should normalize to the `/ws` URL the same way `httpUrlToWs` is used elsewhere.
 
 ### Medium
