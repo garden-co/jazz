@@ -266,13 +266,6 @@ fn history_row_system_column_count() -> usize {
 fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
     let mut columns = vec![
         ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
-        ColumnDescriptor::new(
-            "_jazz_parents",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Bytea),
-            },
-        )
-        .nullable(),
         ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
         ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
         ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
@@ -280,16 +273,6 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new("_jazz_state", row_state_column_type()),
         ColumnDescriptor::new("_jazz_confirmed_tier", confirmed_tier_column_type()).nullable(),
         ColumnDescriptor::new("_jazz_delete_kind", delete_kind_column_type()).nullable(),
-        ColumnDescriptor::new("_jazz_is_deleted", ColumnType::Boolean),
-        ColumnDescriptor::new(
-            "_jazz_metadata",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Row {
-                    columns: Box::new(metadata_entry_descriptor().clone()),
-                }),
-            },
-        )
-        .nullable(),
     ];
     columns.extend([
         ColumnDescriptor::new(
@@ -309,7 +292,6 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
 fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
     let mut values = vec![
         batch_id_to_value(entry.current_row.batch_id),
-        optional_batch_ids_to_value(&entry.current_row.parents),
         Value::Timestamp(entry.current_row.updated_at),
         Value::Text(entry.current_row.created_by.to_string()),
         Value::Timestamp(entry.current_row.created_at),
@@ -325,8 +307,6 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
             .delete_kind
             .map(delete_kind_to_value)
             .unwrap_or(Value::Null),
-        Value::Boolean(entry.current_row.is_deleted),
-        optional_metadata_to_value(&entry.current_row.metadata),
     ];
     values.extend([
         visible_frontier_to_value(entry),
@@ -483,25 +463,39 @@ pub fn decode_flat_visible_row_entry(
 ) -> Result<VisibleRowEntry, EncodingError> {
     let descriptor = visible_row_physical_descriptor(user_descriptor);
     let values = decode_row(&descriptor, data)?;
-    let system_count = history_row_system_column_count();
     let visible_system_count = visible_row_system_column_count();
     let batch_id = batch_id_from_value(&values[0])?;
-    let current_row = stored_row_batch_from_flat_parts(
-        user_descriptor,
+    let delete_kind = delete_kind_from_value(&values[7])?;
+    let current_row = StoredRowBatch {
         row_id,
-        branch,
         batch_id,
-        &values[1..=system_count],
-        &values[visible_system_count..],
-    )?;
+        branch: branch.into(),
+        parents: SmallVec::new(),
+        updated_at: expect_timestamp(&values[1], "updated_at")?,
+        created_by: expect_text(&values[2], "created_by")?.into(),
+        created_at: expect_timestamp(&values[3], "created_at")?,
+        updated_by: expect_text(&values[4], "updated_by")?.into(),
+        state: row_state_from_value(&values[5])?,
+        confirmed_tier: durability_tier_from_value(&values[6])?,
+        delete_kind,
+        is_deleted: delete_kind.is_some(),
+        data: flat_user_data_from_values(
+            user_descriptor,
+            &values[visible_system_count..],
+            delete_kind,
+            delete_kind.is_some(),
+        )?
+        .into(),
+        metadata: RowMetadata::default(),
+    };
     let current_batch_id = current_row.batch_id();
 
     Ok(VisibleRowEntry {
         current_row,
-        branch_frontier: visible_frontier_from_value(&values[system_count + 1], current_batch_id)?,
-        worker_batch_id: optional_batch_id_from_value(&values[system_count + 2])?,
-        edge_batch_id: optional_batch_id_from_value(&values[system_count + 3])?,
-        global_batch_id: optional_batch_id_from_value(&values[system_count + 4])?,
+        branch_frontier: visible_frontier_from_value(&values[8], current_batch_id)?,
+        worker_batch_id: optional_batch_id_from_value(&values[9])?,
+        edge_batch_id: optional_batch_id_from_value(&values[10])?,
+        global_batch_id: optional_batch_id_from_value(&values[11])?,
     })
 }
 
@@ -632,14 +626,6 @@ fn batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
     Value::Array(batch_ids.iter().copied().map(batch_id_to_value).collect())
 }
 
-fn optional_batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
-    if batch_ids.is_empty() {
-        Value::Null
-    } else {
-        batch_ids_to_value(batch_ids)
-    }
-}
-
 fn batch_ids_from_value(value: &Value, label: &str) -> Result<Vec<BatchId>, EncodingError> {
     if matches!(value, Value::Null) {
         return Ok(Vec::new());
@@ -661,14 +647,6 @@ fn metadata_to_value(metadata: &RowMetadata) -> Value {
             })
             .collect(),
     )
-}
-
-fn optional_metadata_to_value(metadata: &RowMetadata) -> Value {
-    if metadata.is_empty() {
-        Value::Null
-    } else {
-        metadata_to_value(metadata)
-    }
 }
 
 fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
@@ -1579,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_visible_row_binary_roundtrips_user_and_system_columns() {
+    fn flat_visible_row_binary_roundtrips_retained_visible_columns() {
         let user_descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("title", ColumnType::Text),
             ColumnDescriptor::new("done", ColumnType::Boolean).nullable(),
@@ -1630,7 +1608,29 @@ mod tests {
         )
         .expect("decode flat visible");
 
-        assert_eq!(decoded, entry);
+        assert_eq!(decoded.current_row.row_id, entry.current_row.row_id);
+        assert_eq!(decoded.current_row.batch_id(), entry.current_row.batch_id());
+        assert_eq!(decoded.current_row.branch, entry.current_row.branch);
+        assert!(decoded.current_row.parents.is_empty());
+        assert_eq!(decoded.current_row.updated_at, entry.current_row.updated_at);
+        assert_eq!(decoded.current_row.created_by, entry.current_row.created_by);
+        assert_eq!(decoded.current_row.created_at, entry.current_row.created_at);
+        assert_eq!(decoded.current_row.updated_by, entry.current_row.updated_by);
+        assert_eq!(decoded.current_row.state, entry.current_row.state);
+        assert_eq!(
+            decoded.current_row.confirmed_tier,
+            entry.current_row.confirmed_tier
+        );
+        assert_eq!(
+            decoded.current_row.delete_kind,
+            entry.current_row.delete_kind
+        );
+        assert!(decoded.current_row.metadata.is_empty());
+        assert_eq!(decoded.current_row.data, entry.current_row.data);
+        assert_eq!(decoded.branch_frontier, entry.branch_frontier);
+        assert_eq!(decoded.worker_batch_id, entry.worker_batch_id);
+        assert_eq!(decoded.edge_batch_id, entry.edge_batch_id);
+        assert_eq!(decoded.global_batch_id, entry.global_batch_id);
     }
 
     #[test]
@@ -1805,6 +1805,18 @@ mod tests {
             descriptor.column("_jazz_branch").is_none(),
             "visible rows should derive branch from the storage key"
         );
+        assert!(
+            descriptor.column("_jazz_parents").is_none(),
+            "visible rows should not duplicate history parents in the hot visible payload"
+        );
+        assert!(
+            descriptor.column("_jazz_metadata").is_none(),
+            "visible rows should not duplicate history metadata in the hot visible payload"
+        );
+        assert!(
+            descriptor.column("_jazz_is_deleted").is_none(),
+            "visible rows should derive deletion state from delete_kind in the hot payload"
+        );
     }
 
     #[test]
@@ -1818,10 +1830,8 @@ mod tests {
         let values = decode_row(&visible_row_physical_descriptor(&descriptor), &encoded)
             .expect("decode visible row");
 
-        assert_eq!(values[1], Value::Null, "empty parents should be implicit");
-        assert_eq!(values[10], Value::Null, "empty metadata should be implicit");
         assert_eq!(
-            values[11],
+            values[8],
             Value::Null,
             "singleton frontier matching current batch should be implicit"
         );

@@ -107,8 +107,9 @@ That payload set matches the table-first runtime model:
 1. A client sends `QuerySubscription`.
 2. The Sync Manager records that desired state.
 3. The Query Manager compiles and settles the server-side query.
-4. Matching rows are sent down as `RowBatchNeeded`.
-5. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
+4. For each matching object/branch, initial replay sends the current visible row as `RowBatchNeeded`.
+5. If that current row has replayable batch fate, the current `BatchSettlement` is replayed too.
+6. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
 
 ### Later visibility/state change
 

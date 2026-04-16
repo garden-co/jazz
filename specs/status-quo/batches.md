@@ -130,7 +130,6 @@ rather than the payload.
 Visible rows store the current winning row body as:
 
 - `_jazz_batch_id`
-- `_jazz_parents`
 - `_jazz_updated_at`
 - `_jazz_created_by`
 - `_jazz_created_at`
@@ -138,8 +137,6 @@ Visible rows store the current winning row body as:
 - `_jazz_state`
 - `_jazz_confirmed_tier`
 - `_jazz_delete_kind`
-- `_jazz_is_deleted`
-- `_jazz_metadata`
 
 Then they append:
 
@@ -152,8 +149,9 @@ The visible-row raw-table-local key still carries `(branch_name, row_id)`, while
 visible `batch_id` lives directly in the flat visible row payload. Application columns again
 follow after the reserved prefix.
 
-This is why visible rows can answer ordinary queries quickly while still remembering lower-tier
-visible winners and branch-frontier ancestry.
+History keeps parents, metadata, and the full delete marker lineage; the visible head keeps only
+the fields needed for current reads plus tier/frontier pointers. This keeps ordinary queries fast
+without duplicating the full history-row payload.
 
 ### Batch bookkeeping tables
 

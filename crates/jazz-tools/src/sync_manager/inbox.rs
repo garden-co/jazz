@@ -195,16 +195,28 @@ impl SyncManager {
             return;
         }
 
-        let row_update = patch_row_batch_state(
+        let row_update = match patch_row_batch_state(
             storage,
             row_id,
             &branch_name,
             batch_id,
             state,
             confirmed_tier,
-        )
-        .ok()
-        .flatten();
+        ) {
+            Ok(update) => update,
+            Err(err) => {
+                tracing::error!(
+                    %row_id,
+                    %branch_name,
+                    ?batch_id,
+                    ?state,
+                    ?confirmed_tier,
+                    ?err,
+                    "failed to apply row batch state change"
+                );
+                return;
+            }
+        };
 
         if let Some(tier) = confirmed_tier {
             self.received_row_batch_acks
