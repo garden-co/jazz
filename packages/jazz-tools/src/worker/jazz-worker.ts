@@ -263,6 +263,19 @@ export function performUpstreamConnect(
   }
 }
 
+export function handleUpdateAuth(
+  runtime: { updateAuth?: (auth: string) => void },
+  authJson: string,
+  post: (msg: WorkerToMainMessage) => void,
+): void {
+  try {
+    runtime.updateAuth?.(authJson);
+  } catch (e) {
+    console.error("[worker] runtime.updateAuth failed:", e);
+    post({ type: "auth-failed", reason: "invalid" });
+  }
+}
+
 // ============================================================================
 // Init: Open persistent runtime, register main thread as client
 // ============================================================================
@@ -489,11 +502,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     case "update-auth": {
       currentAuth = mergeAuth(currentAuth, msg.jwtToken);
       if (runtime) {
-        try {
-          runtime.updateAuth(JSON.stringify(currentAuth));
-        } catch (e) {
-          console.error("[worker] runtime.updateAuth failed:", e);
-        }
+        handleUpdateAuth(runtime, JSON.stringify(currentAuth), post);
       }
       break;
     }
