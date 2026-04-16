@@ -170,6 +170,13 @@ pub trait SubscriptionCallback: Send + Sync {
     fn on_update(&self, delta_json: String);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait AuthFailureCallback: Send + Sync {
+    /// Invoked when the Rust transport receives an auth rejection from the server.
+    /// `reason` is a human-readable string (e.g. "Unauthorized").
+    fn on_failure(&self, reason: String);
+}
+
 // ============================================================================
 // RnScheduler
 // ============================================================================
@@ -868,6 +875,23 @@ impl RnRuntime {
                     handle.update_auth(auth);
                 }
             }
+            Ok(())
+        })
+    }
+
+    /// Register a callback that fires when the transport receives an auth
+    /// rejection from the server during the WS handshake.
+    pub fn on_auth_failure(
+        &self,
+        callback: Box<dyn AuthFailureCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("on_auth_failure", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.set_auth_failure_callback(move |reason| {
+                callback.on_failure(reason);
+            });
             Ok(())
         })
     }
