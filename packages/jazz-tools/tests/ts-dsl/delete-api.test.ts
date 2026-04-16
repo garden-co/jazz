@@ -17,7 +17,7 @@ describe("TS Delete API", () => {
     await db.shutdown();
   });
 
-  it("deletes rows synchronously without returning a promise", async () => {
+  it("deletes rows synchronously and returns a write handle", async () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
     const { value: todo } = db.insert(app.todos, {
@@ -30,7 +30,9 @@ describe("TS Delete API", () => {
     });
 
     const result = db.delete(app.todos, todo.id);
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }));
     expect(rows).toEqual([]);
@@ -53,10 +55,8 @@ describe("TS Delete API", () => {
     await todoHandle.wait({ tier: "worker" });
     const { value: todo } = todoHandle;
 
-    const pending = db.deleteDurable(app.todos, todo.id, { tier: "worker" });
-    expect(pending).toBeInstanceOf(Promise);
-
-    await pending;
+    const pending = db.delete(app.todos, todo.id);
+    await pending.wait({ tier: "worker" });
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
     expect(rows).toEqual([]);

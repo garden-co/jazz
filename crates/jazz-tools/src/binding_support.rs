@@ -343,7 +343,6 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
     json!({
         "batchId": record.batch_id.to_string(),
         "mode": serialize_batch_mode(record.mode),
-        "requestedTier": serialize_durability_tier(record.requested_tier),
         "sealed": record.sealed,
         "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
     })

@@ -2877,6 +2877,138 @@ fn rc_delete_sync() {
 }
 
 #[test]
+fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+    let insert_batch_id =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), id)
+            .unwrap()
+            .expect("insert should create one visible row")
+            .batch_id;
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let update_batch_id =
+        s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
+            .unwrap();
+
+    let update_record =
+        s.a.storage()
+            .load_local_batch_record(update_batch_id)
+            .unwrap()
+            .expect("direct update should create a local batch record");
+    assert_eq!(
+        update_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id: update_batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: id,
+                branch_name,
+                batch_id: update_batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![update_batch_id]
+    )));
+}
+
+#[test]
+fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+    let insert_batch_id =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), id)
+            .unwrap()
+            .expect("insert should create one visible row")
+            .batch_id;
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let delete_batch_id = s.a.delete(id, None).unwrap();
+
+    let delete_record =
+        s.a.storage()
+            .load_local_batch_record(delete_batch_id)
+            .unwrap()
+            .expect("direct delete should create a local batch record");
+    assert_eq!(
+        delete_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id: delete_batch_id,
+            confirmed_tier: DurabilityTier::Worker,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: id,
+                branch_name,
+                batch_id: delete_batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![delete_batch_id]
+    )));
+}
+
+#[test]
 fn rc_insert_persisted_resolves_on_worker_ack() {
     let mut s = create_3tier_rc();
     let user_id = ObjectId::new();
@@ -3078,7 +3210,6 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .expect("persisted write should create a local batch record");
     assert_eq!(initial_record.batch_id, batch_id);
     assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
     assert_eq!(
         initial_record.latest_settlement, None,
         "client-side persisted direct writes should start pending until an upstream durability settlement arrives"
@@ -3115,6 +3246,193 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             }],
         })
     );
+}
+
+#[test]
+fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "the caller-facing worker wait should resolve once worker confirms"
+    );
+
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
+    )));
+}
+
+#[test]
+fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "worker confirmation should not satisfy an edge wait"
+    );
+
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "edge confirmation should resolve the caller-facing wait"
+    );
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("edge-accepted direct batch should stay retained");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
+    )));
+}
+
+#[test]
+fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("terminally accepted direct batch should still be inspectable");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(!outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids.contains(&batch_id)
+    )));
 }
 
 #[test]
@@ -3932,7 +4250,6 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         initial_record.mode,
         crate::batch_fate::BatchMode::Transactional
     );
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
     assert!(!initial_record.sealed);
     assert_eq!(initial_record.latest_settlement, None);
 

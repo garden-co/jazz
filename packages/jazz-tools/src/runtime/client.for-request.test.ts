@@ -48,8 +48,12 @@ function makeClient() {
       values: [],
       batchId: "plain-insert-batch",
     }),
-    update: () => {},
-    delete: () => {},
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -131,8 +135,12 @@ function makeClientWithContext(context: AppContext): JazzClient {
       values: [],
       batchId: "plain-insert-batch",
     }),
-    update: () => {},
-    delete: () => {},
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async () => [],
     subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
@@ -512,8 +520,12 @@ describe("JazzClient schema order", () => {
     const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
       insert,
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 0,
@@ -584,8 +596,12 @@ describe("JazzClient schema order", () => {
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -667,8 +683,12 @@ describe("JazzClient schema order", () => {
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -774,8 +794,12 @@ describe("JazzClient schema order", () => {
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -921,8 +945,12 @@ describe("JazzClient schema order", () => {
   it("keeps magic projection values ahead of included rows during schema alignment", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -1071,8 +1099,12 @@ describe("JazzClient schema order", () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 1,

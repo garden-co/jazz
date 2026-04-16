@@ -1907,7 +1907,6 @@ mod tests {
             .expect("persisted direct write should retain a local batch record");
         assert_eq!(local_record.batch_id, batch_id);
         assert_eq!(local_record.mode, BatchMode::Direct);
-        assert_eq!(local_record.requested_tier, DurabilityTier::Worker);
         assert!(local_record.latest_settlement.is_none());
 
         client

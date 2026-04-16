@@ -1136,7 +1136,6 @@ fn local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
         ColumnDescriptor::new("mode", ColumnType::Text),
-        ColumnDescriptor::new("requested_tier", ColumnType::Text),
         ColumnDescriptor::new("sealed", ColumnType::Boolean),
         ColumnDescriptor::new(
             "members",
@@ -1170,25 +1169,6 @@ fn decode_batch_mode(raw: &str) -> Result<crate::batch_fate::BatchMode, StorageE
         "transactional" => Ok(crate::batch_fate::BatchMode::Transactional),
         other => Err(StorageError::IoError(format!(
             "unknown batch mode '{other}'"
-        ))),
-    }
-}
-
-fn encode_durability_tier(tier: DurabilityTier) -> &'static str {
-    match tier {
-        DurabilityTier::Worker => "worker",
-        DurabilityTier::EdgeServer => "edge",
-        DurabilityTier::GlobalServer => "global",
-    }
-}
-
-fn decode_durability_tier(raw: &str) -> Result<DurabilityTier, StorageError> {
-    match raw {
-        "worker" => Ok(DurabilityTier::Worker),
-        "edge" => Ok(DurabilityTier::EdgeServer),
-        "global" => Ok(DurabilityTier::GlobalServer),
-        other => Err(StorageError::IoError(format!(
-            "unknown durability tier '{other}'"
         ))),
     }
 }
@@ -2100,7 +2080,6 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         &[
             Value::BatchId(*record.batch_id.as_bytes()),
             Value::Text(encode_batch_mode(record.mode).to_string()),
-            Value::Text(encode_durability_tier(record.requested_tier).to_string()),
             Value::Boolean(record.sealed),
             Value::Array(
                 record
@@ -2140,7 +2119,6 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     let [
         batch_id,
         mode,
-        requested_tier,
         sealed,
         members,
         sealed_submission,
@@ -2158,14 +2136,6 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         other => {
             return Err(StorageError::IoError(format!(
                 "expected batch mode text, got {other:?}"
-            )));
-        }
-    };
-    let requested_tier = match requested_tier {
-        Value::Text(raw) => decode_durability_tier(raw)?,
-        other => {
-            return Err(StorageError::IoError(format!(
-                "expected requested tier text, got {other:?}"
             )));
         }
     };
@@ -2303,7 +2273,6 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     Ok(LocalBatchRecord {
         batch_id,
         mode,
-        requested_tier,
         sealed,
         members,
         sealed_submission,

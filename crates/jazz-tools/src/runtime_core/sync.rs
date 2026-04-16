@@ -1,10 +1,23 @@
 use super::*;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+    fn retained_batch_terminal_tier(&self) -> DurabilityTier {
+        let sync_manager = self.schema_manager.query_manager().sync_manager();
+
+        if sync_manager.has_connected_servers() {
+            DurabilityTier::GlobalServer
+        } else {
+            sync_manager
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Worker)
+        }
+    }
+
     fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
         let Ok(records) = self.storage.scan_local_batch_records() else {
             return Vec::new();
         };
+        let terminal_tier = self.retained_batch_terminal_tier();
 
         records
             .into_iter()
@@ -21,7 +34,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 | Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
                     confirmed_tier,
                     ..
-                }) => *confirmed_tier < record.requested_tier,
+                }) => *confirmed_tier < terminal_tier,
             })
             .map(|record| record.batch_id)
             .collect()

@@ -59,8 +59,12 @@ function createRuntimeMock(): {
 
   const runtime: Runtime = {
     insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
-    update: () => undefined,
-    delete: () => undefined,
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,

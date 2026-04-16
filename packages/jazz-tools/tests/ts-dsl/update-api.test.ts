@@ -76,7 +76,7 @@ describe("TS Update API", () => {
     );
   });
 
-  it("updates rows synchronously without returning a promise", async () => {
+  it("updates rows synchronously and returns a write handle", async () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
     const { value: todo } = db.insert(app.todos, {
@@ -89,7 +89,9 @@ describe("TS Update API", () => {
     });
 
     const result = db.update(app.todos, todo.id, { done: true });
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }));
     expect(updated!.done).toBe(true);
@@ -107,10 +109,8 @@ describe("TS Update API", () => {
       assigneesIds: [],
     });
 
-    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
-    expect(pending).toBeInstanceOf(Promise);
-
-    await pending;
+    const pending = db.update(app.todos, todo.id, { done: true });
+    await pending.wait({ tier: "worker" });
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), {
       tier: "worker",
