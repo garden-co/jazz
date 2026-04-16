@@ -1245,6 +1245,11 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
+    let role = match &setup {
+        WsClientSetup::Admin => "admin",
+        WsClientSetup::Backend => "backend",
+        WsClientSetup::Session(_) => "session",
+    };
 
     // 4. Register with ConnectionEventHub (mirrors events_handler).
     let connection_id = state
@@ -1322,6 +1327,7 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         ws_cleanup(&state, connection_id, client_id).await;
         return;
     }
+    tracing::info!(connection_id, %client_id, role, "ws client connected");
 
     // 7. Bidirectional loop: inbound frames from client + outbound updates from hub.
     //    Also fires a periodic heartbeat so idle connections don't look half-open.
@@ -1400,6 +1406,11 @@ async fn ws_cleanup(state: &Arc<ServerState>, connection_id: u64, client_id: Cli
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc as StdArc, Mutex};
+    use std::time::Duration;
+
     use crate::jazz_transport::SyncBatchRequest;
     use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{
@@ -1411,8 +1422,13 @@ mod tests {
     };
     use axum::body;
     use axum::routing::{get, post};
+    use futures::{SinkExt as _, StreamExt as _};
     use serde_json::Value;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::{Layer, Registry};
 
     use crate::middleware::AuthConfig;
     use crate::server::{CatalogueAuthorityMode, ServerBuilder, ServerState};
@@ -1522,6 +1538,80 @@ mod tests {
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        message: Option<String>,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCollector {
+        events: StdArc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl EventCollector {
+        fn snapshot(&self) -> Vec<CapturedEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl<S> Layer<S> for EventCollector
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = CapturedEventVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                message: visitor.message,
+                fields: visitor.fields,
+            });
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturedEventVisitor {
+        message: Option<String>,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl CapturedEventVisitor {
+        fn record_value(&mut self, field: &Field, value: String) {
+            if field.name() == "message" {
+                self.message = Some(value.clone());
+            }
+            self.fields.insert(field.name().to_string(), value);
+        }
+    }
+
+    impl Visit for CapturedEventVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.record_value(field, format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.record_value(field, value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.record_value(field, value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.record_value(field, value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.record_value(field, value.to_string());
+        }
     }
 
     #[tokio::test]
@@ -2730,5 +2820,71 @@ mod tests {
                 unreachable_schema_hashes: vec![],
             }
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_handler_logs_when_connection_is_established() {
+        // Exercise the real /ws route so the assertion covers the actual
+        // upgrade, handshake, and ConnectedResponse path the server uses.
+        let collector = EventCollector::default();
+        let subscriber = Registry::default().with(collector.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let client_id = ClientId::new().to_string();
+        let ws_url = format!("ws://{addr}/ws");
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: client_id.clone(),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("test-backend-secret".to_string()),
+                ..Default::default()
+            },
+            catalogue_state_hash: None,
+        };
+        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
+        ws.send(WsMessage::Binary(
+            crate::transport_manager::frame_encode(&payload).into(),
+        ))
+        .await
+        .expect("send handshake");
+
+        let connected = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for ConnectedResponse")
+            .expect("ws frame")
+            .expect("ws result");
+        assert!(
+            matches!(connected, WsMessage::Binary(_)),
+            "expected binary ConnectedResponse frame"
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let events = collector.snapshot();
+        assert!(
+            events.iter().any(|event| {
+                event.level == tracing::Level::INFO
+                    && event.message.as_deref() == Some("ws client connected")
+                    && event.fields.get("client_id").map(String::as_str) == Some(client_id.as_str())
+                    && event.fields.get("connection_id").map(String::as_str) == Some("1")
+                    && event.fields.get("role").map(String::as_str) == Some("backend")
+            }),
+            "expected ws client connected log, captured events: {events:#?}"
+        );
+
+        let _ = ws.close(None).await;
+        server_task.abort();
     }
 }

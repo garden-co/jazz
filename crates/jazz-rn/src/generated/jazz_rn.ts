@@ -32,6 +32,7 @@ import nativeModule, {
   type UniffiForeignFutureCompleteRustBuffer,
   type UniffiForeignFutureResultVoid,
   type UniffiForeignFutureCompleteVoid,
+  type UniffiVTableCallbackInterfaceAuthFailureCallback,
   type UniffiVTableCallbackInterfaceBatchedTickCallback,
   type UniffiVTableCallbackInterfaceSubscriptionCallback,
 } from './jazz_rn-ffi';
@@ -129,6 +130,60 @@ export function mintLocalFirstToken(
     )
   );
 }
+
+export interface AuthFailureCallback {
+  /**
+   * Invoked when the Rust transport receives an auth rejection from the server.
+   * `reason` is a human-readable string (e.g. "Unauthorized").
+   */
+  onFailure(reason: string): void;
+}
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+const uniffiCallbackInterfaceAuthFailureCallback: {
+  vtable: UniffiVTableCallbackInterfaceAuthFailureCallback;
+  register: () => void;
+} = {
+  // Create the VTable using a series of closures.
+  // ts automatically converts these into C callback functions.
+  vtable: {
+    onFailure: (uniffiHandle: bigint, reason: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback =
+          FfiConverterTypeAuthFailureCallback.lift(uniffiHandle);
+        return jsCallback.onFailure(FfiConverterString.lift(reason));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower
+      );
+      return uniffiResult;
+    },
+    uniffiFree: (uniffiHandle: UniffiHandle): void => {
+      // AuthFailureCallback: this will throw a stale handle error if the handle isn't found.
+      FfiConverterTypeAuthFailureCallback.drop(uniffiHandle);
+    },
+    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
+      return FfiConverterTypeAuthFailureCallback.clone(uniffiHandle);
+    },
+  },
+  register: () => {
+    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+      uniffiCallbackInterfaceAuthFailureCallback.vtable
+    );
+  },
+};
+
+// FfiConverter protocol for callback interfaces
+const FfiConverterTypeAuthFailureCallback =
+  new FfiConverterCallback<AuthFailureCallback>();
 
 export interface BatchedTickCallback {
   /**
@@ -677,6 +732,11 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined
   ) /*throws*/ : string;
   /**
+   * Register a callback that fires when the transport receives an auth
+   * rejection from the server during the WS handshake.
+   */
+  onAuthFailure(callback: AuthFailureCallback) /*throws*/ : void;
+  /**
    * Register a JS callback that schedules `batched_tick()` calls.
    */
   onBatchedTickNeeded(
@@ -1019,6 +1079,26 @@ export class RnRuntime
         },
         /*liftString:*/ FfiConverterString.lift
       )
+    );
+  }
+
+  /**
+   * Register a callback that fires when the transport receives an auth
+   * rejection from the server during the WS handshake.
+   */
+  onAuthFailure(callback: AuthFailureCallback): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterTypeAuthFailureCallback.lower(callback),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -1492,6 +1572,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure() !==
+    50366
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed() !==
     36428
   ) {
@@ -1588,6 +1676,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure() !==
+    17333
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick() !==
     53765
   ) {
@@ -1604,6 +1700,7 @@ function uniffiEnsureInitialized() {
     );
   }
 
+  uniffiCallbackInterfaceAuthFailureCallback.register();
   uniffiCallbackInterfaceBatchedTickCallback.register();
   uniffiCallbackInterfaceSubscriptionCallback.register();
 }
