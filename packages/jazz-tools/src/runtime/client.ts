@@ -15,6 +15,7 @@ import {
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
+import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
@@ -105,6 +106,8 @@ export interface Runtime {
   disconnect?(): void;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth?(auth_json: string): void;
+  /** Register a callback invoked when the Rust transport rejects the JWT. */
+  onAuthFailure?(callback: (reason: string) => void): void;
 }
 
 /**
@@ -619,7 +622,7 @@ export class JazzClient {
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
-    _runtimeOptions?: ConnectSyncRuntimeOptions,
+    runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
@@ -629,6 +632,13 @@ export class JazzClient {
       appId: context.appId,
       jwtToken: context.jwtToken,
     }).session;
+
+    if (runtimeOptions?.onAuthFailure) {
+      const handler = runtimeOptions.onAuthFailure;
+      this.runtime.onAuthFailure?.((reason: string) => {
+        handler(mapAuthReason(reason));
+      });
+    }
   }
 
   /**

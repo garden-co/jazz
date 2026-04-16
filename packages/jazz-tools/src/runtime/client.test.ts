@@ -37,6 +37,28 @@ function makeContext(): AppContext {
   };
 }
 
+describe("JazzClient onAuthFailure wiring", () => {
+  it("registers runtimeOptions.onAuthFailure with runtime.onAuthFailure on construction", () => {
+    const runtime = makeFakeRuntime();
+    const onAuthFailure = vi.fn();
+
+    JazzClient.connectWithRuntime(runtime as any, makeContext(), { onAuthFailure });
+
+    expect(runtime.onAuthFailure).toHaveBeenCalledTimes(1);
+
+    // Invoke whatever callback was registered:
+    const registered = runtime.onAuthFailure.mock.calls[0][0];
+    registered("token expired");
+    expect(onAuthFailure).toHaveBeenCalledWith("expired");
+  });
+
+  it("does nothing when runtimeOptions.onAuthFailure is omitted", () => {
+    const runtime = makeFakeRuntime();
+    JazzClient.connectWithRuntime(runtime as any, makeContext(), {});
+    expect(runtime.onAuthFailure).not.toHaveBeenCalled();
+  });
+});
+
 describe("JazzClient.updateAuthToken", () => {
   it("forwards refreshed JWT to the Rust runtime via runtime.updateAuth", () => {
     const runtime = makeFakeRuntime();
