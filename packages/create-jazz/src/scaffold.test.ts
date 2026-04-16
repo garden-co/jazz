@@ -8,6 +8,7 @@ import { scaffold, validateAppName, type ScaffoldOptions } from "./scaffold.js";
 const repoRoot = path.resolve(import.meta.dirname, "../../../");
 const betterauthStarterPath = path.join(repoRoot, "starters/next-betterauth");
 const localfirstStarterPath = path.join(repoRoot, "starters/next-localfirst");
+const sveltekitBetterauthStarterPath = path.join(repoRoot, "starters/sveltekit-betterauth");
 
 // CI runners have no global git identity configured, so inject fallbacks
 // via the env vars git honours. Production code still fails loudly when a
@@ -156,6 +157,50 @@ describe("scaffold() — next-localfirst e2e via JAZZ_STARTER_PATH", () => {
 
     expect(pkgJson.name).toBe("alice-localfirst");
     expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(true);
+
+    const allDepValues = [
+      ...Object.values(pkgJson.dependencies ?? {}),
+      ...Object.values(pkgJson.devDependencies ?? {}),
+    ];
+    for (const value of allDepValues) {
+      expect(value).not.toMatch(/^workspace:/);
+      expect(value).not.toMatch(/^catalog:/);
+    }
+  });
+});
+
+describe("scaffold() — sveltekit-betterauth e2e via JAZZ_STARTER_PATH", () => {
+  withLocalStarter(sveltekitBetterauthStarterPath);
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("scaffolds a complete sveltekit-betterauth project", { timeout: 30_000 }, async () => {
+    tmpDir = path.join(os.tmpdir(), `scaffold-sveltekit-ba-${Date.now()}`);
+
+    await scaffold({
+      appName: "alice-sveltekit",
+      targetDir: tmpDir,
+      pm: null,
+      starter: "sveltekit-betterauth",
+    });
+
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
+      name?: string;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(pkgJson.name).toBe("alice-sveltekit");
+    expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(true);
+
+    // SvelteKit starters have src/lib/ structure
+    expect(fs.existsSync(path.join(tmpDir, "src/lib/schema.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "svelte.config.js"))).toBe(true);
 
     const allDepValues = [
       ...Object.values(pkgJson.dependencies ?? {}),

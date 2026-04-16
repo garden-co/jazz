@@ -199,7 +199,10 @@ async function fetchWithTimeout(url: string): Promise<Response> {
 async function fetchOnce(url: string): Promise<Response> {
   try {
     return await fetchWithTimeout(url);
-  } catch {
+  } catch (firstErr) {
+    console.warn(
+      `Retrying ${url} after transient failure: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}`,
+    );
     return await fetchWithTimeout(url);
   }
 }
