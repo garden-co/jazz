@@ -33,7 +33,12 @@ vi.mock("jazz-wasm", () => ({
   initSync: vi.fn(),
 }));
 
-import { composeConnectUrl, mergeAuth, performUpstreamConnect } from "./jazz-worker.js";
+import {
+  composeConnectUrl,
+  mergeAuth,
+  performUpstreamConnect,
+  handleUpdateAuth,
+} from "./jazz-worker.js";
 import type { WorkerToMainMessage } from "./worker-protocol.js";
 
 describe("worker URL + auth wiring", () => {
@@ -61,6 +66,25 @@ describe("worker URL + auth wiring", () => {
     const afterUpdate = mergeAuth(afterInit, undefined);
     expect(afterUpdate.jwt_token).toBeUndefined();
     expect(afterUpdate.admin_secret).toBe("s");
+  });
+});
+
+describe("worker update-auth error propagation", () => {
+  it("posts auth-failed with reason=invalid when runtime.updateAuth throws", () => {
+    const posted: any[] = [];
+    const runtime = {
+      updateAuth: vi.fn(() => {
+        throw new Error("boom");
+      }),
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    handleUpdateAuth(runtime, '{"jwt_token":"new.jwt"}', (msg) => posted.push(msg));
+
+    const authFailed = posted.find((m) => m.type === "auth-failed");
+    expect(authFailed).toBeDefined();
+    expect(authFailed.reason).toBe("invalid");
+    errorSpy.mockRestore();
   });
 });
 
