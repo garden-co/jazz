@@ -4116,3 +4116,30 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
         "bob should be preserved"
     );
 }
+
+#[cfg(feature = "transport-websocket")]
+#[test]
+fn auth_failure_callback_fires_on_inbound_auth_failure_event() {
+    use crate::transport_manager::TransportInbound;
+    use std::sync::{Arc, Mutex};
+
+    let mut core = create_test_runtime();
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+    core.set_auth_failure_callback(move |reason| {
+        captured_clone.lock().unwrap().push(reason);
+    });
+
+    let dummy_server_id = ServerId::new();
+    core.handle_transport_inbound_for_test(
+        dummy_server_id,
+        TransportInbound::AuthFailure {
+            reason: "Unauthorized".to_string(),
+        },
+    );
+
+    assert_eq!(
+        captured.lock().unwrap().as_slice(),
+        &["Unauthorized".to_string()]
+    );
+}
