@@ -15,7 +15,7 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
+use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{Session, WriteContext};
 use super::types::{
@@ -845,8 +845,9 @@ impl QueryManager {
                         operation: Operation::Insert,
                     });
                 }
-                if let Some(policy) = insert_policy
-                    && !self.evaluate_policy_for_content_with_context(
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
                         &policy,
                         &data,
@@ -855,12 +856,15 @@ impl QueryManager {
                         session,
                         table,
                         self.current_branch().as_str(),
-                    )
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
                 }
             }
         }
@@ -1015,8 +1019,9 @@ impl QueryManager {
                         operation: Operation::Insert,
                     });
                 }
-                if let Some(policy) = insert_policy
-                    && !self.evaluate_policy_for_content_with_context(
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
                         &policy,
                         &data,
@@ -1025,12 +1030,15 @@ impl QueryManager {
                         session,
                         table,
                         branch,
-                    )
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
                 }
             }
         }
@@ -1356,11 +1364,6 @@ impl QueryManager {
         )
     }
 
-    /// Evaluate a policy expression against encoded row content using full policy context.
-    ///
-    /// This uses the same simple/complex split as server-side permission checks:
-    /// - Evaluate simple predicates directly from row bytes.
-    /// - Materialize and settle policy graphs for complex clauses.
     #[allow(clippy::too_many_arguments)]
     fn evaluate_policy_for_content_with_context<H: Storage>(
         &mut self,
@@ -1437,7 +1440,9 @@ impl QueryManager {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
-        let simple_result = evaluate_simple_parts(policy, content, provenance, descriptor, session);
+        let simple_result = evaluate_simple_parts_with_row_id(
+            policy, content, provenance, descriptor, session, row_id,
+        );
         if !simple_result.passed {
             return false;
         }

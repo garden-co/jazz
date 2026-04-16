@@ -1,5 +1,6 @@
-import type { InsertValues, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
+import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export type JazzRnErrorTag =
@@ -220,7 +221,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   insert(table: string, values: InsertValues): Row {
     try {
-      const rowJson = this.binding.insert(table, JSON.stringify(values));
+      const rowJson = this.binding.insert(table, encodeFFIRecordToJson(values));
       return JSON.parse(rowJson) as Row;
     } catch (error) {
       throw normalizeJazzRnError(error);
@@ -231,7 +232,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     try {
       const rowJson = this.requireWriteContextMethod("insertWithSession")(
         table,
-        JSON.stringify(values),
+        encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
       return JSON.parse(rowJson) as Row;
@@ -240,20 +241,24 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: any): void {
+  update(object_id: string, values: Record<string, Value>): void {
     try {
-      this.binding.update(object_id, JSON.stringify(values));
+      this.binding.update(object_id, encodeFFIRecordToJson(values));
     } catch (error) {
       if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  updateWithSession(object_id: string, values: any, write_context_json?: string | null): void {
+  updateWithSession(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): void {
     try {
       this.requireWriteContextMethod("updateWithSession")(
         object_id,
-        JSON.stringify(values),
+        encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
     } catch (error) {
@@ -384,7 +389,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve(row);
   }
 
-  updateDurable(object_id: string, values: any, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
@@ -393,7 +398,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   updateDurableWithSession(
     object_id: string,
-    values: any,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void> {
