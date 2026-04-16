@@ -81,4 +81,36 @@ describe("JazzClient.updateAuthToken", () => {
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
   });
+
+  it("preserves admin_secret from context across token refresh", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      adminSecret: "admin-xyz",
+    });
+
+    client.updateAuthToken("new.jwt.token");
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({
+      jwt_token: "new.jwt.token",
+      admin_secret: "admin-xyz",
+    });
+  });
+
+  it("preserves backend_secret from context across token refresh", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      backendSecret: "backend-abc",
+    });
+
+    client.updateAuthToken("new.jwt.token");
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({
+      jwt_token: "new.jwt.token",
+      backend_secret: "backend-abc",
+    });
+  });
 });

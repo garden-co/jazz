@@ -790,7 +790,21 @@ export class JazzClient {
     // Push the refreshed credentials into the Rust transport. `updateAuth`
     // is optional on the Runtime interface because not every binding exposes
     // it yet; bindings that do will route this to TransportControl::UpdateAuth.
-    this.runtime.updateAuth?.(JSON.stringify({ jwt_token: jwtToken ?? null }));
+    // Carry forward admin/backend secrets from context — omitting them here
+    // would deserialise to None on the Rust side and silently erase any
+    // privileged credentials the transport was connected with.
+    const payload: {
+      jwt_token: string | null;
+      admin_secret?: string;
+      backend_secret?: string;
+    } = { jwt_token: jwtToken ?? null };
+    if (this.context.adminSecret) {
+      payload.admin_secret = this.context.adminSecret;
+    }
+    if (this.context.backendSecret) {
+      payload.backend_secret = this.context.backendSecret;
+    }
+    this.runtime.updateAuth?.(JSON.stringify(payload));
   }
 
   private normalizeQueryExecutionOptions(
