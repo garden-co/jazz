@@ -1,23 +1,31 @@
-import { intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
+import {
+  intro,
+  outro,
+  text,
+  select,
+  spinner,
+  log,
+  isCancel,
+} from "@clack/prompts";
 import pc from "picocolors";
 import * as path from "node:path";
 import { scaffold, validateAppName, type StarterName } from "./scaffold.js";
 import { detectPackageManager } from "./detect-pm.js";
 
 type Framework = "next" | "sveltekit";
-type Auth = "localfirst" | "localfirst-auth" | "betterauth";
+type Auth = "localfirst" | "hybrid" | "betterauth";
 
 // Maps framework + auth choices to a starter directory under starters/.
 // `null` means "not shipped yet" — the CLI surfaces a helpful error.
 const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
   next: {
     localfirst: "next-localfirst",
-    "localfirst-auth": "next-localfirst-auth",
+    hybrid: "next-hybrid",
     betterauth: "next-betterauth",
   },
   sveltekit: {
     localfirst: "sveltekit-localfirst",
-    "localfirst-auth": "sveltekit-localfirst-auth",
+    hybrid: "sveltekit-hybrid",
     betterauth: "sveltekit-betterauth",
   },
 };
@@ -27,13 +35,16 @@ async function main() {
 
   // Parse --starter <name> from argv — skips the interactive picker entirely.
   const starterFlagIndex = args.indexOf("--starter");
-  const starterArg = starterFlagIndex !== -1 ? args[starterFlagIndex + 1] : undefined;
+  const starterArg =
+    starterFlagIndex !== -1 ? args[starterFlagIndex + 1] : undefined;
   const gitOptOut = args.includes("--no-git");
 
   // App name is the first non-flag argument
   const argvName = args.find((a) => !a.startsWith("-"));
 
-  intro(pc.bold("create-jazz"));
+  // #146aff brand blue via 24-bit ANSI escape
+  const blue = (s: string) => `\x1b[38;2;20;106;255m${s}\x1b[39m`;
+  intro(`${blue("♪")} ${pc.bold("Jazz")}`);
 
   let appName: string;
   if (argvName) {
@@ -78,12 +89,16 @@ async function main() {
     const auth = await select<Auth>({
       message: "Auth",
       options: [
-        { value: "localfirst", label: "Local-first (anonymous only)" },
+        { value: "localfirst", label: "Local-first" },
         {
-          value: "localfirst-auth",
-          label: "Local-first + BetterAuth (anonymous, upgradeable to a named account)",
+          value: "hybrid",
+          label:
+            "Hybrid (local-first + BetterAuth, optional upgrade to a managed account)",
         },
-        { value: "betterauth", label: "BetterAuth (email + password, auth-gated)" },
+        {
+          value: "betterauth",
+          label: "BetterAuth (email + password, sign-up required)",
+        },
       ],
     });
     if (isCancel(auth)) process.exit(0);

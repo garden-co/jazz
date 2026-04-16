@@ -88,13 +88,13 @@ Without it, anonymous local-first connections will receive auth errors.
   site data wipes the identity and the user starts fresh. There is no
   account portability between devices or browsers.
 - **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `sveltekit-localfirst-auth`
+  gone. When those constraints matter, use the `sveltekit-hybrid`
   starter instead.
 
 ## Adding BetterAuth later
 
 If you later want named accounts with an upgrade path that preserves
-existing anonymous data, scaffold the `sveltekit-localfirst-auth` starter
+existing anonymous data, scaffold the `sveltekit-hybrid` starter
 in a sibling directory and copy its `src/lib/auth.ts`,
 `src/lib/auth-client.ts`, `src/hooks.server.ts`, `src/routes/signin/`, and
 `src/routes/signup/` into this project. Rework `src/routes/+layout.svelte`

@@ -10,10 +10,10 @@ const DEFAULT_STARTER = "next-betterauth";
 export const KNOWN_STARTERS = [
   "next-betterauth",
   "next-localfirst",
-  "next-localfirst-auth",
+  "next-hybrid",
   "sveltekit-betterauth",
   "sveltekit-localfirst",
-  "sveltekit-localfirst-auth",
+  "sveltekit-hybrid",
 ] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 
