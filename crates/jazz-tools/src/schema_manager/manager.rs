@@ -213,7 +213,8 @@ impl SchemaManager {
     /// Queries are executed with explicit `QuerySchemaContext` rather than
     /// using implicit current schema context.
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
-        let query_manager = QueryManager::new(sync_manager);
+        let mut query_manager = QueryManager::new(sync_manager);
+        query_manager.require_authorization_schema();
         Self {
             context: SchemaContext::empty(),
             query_manager,
@@ -1818,8 +1819,8 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableName,
-        TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, SchemaBuilder, SchemaHash,
+        TableName, TablePolicies, TableSchema,
     };
 
     fn test_app_id() -> AppId {
@@ -1871,6 +1872,18 @@ mod tests {
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
         assert_eq!(manager.app_id(), test_app_id());
+    }
+
+    #[test]
+    fn schema_manager_new_server_requires_authorization_schema_from_boot() {
+        let manager = SchemaManager::new_server(SyncManager::new(), test_app_id(), "dev");
+        let (row_policy_mode, authorization_schema_required, has_authorization_schema) =
+            manager.query_manager.debug_authorization_state();
+
+        assert!(!manager.has_current_schema());
+        assert!(matches!(row_policy_mode, RowPolicyMode::Enforcing));
+        assert!(authorization_schema_required);
+        assert!(!has_authorization_schema);
     }
 
     #[test]

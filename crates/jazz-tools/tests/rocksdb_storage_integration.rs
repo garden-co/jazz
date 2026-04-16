@@ -10,7 +10,7 @@ use jazz_tools::{
     AppContext, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
-use support::{TestingClient, wait_for_query};
+use support::{TestingClient, publish_allow_all_permissions, wait_for_query};
 use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,13 +57,17 @@ async fn make_client(
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {
-    TestingClient::builder()
+    let client = TestingClient::builder()
         .with_server(server)
-        .with_schema(schema)
+        .with_schema(schema.clone())
         .with_user_id(user_id)
         .ready_on(ready_table, READY_TIMEOUT)
         .connect()
-        .await
+        .await;
+
+    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+
+    client
 }
 
 /// Connects a client to a server that uses an external JWKS URL (where the
@@ -77,7 +81,7 @@ async fn make_client_external_jwks(
     let context = AppContext {
         app_id: server.app_id(),
         client_id: None,
-        schema,
+        schema: schema.clone(),
         server_url: server.base_url(),
         data_dir: tempfile::TempDir::new().expect("temp client dir").keep(),
         storage: ClientStorage::Memory,
@@ -98,6 +102,7 @@ async fn make_client_external_jwks(
         |_| Some(()),
     )
     .await;
+    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
 
     client
 }
