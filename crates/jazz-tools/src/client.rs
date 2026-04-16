@@ -28,6 +28,7 @@ use bytes::BytesMut;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::{RwLock, mpsc, oneshot};
+use uuid::Uuid;
 
 use crate::transport::{AuthConfig, ServerConnection};
 use crate::{
@@ -441,9 +442,25 @@ impl JazzClient {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_with_id(table, Option::<Uuid>::None, values)
+            .await
+    }
+
+    /// Create a new row in a table using a caller-supplied UUIDv7.
+    pub async fn create_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let (object_id, row_values) = self
             .runtime
-            .insert(table, values, None)
+            .insert_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                None,
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -464,9 +481,27 @@ impl JazzClient {
         values: HashMap<String, Value>,
         tier: DurabilityTier,
     ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
+            .await
+    }
+
+    /// Create a new row with a caller-supplied UUIDv7 and wait for durability.
+    pub async fn create_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let ((object_id, row_values), receiver) = self
             .runtime
-            .insert_persisted(table, values, None, tier)
+            .insert_persisted_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                None,
+                tier,
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -479,6 +514,33 @@ impl JazzClient {
         };
         wait_for_persisted_write(receiver, "create row", tier).await?;
         Ok((object_id, row_values))
+    }
+
+    /// Create or update a row using a caller-supplied UUIDv7.
+    pub async fn upsert(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+    ) -> Result<()> {
+        self.runtime
+            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Create or update a row and wait until it reaches the requested durability tier.
+    pub async fn upsert_persisted(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .runtime
+            .upsert_persisted_with_id(table, ObjectId::from_uuid(object_id), values, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "upsert row", tier).await
     }
 
     /// Update a row.
@@ -615,10 +677,25 @@ impl<'a> SessionClient<'a> {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_with_id(table, Option::<Uuid>::None, values)
+            .await
+    }
+
+    pub async fn create_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let (object_id, row_values) = self
             .client
             .runtime
-            .insert(table, values, Some(&self.session))
+            .insert_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                Some(&self.session),
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.client.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -638,10 +715,27 @@ impl<'a> SessionClient<'a> {
         values: HashMap<String, Value>,
         tier: DurabilityTier,
     ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
+            .await
+    }
+
+    pub async fn create_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let ((object_id, row_values), receiver) = self
             .client
             .runtime
-            .insert_persisted(table, values, Some(&self.session), tier)
+            .insert_persisted_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                Some(&self.session),
+                tier,
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.client.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -654,6 +748,44 @@ impl<'a> SessionClient<'a> {
         };
         wait_for_persisted_write(receiver, "create row", tier).await?;
         Ok((object_id, row_values))
+    }
+
+    pub async fn upsert(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+    ) -> Result<()> {
+        self.client
+            .runtime
+            .upsert_with_id(
+                table,
+                ObjectId::from_uuid(object_id),
+                values,
+                Some(&self.session),
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn upsert_persisted(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .upsert_persisted_with_id(
+                table,
+                ObjectId::from_uuid(object_id),
+                values,
+                Some(&self.session),
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "upsert row", tier).await
     }
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {

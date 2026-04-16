@@ -11,6 +11,7 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use support::wait_for_query;
+use uuid::Uuid;
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -210,6 +211,124 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 
     client_a.shutdown().await.expect("shutdown client a");
     client_b.shutdown().await.expect("shutdown client b");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn caller_supplied_uuidv7_is_used_for_created_row() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("01963f3e-5cbe-7a62-8d7c-123456789abc").expect("parse external uuidv7");
+
+    let (todo_id, expected_values) = client
+        .create_with_id(
+            "todos",
+            external_id,
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("external-id-created".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("create row with external id");
+
+    assert_eq!(todo_id.uuid(), &external_id);
+
+    let rows = wait_for_query(
+        &client,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "query returns row created with external id",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
+                .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(rows[0].0.uuid(), &external_id);
+
+    client.shutdown().await.expect("shutdown writer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn upsert_uses_external_uuidv7_for_insert_and_updates_existing_row() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("01963f3e-5cbf-73d1-9f8a-123456789abc").expect("parse external uuidv7");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([
+                ("title".to_string(), Value::Text("first-title".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("insert row through upsert");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("updated-title".to_string()),
+            )]),
+        )
+        .await
+        .expect("update existing row through upsert");
+
+    let rows = wait_for_query(
+        &client,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "query returns updated row from upsert",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0.uuid() == &external_id
+                && rows[0].1
+                    == vec![
+                        Value::Text("updated-title".to_string()),
+                        Value::Boolean(false),
+                    ])
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(rows[0].0.uuid(), &external_id);
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Text("updated-title".to_string()),
+            Value::Boolean(false)
+        ]
+    );
+
+    client.shutdown().await.expect("shutdown writer");
     server.shutdown().await;
 }
 

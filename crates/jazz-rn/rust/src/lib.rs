@@ -16,7 +16,7 @@ use jazz_tools::binding_support::{
     current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_session_input, parse_write_context_input,
+    parse_external_object_id, parse_query_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
@@ -455,14 +455,21 @@ impl RnRuntime {
     // CRUD
     // =========================================================================
 
-    pub fn insert(&self, table: String, values_json: String) -> Result<String, JazzRnError> {
+    pub fn insert(
+        &self,
+        table: String,
+        values_json: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert", || {
             let named_values = convert_insert_values(&values_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             let (id, row_values) = core
-                .insert(&table, named_values, None)
+                .insert_with_id(&table, named_values, object_id, None)
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -485,15 +492,18 @@ impl RnRuntime {
         table: String,
         values_json: String,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert_with_session", || {
             let named_values = convert_insert_values(&values_json)?;
             let write_context = parse_write_context(write_context_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             let (id, row_values) = core
-                .insert(&table, named_values, write_context.as_ref())
+                .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
