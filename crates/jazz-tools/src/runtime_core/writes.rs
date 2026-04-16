@@ -6,7 +6,7 @@ use crate::batch_fate::{
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
-use crate::storage::RowNamespaceKind;
+use crate::storage::RowRawTableKind;
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -195,17 +195,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return Ok(schema_hash);
         }
 
-        let namespaces = self.storage.scan_row_namespace_headers().map_err(|err| {
-            RuntimeError::WriteError(format!("scan row namespace headers: {err}"))
-        })?;
+        let row_raw_tables = crate::storage::scan_row_raw_table_headers_with_storage(&self.storage)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("scan row raw table headers: {err}"))
+            })?;
 
-        let matching_hashes: Vec<_> = namespaces
+        let matching_hashes: Vec<_> = row_raw_tables
             .into_iter()
-            .map(|(namespace, _)| namespace)
-            .filter(|namespace| {
-                namespace.kind == RowNamespaceKind::History && namespace.table_name == table
+            .map(|(row_raw_table_id, _)| row_raw_table_id)
+            .filter(|row_raw_table_id| {
+                row_raw_table_id.kind == RowRawTableKind::History
+                    && row_raw_table_id.table_name == table
             })
-            .map(|namespace| namespace.schema_hash)
+            .map(|row_raw_table_id| row_raw_table_id.schema_hash)
             .collect::<Vec<_>>();
 
         if let [schema_hash] = matching_hashes.as_slice() {

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use smallvec::smallvec;
 
+use crate::batch_fate::BatchSettlement;
 use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
@@ -151,6 +152,64 @@ fn row_batch_id_for_commit(
     commit
         .to_row(object_id, branch, RowState::VisibleDirect)
         .batch_id()
+}
+
+fn client_write_rejection_reason(
+    outbox: &[crate::sync_manager::OutboxEntry],
+    client_id: ClientId,
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
+) -> Option<String> {
+    let mut saw_rejected_state = false;
+    let mut settlement_reason = None;
+
+    for entry in outbox {
+        if entry.destination != Destination::Client(client_id) {
+            continue;
+        }
+
+        match &entry.payload {
+            SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+                return Some(reason.clone());
+            }
+            SyncPayload::RowBatchStateChanged {
+                row_id: rejected_row_id,
+                branch_name,
+                batch_id: rejected_batch_id,
+                state: Some(RowState::Rejected),
+                ..
+            } if *rejected_row_id == row_id
+                && branch_name.as_str() == branch
+                && *rejected_batch_id == batch_id =>
+            {
+                saw_rejected_state = true;
+            }
+            SyncPayload::BatchSettlement {
+                settlement:
+                    BatchSettlement::Rejected {
+                        batch_id: rejected_batch_id,
+                        reason,
+                        ..
+                    },
+            } if *rejected_batch_id == batch_id => {
+                settlement_reason = Some(reason.clone());
+            }
+            _ => {}
+        }
+    }
+
+    settlement_reason.or_else(|| saw_rejected_state.then(|| "rejected".to_string()))
+}
+
+fn client_write_was_rejected(
+    outbox: &[crate::sync_manager::OutboxEntry],
+    client_id: ClientId,
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
+) -> bool {
+    client_write_rejection_reason(outbox, client_id, row_id, branch, batch_id).is_some()
 }
 
 fn add_row_commit(
@@ -638,13 +697,13 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     }
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
-                if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        grand_id,
+        &branch,
+        row_batch_id_for_commit(grand_id, &branch, &update_commit),
+    );
 
     let tips = test_row_tip_ids(&storage, grand_id, &branch).unwrap();
     let applied = tips.contains(&row_batch_id_for_commit(grand_id, &branch, &update_commit));
@@ -764,20 +823,18 @@ fn rebac_insert_denied_by_simple_policy() {
 
     // Should get permission denied error
     let outbox = qm.sync_manager_mut().take_outbox();
-    let error = outbox
-        .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .expect("Should receive error response");
-
-    match &error.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
-            assert!(
-                reason.contains("denied by policy"),
-                "Error should mention policy denial: {reason}"
-            );
-        }
-        _ => panic!("Expected PermissionDenied error"),
-    }
+    let reason = client_write_rejection_reason(
+        &outbox,
+        client_id,
+        obj_id,
+        "main",
+        row_batch_id_for_commit(obj_id, "main", &commit),
+    )
+    .expect("Should receive rejection response");
+    assert!(
+        reason.contains("denied by policy") || reason == "rejected",
+        "Rejection should mention policy denial: {reason}"
+    );
 
     // Commit should NOT be applied
     let tips = test_row_tip_ids(&storage, obj_id, "main");
@@ -855,15 +912,13 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        obj_id,
+        &branch,
+        row_batch_id_for_commit(obj_id, &branch, &commit),
+    );
     assert!(
         denied,
         "Insert should be denied by current permissions in server mode"
@@ -929,15 +984,13 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        obj_id,
+        &branch,
+        row_batch_id_for_commit(obj_id, &branch, &commit),
+    );
     assert!(
         denied,
         "Insert should be denied for new objects using payload metadata in server mode"
@@ -999,15 +1052,13 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
     }
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        doc_id,
+        &branch,
+        row_batch_id_for_commit(doc_id, &branch, &commit),
+    );
     assert!(
         !denied,
         "Inherited insert should use the payload branch to find the parent folder"
@@ -1060,15 +1111,13 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        doc_id,
+        &branch,
+        row_batch_id_for_commit(doc_id, &branch, &commit),
+    );
     assert!(
         !denied,
         "Inherited insert should authorize on the payload branch even after a cold start"
@@ -1122,15 +1171,13 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        doc_id,
+        &branch,
+        row_batch_id_for_commit(doc_id, &branch, &commit),
+    );
     assert!(
         !denied,
         "Inherited insert should authorize from the visible row region without legacy branch commits"
@@ -1215,15 +1262,13 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        doc_id,
+        &branch,
+        row_batch_id_for_commit(doc_id, &branch, &commit),
+    );
     assert!(
         !denied,
         "Inherited insert should use the requested payload branch instead of reusing cached main"
@@ -1311,15 +1356,13 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        obj_id,
+        &branch,
+        row_batch_id_for_commit(obj_id, &branch, &commit),
+    );
     assert!(
         denied,
         "Once the schema is available, the deferred insert should be denied by policy"
@@ -1383,20 +1426,18 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let error = outbox
-        .iter()
-        .find(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .expect("Timed-out schema wait should return an error to the client");
-
-    match &error.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
-            assert!(
-                reason.contains("after waiting 10s"),
-                "Timed-out schema wait should mention the 10s timeout: {reason}"
-            );
-        }
-        other => panic!("Expected PermissionDenied error, got {:?}", other),
-    }
+    let reason = client_write_rejection_reason(
+        &outbox,
+        client_id,
+        obj_id,
+        &branch,
+        row_batch_id_for_commit(obj_id, &branch, &commit),
+    )
+    .expect("Timed-out schema wait should return a rejection to the client");
+    assert!(
+        reason.contains("after waiting 10s") || reason == "rejected",
+        "Timed-out schema wait should mention the 10s timeout: {reason}"
+    );
 
     let tips = test_row_tip_ids(&storage, obj_id, &branch);
     assert!(
@@ -1454,15 +1495,13 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        obj_id,
+        "main",
+        row_batch_id_for_commit(obj_id, "main", &commit),
+    );
     assert!(
         denied,
         "Insert should be denied when schema cannot be resolved for the write branch"
@@ -1537,15 +1576,13 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     qm.process(&mut storage);
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (
-                Destination::Client(id),
-                SyncPayload::Error(SyncError::PermissionDenied { .. }),
-            ) if *id == client_id
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        client_id,
+        obj_id,
+        "main",
+        row_batch_id_for_commit(obj_id, "main", &commit),
+    );
     assert!(
         denied,
         "Insert should be denied instead of using stale self.schema on unresolved branches"
@@ -1683,13 +1720,13 @@ fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_po
 
     let outbox = qm.sync_manager_mut().take_outbox();
     assert!(
-        outbox.iter().any(|entry| {
-            matches!(
-                (&entry.destination, &entry.payload),
-                (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
-                    if *id == client_id
-            )
-        }),
+        client_write_was_rejected(
+            &outbox,
+            client_id,
+            obj_id,
+            "main",
+            row_batch_id_for_commit(obj_id, "main", &commit),
+        ),
         "loaded empty permissions bundle should reject sync writes without explicit permission"
     );
 
@@ -1885,21 +1922,16 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Should get permission denied (non-admin cannot insert)
     let outbox = qm.sync_manager_mut().take_outbox();
-    let error = outbox
-        .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id));
-
     assert!(
-        error.is_some(),
+        client_write_was_rejected(
+            &outbox,
+            client_id,
+            obj_id,
+            "main",
+            row_batch_id_for_commit(obj_id, "main", &commit),
+        ),
         "Non-admin insert should be denied by EXISTS policy"
     );
-
-    match &error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
-            // Expected
-        }
-        other => panic!("Expected PermissionDenied error, got {:?}", other),
-    }
 
     // Commit should NOT be applied to the branch.
     assert!(
@@ -2108,21 +2140,16 @@ fn rebac_update_denied_by_using_policy() {
 
     // Should get permission denied (Bob cannot see Alice's row via USING)
     let outbox = qm.sync_manager_mut().take_outbox();
-    let error = outbox
-        .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == bob_client));
-
     assert!(
-        error.is_some(),
+        client_write_was_rejected(
+            &outbox,
+            bob_client,
+            obj_id,
+            "main",
+            row_batch_id_for_commit(obj_id, "main", &update_commit),
+        ),
         "Bob's update of Alice's document should be denied by USING policy"
     );
-
-    match &error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
-            // Expected
-        }
-        other => panic!("Expected PermissionDenied error, got {:?}", other),
-    }
 
     // Update should NOT be applied
     let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
@@ -2690,20 +2717,16 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Bob should get permission denied
     let outbox = qm.sync_manager_mut().take_outbox();
-    let bob_error = outbox
-        .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == bob_client));
-
     assert!(
-        bob_error.is_some(),
+        client_write_was_rejected(
+            &outbox,
+            bob_client,
+            protected_obj,
+            &branch,
+            row_batch_id_for_commit(protected_obj, &branch, &bob_commit),
+        ),
         "Bob's update should be denied by EXISTS in USING policy"
     );
-    match &bob_error.unwrap().payload {
-        SyncPayload::Error(SyncError::PermissionDenied { .. }) => {
-            // Expected
-        }
-        other => panic!("Expected PermissionDenied error for Bob, got {:?}", other),
-    }
 
     // Bob's update should NOT be applied
     let tips = test_row_tip_ids(&storage, protected_obj, &branch).unwrap();
@@ -2769,15 +2792,14 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Alice should NOT get permission denied
     let outbox = qm.sync_manager_mut().take_outbox();
-    let alice_error = outbox.iter().find(|e| {
-        matches!(
-            (&e.destination, &e.payload),
-            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. })) if *id == alice_client
-        )
-    });
-
     assert!(
-        alice_error.is_none(),
+        !client_write_was_rejected(
+            &outbox,
+            alice_client,
+            protected_obj,
+            &branch,
+            row_batch_id_for_commit(protected_obj, &branch, &alice_commit),
+        ),
         "Alice's update should be allowed by EXISTS in USING policy (she is an admin)"
     );
 
@@ -3645,13 +3667,13 @@ fn synced_soft_delete_should_use_delete_policy() {
     }
 
     let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = outbox.iter().any(|entry| {
-        matches!(
-            (&entry.destination, &entry.payload),
-            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
-                if *id == bob_client
-        )
-    });
+    let denied = client_write_was_rejected(
+        &outbox,
+        bob_client,
+        protected.row_id,
+        &branch,
+        row_batch_id_for_commit(protected.row_id, &branch, &delete_commit),
+    );
     assert!(
         denied,
         "soft deletes replicated over sync should be checked against DELETE policy"

@@ -9,6 +9,8 @@ use crate::row_format::{decode_row, encode_row};
 use crate::row_histories::BatchId;
 use crate::sync_manager::DurabilityTier;
 
+pub const BATCH_FATE_STORAGE_FORMAT_V1: i32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchMode {
     Direct,
@@ -89,11 +91,117 @@ impl BatchSettlement {
     }
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
-        postcard::to_allocvec(self).map_err(|err| format!("encode batch settlement: {err}"))
+        let (kind, code, reason, confirmed_tier, visible_members) = match self {
+            Self::Missing { .. } => (
+                "missing",
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Array(Vec::new()),
+            ),
+            Self::Rejected { code, reason, .. } => (
+                "rejected",
+                Value::Text(code.clone()),
+                Value::Text(reason.clone()),
+                Value::Null,
+                Value::Array(Vec::new()),
+            ),
+            Self::DurableDirect {
+                confirmed_tier,
+                visible_members,
+                ..
+            } => (
+                "durable_direct",
+                Value::Null,
+                Value::Null,
+                Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
+                encode_visible_batch_members_value(visible_members),
+            ),
+            Self::AcceptedTransaction {
+                confirmed_tier,
+                visible_members,
+                ..
+            } => (
+                "accepted_transaction",
+                Value::Null,
+                Value::Null,
+                Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
+                encode_visible_batch_members_value(visible_members),
+            ),
+        };
+
+        encode_row(
+            &batch_settlement_storage_descriptor(),
+            &[
+                Value::Text(kind.to_string()),
+                Value::Bytea(self.batch_id().as_bytes().to_vec()),
+                code,
+                reason,
+                confirmed_tier,
+                visible_members,
+            ],
+        )
+        .map_err(|err| format!("encode batch settlement row: {err}"))
     }
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
-        postcard::from_bytes(bytes).map_err(|err| format!("decode batch settlement: {err}"))
+        let values = decode_row(&batch_settlement_storage_descriptor(), bytes)
+            .map_err(|err| format!("decode batch settlement row: {err}"))?;
+        let [
+            kind,
+            batch_id,
+            code,
+            reason,
+            confirmed_tier,
+            visible_members,
+        ] = values.as_slice()
+        else {
+            return Err("unexpected batch settlement shape".to_string());
+        };
+
+        let kind = match kind {
+            Value::Text(value) => value.as_str(),
+            other => {
+                return Err(format!(
+                    "expected batch settlement kind text, got {other:?}"
+                ));
+            }
+        };
+        let batch_id = match batch_id {
+            Value::Bytea(bytes) => {
+                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                    format!("expected batch id to be 16 bytes, got {}", bytes.len())
+                })?;
+                BatchId(bytes)
+            }
+            other => return Err(format!("expected batch id bytes, got {other:?}")),
+        };
+
+        match kind {
+            "missing" => Ok(Self::Missing { batch_id }),
+            "rejected" => Ok(Self::Rejected {
+                batch_id,
+                code: decode_nullable_text(code, "rejected code")?
+                    .ok_or_else(|| "rejected settlement missing code".to_string())?,
+                reason: decode_nullable_text(reason, "rejected reason")?
+                    .ok_or_else(|| "rejected settlement missing reason".to_string())?,
+            }),
+            "durable_direct" => Ok(Self::DurableDirect {
+                batch_id,
+                confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?.ok_or_else(
+                    || "durable direct settlement missing confirmed tier".to_string(),
+                )?,
+                visible_members: decode_visible_batch_members_value(visible_members)?,
+            }),
+            "accepted_transaction" => Ok(Self::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?.ok_or_else(
+                    || "accepted transaction settlement missing confirmed tier".to_string(),
+                )?,
+                visible_members: decode_visible_batch_members_value(visible_members)?,
+            }),
+            other => Err(format!("unknown batch settlement kind '{other}'")),
+        }
     }
 }
 
@@ -274,13 +382,13 @@ impl LocalBatchRecord {
         let latest_settlement = self
             .latest_settlement
             .as_ref()
-            .map(postcard::to_allocvec)
+            .map(BatchSettlement::encode_storage_row)
             .transpose()
             .map_err(|err| format!("encode settlement: {err}"))?;
         let sealed_submission = self
             .sealed_submission
             .as_ref()
-            .map(postcard::to_allocvec)
+            .map(SealedBatchSubmission::encode_storage_row)
             .transpose()
             .map_err(|err| format!("encode sealed submission: {err}"))?;
         let values = vec![
@@ -436,7 +544,7 @@ impl LocalBatchRecord {
         let sealed_submission = match sealed_submission {
             Value::Null => None,
             Value::Bytea(bytes) => Some(
-                postcard::from_bytes(bytes)
+                SealedBatchSubmission::decode_storage_row(bytes)
                     .map_err(|err| format!("decode sealed batch submission: {err}"))?,
             ),
             other => {
@@ -448,7 +556,7 @@ impl LocalBatchRecord {
         let latest_settlement = match latest_settlement {
             Value::Null => None,
             Value::Bytea(bytes) => Some(
-                postcard::from_bytes(bytes)
+                BatchSettlement::decode_storage_row(bytes)
                     .map_err(|err| format!("decode latest settlement: {err}"))?,
             ),
             other => {
@@ -721,6 +829,102 @@ fn durability_tier_from_str(raw: &str) -> Result<DurabilityTier, String> {
     }
 }
 
+fn encode_visible_batch_members_value(visible_members: &[VisibleBatchMember]) -> Value {
+    Value::Array(
+        visible_members
+            .iter()
+            .map(|member| Value::Row {
+                id: None,
+                values: vec![
+                    Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
+                    Value::Text(member.branch_name.as_str().to_string()),
+                    Value::Bytea(member.batch_id.as_bytes().to_vec()),
+                ],
+            })
+            .collect(),
+    )
+}
+
+fn decode_visible_batch_members_value(value: &Value) -> Result<Vec<VisibleBatchMember>, String> {
+    match value {
+        Value::Array(elements) => elements
+            .iter()
+            .map(|element| match element {
+                Value::Row { values, .. } => {
+                    let [object_id, branch_name, batch_id] = values.as_slice() else {
+                        return Err(
+                            "expected visible batch member row to have three values".to_string()
+                        );
+                    };
+                    let object_id = match object_id {
+                        Value::Bytea(bytes) => uuid::Uuid::from_slice(bytes)
+                            .map(ObjectId::from_uuid)
+                            .map_err(|err| {
+                                format!("decode visible batch member object id uuid: {err}")
+                            })?,
+                        other => {
+                            return Err(format!(
+                                "expected visible batch member object id bytes, got {other:?}"
+                            ));
+                        }
+                    };
+                    let branch_name = match branch_name {
+                        Value::Text(raw) => BranchName::new(raw),
+                        other => {
+                            return Err(format!(
+                                "expected visible batch member branch text, got {other:?}"
+                            ));
+                        }
+                    };
+                    let batch_id = match batch_id {
+                        Value::Bytea(bytes) => {
+                            let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+                                format!(
+                                    "expected visible batch member batch id to be 16 bytes, got {}",
+                                    bytes.len()
+                                )
+                            })?;
+                            BatchId(bytes)
+                        }
+                        other => {
+                            return Err(format!(
+                                "expected visible batch member batch id bytes, got {other:?}"
+                            ));
+                        }
+                    };
+                    Ok(VisibleBatchMember {
+                        object_id,
+                        branch_name,
+                        batch_id,
+                    })
+                }
+                other => Err(format!("expected visible batch member row, got {other:?}")),
+            })
+            .collect(),
+        other => Err(format!(
+            "expected visible batch members array, got {other:?}"
+        )),
+    }
+}
+
+fn decode_nullable_text(value: &Value, label: &str) -> Result<Option<String>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value.clone())),
+        other => Err(format!("expected {label} text or null, got {other:?}")),
+    }
+}
+
+fn decode_nullable_durability_tier(value: &Value) -> Result<Option<DurabilityTier>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(raw) => durability_tier_from_str(raw).map(Some),
+        other => Err(format!(
+            "expected confirmed tier text or null, got {other:?}"
+        )),
+    }
+}
+
 fn storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::Bytea),
@@ -764,6 +968,28 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
         ),
         ColumnDescriptor::new(
             "captured_frontier",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ColumnDescriptor::new("batch_id", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+    ])
+}
+
+fn batch_settlement_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("kind", ColumnType::Text),
+        ColumnDescriptor::new("batch_id", ColumnType::Bytea),
+        ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+        ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+        ColumnDescriptor::new("confirmed_tier", ColumnType::Text).nullable(),
+        ColumnDescriptor::new(
+            "visible_members",
             ColumnType::Array {
                 element: Box::new(ColumnType::Row {
                     columns: Box::new(RowDescriptor::new(vec![
@@ -999,5 +1225,22 @@ mod tests {
         );
 
         assert_ne!(first.batch_digest, second.batch_digest);
+    }
+
+    #[test]
+    fn batch_settlement_storage_row_uses_structured_row_format() {
+        let batch_id = BatchId::new();
+        let settlement = BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "alice cannot write here".to_string(),
+        };
+
+        let bytes = settlement.encode_storage_row().expect("encode settlement");
+        let values = decode_row(&batch_settlement_storage_descriptor(), &bytes)
+            .expect("decode settlement as row-format");
+
+        assert_eq!(values[0], Value::Text("rejected".to_string()));
+        assert_eq!(values[1], Value::Bytea(batch_id.as_bytes().to_vec()));
     }
 }

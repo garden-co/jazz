@@ -1630,7 +1630,7 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let mut storage: Box<dyn Storage> = Box::new(
+        let storage: Box<dyn Storage> = Box::new(
             OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
                 .await
                 .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
