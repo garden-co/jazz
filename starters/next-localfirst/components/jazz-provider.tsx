@@ -40,9 +40,6 @@ function buildConfig(localFirstSecret: string): DbConfig {
   return {
     appId: APP_ID,
     serverUrl: SERVER_URL,
-    // The persistent driver's worker currently fails to load under
-    // Next.js + Turbopack dev (jaz-ad1f); memory mode avoids it.
-    driver: { type: "memory" },
     auth: { localFirstSecret },
   };
 }
