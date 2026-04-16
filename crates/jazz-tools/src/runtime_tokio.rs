@@ -724,19 +724,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let tick = NativeTickNotifier {
             scheduler: self.scheduler.clone(),
         };
-        let (handle, manager) = crate::transport_manager::create::<
-            crate::ws_stream::NativeWsStream,
-            NativeTickNotifier<S>,
-        >(url, auth, tick);
-        // Seed the handshake catalogue hash so the server can skip replay
-        // when the client is already up to date.
-        let catalogue_hash = self
-            .core
-            .lock()
-            .ok()
-            .map(|c| c.schema_manager().catalogue_state_hash());
-        handle.set_catalogue_state_hash(catalogue_hash);
-        self.core.lock().unwrap().set_transport(handle);
+        let manager = {
+            let mut core = self.core.lock().unwrap();
+            crate::runtime_core::install_transport::<_, _, crate::ws_stream::NativeWsStream, _>(
+                &mut core, url, auth, tick,
+            )
+        };
         tokio::spawn(manager.run());
     }
 
