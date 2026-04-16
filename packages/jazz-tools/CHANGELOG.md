@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 2.0.0-alpha.29
+
+### Patch Changes
+
+- 58ace62: Add external UUIDv7 create APIs and id-based upsert APIs across the Rust and TypeScript client surfaces.
+- Updated dependencies [58ace62]
+  - jazz-wasm@2.0.0-alpha.29
+  - jazz-rn@2.0.0-alpha.29
+
 ## 2.0.0-alpha.28
 
 ### Minor Changes
