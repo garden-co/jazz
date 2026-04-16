@@ -170,6 +170,13 @@ pub trait SubscriptionCallback: Send + Sync {
     fn on_update(&self, delta_json: String);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait AuthFailureCallback: Send + Sync {
+    /// Invoked when the Rust transport receives an auth rejection from the server.
+    /// `reason` is a human-readable string (e.g. "Unauthorized").
+    fn on_failure(&self, reason: String);
+}
+
 // ============================================================================
 // RnScheduler
 // ============================================================================
@@ -826,23 +833,17 @@ impl RnRuntime {
                 .scheduler()
                 .clone();
             let tick = RnTickNotifier { scheduler };
-            let (handle, manager) = jazz_tools::transport_manager::create::<
-                jazz_tools::ws_stream::NativeWsStream,
-                RnTickNotifier,
-            >(url, auth, tick);
-            // Seed the handshake catalogue hash.
-            {
-                let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let manager = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
-            }
-            self.core
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .set_transport(handle);
+                jazz_tools::runtime_core::install_transport::<
+                    _,
+                    _,
+                    jazz_tools::ws_stream::NativeWsStream,
+                    _,
+                >(&mut core, url, auth, tick)
+            };
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -874,6 +875,23 @@ impl RnRuntime {
                     handle.update_auth(auth);
                 }
             }
+            Ok(())
+        })
+    }
+
+    /// Register a callback that fires when the transport receives an auth
+    /// rejection from the server during the WS handshake.
+    pub fn on_auth_failure(
+        &self,
+        callback: Box<dyn AuthFailureCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("on_auth_failure", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.set_auth_failure_callback(move |reason| {
+                callback.on_failure(reason);
+            });
             Ok(())
         })
     }

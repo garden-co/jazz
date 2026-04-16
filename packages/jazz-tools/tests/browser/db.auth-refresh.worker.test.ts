@@ -20,12 +20,12 @@
  *    serves worker-tier queries.  Uses global-setup server but does not
  *    rely on the auth-rejection → unauthenticated path.
  *
- * Known gap (tracked separately):
- *   db.auth-refresh.test.ts exercises the full server-rejection
- *   → unauthenticated → updateAuthToken → re-authenticated round-trip.
- *   That test currently fails because jazz-worker.ts does not yet post an
- *   "auth-failed" message to the main thread when the server rejects the
- *   WS connection JWT.  Fixing that plumbing is out of scope for T23.
+ * Coverage of the full update-auth chain is split across:
+ *   - client.test.ts: JazzClient.updateAuthToken forwards to runtime.updateAuth
+ *   - jazz-worker.test.ts: worker "update-auth" handler invokes runtime.updateAuth
+ *     and posts "auth-failed" if it throws
+ *   - napi.auth-failure.test.ts: real NAPI runtime fires onAuthFailure on a
+ *     server-rejected JWT
  */
 
 import { afterEach, describe, expect, it } from "vitest";

@@ -88,6 +88,16 @@ impl TransportHandle {
             *slot = hash;
         }
     }
+
+    /// Test-only accessor: returns the current catalogue state hash stored in
+    /// this handle.
+    #[cfg(test)]
+    pub fn catalogue_state_hash_for_test(&self) -> Option<String> {
+        self.catalogue_state_hash
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
 }
 
 // I-4: hand-written Debug that redacts secret fields.

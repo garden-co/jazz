@@ -9,7 +9,7 @@
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
-import type { AuthFailureReason } from "../runtime/sync-transport.js";
+import { mapAuthReason } from "../runtime/auth-state.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
 import {
   readWorkerRuntimeWasmUrl,
@@ -206,18 +206,9 @@ async function startup(): Promise<void> {
 // Pure helpers (exported for unit tests)
 // ============================================================================
 
-/**
- * Map a Rust auth-failure reason string to a typed `AuthFailureReason`.
- * The Rust transport sends the server's error message verbatim; we look for
- * well-known sub-strings and fall back to "invalid" for anything unrecognised.
- */
-export function mapAuthReason(reason: string): AuthFailureReason {
-  const lower = reason.toLowerCase();
-  if (lower.includes("expired")) return "expired";
-  if (lower.includes("missing")) return "missing";
-  if (lower.includes("disabled")) return "disabled";
-  return "invalid";
-}
+// mapAuthReason is re-exported from auth-state for backward compatibility with
+// any tests that may import it from this module.
+export { mapAuthReason } from "../runtime/auth-state.js";
 
 /**
  * Build the WebSocket URL for runtime.connect() from the init message fields.
@@ -269,6 +260,19 @@ export function performUpstreamConnect(
   } catch (err) {
     console.error("[worker] runtime.connect failed:", err);
     post({ type: "upstream-disconnected" });
+  }
+}
+
+export function handleUpdateAuth(
+  runtime: { updateAuth?: (auth: string) => void },
+  authJson: string,
+  post: (msg: WorkerToMainMessage) => void,
+): void {
+  try {
+    runtime.updateAuth?.(authJson);
+  } catch (e) {
+    console.error("[worker] runtime.updateAuth failed:", e);
+    post({ type: "auth-failed", reason: "invalid" });
   }
 }
 
@@ -498,11 +502,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     case "update-auth": {
       currentAuth = mergeAuth(currentAuth, msg.jwtToken);
       if (runtime) {
-        try {
-          runtime.updateAuth(JSON.stringify(currentAuth));
-        } catch (e) {
-          console.error("[worker] runtime.updateAuth failed:", e);
-        }
+        handleUpdateAuth(runtime, JSON.stringify(currentAuth), post);
       }
       break;
     }
