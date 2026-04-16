@@ -1,4 +1,6 @@
 export {
+  type CreateDurabilityOptions,
+  type CreateOptions,
   JazzClient,
   type LocalUpdatesMode,
   SessionClient,
@@ -12,6 +14,8 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
+  type UpsertDurabilityOptions,
+  type UpsertOptions,
   type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";

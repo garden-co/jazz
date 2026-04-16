@@ -48,14 +48,25 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues): Row;
-  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
+  insert(table: string, values: InsertValues, object_id?: string | null): Row;
+  insertWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Row;
+  insertDurable(
+    table: string,
+    values: InsertValues,
+    tier: string,
+    object_id?: string | null,
+  ): Promise<Row>;
   insertDurableWithSession?(
     table: string,
     values: InsertValues,
     write_context_json: string | null | undefined,
     tier: string,
+    object_id?: string | null,
   ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): void;
   updateWithSession?(
@@ -138,6 +149,22 @@ export interface ResolvedQueryExecutionOptions {
 
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
+}
+
+export interface CreateOptions {
+  id?: string;
+}
+
+export interface CreateDurabilityOptions extends WriteDurabilityOptions {
+  id?: string;
+}
+
+export interface UpsertOptions {
+  id: string;
+}
+
+export interface UpsertDurabilityOptions extends WriteDurabilityOptions {
+  id: string;
 }
 
 /**
@@ -481,6 +508,11 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims };
 }
 
+function isObjectAlreadyExistsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("object already exists") || message.includes("Create failed: Conflict");
+}
+
 /**
  * Session-scoped client for backend operations.
  *
@@ -499,7 +531,7 @@ export class SessionClient {
   /**
    * Create a new row as this session's user.
    */
-  async create(table: string, values: InsertValues): Promise<string> {
+  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -511,6 +543,7 @@ export class SessionClient {
         table,
         values,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.id ? { object_id: options.id } : {}),
       },
       this.session,
     );
@@ -521,6 +554,22 @@ export class SessionClient {
 
     const result = await response.json();
     return result.object_id;
+  }
+
+  /**
+   * Create or update a row as this session's user using a caller-supplied id.
+   */
+  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
+    try {
+      await this.create(table, values, options);
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.update(options.id, values as Record<string, Value>);
   }
 
   /**
@@ -1080,8 +1129,15 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues): Row {
-    return this.createInternal(table, values);
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
+    return this.createInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.upsertInternal(table, values, options.id);
   }
 
   /**
@@ -1093,20 +1149,53 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
+    options?: CreateOptions,
   ): Row {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
-        ? this.requireSessionWriteMethod("insertWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution),
-          )
-        : this.runtime.insert(table, values);
+        ? options?.id
+          ? this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              options.id,
+            )
+          : this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+            )
+        : options?.id
+          ? this.runtime.insert(table, values, options.id)
+          : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id, optionally scoped to a session.
+   * @internal
+   */
+  upsertInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+  ): void {
+    try {
+      this.createInternal(table, values, session, attribution, { id: objectId });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    this.updateInternal(objectId, values as Record<string, Value>, session, attribution);
   }
 
   /**
@@ -1115,9 +1204,20 @@ export class JazzClient {
   async createDurable(
     table: string,
     values: InsertValues,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     return this.createDurableInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability.
+   */
+  async upsertDurable(
+    table: string,
+    values: InsertValues,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    await this.upsertDurableInternal(table, values, options.id, undefined, undefined, options);
   }
 
   /**
@@ -1129,23 +1229,67 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
-        ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution),
-            tier,
-          )
-        : await this.runtime.insertDurable(table, values, tier);
+        ? options?.id
+          ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              tier,
+              options.id,
+            )
+          : await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              tier,
+            )
+        : options?.id
+          ? await this.runtime.insertDurable(table, values, tier, options.id)
+          : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability,
+   * optionally scoped to a session.
+   * @internal
+   */
+  async upsertDurableInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+  ): Promise<void> {
+    try {
+      await this.createDurableInternal(table, values, session, attribution, {
+        ...options,
+        id: objectId,
+      });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.updateDurableInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      options,
+    );
   }
 
   /**

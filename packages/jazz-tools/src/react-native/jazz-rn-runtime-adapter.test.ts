@@ -57,6 +57,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      undefined,
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
@@ -84,6 +85,7 @@ describe("JazzRnRuntimeAdapter", () => {
       JSON.stringify({
         data: { type: "Bytea", value: "0102ff" },
       }),
+      undefined,
     );
   });
 
@@ -161,6 +163,7 @@ describe("JazzRnRuntimeAdapter", () => {
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
       writeContextJson,
+      undefined,
     );
 
     adapter.updateWithSession(

@@ -25,7 +25,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
+    parse_external_object_id, parse_query_input,
+    parse_read_durability_options as parse_binding_read_durability_options,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
 };
@@ -542,13 +543,16 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, values.0, None)
+            .insert_with_id(&table, values.0, object_id, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -569,15 +573,18 @@ impl NapiRuntime {
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, values.0, write_context.as_ref())
+            .insert_with_id(&table, values.0, object_id, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -862,8 +869,11 @@ impl NapiRuntime {
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         tier: String,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -871,7 +881,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, values.0, None, persistence_tier)
+                .insert_persisted_with_id(&table, values.0, object_id, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -896,9 +906,12 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
         tier: String,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -906,7 +919,13 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, values.0, write_context.as_ref(), persistence_tier)
+                .insert_persisted_with_id(
+                    &table,
+                    values.0,
+                    object_id,
+                    write_context.as_ref(),
+                    persistence_tier,
+                )
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,

@@ -17,6 +17,10 @@ import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   JazzClient,
   loadWasmModule,
+  type CreateDurabilityOptions,
+  type CreateOptions,
+  type UpsertDurabilityOptions,
+  type UpsertOptions,
   type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -1125,12 +1129,14 @@ export class Db {
    * @param data Init object with column values
    * @returns Inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
-    const row = client.create(table._table, values);
+    const row = options?.id
+      ? client.create(table._table, values, options)
+      : client.create(table._table, values);
     return transformRow(row, table._schema, table._table);
   }
 
@@ -1145,7 +1151,7 @@ export class Db {
   async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options: { tier: DurabilityTier },
+    options: CreateDurabilityOptions,
   ): Promise<T> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
@@ -1157,6 +1163,34 @@ export class Db {
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await client.createDurable(table._table, values, options);
     return transformRow(row, table._schema, table._table);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+    const client = this.getClient(table._schema);
+    const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    client.upsert(table._table, values, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability.
+   */
+  async upsertDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
+    await this.ensureBridgeReady();
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await client.upsertDurable(table._table, values, options);
   }
 
   /**
