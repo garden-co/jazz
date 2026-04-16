@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.28
+
+### Patch Changes
+
+- 9b45ec5: Adopt the new row-permission strategy across client and server runtimes. Local clients that only have a structural schema stay permissive for offline reads and writes, while runtimes with current permissions and sync servers enforce deny-by-default row access for session-scoped reads, inserts, updates, and deletes.
+
 ## 2.0.0-alpha.27
 
 ### Patch Changes
