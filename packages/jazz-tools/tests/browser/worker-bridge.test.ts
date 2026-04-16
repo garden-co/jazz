@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -33,6 +33,7 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
+import { schema as s } from "../../src/";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -51,47 +52,22 @@ interface DebugSchemaState {
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
 
-const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-      {
-        name: "tags",
-        column_type: { type: "Array", element: { type: "Text" } },
-        nullable: true,
-      },
-    ],
-  },
-  projects: {
-    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-  },
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    projectId: s.ref("projects").optional(),
+    tags: s.array(s.string()).optional(),
+  }),
 };
 
-interface Todo {
-  id: string;
-  title: string;
-  done: boolean;
-  project?: string;
-  tags?: string[];
-}
-
-interface TodoInit {
-  title: string;
-  done: boolean;
-  project?: string;
-  tags?: string[];
-}
-
-interface Project {
-  id: string;
-  name: string;
-}
-
-interface ProjectInit {
-  name: string;
-}
+type AppSchema = s.Schema<typeof schema>;
+const app: s.App<AppSchema> = s.defineApp(schema);
+const { projects, todos } = app;
+type Todo = s.RowOf<typeof todos>;
 
 interface WorkerMessageDebugEvent {
   atMs: number;
@@ -103,20 +79,6 @@ interface WorkerMessageProbe {
   dispose(): void;
   snapshot(): WorkerMessageDebugEvent[];
 }
-
-const todos: TableProxy<Todo, TodoInit> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _initType: {} as TodoInit,
-};
-
-const projects: TableProxy<Project, ProjectInit> = {
-  _table: "projects",
-  _schema: schema,
-  _rowType: {} as Project,
-  _initType: {} as ProjectInit,
-};
 
 function summarizeWorkerMessage(
   data: { type?: string; [key: string]: unknown } | undefined,
@@ -245,35 +207,11 @@ async function rethrowWithWorkerDiagnostics(
 }
 
 /** QueryBuilder that selects all todos. */
-const allTodos: QueryBuilder<Todo> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _build() {
-    return JSON.stringify({
-      table: "todos",
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    });
-  },
-};
+const allTodos: QueryBuilder<Todo> = app.todos;
 
 /** QueryBuilder that selects all todos by project. */
 function todosByProject(projectId: string): QueryBuilder<Todo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: {} as Todo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [{ column: "project", op: "eq", value: projectId }],
-        includes: {},
-        orderBy: [],
-      });
-    },
-  };
+  return app.todos.where({ projectId });
 }
 
 // Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
@@ -955,11 +893,11 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    db.insert(todos, { title: "Observed", done: false, project: projectId });
+    db.insert(todos, { title: "Observed", done: false, projectId });
     const {
       value: { id: anotherProjectId },
     } = db.insert(projects, { name: "Ignored Project" });
-    db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
+    db.insert(todos, { title: "Not observed", done: false, projectId: anotherProjectId });
 
     // Wait for subscription to fire
     await waitForCondition(
@@ -992,24 +930,9 @@ describe("Worker Bridge with OPFS", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(
-        {
-          _table: "todos",
-          _schema: schema,
-          _rowType: {} as Todo,
-          _build() {
-            return JSON.stringify({
-              table: "todos",
-              conditions: [{ column: "id", op: "eq", value: targetId }],
-              includes: {},
-              orderBy: [],
-            });
-          },
-        },
-        (delta) => {
-          received.push([...delta.all]);
-        },
-      ),
+      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
+        received.push([...delta.all]);
+      }),
     );
 
     await waitForCondition(
@@ -1052,24 +975,9 @@ describe("Worker Bridge with OPFS", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(
-        {
-          _table: "todos",
-          _schema: schema,
-          _rowType: {} as Todo,
-          _build() {
-            return JSON.stringify({
-              table: "todos",
-              conditions: [{ column: "id", op: "eq", value: targetId }],
-              includes: {},
-              orderBy: [],
-            });
-          },
-        },
-        (delta) => {
-          received.push([...delta.all]);
-        },
-      ),
+      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
+        received.push([...delta.all]);
+      }),
     );
 
     await waitForCondition(
@@ -1171,7 +1079,7 @@ describe("Worker Bridge with OPFS", () => {
       appId,
       dbName: uniqueDbName("sync-recover-b"),
       table: "todos",
-      schemaJson: JSON.stringify(schema),
+      schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
       adminSecret,
       localFirstSecret: sharedLocalAuthToken,
@@ -1308,7 +1216,7 @@ describe("Worker Bridge with OPFS", () => {
       appId,
       dbName: uniqueDbName("sync-offline-b"),
       table: "todos",
-      schemaJson: JSON.stringify(schema),
+      schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
       adminSecret,
       localFirstSecret: sharedLocalAuthToken,
