@@ -10,7 +10,7 @@ use crate::middleware::auth::JwtVerifier;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
+use crate::sync_manager::{ClientId, InboxEntry, ServerId, Source, SyncPayload};
 
 mod builder;
 mod hosted;
@@ -183,6 +183,12 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    /// Channel for outgoing messages destined to upstream servers.
+    /// Populated by the runtime's outbox callback when the destination
+    /// is `Destination::Server(id)`.
+    pub server_outbox_tx: mpsc::UnboundedSender<(ServerId, SyncPayload)>,
+    /// Receiver end — consumed by the upstream peering task.
+    pub server_outbox_rx: Mutex<Option<mpsc::UnboundedReceiver<(ServerId, SyncPayload)>>>,
 }
 
 /// State for a single SSE connection.

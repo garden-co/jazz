@@ -259,10 +259,12 @@ impl OpenDb {
 }
 
 pub(crate) fn open_db(args: &DbContextArgs) -> Result<OpenDb, String> {
-    let app_id = AppId::from_string(&args.app_id).unwrap_or_else(|_| AppId::from_name(&args.app_id));
+    let app_id =
+        AppId::from_string(&args.app_id).unwrap_or_else(|_| AppId::from_name(&args.app_id));
     let storage = open_storage(&args.data_dir)?;
 
-    let mut inspection_manager = SchemaManager::new_server(server_sync_manager(), app_id, &args.env);
+    let mut inspection_manager =
+        SchemaManager::new_server(server_sync_manager(), app_id, &args.env);
     rehydrate_schema_manager_from_catalogue(&mut inspection_manager, storage.as_ref(), app_id)?;
 
     if inspection_manager.known_schema_hashes().is_empty() {
@@ -280,7 +282,12 @@ pub(crate) fn open_db(args: &DbContextArgs) -> Result<OpenDb, String> {
     let schema = inspection_manager
         .get_known_schema(&schema_hash)
         .cloned()
-        .ok_or_else(|| format!("schema {} was selected but could not be loaded", schema_hash))?;
+        .ok_or_else(|| {
+            format!(
+                "schema {} was selected but could not be loaded",
+                schema_hash
+            )
+        })?;
 
     let mut schema_manager = SchemaManager::new(
         server_sync_manager(),
@@ -314,11 +321,17 @@ pub(crate) fn persist_schema_catalogue_for_test(
     args: &DbContextArgs,
     schema: Schema,
 ) -> Result<(), String> {
-    let app_id = AppId::from_string(&args.app_id).unwrap_or_else(|_| AppId::from_name(&args.app_id));
+    let app_id =
+        AppId::from_string(&args.app_id).unwrap_or_else(|_| AppId::from_name(&args.app_id));
     let storage = open_storage(&args.data_dir)?;
-    let schema_manager =
-        SchemaManager::new(server_sync_manager(), schema, app_id, &args.env, &args.user_branch)
-            .map_err(|err| format!("failed to initialize schema manager: {err}"))?;
+    let schema_manager = SchemaManager::new(
+        server_sync_manager(),
+        schema,
+        app_id,
+        &args.env,
+        &args.user_branch,
+    )
+    .map_err(|err| format!("failed to initialize schema manager: {err}"))?;
     let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
     runtime
         .persist_schema()
@@ -444,8 +457,7 @@ fn server_sync_manager() -> SyncManager {
 }
 
 fn parse_value_map(input: &str) -> Result<HashMap<String, Value>, String> {
-    serde_json::from_str(input)
-        .map_err(|err| format!("invalid Jazz Value JSON object: {err}"))
+    serde_json::from_str(input).map_err(|err| format!("invalid Jazz Value JSON object: {err}"))
 }
 
 fn parse_object_id(raw: &str) -> Result<ObjectId, String> {
@@ -472,10 +484,7 @@ pub(crate) fn execute_query_snapshot(
                         decode_row(&delta.descriptor, &change.row.data)
                             .map(|values| (change.row.id, values))
                             .map_err(|err| {
-                                format!(
-                                    "failed to decode query row {}: {err}",
-                                    change.row.id
-                                )
+                                format!("failed to decode query row {}: {err}", change.row.id)
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -614,7 +623,11 @@ fn output_keys(descriptor: &RowDescriptor) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn row_json(object_id: ObjectId, values: &[Value], descriptor: &RowDescriptor) -> JsonValue {
+pub(crate) fn row_json(
+    object_id: ObjectId,
+    values: &[Value],
+    descriptor: &RowDescriptor,
+) -> JsonValue {
     let output_keys = output_keys(descriptor);
     let cells: Vec<JsonValue> = values
         .iter()
@@ -648,7 +661,8 @@ pub(crate) fn value_json(value: &Value, column_type: Option<&ColumnType>) -> Jso
         (Value::Uuid(v), _) => json!(v.to_string()),
         (Value::Bytea(bytes), _) => json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
         (Value::Array(items), Some(ColumnType::Array { element })) => JsonValue::Array(
-            items.iter()
+            items
+                .iter()
                 .map(|value| value_json(value, Some(element.as_ref())))
                 .collect(),
         ),
@@ -662,7 +676,10 @@ pub(crate) fn value_json(value: &Value, column_type: Option<&ColumnType>) -> Jso
                 .map(|(value, column)| value_json(value, Some(&column.column_type)))
                 .collect();
             let mut record = JsonMap::new();
-            for (key, cell) in output_keys(columns).into_iter().zip(nested_cells.iter().cloned()) {
+            for (key, cell) in output_keys(columns)
+                .into_iter()
+                .zip(nested_cells.iter().cloned())
+            {
                 record.insert(key, cell);
             }
             json!({
@@ -766,14 +783,9 @@ mod tests {
             .build();
 
         let storage = open_storage(&data_dir).expect("open storage");
-        let schema_manager = SchemaManager::new(
-            server_sync_manager(),
-            schema.clone(),
-            app_id,
-            "dev",
-            "main",
-        )
-        .expect("create schema manager");
+        let schema_manager =
+            SchemaManager::new(server_sync_manager(), schema.clone(), app_id, "dev", "main")
+                .expect("create schema manager");
         let runtime = TokioRuntime::new(schema_manager, storage, |_| {});
 
         runtime.persist_schema().expect("persist schema");

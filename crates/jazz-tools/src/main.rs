@@ -144,6 +144,16 @@ enum Commands {
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
+
+        /// URL of an upstream Jazz server to peer with for data replication.
+        /// When set, this server connects to the upstream and replicates all
+        /// data bidirectionally. Uses the admin secret for authentication.
+        #[arg(long, env = "JAZZ_UPSTREAM_URL")]
+        upstream_url: Option<String>,
+
+        /// Admin secret for authenticating with the upstream peer server.
+        #[arg(long, env = "JAZZ_UPSTREAM_ADMIN_SECRET")]
+        upstream_admin_secret: Option<String>,
     },
 }
 
@@ -199,6 +209,8 @@ async fn main() {
             catalogue_authority_url,
             catalogue_authority_admin_secret,
             bound_port_file,
+            upstream_url,
+            upstream_admin_secret,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let allow_local_first_auth =
@@ -253,6 +265,24 @@ async fn main() {
                     }
                 }
             };
+            let upstream = match upstream_url {
+                Some(url) => {
+                    let admin_secret = match upstream_admin_secret
+                        .filter(|secret| !secret.trim().is_empty())
+                    {
+                        Some(admin_secret) => admin_secret,
+                        None => {
+                            eprintln!(
+                                "Server error: upstream peering requires --upstream-admin-secret or JAZZ_UPSTREAM_ADMIN_SECRET"
+                            );
+                            shutdown_tracing();
+                            std::process::exit(1);
+                        }
+                    };
+                    Some(commands::server::UpstreamPeerConfig { url, admin_secret })
+                }
+                None => None,
+            };
             if let Err(e) = commands::server::run(
                 &app_id,
                 port,
@@ -261,6 +291,7 @@ async fn main() {
                 auth_config,
                 catalogue_authority,
                 bound_port_file,
+                upstream,
             )
             .await
             {

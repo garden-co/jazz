@@ -288,7 +288,10 @@ pub fn run(command: AgentInfraCommand) -> Result<(), String> {
     Ok(())
 }
 
-fn read_payload_object(input: &JsonInputArgs, label: &str) -> Result<JsonMap<String, JsonValue>, String> {
+fn read_payload_object(
+    input: &JsonInputArgs,
+    label: &str,
+) -> Result<JsonMap<String, JsonValue>, String> {
     let raw = input.read_required(label)?;
     let payload: JsonValue =
         serde_json::from_str(&raw).map_err(|err| format!("invalid {label} JSON: {err}"))?;
@@ -390,7 +393,8 @@ fn run_summary_json(db: &OpenDb, run_id: &str) -> Result<JsonValue, String> {
     artifacts.sort_by_key(|row| row.timestamp("created_at").unwrap_or_default());
 
     let mut workspace_snapshots = workspace_snapshots;
-    workspace_snapshots.sort_by_key(|row| std::cmp::Reverse(row.timestamp("captured_at").unwrap_or_default()));
+    workspace_snapshots
+        .sort_by_key(|row| std::cmp::Reverse(row.timestamp("captured_at").unwrap_or_default()));
 
     let mut memory_links = memory_links;
     memory_links.sort_by_key(|row| row.timestamp("created_at").unwrap_or_default());
@@ -416,7 +420,11 @@ fn run_summary_json(db: &OpenDb, run_id: &str) -> Result<JsonValue, String> {
 fn list_recent_runs_json(db: &OpenDb, limit: usize) -> Result<JsonValue, String> {
     let mut rows = snapshot_rows(scan_table(db, "agent_runs")?);
     rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp("started_at").unwrap_or_default()));
-    let rows = rows.into_iter().take(limit.min(200)).map(|row| row.json()).collect::<Vec<_>>();
+    let rows = rows
+        .into_iter()
+        .take(limit.min(200))
+        .map(|row| row.json())
+        .collect::<Vec<_>>();
     Ok(json!({
         "database": db.metadata_json(),
         "rows": rows,
@@ -465,7 +473,10 @@ fn upsert_agent(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<Loc
     require_one_by_text(db, "agents", "agent_id", &agent_id)
 }
 
-fn record_run_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_run_started(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let agent_id = required_string(payload, "agentId")?;
     let agent_payload = payload
@@ -538,7 +549,10 @@ fn record_run_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resu
     require_one_by_text(db, "agent_runs", "run_id", &run_id)
 }
 
-fn record_run_completed(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_run_completed(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let status = optional_string(payload, "status").unwrap_or_else(|| "completed".to_string());
     let ended_at = optional_timestamp(payload, "endedAtMicros")?.unwrap_or_else(now_micros);
@@ -552,7 +566,10 @@ fn record_run_completed(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Re
     require_one_by_text(db, "agent_runs", "run_id", &run_id)
 }
 
-fn record_item_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_item_started(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let item_id = required_string(payload, "itemId")?;
     let item_kind = required_string(payload, "itemKind")?;
@@ -562,7 +579,8 @@ fn record_item_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Res
     let summary_json = optional_json_text(payload, "summaryJson")?;
     let started_at = optional_timestamp(payload, "startedAtMicros")?.unwrap_or_else(now_micros);
     let run = require_one_by_text(db, "agent_runs", "run_id", &run_id)?;
-    let existing = find_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", &item_id))?;
+    let existing =
+        find_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", &item_id))?;
 
     if let Some(existing) = existing {
         let mut updates = HashMap::from([
@@ -577,8 +595,13 @@ fn record_item_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Res
         }
         update_row(db, existing.id, updates)
             .map_err(|err| format!("failed to update item '{}': {err}", item_id))?;
-        return require_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", &item_id))?
-            .ok_or_else(|| format!("item '{}' disappeared after update", item_id));
+        return require_one_by_text_pair(
+            db,
+            "run_items",
+            ("run_id", &run_id),
+            ("item_id", &item_id),
+        )?
+        .ok_or_else(|| format!("item '{}' disappeared after update", item_id));
     }
 
     let mut values = HashMap::from([
@@ -602,14 +625,23 @@ fn record_item_started(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Res
         .ok_or_else(|| format!("item '{}' not found after insert", item_id))
 }
 
-fn record_item_completed(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_item_completed(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let item_id = required_string(payload, "itemId")?;
     let status = optional_string(payload, "status").unwrap_or_else(|| "completed".to_string());
     let summary_json = optional_json_text(payload, "summaryJson")?;
     let completed_at = optional_timestamp(payload, "completedAtMicros")?.unwrap_or_else(now_micros);
-    let existing = require_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", &item_id))?
-        .ok_or_else(|| format!("run item not found for run '{}' and item '{}'", run_id, item_id))?;
+    let existing =
+        require_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", &item_id))?
+            .ok_or_else(|| {
+                format!(
+                    "run item not found for run '{}' and item '{}'",
+                    run_id, item_id
+                )
+            })?;
     let mut updates = HashMap::from([
         ("status".to_string(), Value::Text(status)),
         ("completed_at".to_string(), Value::Timestamp(completed_at)),
@@ -621,7 +653,10 @@ fn record_item_completed(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> R
         .ok_or_else(|| format!("item '{}' disappeared after completion update", item_id))
 }
 
-fn append_semantic_event(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn append_semantic_event(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let event_type = required_string(payload, "eventType")?;
     let event_id = optional_string(payload, "eventId").unwrap_or_else(random_event_id);
@@ -631,7 +666,9 @@ fn append_semantic_event(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> R
     let occurred_at = optional_timestamp(payload, "occurredAtMicros")?.unwrap_or_else(now_micros);
     let run = require_one_by_text(db, "agent_runs", "run_id", &run_id)?;
     let item = match &item_id {
-        Some(item_id) => find_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", item_id))?,
+        Some(item_id) => {
+            find_one_by_text_pair(db, "run_items", ("run_id", &run_id), ("item_id", item_id))?
+        }
         None => None,
     };
     let existing = find_one_by_text(db, "semantic_events", "event_id", &event_id)?;
@@ -667,7 +704,10 @@ fn append_semantic_event(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> R
     require_one_by_text(db, "semantic_events", "event_id", &event_id)
 }
 
-fn append_wire_event(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn append_wire_event(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let event_id = optional_string(payload, "eventId").unwrap_or_else(random_event_id);
     let direction = required_string(payload, "direction")?;
     let run_id = optional_string(payload, "runId");
@@ -718,7 +758,10 @@ fn append_wire_event(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resul
     require_one_by_text(db, "wire_events", "event_id", &event_id)
 }
 
-fn record_artifact(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_artifact(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let artifact_kind = required_string(payload, "artifactKind")?;
     let absolute_path = required_string(payload, "absolutePath")?;
@@ -760,7 +803,10 @@ fn record_artifact(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<
     require_one_by_text(db, "artifacts", "artifact_id", &artifact_id)
 }
 
-fn record_workspace_snapshot(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_workspace_snapshot(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let run_id = required_string(payload, "runId")?;
     let repo_root = required_string(payload, "repoRoot")?;
     let snapshot_id = optional_string(payload, "snapshotId").unwrap_or_else(random_event_id);
@@ -781,8 +827,12 @@ fn record_workspace_snapshot(db: &OpenDb, payload: &JsonMap<String, JsonValue>) 
         if payload.contains_key("capturedAtMicros") {
             updates.insert("captured_at".to_string(), Value::Timestamp(captured_at));
         }
-        update_row(db, existing.id, updates)
-            .map_err(|err| format!("failed to update workspace snapshot '{}': {err}", snapshot_id))?;
+        update_row(db, existing.id, updates).map_err(|err| {
+            format!(
+                "failed to update workspace snapshot '{}': {err}",
+                snapshot_id
+            )
+        })?;
         return require_one_by_text(db, "workspace_snapshots", "snapshot_id", &snapshot_id);
     }
 
@@ -799,11 +849,19 @@ fn record_workspace_snapshot(db: &OpenDb, payload: &JsonMap<String, JsonValue>) 
     insert_optional_value(&mut values, "snapshot_json", snapshot_json);
     db.runtime
         .insert("workspace_snapshots", values, None)
-        .map_err(|err| format!("failed to insert workspace snapshot '{}': {err}", snapshot_id))?;
+        .map_err(|err| {
+            format!(
+                "failed to insert workspace snapshot '{}': {err}",
+                snapshot_id
+            )
+        })?;
     require_one_by_text(db, "workspace_snapshots", "snapshot_id", &snapshot_id)
 }
 
-fn update_agent_state(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn update_agent_state(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let agent_id = required_string(payload, "agentId")?;
     let state_json = required_json_text(payload, "stateJson")?;
     let snapshot_id = optional_string(payload, "snapshotId").unwrap_or_else(random_event_id);
@@ -849,7 +907,10 @@ fn update_agent_state(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resu
     require_one_by_text(db, "agent_state_snapshots", "snapshot_id", &snapshot_id)
 }
 
-fn record_memory_link(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_memory_link(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let link_id = optional_string(payload, "linkId").unwrap_or_else(random_event_id);
     let memory_scope = required_string(payload, "memoryScope")?;
     let run_id = optional_string(payload, "runId");
@@ -863,7 +924,9 @@ fn record_memory_link(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resu
         None => None,
     };
     let item = match (&run_id, &item_id) {
-        (Some(run_id), Some(item_id)) => find_one_by_text_pair(db, "run_items", ("run_id", run_id), ("item_id", item_id))?,
+        (Some(run_id), Some(item_id)) => {
+            find_one_by_text_pair(db, "run_items", ("run_id", run_id), ("item_id", item_id))?
+        }
         _ => None,
     };
     let existing = find_one_by_text(db, "memory_links", "link_id", &link_id)?;
@@ -903,7 +966,10 @@ fn record_memory_link(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resu
     require_one_by_text(db, "memory_links", "link_id", &link_id)
 }
 
-fn record_source_file(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Result<LocatedRow, String> {
+fn record_source_file(
+    db: &OpenDb,
+    payload: &JsonMap<String, JsonValue>,
+) -> Result<LocatedRow, String> {
     let source_file_id = optional_string(payload, "sourceFileId").unwrap_or_else(random_event_id);
     let file_kind = required_string(payload, "fileKind")?;
     let absolute_path = required_string(payload, "absolutePath")?;
@@ -933,7 +999,10 @@ fn record_source_file(db: &OpenDb, payload: &JsonMap<String, JsonValue>) -> Resu
     }
 
     let mut values = HashMap::from([
-        ("source_file_id".to_string(), Value::Text(source_file_id.clone())),
+        (
+            "source_file_id".to_string(),
+            Value::Text(source_file_id.clone()),
+        ),
         ("file_kind".to_string(), Value::Text(file_kind)),
         ("absolute_path".to_string(), Value::Text(absolute_path)),
         ("created_at".to_string(), Value::Timestamp(created_at)),
@@ -969,12 +1038,22 @@ fn snapshot_rows(snapshot: QuerySnapshot) -> Vec<LocatedRow> {
         .collect()
 }
 
-fn find_one_by_text(db: &OpenDb, table: &str, column: &str, expected: &str) -> Result<Option<LocatedRow>, String> {
+fn find_one_by_text(
+    db: &OpenDb,
+    table: &str,
+    column: &str,
+    expected: &str,
+) -> Result<Option<LocatedRow>, String> {
     let mut matches = find_many_by_text(db, table, column, expected)?;
     Ok(matches.pop())
 }
 
-fn require_one_by_text(db: &OpenDb, table: &str, column: &str, expected: &str) -> Result<LocatedRow, String> {
+fn require_one_by_text(
+    db: &OpenDb,
+    table: &str,
+    column: &str,
+    expected: &str,
+) -> Result<LocatedRow, String> {
     find_one_by_text(db, table, column, expected)?
         .ok_or_else(|| format!("row not found in table '{table}' where {column}='{expected}'"))
 }
@@ -998,7 +1077,12 @@ fn find_one_by_text_pair(
     Ok(matches.pop())
 }
 
-fn find_many_by_text(db: &OpenDb, table: &str, column: &str, expected: &str) -> Result<Vec<LocatedRow>, String> {
+fn find_many_by_text(
+    db: &OpenDb,
+    table: &str,
+    column: &str,
+    expected: &str,
+) -> Result<Vec<LocatedRow>, String> {
     Ok(snapshot_rows(scan_table(db, table)?)
         .into_iter()
         .filter_map(|row| match row.text(column) {
@@ -1168,7 +1252,11 @@ mod tests {
     fn args_for_tempdir(tempdir: &tempfile::TempDir) -> DbContextArgs {
         DbContextArgs {
             app_id: "agent-infra-command-test".to_string(),
-            data_dir: tempdir.path().join("agent-data.db").to_string_lossy().to_string(),
+            data_dir: tempdir
+                .path()
+                .join("agent-data.db")
+                .to_string_lossy()
+                .to_string(),
             env: "dev".to_string(),
             user_branch: "main".to_string(),
             schema_hash: None,
@@ -1220,7 +1308,8 @@ mod tests {
         });
 
         record_run_started(&db, run_payload.as_object().expect("run object")).expect("record run");
-        record_item_started(&db, item_payload.as_object().expect("item object")).expect("record item");
+        record_item_started(&db, item_payload.as_object().expect("item object"))
+            .expect("record item");
         append_semantic_event(&db, semantic_payload.as_object().expect("semantic object"))
             .expect("record semantic event");
         update_agent_state(&db, state_payload.as_object().expect("state object"))
@@ -1237,7 +1326,10 @@ mod tests {
         assert_eq!(summary["run"]["record"]["status"], json!("completed"));
         assert_eq!(summary["items"].as_array().map(Vec::len), Some(1));
         assert_eq!(summary["semanticEvents"].as_array().map(Vec::len), Some(1));
-        assert_eq!(summary["latestAgentState"]["record"]["status"], json!("idle"));
+        assert_eq!(
+            summary["latestAgentState"]["record"]["status"],
+            json!("idle")
+        );
 
         db.close().expect("close db");
     }
@@ -1292,19 +1384,23 @@ fn optional_i32(payload: &JsonMap<String, JsonValue>, key: &str) -> Result<Optio
     }
 }
 
-fn optional_timestamp(payload: &JsonMap<String, JsonValue>, key: &str) -> Result<Option<u64>, String> {
+fn optional_timestamp(
+    payload: &JsonMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<u64>, String> {
     match payload.get(key) {
         None | Some(JsonValue::Null) => Ok(None),
-        Some(JsonValue::Number(value)) => value
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| format!("field '{key}' must be a non-negative integer microsecond timestamp")),
+        Some(JsonValue::Number(value)) => value.as_u64().map(Some).ok_or_else(|| {
+            format!("field '{key}' must be a non-negative integer microsecond timestamp")
+        }),
         Some(JsonValue::String(value)) if !value.trim().is_empty() => value
             .trim()
             .parse::<u64>()
             .map(Some)
             .map_err(|err| format!("field '{key}' must be a u64 microsecond timestamp: {err}")),
-        _ => Err(format!("field '{key}' must be a non-negative integer microsecond timestamp")),
+        _ => Err(format!(
+            "field '{key}' must be a non-negative integer microsecond timestamp"
+        )),
     }
 }
 
@@ -1317,7 +1413,10 @@ fn required_json_text(payload: &JsonMap<String, JsonValue>, key: &str) -> Result
         .map_err(|err| format!("failed to serialize field '{key}' as JSON text: {err}"))
 }
 
-fn optional_json_text(payload: &JsonMap<String, JsonValue>, key: &str) -> Result<Option<Value>, String> {
+fn optional_json_text(
+    payload: &JsonMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<Value>, String> {
     match payload.get(key) {
         None | Some(JsonValue::Null) => Ok(None),
         Some(value) => serde_json::to_string(value)

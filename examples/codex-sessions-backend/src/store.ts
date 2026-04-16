@@ -696,11 +696,11 @@ export class CodexSessionStore {
               status: "completed",
               completed_at: { gte: completedAfter },
             })
-            .orderBy("completed_at", "asc")
+            .orderBy("completed_at", "desc")
             .limit(clampLimit(options?.limit, 50))
         : app.codex_turns
             .where({ status: "completed" })
-            .orderBy("completed_at", "asc")
+            .orderBy("completed_at", "desc")
             .limit(clampLimit(options?.limit, 50)),
     );
     const sessionCache = new Map<string, CodexSession | null>();

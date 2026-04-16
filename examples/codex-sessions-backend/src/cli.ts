@@ -2127,7 +2127,13 @@ async function main(): Promise<void> {
       if (!sessionId) {
         throw new Error("get-session requires --session-id");
       }
-      const session = await store.getSession(sessionId);
+      let session = await store.getSession(sessionId);
+      if (!session) {
+        const syncResult = await syncCodexSessionRollout({ codexHome, store, sessionId });
+        if (syncResult.found) {
+          session = await store.getSession(sessionId);
+        }
+      }
       console.log(JSON.stringify(session ? toSessionLookupRow(session) : null));
       return;
     }

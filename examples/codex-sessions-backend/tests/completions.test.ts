@@ -162,4 +162,68 @@ describe("codex completion events", () => {
     expect(completions[0]?.turnId).toBe("turn-2");
     expect(completions[0]?.summary).toBe("Second completion.");
   });
+
+  it("lists the most recent completion events first", async () => {
+    await writeFile(
+      rolloutPath,
+      [
+        JSON.stringify({
+          timestamp: "2026-04-08T12:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: "019d0000-0000-7000-8000-000000000002",
+            timestamp: "2026-04-08T12:00:00.000Z",
+            cwd: "/tmp/demo-two",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-08T12:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-1",
+            started_at: 1775649601,
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-08T12:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-1",
+            last_agent_message: "First completion.",
+            completed_at: 1775649602,
+            duration_ms: 1000,
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-08T12:00:04.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-2",
+            started_at: 1775649604,
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-08T12:00:05.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-2",
+            last_agent_message: "Second completion.",
+            completed_at: 1775649605,
+            duration_ms: 1000,
+          },
+        }),
+      ].join("\n"),
+    );
+
+    await syncCodexRollouts({ codexHome, store });
+    const completions = await store.listCompletionEvents({ limit: 2 });
+
+    expect(completions).toHaveLength(2);
+    expect(completions.map((completion) => completion.turnId)).toEqual(["turn-2", "turn-1"]);
+  });
 });

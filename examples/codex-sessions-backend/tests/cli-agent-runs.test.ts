@@ -281,6 +281,59 @@ describe("codex-sessions CLI agent-run commands", () => {
     expect(session.preview).toBe("Sync just this session");
   });
 
+  it("hydrates a missing session on demand through get-session", async () => {
+    const codexHome = join(tempDir, ".codex");
+    const rolloutDir = join(codexHome, "sessions/2026/04/08");
+    const rolloutPath = join(
+      rolloutDir,
+      "rollout-2026-04-08T12-50-00-019d0000-0000-7000-8000-000000000003.jsonl",
+    );
+    await mkdir(rolloutDir, { recursive: true });
+    await writeFile(
+      rolloutPath,
+      [
+        {
+          timestamp: "2026-04-08T12:50:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: "019d0000-0000-7000-8000-000000000003",
+            timestamp: "2026-04-08T12:50:00.000Z",
+            cwd: "/Users/nikitavoloboev/repos/openai/codex",
+            originator: "codex-cli",
+            cli_version: "0.0.0",
+            source: "cli",
+          },
+        },
+        {
+          timestamp: "2026-04-08T12:50:01.000Z",
+          type: "turn_context",
+          payload: {
+            turn_id: "turn-3",
+            cwd: "/Users/nikitavoloboev/repos/openai/codex",
+          },
+        },
+        {
+          timestamp: "2026-04-08T12:50:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Hydrate this session on demand",
+          },
+        },
+      ].map((line) => JSON.stringify(line)).join("\n"),
+    );
+
+    const session = runCliJson("get-session", undefined, [
+      "--codex-home",
+      codexHome,
+      "--session-id",
+      "019d0000-0000-7000-8000-000000000003",
+    ]);
+
+    expect(session.id).toBe("019d0000-0000-7000-8000-000000000003");
+    expect(session.preview).toBe("Hydrate this session on demand");
+  });
+
   function runCliJson(command: string, input?: unknown, extraArgs: string[] = []): any {
     const result = spawnSync(
       "pnpm",

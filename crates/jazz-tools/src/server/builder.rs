@@ -21,7 +21,7 @@ use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
+use crate::sync_manager::{Destination, DurabilityTier, ServerId, SyncManager};
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
@@ -151,7 +151,8 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
-        let (runtime, connection_event_hub) = self.build_runtime()?;
+        let (server_outbox_tx, server_outbox_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (runtime, connection_event_hub) = self.build_runtime(server_outbox_tx.clone())?;
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
@@ -169,6 +170,8 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
+            server_outbox_tx,
+            server_outbox_rx: std::sync::Mutex::new(Some(server_outbox_rx)),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits
@@ -195,15 +198,26 @@ impl ServerBuilder {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
+    fn build_runtime(
+        &self,
+        server_outbox_tx: tokio::sync::mpsc::UnboundedSender<(
+            ServerId,
+            crate::sync_manager::SyncPayload,
+        )>,
+    ) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let dispatch_hub = Arc::clone(&connection_event_hub);
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                dispatch_hub.dispatch_payload(client_id, entry.payload);
+            match entry.destination {
+                Destination::Client(client_id) => {
+                    dispatch_hub.dispatch_payload(client_id, entry.payload);
+                }
+                Destination::Server(server_id) => {
+                    let _ = server_outbox_tx.send((server_id, entry.payload));
+                }
             }
         });
 
