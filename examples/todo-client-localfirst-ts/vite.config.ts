@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { jazzPlugin } from "jazz-tools/dev/vite";
 
 export default defineConfig({
   build: { target: "es2020" },
@@ -6,4 +7,5 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ["jazz-wasm"],
   },
+  plugins: [jazzPlugin()],
 });
