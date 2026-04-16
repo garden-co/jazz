@@ -36,7 +36,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const localBatchRecord = {
     batchId: "00000000-0000-0000-0000-000000000041",
     mode: "direct" as const,
-    requestedTier: "edge" as const,
     sealed: true,
     latestSettlement: {
       kind: "durable_direct" as const,
@@ -107,6 +106,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     },
     update: (objectId: string, updates: Record<string, unknown>) => {
       updateCalls.push([objectId, updates]);
+      return { batchId: localBatchRecord.batchId };
     },
     updateWithSession: (
       objectId: string,
@@ -114,6 +114,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       updateWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined]);
+      return { batchId: localBatchRecord.batchId };
     },
     updateDurable: async (objectId: string, updates: Record<string, unknown>, tier: string) => {
       updateDurableCalls.push([objectId, updates, tier]);
@@ -146,9 +147,11 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     },
     delete: (objectId: string) => {
       deleteCalls.push(objectId);
+      return { batchId: localBatchRecord.batchId };
     },
     deleteWithSession: (objectId: string, writeContextJson?: string | null) => {
       deleteWithSessionCalls.push([objectId, writeContextJson ?? undefined]);
+      return { batchId: localBatchRecord.batchId };
     },
     deleteDurable: async (objectId: string, tier: string) => {
       deleteDurableCalls.push([objectId, tier]);
@@ -305,11 +308,11 @@ describe("JazzClient mutation durability split", () => {
   });
 
   it("routes update/delete through the synchronous runtime methods", () => {
-    const { client, updateCalls, deleteCalls } = makeClient();
+    const { client, updateCalls, deleteCalls, localBatchRecord } = makeClient();
     const updates = { done: { type: "Boolean" as const, value: true } };
 
-    expect(client.update("row-1", updates)).toBeUndefined();
-    expect(client.delete("row-1")).toBeUndefined();
+    expect(client.update("row-1", updates)).toEqual({ batchId: localBatchRecord.batchId });
+    expect(client.delete("row-1")).toEqual({ batchId: localBatchRecord.batchId });
 
     expect(updateCalls).toEqual([["row-1", updates]]);
     expect(deleteCalls).toEqual(["row-1"]);
@@ -597,7 +600,6 @@ describe("JazzClient mutation durability split", () => {
     let currentLocalBatchRecord: LocalBatchRecord | null = {
       batchId: "00000000-0000-0000-0000-000000000041",
       mode: "transactional",
-      requestedTier: "edge",
       sealed: true,
       latestSettlement: null,
     };
@@ -637,5 +639,125 @@ describe("JazzClient mutation durability split", () => {
     });
     expect(runtimeOnSyncMessageReceived).toHaveBeenCalledWith("{}", undefined);
     expect(setTimeoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("resolves lower-tier waits without resolving stricter waits for the same batch", async () => {
+    let syncMessageCount = 0;
+    let currentLocalBatchRecord: LocalBatchRecord | null = {
+      batchId: "00000000-0000-0000-0000-000000000041",
+      mode: "direct",
+      sealed: true,
+      latestSettlement: {
+        kind: "durable_direct",
+        batchId: "00000000-0000-0000-0000-000000000041",
+        confirmedTier: "worker",
+        visibleMembers: [
+          {
+            objectId: "00000000-0000-0000-0000-000000000001",
+            branchName: "main",
+            batchId: "00000000-0000-0000-0000-000000000041",
+          },
+        ],
+      },
+    };
+    const runtimeOnSyncMessageReceived = vi.fn(() => {
+      syncMessageCount += 1;
+      currentLocalBatchRecord = {
+        ...currentLocalBatchRecord!,
+        latestSettlement: {
+          kind: "durable_direct",
+          batchId: currentLocalBatchRecord!.batchId,
+          confirmedTier: syncMessageCount === 1 ? "edge" : "global",
+          visibleMembers: [
+            {
+              objectId: "00000000-0000-0000-0000-000000000001",
+              branchName: "main",
+              batchId: currentLocalBatchRecord!.batchId,
+            },
+          ],
+        },
+      };
+    });
+    const { client } = makeClient({
+      loadLocalBatchRecord: (batchId: string) =>
+        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
+      onSyncMessageReceived: runtimeOnSyncMessageReceived,
+    });
+
+    const edgeWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "edge");
+    const globalWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "global");
+    let globalResolved = false;
+    void globalWait.then(() => {
+      globalResolved = true;
+    });
+
+    client.getRuntime().onSyncMessageReceived("{}");
+
+    await expect(edgeWait).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(globalResolved).toBe(false);
+
+    client.getRuntime().onSyncMessageReceived("{}");
+
+    await expect(globalWait).resolves.toBeUndefined();
+  });
+
+  it("allows a stricter wait to attach after an earlier lower-tier wait resolved", async () => {
+    let currentLocalBatchRecord: LocalBatchRecord | null = {
+      batchId: "00000000-0000-0000-0000-000000000041",
+      mode: "direct",
+      sealed: true,
+      latestSettlement: {
+        kind: "durable_direct",
+        batchId: "00000000-0000-0000-0000-000000000041",
+        confirmedTier: "edge",
+        visibleMembers: [
+          {
+            objectId: "00000000-0000-0000-0000-000000000001",
+            branchName: "main",
+            batchId: "00000000-0000-0000-0000-000000000041",
+          },
+        ],
+      },
+    };
+    const runtimeOnSyncMessageReceived = vi.fn(() => {
+      currentLocalBatchRecord = {
+        ...currentLocalBatchRecord!,
+        latestSettlement: {
+          kind: "durable_direct",
+          batchId: currentLocalBatchRecord!.batchId,
+          confirmedTier: "global",
+          visibleMembers: [
+            {
+              objectId: "00000000-0000-0000-0000-000000000001",
+              branchName: "main",
+              batchId: currentLocalBatchRecord!.batchId,
+            },
+          ],
+        },
+      };
+    });
+    const { client } = makeClient({
+      loadLocalBatchRecord: (batchId: string) =>
+        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
+      onSyncMessageReceived: runtimeOnSyncMessageReceived,
+    });
+
+    await expect(
+      client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "edge"),
+    ).resolves.toBeUndefined();
+
+    const globalWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "global");
+    let globalResolved = false;
+    void globalWait.then(() => {
+      globalResolved = true;
+    });
+
+    await Promise.resolve();
+    expect(globalResolved).toBe(false);
+
+    client.getRuntime().onSyncMessageReceived("{}");
+
+    await expect(globalWait).resolves.toBeUndefined();
   });
 });

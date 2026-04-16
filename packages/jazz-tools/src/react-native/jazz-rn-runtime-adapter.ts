@@ -1,5 +1,5 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
-import type { DirectInsertResult, Row, Runtime } from "../runtime/client.js";
+import type { DirectInsertResult, DirectMutationResult, Row, Runtime } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
@@ -21,8 +21,8 @@ export interface JazzRnRuntimeBinding {
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
-  delete_(objectId: string): void;
-  deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
+  delete_(objectId: string): string;
+  deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
   insert(table: string, valuesJson: string): string;
@@ -68,12 +68,12 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
-  update(objectId: string, valuesJson: string): void;
+  update(objectId: string, valuesJson: string): string;
   updateWithSession?(
     objectId: string,
     valuesJson: string,
     writeContextJson: string | undefined,
-  ): void;
+  ): string;
   uniffiDestroy?(): void;
 }
 
@@ -94,29 +94,6 @@ function swallowCallbackError(context: string, error: unknown): void {
   } catch {
     // Ignore logging failures.
   }
-}
-
-function isObjectNotFoundError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const maybeInner = (error as { inner?: { message?: unknown } }).inner;
-  const innerMessage =
-    maybeInner && typeof maybeInner === "object" ? maybeInner.message : undefined;
-  if (typeof innerMessage === "string" && innerMessage.includes("ObjectNotFound(")) {
-    return true;
-  }
-  const message = String(error);
-  return message.includes("ObjectNotFound(");
-}
-
-function swallowMissingObjectMutation(context: string, error: unknown): boolean {
-  if (!isObjectNotFoundError(error)) return false;
-  try {
-    // eslint-disable-next-line no-console
-    console.warn(`[jazz-rn] ${context}: object already missing, ignoring`, error);
-  } catch {
-    // Ignore logging failures.
-  }
-  return true;
 }
 
 function isJazzRnErrorLike(
@@ -245,11 +222,11 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: Record<string, Value>): void {
+  update(object_id: string, values: Record<string, Value>): DirectMutationResult {
     try {
-      this.binding.update(object_id, encodeFFIRecordToJson(values));
+      const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
@@ -258,36 +235,36 @@ export class JazzRnRuntimeAdapter implements Runtime {
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): void {
+  ): DirectMutationResult {
     try {
-      this.requireWriteContextMethod("updateWithSession")(
+      const resultJson = this.requireWriteContextMethod("updateWithSession")(
         object_id,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  delete(object_id: string): void {
+  delete(object_id: string): DirectMutationResult {
     try {
-      this.binding.delete_(object_id);
+      const resultJson = this.binding.delete_(object_id);
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("delete", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  deleteWithSession(object_id: string, write_context_json?: string | null): void {
+  deleteWithSession(object_id: string, write_context_json?: string | null): DirectMutationResult {
     try {
-      this.requireWriteContextMethod("deleteWithSession")(
+      const resultJson = this.requireWriteContextMethod("deleteWithSession")(
         object_id,
         write_context_json ?? undefined,
       );
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("delete", error)) return;
       throw normalizeJazzRnError(error);
     }
   }

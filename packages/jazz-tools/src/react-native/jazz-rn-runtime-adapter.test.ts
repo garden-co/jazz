@@ -9,8 +9,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     batchedTick: vi.fn(),
     close: vi.fn(),
     createSubscription: vi.fn(() => 9n),
-    delete_: vi.fn(),
-    deleteWithSession: vi.fn(),
+    delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
+    deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
@@ -29,8 +29,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
-    update: vi.fn(),
-    updateWithSession: vi.fn(),
+    update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
+    updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
   };
 }

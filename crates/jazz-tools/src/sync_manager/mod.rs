@@ -252,6 +252,11 @@ impl SyncManager {
         self.my_tiers.clone()
     }
 
+    /// True when this runtime currently has at least one upstream server.
+    pub fn has_connected_servers(&self) -> bool {
+        !self.servers.is_empty()
+    }
+
     /// Return the strongest durability tier this node can attest to locally.
     pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
         self.my_tiers.iter().copied().max()

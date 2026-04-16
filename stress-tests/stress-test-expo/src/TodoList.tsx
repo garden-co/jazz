@@ -9,8 +9,8 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react-native";
-import { app, type Todo, type TodoWithIncludes } from "../schema";
+import { useAll, useDb } from "jazz-tools/react-native";
+import { app } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";
@@ -110,7 +110,9 @@ export function TodoList() {
       <View style={styles.todoRow}>
         <Switch
           value={item.done}
-          onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
+          onValueChange={() => {
+            db.update(app.todos, item.id, { done: !item.done });
+          }}
         />
         <View style={styles.todoTextWrap}>
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{displayTitle}</Text>

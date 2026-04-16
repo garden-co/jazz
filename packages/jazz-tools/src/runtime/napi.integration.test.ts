@@ -578,14 +578,12 @@ describe("NAPI integration", () => {
       loadLocalBatchRecord(batchId: string): {
         batchId: string;
         mode: string;
-        requestedTier: string;
         sealed: boolean;
         latestSettlement: unknown;
       } | null;
       loadLocalBatchRecords(): Array<{
         batchId: string;
         mode: string;
-        requestedTier: string;
         sealed: boolean;
         latestSettlement: unknown;
       }>;
@@ -611,7 +609,6 @@ describe("NAPI integration", () => {
     expect(directRecord).toMatchObject({
       batchId: directWrite.batchId,
       mode: "direct",
-      requestedTier: "edge",
       sealed: true,
     });
 
@@ -634,7 +631,6 @@ describe("NAPI integration", () => {
     expect(transactionalRecord).toMatchObject({
       batchId: transactionalBatchId,
       mode: "transactional",
-      requestedTier: "edge",
       sealed: false,
     });
 
@@ -1436,7 +1432,7 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath },
       });
 
-      const created = context.db().insert(byteChunksTable, {
+      const { value: created } = context.db().insert(byteChunksTable, {
         label: "alpha",
         data: new Uint8Array([1, 2, 3]),
       });

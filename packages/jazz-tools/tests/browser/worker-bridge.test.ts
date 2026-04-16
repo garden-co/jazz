@@ -626,7 +626,9 @@ describe("Worker Bridge with OPFS", () => {
     const { value: inserted } = db.insert(todos, { title: "Original", done: false });
     const { id } = inserted;
     const result = db.update(todos, id, { done: true });
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const results = await db.all(allTodos);
     expect(results.length).toBe(1);
@@ -669,7 +671,9 @@ describe("Worker Bridge with OPFS", () => {
     expect((await db.all(allTodos)).length).toBe(1);
 
     const result = db.delete(todos, id);
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
     const results = await db.all(allTodos);
     expect(results.length).toBe(0);
   });

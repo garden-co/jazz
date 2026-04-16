@@ -79,9 +79,13 @@ function makeRuntime() {
   const runtime: Runtime = {
     insert: () => ({ id: "row-1", values: [], batchId: "batch-1" }),
     insertDurable: async () => ({ id: "row-1", values: [] }),
-    update: () => {},
+    update: () => ({
+      batchId: "batch-1",
+    }),
     updateDurable: async () => {},
-    delete: () => {},
+    delete: () => ({
+      batchId: "batch-1",
+    }),
     deleteDurable: async () => {},
     query: async () => [],
     subscribe: () => 0,

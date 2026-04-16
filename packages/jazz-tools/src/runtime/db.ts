@@ -248,26 +248,34 @@ function backendScopedAuthState(session?: Session | null): AuthState {
 }
 
 /**
+ * Returned by update and delete operations. Allows waiting for the write to be persisted at a given durability tier.
+ */
+export class WriteHandle {
+  readonly #client: JazzClient;
+
+  constructor(
+    readonly batchId: string,
+    client: JazzClient,
+  ) {
+    this.#client = client;
+  }
+
+  async wait(options: { tier: DurabilityTier }): Promise<void> {
+    return this.#client.waitForPersistedBatch(this.batchId, options.tier);
+  }
+}
+
+/**
  * Returned by insert operations. Allows getting the inserted value and
  * waiting for the write to be persisted at a given durability tier.
  */
-export class InsertHandle<T> {
-  // oxlint-disable-next-line no-unused-private-class-members
-  readonly #batchId: string;
-  // oxlint-disable-next-line no-unused-private-class-members
-  readonly #client: JazzClient;
-
+export class InsertHandle<T> extends WriteHandle {
   constructor(
     readonly value: T,
     batchId: string,
     client: JazzClient,
   ) {
-    this.#batchId = batchId;
-    this.#client = client;
-  }
-
-  async wait(options: { tier: DurabilityTier }): Promise<void> {
-    return this.#client.waitForPersistedBatch(this.#batchId, options.tier);
+    super(batchId, client);
   }
 }
 
@@ -384,14 +392,15 @@ export class DbTransaction {
     );
   }
 
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     this.ensureWritable();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    this.runtimeTransaction.update(id, updates);
+    const result = this.runtimeTransaction.update(id, updates);
+    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
   }
 
   updatePersisted<T, Init>(
@@ -413,10 +422,11 @@ export class DbTransaction {
     );
   }
 
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.ensureWritable();
     this.assertOwnsTable(table, "DbTransaction");
-    this.runtimeTransaction.delete(id);
+    const result = this.runtimeTransaction.delete(id);
+    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
   }
 
   deletePersisted<T, Init>(
@@ -511,13 +521,14 @@ export class DbDirectBatch {
     );
   }
 
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    this.runtimeBatch.update(id, updates);
+    const result = this.runtimeBatch.update(id, updates);
+    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
   }
 
   updatePersisted<T, Init>(
@@ -538,9 +549,10 @@ export class DbDirectBatch {
     );
   }
 
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.assertOwnsTable(table, "DbDirectBatch");
-    this.runtimeBatch.delete(id);
+    const result = this.runtimeBatch.delete(id);
+    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
   }
 
   deletePersisted<T, Init>(
@@ -1550,10 +1562,10 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.update(id, updates);
+    return new WriteHandle(client.update(id, updates).batchId, client);
   }
 
   /**
@@ -1605,9 +1617,9 @@ export class Db {
   /**
    * Delete a row without waiting for durability.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
-    client.delete(id);
+    return new WriteHandle(client.delete(id).batchId, client);
   }
 
   /**
@@ -2113,11 +2125,21 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  override update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): WriteHandle {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.updateInternal(id, updates, this.session, this.attribution);
+    const batchId = this.runtimeClient.updateInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+    ).batchId;
+    return new WriteHandle(batchId, this.runtimeClient);
   }
 
   override async updateDurable<T, Init>(
@@ -2161,8 +2183,9 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
-    this.runtimeClient.deleteInternal(id, this.session, this.attribution);
+  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): WriteHandle {
+    const batchId = this.runtimeClient.deleteInternal(id, this.session, this.attribution).batchId;
+    return new WriteHandle(batchId, this.runtimeClient);
   }
 
   override async deleteDurable<T, Init>(

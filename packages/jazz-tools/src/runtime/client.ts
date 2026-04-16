@@ -61,12 +61,12 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult | void;
+  update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): DirectMutationResult | void;
+  ): DirectMutationResult;
   updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
@@ -74,11 +74,8 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
-  delete(object_id: string): DirectMutationResult | void;
-  deleteWithSession?(
-    object_id: string,
-    write_context_json?: string | null,
-  ): DirectMutationResult | void;
+  delete(object_id: string): DirectMutationResult;
+  deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
   deleteDurable(object_id: string, tier: string): Promise<void>;
   deleteDurableWithSession?(
     object_id: string,
@@ -208,7 +205,6 @@ export type BatchSettlement =
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
-  requestedTier: DurabilityTier;
   sealed: boolean;
   latestSettlement: BatchSettlement | null;
 }
@@ -746,9 +742,9 @@ export class Transaction {
     );
   }
 
-  update(objectId: string, updates: Record<string, Value>): void {
+  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
     this.ensureWritable();
-    this.client.updateInternal(
+    return this.client.updateInternal(
       objectId,
       updates,
       this.session,
@@ -773,9 +769,9 @@ export class Transaction {
     );
   }
 
-  delete(objectId: string): void {
+  delete(objectId: string): DirectMutationResult {
     this.ensureWritable();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+    return this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
@@ -839,8 +835,8 @@ export class DirectBatch {
     );
   }
 
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.client.updateInternal(
+  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
+    return this.client.updateInternal(
       objectId,
       updates,
       this.session,
@@ -864,8 +860,8 @@ export class DirectBatch {
     );
   }
 
-  delete(objectId: string): void {
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  delete(objectId: string): DirectMutationResult {
+    return this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
@@ -1807,8 +1803,8 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.updateInternal(objectId, updates);
+  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
+    return this.updateInternal(objectId, updates);
   }
 
   /**
@@ -1821,7 +1817,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-  ): DirectMutationResult | void {
+  ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext) {
       return this.requireSessionWriteMethod("updateWithSession")(
@@ -1902,8 +1898,8 @@ export class JazzClient {
   /**
    * Delete a row by ID without waiting for durability.
    */
-  delete(objectId: string): void {
-    this.deleteInternal(objectId);
+  delete(objectId: string): DirectMutationResult {
+    return this.deleteInternal(objectId);
   }
 
   /**
@@ -1915,7 +1911,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-  ): DirectMutationResult | void {
+  ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext) {
       return this.requireSessionWriteMethod("deleteWithSession")(
