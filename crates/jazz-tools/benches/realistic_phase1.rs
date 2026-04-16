@@ -21,16 +21,19 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use jazz_tools::metadata::{MetadataKey, RowProvenance};
+use jazz_tools::catalogue::CatalogueEntry;
+use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
+    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TablePolicies, TableSchema, Value,
 };
+use jazz_tools::row_format::encode_row;
 use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, apply_row_batch};
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
@@ -3036,6 +3039,8 @@ fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
     );
     scan_leaf_group.finish();
 
+    drop(loaded_storage);
+
     let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_cold_load");
     configure_group(&mut cold_load_group, 10, 5);
     cold_load_group.throughput(Throughput::Elements(scenario.branch_count as u64));
@@ -3455,10 +3460,40 @@ fn many_branches_row_metadata() -> HashMap<String, String> {
     )])
 }
 
+fn many_branches_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder(MANY_BRANCHES_TABLE).column("payload", ColumnType::Bytea))
+        .build()
+}
+
+fn ensure_many_branches_schema<H: Storage>(storage: &mut H) -> (SchemaHash, RowDescriptor) {
+    let schema = many_branches_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([
+                (
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                ),
+                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+            ]),
+            content: encode_schema(&schema),
+        })
+        .expect("seed many-branches schema catalogue entry");
+
+    (
+        schema_hash,
+        schema[&MANY_BRANCHES_TABLE.into()].columns.clone(),
+    )
+}
+
 fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     storage: &mut H,
     scenario: &R8Scenario,
 ) -> ManyBranchesDataset {
+    let (schema_hash, user_descriptor) = ensure_many_branches_schema(storage);
     let object_id = ObjectId::new();
     storage
         .put_metadata(object_id, many_branches_row_metadata())
@@ -3468,7 +3503,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
             object_id,
             Some(&RowLocator {
                 table: MANY_BRANCHES_TABLE.into(),
-                origin_schema_hash: None,
+                origin_schema_hash: Some(schema_hash),
             }),
         )
         .expect("seed many-branches row locator");
@@ -3495,7 +3530,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
                 object_id,
                 branch_name.clone(),
                 Vec::new(),
-                many_branches_payload(scenario, branch_idx, 0),
+                many_branches_payload(&user_descriptor, scenario, branch_idx, 0),
                 RowProvenance::for_insert(author.clone(), root_timestamp),
                 HashMap::new(),
                 RowState::VisibleDirect,
@@ -3517,7 +3552,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
                     object_id,
                     branch_name.clone(),
                     vec![head_id],
-                    many_branches_payload(scenario, branch_idx, commit_idx),
+                    many_branches_payload(&user_descriptor, scenario, branch_idx, commit_idx),
                     RowProvenance {
                         created_by: author.clone(),
                         created_at: root_timestamp,
@@ -3554,7 +3589,12 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     }
 }
 
-fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: usize) -> Vec<u8> {
+fn many_branches_payload(
+    user_descriptor: &RowDescriptor,
+    scenario: &R8Scenario,
+    branch_idx: usize,
+    commit_idx: usize,
+) -> Vec<u8> {
     let mut payload = vec![0u8; scenario.payload_bytes.max(32)];
     let header = format!("branch={branch_idx};commit={commit_idx};");
     let header_bytes = header.as_bytes();
@@ -3566,7 +3606,7 @@ fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: u
             .wrapping_add(commit_idx.wrapping_mul(17))
             .wrapping_add(offset) as u8;
     }
-    payload
+    encode_row(user_descriptor, &[Value::Bytea(payload)]).expect("encode many-branches payload")
 }
 
 fn scan_branch_heads(
