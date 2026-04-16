@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import {
+  createDb,
+  fetchSchemaHashes,
+  publishStoredPermissions,
+  type Db,
+  type QueryBuilder,
+  type TableProxy,
+} from "../../src/runtime/index.js";
+import { publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
@@ -53,7 +61,8 @@ describe("Db auth refresh browser integration", () => {
   });
 
   it("recovers from auth loss after updateAuthToken and flushes queued local writes", async () => {
-    const { appId, serverUrl } = await getTestingServerInfo();
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
     const invalidJwt = makeFakeJwt({
@@ -79,6 +88,38 @@ describe("Db auth refresh browser integration", () => {
         driver: { type: "persistent", dbName: dbNameB },
       }),
     );
+
+    const { hash: publishedSchemaHash } = await publishStoredSchema(serverUrl, {
+      adminSecret,
+      schema,
+    });
+
+    let latestSchemaHash: string | null = publishedSchemaHash;
+    await waitForCondition(
+      async () => {
+        const { hashes } = await fetchSchemaHashes(serverUrl, { adminSecret });
+        latestSchemaHash = hashes.at(-1) ?? publishedSchemaHash;
+        return latestSchemaHash !== null;
+      },
+      20_000,
+      "expected at least one published schema hash before publishing test permissions",
+    );
+
+    await publishStoredPermissions(serverUrl, {
+      adminSecret,
+      schemaHash: latestSchemaHash!,
+      permissions: {
+        todos: {
+          select: { using: { type: "True" } },
+          insert: { with_check: { type: "True" } },
+          update: {
+            using: { type: "True" },
+            with_check: { type: "True" },
+          },
+          delete: { using: { type: "True" } },
+        },
+      },
+    });
 
     const marker = `queued-after-auth-loss-${Date.now()}`;
     writer.insert(todos, {

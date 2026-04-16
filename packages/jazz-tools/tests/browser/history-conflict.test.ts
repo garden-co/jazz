@@ -9,10 +9,16 @@
  * rather than specific LWW winners, making them timing-tolerant.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import type { TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
+import { getTestingServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -62,6 +68,30 @@ const allTodos = makeQuery<Todo>("todos", schema);
 describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
   afterEach(() => ctx.cleanup());
+  beforeEach(async () => {
+    const { serverUrl, adminSecret } = await getTestingServerInfo();
+    const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+      adminSecret,
+      schema,
+    });
+    const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+    await publishStoredPermissions(serverUrl, {
+      adminSecret,
+      schemaHash,
+      permissions: {
+        todos: {
+          select: { using: { type: "True" } },
+          insert: { with_check: { type: "True" } },
+          update: {
+            using: { type: "True" },
+            with_check: { type: "True" },
+          },
+          delete: { using: { type: "True" } },
+        },
+      },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+    });
+  });
 
   /**
    * Two browser clients update the same todo concurrently. Both must

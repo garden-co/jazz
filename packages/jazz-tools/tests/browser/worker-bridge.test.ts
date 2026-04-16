@@ -32,6 +32,11 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -989,6 +994,7 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("propagates synced row from client A to client B", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken);
     const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken);
@@ -1010,6 +1016,7 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("propagates synced row from client B to client A", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken);
     const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken);
@@ -1031,6 +1038,7 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
     const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken);
@@ -1094,6 +1102,7 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the first fresh edge query completes without needing a second client recreate
    */
   it("replays a fresh edge query once upstream attaches after init", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const { serverUrl } = await getTestingServerInfo();
     const dbWriter = await createSyncedDb(ctx, "edge-late-attach-writer", sharedLocalAuthToken);
@@ -1141,7 +1150,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer", db: dbWriter, probe: writerProbe },
-            { name: "probe", db: dbProbe, probe: probeProbe },
+            { name: "probe", db: dbProbe, probe: probeProbe ?? undefined },
           ],
         ),
       );
@@ -1167,6 +1176,7 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the earlier offline worker write also promotes to B + fresh edge client
    */
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
     const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
@@ -1284,7 +1294,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer-a", db: dbA, probe: dbAProbe },
-            { name: "probe", db: dbProbe, probe: dbProbeTrace },
+            { name: "probe", db: dbProbe, probe: dbProbeTrace ?? undefined },
           ],
         ),
       );
@@ -1346,6 +1356,7 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("local-only subscriptions do not receive rows from sync server", async () => {
+    await publishSyncServerSchemaAndPermissions();
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken);
     const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken);
@@ -1535,6 +1546,40 @@ async function waitForTodos(
   tier?: "worker" | "edge",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishSyncServerSchemaAndPermissions(): Promise<void> {
+  const { serverUrl, adminSecret } = await getTestingServerInfo();
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    adminSecret,
+    schema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  await publishStoredPermissions(serverUrl, {
+    adminSecret,
+    schemaHash,
+    permissions: {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+      projects: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+    },
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
 }
 
 function hasRestoredCatalogueState(state: DebugSchemaState): boolean {
