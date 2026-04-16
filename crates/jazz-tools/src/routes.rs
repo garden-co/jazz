@@ -33,6 +33,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schemas", get(schema_hashes_handler))
         .route("/admin/schemas", post(publish_schema_handler))
         .route("/admin/permissions/head", get(permissions_head_handler))
+        .route("/admin/permissions", get(permissions_handler))
         .route("/admin/permissions", post(publish_permissions_handler))
         .route("/admin/migrations", post(publish_migration_handler))
         .route(
@@ -149,6 +150,13 @@ struct PermissionsHeadView {
 #[serde(rename_all = "camelCase")]
 struct PermissionsHeadResponse {
     head: Option<PermissionsHeadView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPermissionsResponse {
+    head: Option<PermissionsHeadView>,
+    permissions: Option<std::collections::HashMap<String, TablePolicies>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -512,6 +520,66 @@ async fn permissions_head_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "failed to read permissions head: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
+async fn permissions_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    if matches!(
+        &state.catalogue_authority,
+        CatalogueAuthorityMode::Forward { .. }
+    ) {
+        return match forward_catalogue_request(
+            &state,
+            reqwest::Method::GET,
+            "/admin/permissions",
+            None,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+    }
+
+    match state
+        .runtime
+        .with_schema_manager(|schema_manager| schema_manager.current_permissions())
+    {
+        Ok(current) => (
+            StatusCode::OK,
+            Json(match current {
+                Some(current) => StoredPermissionsResponse {
+                    head: Some(permissions_head_view(current.head)),
+                    permissions: Some(permissions_map_view(current.permissions)),
+                },
+                None => StoredPermissionsResponse {
+                    head: None,
+                    permissions: None,
+                },
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read current permissions: {err}"
             ))),
         )
             .into_response(),
@@ -1043,6 +1111,15 @@ fn permissions_head_view(
             .map(|object_id| object_id.to_string()),
         bundle_object_id: head.bundle_object_id.to_string(),
     }
+}
+
+fn permissions_map_view(
+    permissions: std::collections::HashMap<TableName, TablePolicies>,
+) -> std::collections::HashMap<String, TablePolicies> {
+    permissions
+        .into_iter()
+        .map(|(table_name, policies)| (table_name.to_string(), policies))
+        .collect()
 }
 
 fn unix_timestamp_millis() -> u64 {
@@ -1977,6 +2054,39 @@ mod tests {
             )
             .route(
                 "/admin/permissions",
+                get({
+                    let forwarded = forwarded_for_router.clone();
+                    move |headers: HeaderMap| {
+                        let forwarded = forwarded.clone();
+                        async move {
+                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
+                                method: "GET".to_string(),
+                                path: "/admin/permissions".to_string(),
+                                admin_secret: headers
+                                    .get("X-Jazz-Admin-Secret")
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(str::to_string),
+                                body: None,
+                            });
+                            Json(serde_json::json!({
+                                "head": {
+                                    "schemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "version": 4,
+                                    "parentBundleObjectId": "33333333-3333-3333-3333-333333333333",
+                                    "bundleObjectId": "44444444-4444-4444-4444-444444444444"
+                                },
+                                "permissions": {
+                                    "users": {
+                                        "select": { "using": { "type": "True" } }
+                                    }
+                                }
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/admin/permissions",
                 post({
                     let forwarded = forwarded_for_router.clone();
                     move |headers: HeaderMap, body: Json<Value>| {
@@ -2118,6 +2228,19 @@ mod tests {
             .unwrap();
         assert_eq!(permissions_head_response.status(), StatusCode::OK);
 
+        let permissions_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/permissions")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(permissions_response.status(), StatusCode::OK);
+
         let publish_permissions_response = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2144,7 +2267,7 @@ mod tests {
         assert_eq!(publish_permissions_response.status(), StatusCode::CONFLICT);
 
         let forwarded = forwarded.lock().unwrap().clone();
-        assert_eq!(forwarded.len(), 6);
+        assert_eq!(forwarded.len(), 7);
         assert!(
             forwarded
                 .iter()
@@ -2156,8 +2279,9 @@ mod tests {
         assert_eq!(forwarded[3].path, "/admin/migrations");
         assert_eq!(forwarded[4].path, "/admin/permissions/head");
         assert_eq!(forwarded[5].path, "/admin/permissions");
+        assert_eq!(forwarded[6].path, "/admin/permissions");
         assert_eq!(
-            forwarded[5]
+            forwarded[6]
                 .body
                 .as_ref()
                 .and_then(|body| body.get("expectedParentBundleObjectId"))
@@ -2316,6 +2440,60 @@ mod tests {
             head_json["head"]["bundleObjectId"].as_str(),
             Some(second_bundle_object_id.as_str())
         );
+
+        let permissions_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/permissions")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(permissions_response.status(), StatusCode::OK);
+        let permissions_body = body::to_bytes(permissions_response.into_body(), usize::MAX)
+            .await
+            .expect("current permissions body");
+        let permissions_json: Value =
+            serde_json::from_slice(&permissions_body).expect("current permissions json");
+        assert_eq!(permissions_json["head"]["version"].as_u64(), Some(2));
+        assert_eq!(
+            permissions_json["permissions"]["users"]["select"]["using"]["type"].as_str(),
+            Some("False")
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_handler_returns_nulls_before_any_publish() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let state = make_state_with_schema(schema).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/permissions")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("permissions body");
+        let json: Value = serde_json::from_slice(&body).expect("permissions json");
+        assert!(json["head"].is_null());
+        assert!(json["permissions"].is_null());
     }
 
     #[tokio::test]

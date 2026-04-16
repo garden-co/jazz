@@ -11,7 +11,7 @@ export function TableSchemaDefinition() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const schema = useDevtoolsContext().wasmSchema;
+  const { runtime, storedPermissions, wasmSchema: schema } = useDevtoolsContext();
 
   if (!schema) {
     return <p>No schema loaded for this connection.</p>;
@@ -27,6 +27,20 @@ export function TableSchemaDefinition() {
     return JSON.stringify({ [table]: tableSchema }, null, 2);
   }, [table, tableSchema]);
 
+  const formattedPermissions = useMemo(() => {
+    if (runtime === "extension") {
+      return null;
+    }
+    if (!storedPermissions?.head) {
+      return "No published sync-server permissions found for this app.";
+    }
+    const tablePermissions = storedPermissions.permissions?.[table];
+    if (!tablePermissions) {
+      return `No stored permissions for table "${table}".`;
+    }
+    return JSON.stringify({ [table]: tablePermissions }, null, 2);
+  }, [runtime, storedPermissions, table]);
+
   return (
     <section className={styles.container}>
       <header className={styles.header}>
@@ -39,9 +53,23 @@ export function TableSchemaDefinition() {
         </Link>
         <h2 className={styles.title}>{table} schema</h2>
       </header>
-      <pre className={styles.codeBlock}>
-        <code>{formattedSchema}</code>
-      </pre>
+      <div className={styles.sections}>
+        <section className={styles.panel}>
+          <pre className={styles.codeBlock}>
+            <code>{formattedSchema}</code>
+          </pre>
+        </section>
+        {runtime === "standalone" ? (
+          <section className={styles.panel}>
+            <header className={styles.sectionHeader}>
+              <h2 className={styles.sectionTitle}>{table} permissions</h2>
+            </header>
+            <pre className={styles.codeBlock}>
+              <code>{formattedPermissions}</code>
+            </pre>
+          </section>
+        ) : null}
+      </div>
     </section>
   );
 }

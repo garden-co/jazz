@@ -34,6 +34,7 @@ export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
+  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
