@@ -127,6 +127,7 @@ pub struct SchemaManager {
     /// These are stored without requiring a lens path to current.
     known_schemas: Arc<HashMap<SchemaHash, Schema>>,
     known_schemas_dirty: bool,
+    persisted_current_schema_in_storage: HashSet<(usize, SchemaHash)>,
 }
 
 impl SchemaManager {
@@ -197,6 +198,7 @@ impl SchemaManager {
             pending_permissions_head: None,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
+            persisted_current_schema_in_storage: HashSet::new(),
         })
     }
 
@@ -230,6 +232,7 @@ impl SchemaManager {
             pending_permissions_head: None,
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
+            persisted_current_schema_in_storage: HashSet::new(),
         }
     }
 
@@ -835,11 +838,21 @@ impl SchemaManager {
 
     pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
         let schema_hash = self.context.current_hash;
+        let storage_key = (storage.storage_cache_namespace(), schema_hash);
+        if self
+            .persisted_current_schema_in_storage
+            .contains(&storage_key)
+        {
+            return false;
+        }
         let object_id = schema_hash.to_object_id();
         let metadata = self.schema_metadata(&schema_hash);
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
-        self.persist_catalogue_object_if_changed(storage, object_id, metadata, content)
+        let changed =
+            self.persist_catalogue_object_if_changed(storage, object_id, metadata, content);
+        self.persisted_current_schema_in_storage.insert(storage_key);
+        changed
     }
 
     /// Persist the current schema to the catalogue as an Object.

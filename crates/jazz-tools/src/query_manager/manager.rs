@@ -21,7 +21,7 @@ use crate::sync_manager::{
 
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::policy::Operation;
+use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
@@ -246,6 +246,17 @@ pub(super) struct PolicyCheckState {
     pub(super) pending_check: PendingPermissionCheck,
 }
 
+#[derive(Debug)]
+pub(super) struct WriteTableCacheEntry {
+    pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) row_locator: RowLocator,
+    pub(super) insert_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
+    pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) select_policy: Option<Arc<PolicyExpr>>,
+}
+
 /// Server-side query subscription state.
 ///
 /// When a client sends a QuerySubscription, the server builds a QueryGraph
@@ -400,9 +411,33 @@ pub struct QueryManager {
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
     pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
+
+    /// Schema hashes that still need catalogue persistence for the current
+    /// storage namespace.
+    pub(super) pending_catalogue_schema_hashes: HashSet<SchemaHash>,
+
+    /// Storage namespaces where all live schemas have already been upserted
+    /// into the catalogue for this manager.
+    pub(super) catalogued_storage_namespaces: HashSet<usize>,
+
+    /// Per-schema, per-table write metadata cached to avoid cloning policy
+    /// trees and descriptors on every hot write.
+    pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
 }
 
 impl QueryManager {
+    fn mark_schema_catalogue_dirty(&mut self, schema_hash: SchemaHash) {
+        self.pending_catalogue_schema_hashes.insert(schema_hash);
+        self.catalogued_storage_namespaces.clear();
+    }
+
+    fn mark_all_live_schemas_catalogue_dirty(&mut self) {
+        for schema_hash in self.schema_context.all_live_hashes() {
+            self.pending_catalogue_schema_hashes.insert(schema_hash);
+        }
+        self.catalogued_storage_namespaces.clear();
+    }
+
     pub(super) fn finalize_schema_warnings(
         reported: &mut HashSet<SchemaWarningKey>,
         warnings: Vec<SchemaWarning>,
@@ -470,6 +505,9 @@ impl QueryManager {
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
+            pending_catalogue_schema_hashes: HashSet::new(),
+            catalogued_storage_namespaces: HashSet::new(),
+            write_table_cache: HashMap::new(),
         }
     }
 
@@ -503,6 +541,7 @@ impl QueryManager {
             None
         };
         self.authorization_schema_required = false;
+        self.write_table_cache.clear();
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -510,6 +549,8 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
+        self.pending_catalogue_schema_hashes.clear();
+        self.mark_schema_catalogue_dirty(self.schema_context.current_hash);
     }
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
@@ -561,6 +602,7 @@ impl QueryManager {
         // Update branch -> schema hash map
         self.branch_schema_map
             .insert(branch.as_str().to_string(), hash);
+        self.mark_schema_catalogue_dirty(hash);
 
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
@@ -587,6 +629,7 @@ impl QueryManager {
 
                     self.branch_schema_map
                         .insert(branch.as_str().to_string(), hash);
+                    self.mark_schema_catalogue_dirty(hash);
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -655,31 +698,37 @@ impl QueryManager {
     }
 
     pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
     ) -> Result<(), StorageError> {
         if !self.schema_context.is_initialized() {
             return Ok(());
         }
 
-        let mut known_schemas = Vec::with_capacity(self.schema_context.live_schemas.len() + 1);
-        known_schemas.push((
-            self.schema_context.current_hash,
-            self.schema_context.current_schema.clone(),
-        ));
-        known_schemas.extend(
-            self.schema_context
-                .live_schemas
-                .iter()
-                .map(|(hash, schema)| (*hash, schema.clone())),
-        );
+        let storage_namespace = storage.storage_cache_namespace();
+        if !self
+            .catalogued_storage_namespaces
+            .contains(&storage_namespace)
+        {
+            self.mark_all_live_schemas_catalogue_dirty();
+        }
+        if self.pending_catalogue_schema_hashes.is_empty() {
+            return Ok(());
+        }
 
-        for (schema_hash, schema) in known_schemas {
-            let object_id = schema_hash.to_object_id();
-            if storage.load_catalogue_entry(object_id)?.is_some() {
+        let mut pending_hashes = self
+            .pending_catalogue_schema_hashes
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        pending_hashes.sort_by_key(|schema_hash| schema_hash.to_string());
+
+        for schema_hash in pending_hashes {
+            let Some(schema) = self.schema_context.get_schema(&schema_hash) else {
+                self.pending_catalogue_schema_hashes.remove(&schema_hash);
                 continue;
-            }
-
+            };
+            let object_id = schema_hash.to_object_id();
             storage.upsert_catalogue_entry(&CatalogueEntry {
                 object_id,
                 metadata: HashMap::from([
@@ -689,10 +738,12 @@ impl QueryManager {
                     ),
                     (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
                 ]),
-                content: encode_schema(&schema),
+                content: encode_schema(schema),
             })?;
+            self.pending_catalogue_schema_hashes.remove(&schema_hash);
         }
 
+        self.catalogued_storage_namespaces.insert(storage_namespace);
         Ok(())
     }
 
