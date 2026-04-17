@@ -17,6 +17,7 @@ import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { loadWasmModule } from "./runtime/client.js";
 import {
   createMigration,
+  deploy,
   exportSchema,
   permissionsStatus,
   pushMigration,
@@ -1929,6 +1930,413 @@ describe("cli permissions", () => {
   });
 });
 
+describe("cli deploy", () => {
+  it("fails when there's no permissions.ts file", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await expect(
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    ).rejects.toThrow(/no permissions found for this app/i);
+  });
+
+  it("publishes the structural schema and permissions when the server has neither", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    let schemaPublishBody: any;
+    let permissionsPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/admin/schemas")) {
+        schemaPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            hash: schemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        permissionsPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(schemaPublishBody.permissions).toBeUndefined();
+    expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
+    expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
+    expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
+  });
+
+  it("publishes permissions even when the current schema already matches the server head", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "5678567856785678567856785678567856785678567856785678567856785678";
+    const currentHead = {
+      schemaHash,
+      version: 2,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+    let permissionsPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        permissionsPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 3,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "33333333-3333-3333-3333-333333333333",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith("/admin/schemas")) {
+        throw new Error("deploy() should not publish an unchanged structural schema.");
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
+    expect(permissionsPublishBody.expectedParentBundleObjectId).toBe(currentHead.bundleObjectId);
+  });
+
+  it("fails when retargeting permissions to a schema with no local migration path from the previous head", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.includes("/admin/schema-connectivity?")) {
+        const url = new URL(input);
+        expect(url.searchParams.get("fromHash")).toBe(previousSchemaHash);
+        expect(url.searchParams.get("toHash")).toBe(nextSchemaHash);
+        return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    ).rejects.toThrow(
+      "The new permissions schema bbbbbbbbbbbb is not connected to the previous permissions schema aaaaaaaaaaaa on the server. Reads and writes may fail until you push a migration. Run `jazz-tools migrations create --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
+    );
+  });
+
+  it("pushes a local migration before publishing permissions when the server reports disconnected schemas", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const previousShortHash = previousSchemaHash.slice(0, 12);
+    const nextShortHash = nextSchemaHash.slice(0, 12);
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    await writeFile(
+      join(migrationsDir, `20260318-rename-${previousShortHash}-${nextShortHash}.ts`),
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(previousShortHash)},
+  toHash: ${JSON.stringify(nextShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          users: {
+            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.includes("/admin/schema-connectivity?")) {
+        return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/migrations")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.fromHash).toBe(previousSchemaHash);
+        expect(body.toHash).toBe(nextSchemaHash);
+        expect(body.forward).toEqual([
+          {
+            table: "users",
+            operations: [
+              {
+                type: "rename",
+                column: "email",
+                value: "email_address",
+              },
+            ],
+          },
+        ]);
+        return new Response(
+          JSON.stringify({
+            objectId: "33333333-3333-3333-3333-333333333333",
+            fromHash: previousSchemaHash,
+            toHash: nextSchemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "44444444-4444-4444-4444-444444444444",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir,
+      }),
+    );
+
+    expect(logs.some((line) => line.includes("Pushed migration"))).toBe(true);
+    expect(logs.some((line) => line.toLowerCase().includes("not connected"))).toBe(false);
+  });
+
+  it("warns instead of failing with --no-verify when a migration is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const currentHead = {
+      schemaHash: previousSchemaHash,
+      version: 4,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+          status: 200,
+        });
+      }
+
+      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          todos: {
+            columns: [
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+        return storedSchemaResponse(storedRootSchema());
+      }
+
+      if (input.includes("/admin/schema-connectivity?")) {
+        return new Response(JSON.stringify({ connected: false }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 5,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "33333333-3333-3333-3333-333333333333",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+        noVerify: true,
+      }),
+    );
+
+    expect(logs.some((line) => line.includes("Warning: The new permissions schema"))).toBe(true);
+    expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
+  });
+});
+
 function runBin(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
@@ -2274,6 +2682,7 @@ exit 0
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("validate");
     expect(result.stdout).toContain("schema export");
+    expect(result.stdout).toContain("deploy");
     expect(result.stdout).toContain("permissions push");
     expect(result.stdout).toContain("migrations push");
     expect(result.stdout).toContain("server");
