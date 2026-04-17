@@ -14,7 +14,8 @@ use rocksdb::{
 };
 
 use super::{
-    HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
+    HistoryRowBytes, IndexMutation, RawTableMutation, Storage, StorageError, VisibleRowBytes,
+    key_codec,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -325,6 +326,30 @@ impl Storage for RocksDBStorage {
             raw_table_delete_core(table, key, |storage_key| {
                 Self::delete_on_txn_cell(&txn, storage_key)
             })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            for mutation in mutations {
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_table_put_core(table, key, value, |storage_key, bytes| {
+                            Self::put_on_txn_cell(&txn, storage_key, bytes)
+                        })?;
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        raw_table_delete_core(table, key, |storage_key| {
+                            Self::delete_on_txn_cell(&txn, storage_key)
+                        })?;
+                    }
+                }
+            }
             Self::commit_txn(txn.into_inner())
         })
     }

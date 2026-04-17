@@ -13,8 +13,8 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::OptionalExtension;
 
 use super::{
-    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, Storage,
-    StorageError, VisibleRowBytes, key_codec,
+    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, RawTableMutation,
+    Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -343,6 +343,32 @@ impl Storage for SqliteStorage {
                 raw_table_delete_core(table, key, |storage_key| {
                     Self::delete(&inner.conn, storage_key)
                 })
+            })
+        })
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                for mutation in mutations {
+                    match mutation {
+                        RawTableMutation::Put { table, key, value } => {
+                            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                                Self::set(&inner.conn, storage_key, bytes)
+                            })?;
+                        }
+                        RawTableMutation::Delete { table, key } => {
+                            raw_table_delete_core(table, key, |storage_key| {
+                                Self::delete(&inner.conn, storage_key)
+                            })?;
+                        }
+                    }
+                }
+                Ok(())
             })
         })
     }
