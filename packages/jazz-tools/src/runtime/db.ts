@@ -40,6 +40,7 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
+import { resolveClientSessionSync } from "./client-session.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -99,6 +100,37 @@ export interface DbConfig {
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
+}
+
+function trimOptionalString(value?: string | null): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** @internal Derive the default browser persistence namespace for this Db config. */
+export function resolveDefaultPersistentDbName(config: DbConfig): string {
+  const driver = resolveStorageDriver(config.driver);
+  const explicitDbName = trimOptionalString(
+    (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
+  );
+  if (explicitDbName) {
+    return explicitDbName;
+  }
+
+  const sessionUserId = resolveClientSessionSync({
+    appId: config.appId,
+    jwtToken: config.jwtToken,
+  })?.user_id;
+
+  if (!sessionUserId) {
+    return config.appId;
+  }
+
+  return `${config.appId}::${encodeURIComponent(sessionUserId)}`;
 }
 
 /**
@@ -809,7 +841,7 @@ export class Db {
     if (persistentDriver.type !== "persistent") {
       throw new Error("Worker-backed Db requires driver.type='persistent'");
     }
-    db.primaryDbName = persistentDriver.dbName ?? config.appId;
+    db.primaryDbName = resolveDefaultPersistentDbName(config);
     db.workerDbName = db.primaryDbName;
 
     try {

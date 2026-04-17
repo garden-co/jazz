@@ -31,8 +31,45 @@ function uint8ArrayToBase64url(bytes: Uint8Array): string {
 export interface BrowserAuthSecretStoreOptions {
   /** localStorage key name (default: "jazz-auth-secret") */
   key?: string;
+  /** Optional app identifier to namespace the default key. */
+  appId?: string;
+  /** Optional principal identifier to isolate secrets per user. */
+  userId?: string | null;
+  /** Optional session identifier for per-session isolation. */
+  sessionId?: string | null;
   /** Override storage backend (for testing) */
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+}
+
+function normalizeScopeSegment(value?: string | null): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return encodeURIComponent(trimmed);
+}
+
+function resolveBrowserAuthSecretKey(options: BrowserAuthSecretStoreOptions = {}): string {
+  if (options.key) {
+    return options.key;
+  }
+
+  const scopeSegments = [
+    normalizeScopeSegment(options.appId),
+    normalizeScopeSegment(options.userId),
+    normalizeScopeSegment(options.sessionId),
+  ].filter((segment): segment is string => segment !== null);
+
+  if (scopeSegments.length === 0) {
+    return DEFAULT_KEY;
+  }
+
+  return `${DEFAULT_KEY}:${scopeSegments.join(":")}`;
 }
 
 /**
@@ -45,21 +82,45 @@ export interface BrowserAuthSecretStoreOptions {
  * AuthSecretStore with IndexedDB transactions or BroadcastChannel coordination.
  */
 export class BrowserAuthSecretStore implements AuthSecretStore {
-  private static defaultInstance: BrowserAuthSecretStore | null = null;
+  private static globalInstances = new Map<string, BrowserAuthSecretStore>();
+  private static storageScopedInstances = new WeakMap<
+    Pick<Storage, "getItem" | "setItem" | "removeItem">,
+    Map<string, BrowserAuthSecretStore>
+  >();
   private readonly key: string;
   private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   private cachedPromise: Promise<string> | null = null;
 
   constructor(options: BrowserAuthSecretStoreOptions = {}) {
-    this.key = options.key ?? DEFAULT_KEY;
+    this.key = resolveBrowserAuthSecretKey(options);
     this.storage = options.storage ?? globalThis.localStorage;
   }
 
-  private static getDefault(): BrowserAuthSecretStore {
-    if (!BrowserAuthSecretStore.defaultInstance) {
-      BrowserAuthSecretStore.defaultInstance = new BrowserAuthSecretStore();
+  private static getDefault(options: BrowserAuthSecretStoreOptions = {}): BrowserAuthSecretStore {
+    const storage = options.storage;
+    const key = resolveBrowserAuthSecretKey(options);
+
+    if (storage) {
+      let instances = BrowserAuthSecretStore.storageScopedInstances.get(storage);
+      if (!instances) {
+        instances = new Map<string, BrowserAuthSecretStore>();
+        BrowserAuthSecretStore.storageScopedInstances.set(storage, instances);
+      }
+
+      let instance = instances.get(key);
+      if (!instance) {
+        instance = new BrowserAuthSecretStore(options);
+        instances.set(key, instance);
+      }
+      return instance;
     }
-    return BrowserAuthSecretStore.defaultInstance;
+
+    let instance = BrowserAuthSecretStore.globalInstances.get(key);
+    if (!instance) {
+      instance = new BrowserAuthSecretStore(options);
+      BrowserAuthSecretStore.globalInstances.set(key, instance);
+    }
+    return instance;
   }
 
   async loadSecret(): Promise<string | null> {
@@ -90,19 +151,19 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
     return this.cachedPromise;
   }
 
-  static loadSecret(): Promise<string | null> {
-    return BrowserAuthSecretStore.getDefault().loadSecret();
+  static loadSecret(options: BrowserAuthSecretStoreOptions = {}): Promise<string | null> {
+    return BrowserAuthSecretStore.getDefault(options).loadSecret();
   }
 
-  static saveSecret(secret: string): Promise<void> {
-    return BrowserAuthSecretStore.getDefault().saveSecret(secret);
+  static saveSecret(secret: string, options: BrowserAuthSecretStoreOptions = {}): Promise<void> {
+    return BrowserAuthSecretStore.getDefault(options).saveSecret(secret);
   }
 
-  static clearSecret(): Promise<void> {
-    return BrowserAuthSecretStore.getDefault().clearSecret();
+  static clearSecret(options: BrowserAuthSecretStoreOptions = {}): Promise<void> {
+    return BrowserAuthSecretStore.getDefault(options).clearSecret();
   }
 
-  static getOrCreateSecret(): Promise<string> {
-    return BrowserAuthSecretStore.getDefault().getOrCreateSecret();
+  static getOrCreateSecret(options: BrowserAuthSecretStoreOptions = {}): Promise<string> {
+    return BrowserAuthSecretStore.getDefault(options).getOrCreateSecret();
   }
 }
