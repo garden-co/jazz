@@ -279,6 +279,119 @@ fn can_create_sync_manager() {
 }
 
 #[test]
+fn memory_size_separates_sync_state_buckets() {
+    let empty = SyncManager::new().memory_size();
+    assert_eq!(empty, (0, 0, 0, 0, 0));
+
+    let mut sm = SyncManager::new();
+    let io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let row_key = RowBatchKey::from_row(&row);
+    let query = QueryBuilder::new("users").branch("main").build();
+    let session = crate::query_manager::session::Session::new("alice");
+
+    add_client(&mut sm, &io, client_id);
+    add_server(&mut sm, &io, server_id);
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(7),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        Some(session.clone()),
+    );
+
+    sm.row_batch_interest
+        .insert(row_key, HashSet::from([client_id]));
+    sm.received_row_batch_acks
+        .push((row_key, DurabilityTier::Worker));
+    sm.query_origin
+        .insert(QueryId(7), HashSet::from([client_id]));
+    sm.clients
+        .get_mut(&client_id)
+        .expect("client should exist")
+        .sent_batch_ids
+        .insert(
+            (row_id, BranchName::new("main")),
+            HashSet::from([row.batch_id]),
+        );
+    sm.servers
+        .get_mut(&server_id)
+        .expect("server should exist")
+        .sent_metadata
+        .insert(row_id);
+
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Client(client_id),
+        payload: SyncPayload::QuerySettled {
+            query_id: QueryId(7),
+            tier: DurabilityTier::Worker,
+            through_seq: 1,
+        },
+    });
+    sm.inbox.push(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::RowBatchNeeded {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    });
+    sm.pending_query_subscriptions
+        .push(PendingQuerySubscription {
+            client_id,
+            query_id: QueryId(8),
+            query: query.clone(),
+            session: Some(session.clone()),
+            propagation: QueryPropagation::Full,
+        });
+    sm.pending_query_unsubscriptions
+        .push(PendingQueryUnsubscription {
+            client_id,
+            query_id: QueryId(7),
+        });
+    sm.pending_query_settled.push(PendingQuerySettled {
+        server_id: Some(server_id),
+        query_id: QueryId(7),
+        tier: DurabilityTier::Worker,
+        through_seq: 2,
+    });
+    sm.pending_permission_checks.push(PendingPermissionCheck {
+        id: PendingUpdateId(1),
+        client_id,
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+        session,
+        schema_wait_started_at: None,
+        metadata: row_metadata("users"),
+        old_content: None,
+        new_content: Some(b"alice".to_vec()),
+        operation: crate::query_manager::policy::Operation::Insert,
+    });
+
+    let (row_objects, index_objects, subscriptions, outbox_inbox, total) = sm.memory_size();
+
+    assert!(row_objects > 0);
+    assert_eq!(index_objects, 0);
+    assert!(subscriptions > 0);
+    assert!(outbox_inbox > 0);
+    assert_eq!(
+        total,
+        row_objects + index_objects + subscriptions + outbox_inbox
+    );
+}
+
+#[test]
 fn set_query_scope_stores_session() {
     let mut sm = SyncManager::new();
     let io = MemoryStorage::new();
