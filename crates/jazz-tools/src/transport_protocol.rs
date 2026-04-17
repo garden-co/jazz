@@ -44,6 +44,15 @@ pub struct SyncBatchRequest {
     pub client_id: ClientId,
 }
 
+/// Zero-copy serialization view of `SyncBatchRequest`. Produces identical JSON
+/// but borrows the payload slice so the caller can reuse an owned buffer across
+/// frames without cloning.
+#[derive(Debug, Serialize)]
+pub struct SyncBatchRequestRef<'a> {
+    pub payloads: &'a [SyncPayload],
+    pub client_id: ClientId,
+}
+
 /// Per-payload result within a `SyncBatchResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPayloadResult {
