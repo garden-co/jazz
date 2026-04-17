@@ -3057,6 +3057,21 @@ describe("co.map schema", () => {
 
       expect(person.extraField).toEqual("extra");
     });
+
+    test("handles circular references", () => {
+      const BasePerson = co.map({
+        name: z.string(),
+      });
+
+      const Person = BasePerson.extend({
+        get friends() {
+          return co.list(Person);
+        },
+      });
+
+      expect(Person.shape.name).toBeDefined();
+      expect(Person.shape.friends).toBeDefined();
+    });
   });
 
   describe("safeExtend()", () => {
@@ -3100,6 +3115,21 @@ describe("co.map schema", () => {
       person.$jazz.set("extraField", "extra");
 
       expect(person.extraField).toEqual("extra");
+    });
+
+    test("handles circular references", () => {
+      const BasePerson = co.map({
+        name: z.string(),
+      });
+
+      const Person = BasePerson.safeExtend({
+        get friends(): co.List<any> {
+          return co.list(Person);
+        },
+      });
+
+      expect(Person.shape.name).toBeDefined();
+      expect(Person.shape.friends).toBeDefined();
     });
   });
 
