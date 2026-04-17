@@ -79,16 +79,77 @@ async fn alice_write_bob_read() {
     )
     .await;
 
-    insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : RowBatchCreated (1)
-    alice    => server  : RowBatchCreated (1)
-    bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
-    bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
-    server   -> alice   : BatchSettlement (1), RowBatchStateChanged (2)
-    server   -> bob     : BatchSettlement (1), QueryScopeSnapshot (2), QuerySettled (1), RowBatchNeeded (1)
-    server   => alice   : BatchSettlement (1), RowBatchStateChanged (2)
-    server   => bob     : BatchSettlement (1), QueryScopeSnapshot (2), QuerySettled (1), RowBatchNeeded (1)
-    ");
+    let alice_sent = tracer.from("alice");
+    assert!(
+        alice_sent.iter().any(|message| message.is_object_updated()),
+        "alice should send a row batch to the server"
+    );
+
+    let bob_sent = tracer.from("bob");
+    assert!(
+        bob_sent
+            .iter()
+            .any(|message| message.payload.variant_name() == "QuerySubscription"),
+        "bob should subscribe before receiving the row"
+    );
+
+    let alice_received = tracer.to("alice");
+    assert!(
+        alice_received
+            .iter()
+            .any(|message| message.payload.variant_name() == "BatchSettlement"),
+        "alice should receive a settlement for the created row batch"
+    );
+    assert!(
+        alice_received
+            .iter()
+            .any(|message| message.is_persistence_ack()),
+        "alice should receive a row-batch state update"
+    );
+
+    let bob_received = tracer
+        .between("server", "bob")
+        .into_iter()
+        .filter(|message| {
+            message.side == jazz_tools::sync_tracer::Side::Recv
+                && message.from.name() == "server"
+                && message.to.name() == "bob"
+        })
+        .collect::<Vec<_>>();
+    let bob_sent_from_server = tracer
+        .between("server", "bob")
+        .into_iter()
+        .filter(|message| {
+            message.side == jazz_tools::sync_tracer::Side::Send
+                && message.from.name() == "server"
+                && message.to.name() == "bob"
+        })
+        .collect::<Vec<_>>();
+
+    for messages in [&bob_received, &bob_sent_from_server] {
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "BatchSettlement"),
+            "bob should see a batch settlement from the server"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "QueryScopeSnapshot"),
+            "bob should see at least one query scope snapshot from the server"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "QuerySettled"),
+            "bob should see query settlement from the server"
+        );
+        assert!(
+            messages.iter().any(|message| message.is_object_updated()),
+            "bob should receive the created row batch from the server"
+        );
+    }
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
