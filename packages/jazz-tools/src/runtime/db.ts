@@ -23,6 +23,8 @@ import {
   Transaction as RuntimeTransaction,
   type CreateDurabilityOptions,
   type CreateOptions,
+  type UpdateDurabilityOptions,
+  type UpdateOptions,
   type UpsertDurabilityOptions,
   type UpsertOptions,
   type WasmModule,
@@ -1464,7 +1466,7 @@ export class Db {
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
-    const row = options?.id
+    const row = options
       ? client.create(table._table, values, options)
       : client.create(table._table, values);
     return transformRow(row, table._schema, table._table);
@@ -1541,10 +1543,15 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.update(id, updates);
+    client.update(id, updates, options);
   }
 
   /**
@@ -1554,7 +1561,7 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
@@ -1571,7 +1578,7 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
@@ -2045,7 +2052,7 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
   }
 
-  override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  override insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
@@ -2054,6 +2061,7 @@ class ClientBackedDb extends Db {
       values,
       this.session,
       this.attribution,
+      options,
     );
     return transformRow(row, table._schema, table._table);
   }
@@ -2061,7 +2069,7 @@ class ClientBackedDb extends Db {
   override async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options: { tier: DurabilityTier },
+    options: CreateDurabilityOptions,
   ): Promise<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2074,6 +2082,42 @@ class ClientBackedDb extends Db {
       options,
     );
     return transformRow(row, table._schema, table._table);
+  }
+
+  override upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): void {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    this.runtimeClient.upsertInternal(
+      table._table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
+    );
+  }
+
+  override async upsertDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await this.runtimeClient.upsertDurableInternal(
+      table._table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options,
+    );
   }
 
   override insertPersisted<T, Init>(
@@ -2098,18 +2142,30 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  override update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.updateInternal(id, updates, this.session, this.attribution);
+    this.runtimeClient.updateInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+      undefined,
+      options?.updatedAt,
+    );
   }
 
   override async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2120,6 +2176,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      options?.updatedAt,
     );
   }
 
@@ -2127,7 +2184,7 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2138,6 +2195,8 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      undefined,
+      options?.updatedAt,
     );
     return this.wrapPersistedWrite(
       this.runtimeClient,
@@ -2168,6 +2227,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      undefined,
     );
     return this.wrapPersistedWrite(
       this.runtimeClient,

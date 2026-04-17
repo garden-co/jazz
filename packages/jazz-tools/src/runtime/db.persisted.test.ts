@@ -203,10 +203,16 @@ describe("Db persisted writes", () => {
       session,
       "alice@writer",
       { tier: "edge" },
+      undefined,
+      undefined,
     );
-    expect(deletePersistedInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer", {
-      tier: "worker",
-    });
+    expect(deletePersistedInternal).toHaveBeenCalledWith(
+      "todo-2",
+      session,
+      "alice@writer",
+      { tier: "worker" },
+      undefined,
+    );
     expect(inserted.value()).toEqual({
       id: "todo-2",
       title: "With session",

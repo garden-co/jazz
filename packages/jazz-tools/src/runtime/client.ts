@@ -197,6 +197,10 @@ export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
 }
 
+interface TimestampOverrideOptions {
+  updatedAt?: number;
+}
+
 export type BatchMode = "direct" | "transactional";
 
 export interface VisibleBatchMember {
@@ -237,21 +241,25 @@ export interface LocalBatchRecord {
   latestSettlement: BatchSettlement | null;
 }
 
-export interface CreateOptions {
+export interface CreateOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
-export interface CreateDurabilityOptions extends WriteDurabilityOptions {
+export interface CreateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
   id?: string;
 }
 
-export interface UpsertOptions {
+export interface UpsertOptions extends TimestampOverrideOptions {
   id: string;
 }
 
-export interface UpsertDurabilityOptions extends WriteDurabilityOptions {
+export interface UpsertDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
   id: string;
 }
+
+export interface UpdateOptions extends TimestampOverrideOptions {}
+
+export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
 
 /**
  * Query row result.
@@ -264,6 +272,7 @@ export interface Row {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
+  updated_at?: number;
   batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
@@ -658,6 +667,16 @@ function generateBatchId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function normalizeUpdatedAt(updatedAt?: number): number | undefined {
+  if (updatedAt === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(updatedAt) || !Number.isInteger(updatedAt) || updatedAt < 0) {
+    throw new Error("Invalid updatedAt override. Expected a non-negative integer.");
+  }
+  return updatedAt;
+}
+
 function durabilityTierRank(tier: DurabilityTier): number {
   switch (tier) {
     case "worker":
@@ -961,6 +980,9 @@ export class SessionClient {
         values,
         schema_context: this.client.getSchemaContext(),
         ...(options?.id ? { object_id: options.id } : {}),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -994,13 +1016,19 @@ export class SessionClient {
       }
     }
 
-    await this.update(options.id, values as Record<string, Value>);
+    await this.update(options.id, values as Record<string, Value>, {
+      updatedAt: options.updatedAt,
+    });
   }
 
   /**
    * Update a row as this session's user.
    */
-  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
+  async update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: UpdateOptions,
+  ): Promise<void> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -1014,6 +1042,9 @@ export class SessionClient {
         object_id: objectId,
         updates: updateArray,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -1399,11 +1430,12 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchContext) {
+    if (!session && attribution === undefined && !batchContext && updatedAt === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchContext) {
+    if (attribution === undefined && session && !batchContext && updatedAt === undefined) {
       return JSON.stringify(session);
     }
 
@@ -1413,6 +1445,9 @@ export class JazzClient {
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
+    }
+    if (updatedAt !== undefined) {
+      payload.updated_at = normalizeUpdatedAt(updatedAt);
     }
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
@@ -1663,7 +1698,7 @@ export class JazzClient {
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
   upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.upsertInternal(table, values, options.id);
+    this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
   }
 
   /**
@@ -1680,18 +1715,31 @@ export class JazzClient {
   ): Row {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined || batchContext
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      options?.updatedAt !== undefined
         ? options?.id
           ? this.requireSessionWriteMethod("insertWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution, batchContext),
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options.updatedAt,
+              ),
               options.id,
             )
           : this.requireSessionWriteMethod("insertWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution, batchContext),
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options?.updatedAt,
+              ),
             )
         : options?.id
           ? this.runtime.insert(table, values, options.id)
@@ -1712,9 +1760,13 @@ export class JazzClient {
     objectId: string,
     session?: Session,
     attribution?: string,
+    updatedAt?: number,
   ): void {
     try {
-      this.createInternal(table, values, session, attribution, { id: objectId });
+      this.createInternal(table, values, session, attribution, {
+        id: objectId,
+        updatedAt,
+      });
       return;
     } catch (error) {
       if (!isObjectAlreadyExistsError(error)) {
@@ -1722,7 +1774,14 @@ export class JazzClient {
       }
     }
 
-    this.updateInternal(objectId, values as Record<string, Value>, session, attribution);
+    this.updateInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      undefined,
+      updatedAt,
+    );
   }
 
   /**
@@ -1761,19 +1820,19 @@ export class JazzClient {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined
+      effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
         ? options?.id
           ? await this.requireSessionWriteMethod("insertDurableWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options.updatedAt),
               tier,
               options.id,
             )
           : await this.requireSessionWriteMethod("insertDurableWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
               tier,
             )
         : options?.id
@@ -1833,7 +1892,7 @@ export class JazzClient {
     objectId: string,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: UpsertDurabilityOptions,
   ): Promise<void> {
     try {
       await this.createDurableInternal(table, values, session, attribution, {
@@ -1853,6 +1912,7 @@ export class JazzClient {
       session,
       attribution,
       options,
+      options?.updatedAt,
     );
   }
 
@@ -1893,8 +1953,8 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.updateInternal(objectId, updates);
+  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): void {
+    this.updateInternal(objectId, updates, undefined, undefined, undefined, options?.updatedAt);
   }
 
   /**
@@ -1907,13 +1967,14 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
       return;
     }
@@ -1926,9 +1987,16 @@ export class JazzClient {
   async updateDurable(
     objectId: string,
     updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
-    await this.updateDurableInternal(objectId, updates, undefined, undefined, options);
+    await this.updateDurableInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      options,
+      options?.updatedAt,
+    );
   }
 
   /**
@@ -1940,15 +2008,16 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
@@ -1971,15 +2040,16 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): PersistedWrite<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const result =
-      effectiveSession || attribution !== undefined || batchContext
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
         ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
             objectId,
             updates,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
             tier,
           )
         : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
@@ -2002,12 +2072,13 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
       return;
     }
@@ -2030,13 +2101,14 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     options?: WriteDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("deleteDurableWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
@@ -2054,14 +2126,15 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): PersistedWrite<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const result =
-      effectiveSession || attribution !== undefined || batchContext
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
         ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
             objectId,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
             tier,
           )
         : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);

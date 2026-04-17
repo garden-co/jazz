@@ -3850,6 +3850,7 @@ fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     let bob_attribution = WriteContext {
         session: None,
         attribution: Some("bob".into()),
+        updated_at: None,
         batch_mode: None,
         batch_id: None,
         target_branch_name: None,
@@ -3978,6 +3979,84 @@ fn provenance_magic_columns_capture_insert_update_and_system_authors() {
 }
 
 #[test]
+fn provenance_magic_columns_allow_explicit_updated_at_override() {
+    let sync_manager = SyncManager::new();
+    let schema = provenance_notes_schema();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+    let alice_session = Session::new("alice");
+    let note = qm
+        .insert_with_session(
+            &mut storage,
+            "notes",
+            &[Value::Text("draft".into())],
+            Some(&alice_session),
+        )
+        .expect("alice-authored note should insert");
+
+    let initial = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("title", Value::Text("draft".into()))
+            .select(&["$createdAt", "$updatedAt"])
+            .build(),
+        None,
+    );
+    assert_eq!(initial.len(), 1, "draft note should be queryable");
+    let Value::Timestamp(initial_created_at) = initial[0].1[0] else {
+        panic!("$createdAt should decode as a timestamp")
+    };
+
+    let custom_updated_at = initial_created_at + 10_000;
+    let bob_backfill = WriteContext {
+        session: None,
+        attribution: Some("bob".into()),
+        updated_at: Some(custom_updated_at),
+        batch_mode: None,
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    qm.update_with_write_context(
+        &mut storage,
+        note.row_id,
+        &[Value::Text("backfilled".into())],
+        Some(&bob_backfill),
+    )
+    .expect("explicit updated_at override should succeed");
+
+    let updated = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("title", Value::Text("backfilled".into()))
+            .select(&[
+                "title",
+                "$createdBy",
+                "$updatedBy",
+                "$createdAt",
+                "$updatedAt",
+            ])
+            .build(),
+        None,
+    );
+    assert_eq!(updated.len(), 1, "backfilled note should remain queryable");
+    assert_eq!(updated[0].1[0], Value::Text("backfilled".into()));
+    assert_eq!(updated[0].1[1], Value::Text("alice".into()));
+    assert_eq!(updated[0].1[2], Value::Text("bob".into()));
+    let Value::Timestamp(updated_created_at) = updated[0].1[3] else {
+        panic!("updated $createdAt should decode as a timestamp")
+    };
+    let Value::Timestamp(updated_updated_at) = updated[0].1[4] else {
+        panic!("updated $updatedAt should decode as a timestamp")
+    };
+    assert_eq!(updated_created_at, initial_created_at);
+    assert_eq!(updated_updated_at, custom_updated_at);
+}
+
+#[test]
 fn created_by_permissions_allow_creators_and_hide_system_rows() {
     let sync_manager = SyncManager::new();
     let schema = authorship_permissions_schema();
@@ -3989,6 +4068,7 @@ fn created_by_permissions_allow_creators_and_hide_system_rows() {
     let alice_attribution = WriteContext {
         session: None,
         attribution: Some("alice".into()),
+        updated_at: None,
         batch_mode: None,
         batch_id: None,
         target_branch_name: None,
