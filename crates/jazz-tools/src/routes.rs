@@ -33,8 +33,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schemas", get(schema_hashes_handler))
         .route("/admin/schemas", post(publish_schema_handler))
         .route("/admin/permissions/head", get(permissions_head_handler))
-        .route("/admin/permissions", get(permissions_handler))
-        .route("/admin/permissions", post(publish_permissions_handler))
+        .route(
+            "/admin/permissions",
+            get(permissions_handler).post(publish_permissions_handler),
+        )
         .route("/admin/migrations", post(publish_migration_handler))
         .route(
             "/admin/introspection/subscriptions",
