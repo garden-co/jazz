@@ -115,7 +115,9 @@ needing to understand policy evaluation itself.
 The current runtime also carries an explicit row-policy mode:
 
 - `PermissiveLocal`: no compiled policy bundle is loaded in this runtime
-- `Enforcing`: a compiled policy bundle is loaded, even if it is empty
+- `Enforcing`: this runtime must fail closed for missing explicit policy,
+  either because a compiled policy bundle is loaded or because a dynamic server
+  is waiting for its current permissions head
 
 That mode is shared across local query compilation, subscription filtering,
 server-side authorization, and sync-scope derivation.
@@ -134,6 +136,8 @@ In `Enforcing`, missing explicit clauses deny by default:
   denies
 - inherited and recursive checks fail closed when the parent policy or graph
   context cannot be resolved
+- dynamic servers that have learned schema but not yet learned a permissions
+  head stay closed instead of temporarily behaving like local permissive runtimes
 
 ## Key Files
 

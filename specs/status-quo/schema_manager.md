@@ -114,9 +114,10 @@ A server may learn schemas gradually from connected clients through catalogue
 sync. It can then answer queries for several client schema hashes at once
 without restarting or rebuilding the runtime from scratch.
 
-Backends and sync runtimes are normally enforcing runtimes because they load or
-receive permissions bundles explicitly. An empty loaded bundle is still distinct
-from "no bundle loaded" and still means explicit grants only.
+Dynamic servers boot in fail-closed mode even before they have learned the
+current permissions head. Once they receive a permissions head and its bundle,
+they keep enforcing with that authorization schema. An empty loaded bundle is
+still distinct from "no bundle loaded" and still means explicit grants only.
 
 The JS/native runtime schema wire payload now carries that loaded-bundle bit so
 an empty loaded bundle stays distinguishable from a structural-schema-only boot.

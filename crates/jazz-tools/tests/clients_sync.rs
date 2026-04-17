@@ -55,8 +55,8 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 async fn fresh_client_resolves_object_with_deep_update_history() {
     const DEEP_HISTORY_UPDATES: usize = 100;
 
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
     let writer =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
             .await
@@ -140,11 +140,12 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 
 #[tokio::test]
 async fn jazz_tools_cli_two_clients_sync_values() {
-    let server = TestingServer::start().await;
-    let client_a = JazzClient::connect(server.make_client_context(test_schema()))
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(test_schema()))
+    let client_b = JazzClient::connect(server.make_client_context(schema))
         .await
         .expect("connect client b");
 
@@ -334,13 +335,14 @@ async fn upsert_uses_external_uuidv7_for_insert_and_updates_existing_row() {
 
 #[tokio::test]
 async fn jazz_tools_cli_two_different_users_sync_values() {
-    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
     let client_alice =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "alice-sync-user"))
+        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-sync-user"))
             .await
             .expect("connect alice client");
     let client_bob =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "bob-sync-user"))
+        JazzClient::connect(server.make_client_context_for_user(schema, "bob-sync-user"))
             .await
             .expect("connect bob client");
 

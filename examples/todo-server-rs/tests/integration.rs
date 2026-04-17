@@ -2,6 +2,9 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+#[path = "../../../crates/jazz-tools/tests/support/permissions.rs"]
+mod permissions_support;
+
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -752,6 +755,13 @@ async fn test_server_resync() {
             sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
+        let permissions_schema = test_schema();
+        permissions_support::publish_allow_all_permissions(
+            &server.base_url(),
+            TEST_ADMIN_SECRET,
+            &permissions_schema,
+        )
+        .await;
 
         // Create a todo
         let values = todo_values("Synced todo", "");

@@ -8,6 +8,7 @@
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getTestingServerInfo } from "./testing-server.js";
+import type { TestingServerInfo } from "./testing-server.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 
 // ---------------------------------------------------------------------------
@@ -263,9 +264,10 @@ export async function createSyncedDb(
   ctx: TestCleanup,
   label: string,
   secret?: string,
+  testingServer?: TestingServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+  const { appId, serverUrl, adminSecret } = testingServer ?? (await getTestingServerInfo());
   return ctx.track(
     await createDb({
       appId,

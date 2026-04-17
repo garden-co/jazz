@@ -51,8 +51,8 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 #[tokio::test]
 async fn concurrent_updates_resolve_to_lww_winner() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -174,8 +174,8 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 #[tokio::test]
 async fn concurrent_creates_both_survive() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -261,8 +261,8 @@ async fn concurrent_creates_both_survive() {
 #[tokio::test]
 async fn rapid_concurrent_updates_converge() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -386,8 +386,8 @@ async fn rapid_concurrent_updates_converge() {
 #[tokio::test]
 async fn fresh_client_sees_lww_winner_after_conflict() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -542,8 +542,8 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 #[tokio::test]
 async fn subscription_reflects_concurrent_update() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -615,8 +615,8 @@ async fn subscription_reflects_concurrent_update() {
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -711,8 +711,8 @@ async fn sequential_updates_preserve_latest() {
 #[tokio::test]
 async fn concurrent_edits_on_different_fields() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -843,8 +843,8 @@ async fn establish_offline_reconnect_baseline(
     alice_user_id: &str,
     bob_user_id: &str,
 ) -> OfflineReconnectBaseline {
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)

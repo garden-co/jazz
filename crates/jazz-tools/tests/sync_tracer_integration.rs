@@ -29,15 +29,17 @@ fn test_schema() -> jazz_tools::Schema {
 #[tokio::test]
 async fn alice_write_bob_read() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema.clone())
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -46,7 +48,7 @@ async fn alice_write_bob_read() {
 
     let bob = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("bob")
         .with_tracer(&tracer, "bob")
         .ready_on("todos", Duration::from_secs(30))
@@ -102,15 +104,17 @@ async fn alice_write_bob_read() {
 #[tokio::test]
 async fn bob_updates_alice_todo() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema.clone())
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -119,7 +123,7 @@ async fn bob_updates_alice_todo() {
 
     let bob = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("bob")
         .with_tracer(&tracer, "bob")
         .ready_on("todos", Duration::from_secs(30))
@@ -223,15 +227,17 @@ async fn bob_updates_alice_todo() {
 #[tokio::test]
 async fn single_writer_flow() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -270,15 +276,17 @@ async fn single_writer_flow() {
 #[tokio::test]
 async fn named_object_trace() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
