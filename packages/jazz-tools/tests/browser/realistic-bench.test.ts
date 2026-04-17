@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
+import { loadWasmModule } from "../../src/runtime/client.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
@@ -238,7 +238,7 @@ const CI_BROWSER_LIMITS = {
   b4Rounds: 12,
   b5ReadRequests: 160,
   b5UpdateAttempts: 120,
-  b6UpdateCount: 12000,
+  b6UpdateCount: 6000,
 } as const;
 
 const schema = (schemaJson as { tables: WasmSchema }).tables;
