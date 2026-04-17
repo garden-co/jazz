@@ -674,11 +674,10 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
     let v1_schema = schema_v1();
     publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &v1_schema).await;
     push_catalogue_in_memory(
-        &server.base_url(),
+        server.server_state(),
         server.app_id(),
         "dev",
         "main",
-        server.admin_secret(),
         &[v1_schema, schema_v2()],
         &[v1_to_v2_lens()],
     )

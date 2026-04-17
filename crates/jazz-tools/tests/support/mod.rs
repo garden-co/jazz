@@ -9,11 +9,14 @@ use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
+use reqwest::Client;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -87,6 +90,23 @@ impl SyncServerClient {
             .error_for_status()?;
         Ok(())
     }
+}
+
+fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut url = reqwest::Url::parse(server_url)?;
+    let route_prefix = match url.path().trim_end_matches('/') {
+        "" | "/" => String::new(),
+        path => path.to_string(),
+    };
+
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Ok((
+        url.to_string().trim_end_matches('/').to_string(),
+        route_prefix,
+    ))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -549,6 +569,29 @@ where
         }
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_base_url;
+
+    #[test]
+    fn split_base_url_handles_plain_origin() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "");
+    }
+
+    #[test]
+    fn split_base_url_preserves_route_prefix_without_trailing_slash() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337/api/v1/").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "/api/v1");
     }
 }
 
