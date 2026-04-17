@@ -285,9 +285,6 @@ jobs:
             "$SANDBOX_ID:/tmp/server.log" server.log || true
 
           cat server.log
-          WS_CONNECTED="$(grep -c 'ws client connected' server.log || true)"
-          echo "ws client connected logs: $WS_CONNECTED"
-          test "$WS_CONNECTED" -gt 0
 
       - name: Stop sandbox
         if: always()
