@@ -321,14 +321,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: Option<ObjectId>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
-        if object_id.is_some() {
-            return Err(RuntimeError::WriteError(
-                "caller-supplied row ids are not supported on this branch".to_string(),
-            ));
-        }
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result = core.insert(table, values, owned.as_ref())?;
+        let result = core.insert_with_id(table, values, object_id, owned.as_ref())?;
         Ok(result)
     }
 
@@ -353,15 +348,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<PersistedInsertResult, RuntimeError> {
-        if object_id.is_some() {
-            return Err(RuntimeError::WriteError(
-                "caller-supplied row ids are not supported on this branch".to_string(),
-            ));
-        }
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let (result, _batch_id, receiver) =
-            core.insert_persisted_with_batch_id(table, values, owned.as_ref(), tier)?;
+        let (result, receiver) =
+            core.insert_persisted_with_id(table, values, object_id, owned.as_ref(), tier)?;
         Ok((result, receiver))
     }
 

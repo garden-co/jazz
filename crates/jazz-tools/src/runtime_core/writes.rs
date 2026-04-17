@@ -325,12 +325,35 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertedRow, RuntimeError> {
-        if object_id.is_some() {
-            return Err(RuntimeError::WriteError(
-                "caller-supplied row ids are not supported on this branch".to_string(),
-            ));
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_id = result.row_id;
+        let row_values = result.row_values;
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            self.track_local_batch(
+                row_id,
+                result.batch_id,
+                BatchMode::Transactional,
+                self.default_requested_tier_for_transaction(),
+            )?;
         }
-        self.insert(table, values, write_context)
+        debug!(object_id = %row_id, "inserted");
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok((row_id, row_values))
     }
 
     /// Update a row (partial update by column name).
@@ -435,12 +458,52 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        if object_id.is_some() {
-            return Err(RuntimeError::WriteError(
-                "caller-supplied row ids are not supported on this branch".to_string(),
-            ));
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_id = result.row_id;
+        let batch_id = result.batch_id;
+        let row_values = result.row_values;
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            self.track_local_batch(
+                row_id,
+                batch_id,
+                BatchMode::Transactional,
+                self.default_requested_tier_for_transaction(),
+            )?;
+        } else {
+            self.track_local_batch(row_id, batch_id, BatchMode::Direct, tier)?;
         }
-        self.insert_persisted(table, values, write_context, tier)
+        let (sender, receiver) = oneshot::channel();
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(Ok(()));
+        } else {
+            let row_batch_key = self.ack_watcher_key(row_id, batch_id, write_context);
+            self.ack_watchers
+                .entry(row_batch_key)
+                .or_default()
+                .push((tier, sender));
+        }
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(((row_id, row_values), receiver))
     }
 
     /// Insert a row and return the logical batch id plus a receiver that

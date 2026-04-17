@@ -1580,15 +1580,15 @@ mod tests {
         create_router(state)
     }
 
-    /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
+    /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
     fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
         let row_id =
             ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
-            Vec::<crate::commit::CommitId>::new(),
+            Vec::<crate::row_histories::BatchId>::new(),
             b"alice".to_vec(),
             crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
             Default::default(),
@@ -1596,7 +1596,7 @@ mod tests {
             None,
         );
 
-        crate::sync_manager::SyncPayload::RowVersionCreated {
+        crate::sync_manager::SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         }
