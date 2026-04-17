@@ -995,7 +995,7 @@ mod install_transport_tests {
     }
 
     #[test]
-    fn install_transport_seeds_catalogue_hash_and_registers_handle() {
+    fn install_transport_seeds_catalogue_hash_and_declared_schema_hash() {
         let mut core = create_test_runtime();
 
         let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
@@ -1015,10 +1015,21 @@ mod install_transport_tests {
             .as_ref()
             .unwrap()
             .catalogue_state_hash_for_test();
+        let expected_schema_hash = core.schema_manager().current_hash().to_string();
+        let handle_schema_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .declared_schema_hash_for_test();
         assert_eq!(
             handle_hash.as_deref(),
             Some(expected_hash.as_str()),
             "install_transport must seed the handle's catalogue_state_hash",
+        );
+        assert_eq!(
+            handle_schema_hash.as_deref(),
+            Some(expected_schema_hash.as_str()),
+            "install_transport must seed the handle's declared_schema_hash",
         );
     }
 

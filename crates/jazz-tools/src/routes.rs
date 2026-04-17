@@ -1076,6 +1076,23 @@ fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
     Ok(SchemaHash::from_bytes(hash_bytes))
 }
 
+fn connection_schema_diagnostics_from_handshake(
+    state: &Arc<ServerState>,
+    handshake: &crate::transport_manager::AuthHandshake,
+) -> Result<
+    Option<crate::sync_manager::ConnectionSchemaDiagnostics>,
+    crate::runtime_tokio::RuntimeError,
+> {
+    let Some(client_schema_hash) = handshake.declared_schema_hash() else {
+        return Ok(None);
+    };
+
+    let diagnostics = state
+        .runtime
+        .with_schema_manager(|sm| sm.connection_schema_diagnostics(client_schema_hash))?;
+    Ok(diagnostics.has_issues().then_some(diagnostics))
+}
+
 fn parse_object_id_param(object_id_text: &str) -> Result<ObjectId, String> {
     let uuid = Uuid::parse_str(object_id_text)
         .map_err(|_| "invalid object id: expected UUID".to_string())?;
@@ -1331,28 +1348,21 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     }
 
-    // 5b. Dispatch connection schema diagnostics if client sent a schema hash.
-    if let Some(ref hash_str) = handshake.catalogue_state_hash
-        && let Ok(client_schema_hash) = parse_schema_hash_param(hash_str)
-    {
-        match state
-            .runtime
-            .with_schema_manager(|sm| sm.connection_schema_diagnostics(client_schema_hash))
-        {
-            Ok(diagnostics) if diagnostics.has_issues() => {
-                state.connection_event_hub.dispatch_payload(
-                    client_id,
-                    crate::sync_manager::SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
-                );
-            }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::error!(
-                    %client_id,
-                    %client_schema_hash,
-                    "failed to compute connection schema diagnostics: {err}"
-                );
-            }
+    // 5b. Dispatch connection schema diagnostics if client sent a declared schema hash.
+    match connection_schema_diagnostics_from_handshake(&state, &handshake) {
+        Ok(Some(diagnostics)) => {
+            state.connection_event_hub.dispatch_payload(
+                client_id,
+                crate::sync_manager::SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(
+                %client_id,
+                declared_schema_hash = ?handshake.declared_schema_hash,
+                "failed to compute connection schema diagnostics: {err}"
+            );
         }
     }
 
@@ -1705,6 +1715,7 @@ mod tests {
             client_id: client_id.to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
 
         // Authenticate should fail — the `authenticate_ws_handshake` function is
@@ -2969,6 +2980,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ws_handler_uses_declared_schema_hash_for_connection_diagnostics() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let state = make_state_with_schema(schema).await;
+        let declared_hash = SchemaHash::from_bytes([9; 32]);
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
+            declared_schema_hash: Some(declared_hash.to_string()),
+        };
+
+        let diagnostics = connection_schema_diagnostics_from_handshake(&state, &handshake)
+            .expect("compute diagnostics")
+            .expect("declared schema mismatch should produce diagnostics");
+
+        assert_eq!(diagnostics.client_schema_hash, declared_hash);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ws_handler_logs_when_connection_is_established() {
         // Exercise the real /ws route so the assertion covers the actual
@@ -2999,6 +3035,7 @@ mod tests {
                 ..Default::default()
             },
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
         let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
         ws.send(WsMessage::Binary(
