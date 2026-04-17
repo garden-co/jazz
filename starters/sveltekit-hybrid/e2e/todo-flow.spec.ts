@@ -49,6 +49,12 @@ async function signIn(page: Page, credentials: { email: string; password: string
 
 async function signOut(page: Page) {
   await page.getByRole("button", { name: "Sign out" }).click();
+  // Wait for the sign-out button to disappear before checking app state —
+  // otherwise waitForApp returns immediately because the pre-signout widget
+  // is still mounted.
+  await expect(page.getByRole("button", { name: "Sign out" })).not.toBeVisible({
+    timeout: TIMEOUT,
+  });
   await waitForApp(page);
 }
 
@@ -73,8 +79,8 @@ test("todo persistence across anonymous→authenticated→logout→login", async
   await addTodo(page, todo2);
 
   await signOut(page);
-  await expect(page.getByText(todo1)).toHaveCount(0);
-  await expect(page.getByText(todo2)).toHaveCount(0);
+  await expect(page.getByText(todo1)).toHaveCount(0, { timeout: TIMEOUT });
+  await expect(page.getByText(todo2)).toHaveCount(0, { timeout: TIMEOUT });
 
   await signIn(page, credentials);
   await expect(page.getByText(todo1)).toBeVisible({ timeout: TIMEOUT });
