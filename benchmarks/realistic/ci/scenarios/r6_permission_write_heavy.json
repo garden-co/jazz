@@ -10,6 +10,6 @@
   ],
   "recursive_depths": [1, 3, 6],
   "shared_chain_depth": 4,
-  "docs_per_folder": 24,
-  "denied_docs": 96
+  "docs_per_folder": 16,
+  "denied_docs": 64
 }
