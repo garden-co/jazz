@@ -167,7 +167,7 @@ describe("Db worker runtime bootstrap", () => {
     ]);
   });
 
-  it("spawns the browser worker from an HTTP URL and passes the wasm URL through bootstrap params", async () => {
+  it("uses the static bundler-detected URL pattern when no runtimeSources are provided", async () => {
     const spawnedWorkerUrls: string[] = [];
 
     class FakeWorker extends EventTarget {
@@ -203,9 +203,44 @@ describe("Db worker runtime bootstrap", () => {
     await db.shutdown();
 
     expect(loadWasmModuleMock).toHaveBeenCalledTimes(1);
-    expect(spawnedWorkerUrls).toEqual([
-      "http://localhost:3000/worker/jazz-worker.js?jazz-wasm-url=http%3A%2F%2Flocalhost%3A3000%2Fjazz_wasm_bg.wasm",
-    ]);
+    expect(spawnedWorkerUrls).toHaveLength(1);
+    expect(spawnedWorkerUrls[0]).toMatch(/worker\/jazz-worker\.js$/);
+  });
+
+  it("includes a fallbackWasmUrl in bridge options when no runtimeSources are provided", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await Db.createWithWorker({
+      appId: "worker-bootstrap-fallback-wasm",
+      driver: { type: "persistent", dbName: "worker-bootstrap-fallback-wasm" },
+    });
+
+    const options = (db as any).buildWorkerBridgeOptions("{}");
+    await db.shutdown();
+
+    expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
   });
 
   it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {
