@@ -1050,6 +1050,83 @@ mod install_transport_tests {
             "remote query should stay pending until the transport finishes connecting"
         );
     }
+
+    /// Guards the fix for CI expo-e2e failing when the WS transport never
+    /// completes: pending_servers must time out so initial subscriptions
+    /// don't hold the first delivery forever.
+    #[test]
+    fn pending_server_frontier_releases_after_timeout() {
+        use crate::sync_manager::PENDING_SERVER_TIMEOUT;
+
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        assert!(
+            core.schema_manager()
+                .query_manager()
+                .sync_manager()
+                .has_servers_or_pending_servers(),
+            "pending_servers must be active immediately after install_transport"
+        );
+
+        std::thread::sleep(PENDING_SERVER_TIMEOUT + std::time::Duration::from_millis(100));
+
+        assert!(
+            !core
+                .schema_manager()
+                .query_manager()
+                .sync_manager()
+                .has_servers_or_pending_servers(),
+            "pending_servers must time out so local subscriptions can deliver"
+        );
+    }
+
+    /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
+    /// before the timeout), draining the event must release the pending-server
+    /// hold immediately so the user doesn't pay the timeout on cold-start.
+    #[test]
+    fn connect_failed_event_releases_pending_server_immediately() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let server_id = core.transport.as_ref().unwrap().server_id;
+
+        assert!(
+            core.schema_manager()
+                .query_manager()
+                .sync_manager()
+                .has_servers_or_pending_servers(),
+            "pending_servers must be active immediately after install_transport"
+        );
+
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::ConnectFailed {
+                reason: "dns lookup failed".into(),
+            },
+        );
+
+        assert!(
+            !core
+                .schema_manager()
+                .query_manager()
+                .sync_manager()
+                .has_servers_or_pending_servers(),
+            "ConnectFailed must release pending_servers without waiting for the timeout"
+        );
+    }
 }
 
 fn documents_query_by_title(title: &str) -> Query {

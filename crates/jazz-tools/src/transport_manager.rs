@@ -30,6 +30,14 @@ pub enum TransportInbound {
         sequence: Option<u64>,
     },
     Disconnected,
+    /// First connect/handshake attempt after `install_transport` failed before
+    /// the handshake completed (DNS/TCP/TLS error, or handshake network error).
+    /// Consumers use this to release the initial frontier hold so subscriptions
+    /// can deliver local state while the transport keeps retrying in the
+    /// background.
+    ConnectFailed {
+        reason: String,
+    },
     /// Server rejected the auth handshake with an Unauthorized error.
     /// The transport suspends retries and waits for `TransportControl::UpdateAuth`
     /// or `TransportControl::Shutdown` before attempting a new connection.
@@ -365,7 +373,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(Ok(ws)) => ws,
                 ControlOrPhase::Phase(Err(e)) => {
-                    tracing::warn!("ws connect failed: {e}");
+                    let reason = format!("{e}");
+                    tracing::warn!("ws connect failed: {reason}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason });
+                    self.tick.notify();
                     let backoff_outcome = tokio::select! {
                         biased;
                         ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
@@ -463,6 +476,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason: e });
+                    self.tick.notify();
                     ws.close().await;
                 }
             }
@@ -570,7 +587,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(Ok(ws)) => ws,
                 ControlOrPhase::Phase(Err(e)) => {
-                    tracing::warn!("ws connect failed: {e}");
+                    let reason = format!("{e}");
+                    tracing::warn!("ws connect failed: {reason}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason });
+                    self.tick.notify();
                     let backoff_outcome = futures::select! {
                         ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
                         _ = self.reconnect.backoff().fuse() => ControlOrPhase::Phase(()),
@@ -664,6 +686,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason: e });
+                    self.tick.notify();
                     ws.close().await;
                 }
             }

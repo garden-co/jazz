@@ -16,8 +16,8 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: Record<string, unknown>): any
-  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
+  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
+  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any): void
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): void
   delete(objectId: string): void
@@ -29,8 +29,8 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  insertDurable(table: string, values: Record<string, unknown>, tier: string): Promise<any>
-  insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string): Promise<any>
+  insertDurable(table: string, values: Record<string, unknown>, tier: string, objectId?: string | undefined | null): Promise<any>
+  insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string, objectId?: string | undefined | null): Promise<any>
   updateDurable(objectId: string, values: any, tier: string): Promise<void>
   updateDurableWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): Promise<void>
   deleteDurable(objectId: string, tier: string): Promise<void>

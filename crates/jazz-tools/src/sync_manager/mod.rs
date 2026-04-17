@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
@@ -7,6 +8,13 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
+
+/// How long an installed transport may sit in `pending_servers` before callers
+/// treat it as offline. Caps the initial-frontier hold introduced by the
+/// "Hold remote query frontier while transport connects" change — without a
+/// bound, a never-connecting transport stalls every first subscription
+/// delivery forever.
+pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 
 // Module declarations
 pub mod forwarding;
@@ -40,7 +48,9 @@ pub struct SyncManager {
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
-    pub(super) pending_servers: HashSet<ServerId>,
+    /// Servers whose transport handshake is still in flight. Each entry records
+    /// when the transport was installed so we can time it out.
+    pub(super) pending_servers: HashMap<ServerId, Instant>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -307,7 +317,7 @@ impl SyncManager {
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
-            pending_servers: HashSet::new(),
+            pending_servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -511,7 +521,14 @@ impl SyncManager {
         if self.servers.contains_key(&server_id) {
             return;
         }
-        self.pending_servers.insert(server_id);
+        self.pending_servers.insert(server_id, Instant::now());
+    }
+
+    /// Drop the pending flag for a transport whose first connect/handshake
+    /// attempt has failed. Lets held initial subscriptions deliver against
+    /// local state while the transport keeps retrying in the background.
+    pub fn remove_pending_server(&mut self, server_id: ServerId) {
+        self.pending_servers.remove(&server_id);
     }
 
     /// Remove a server connection.
@@ -579,7 +596,13 @@ impl SyncManager {
     }
 
     pub fn has_servers_or_pending_servers(&self) -> bool {
-        !self.servers.is_empty() || !self.pending_servers.is_empty()
+        if !self.servers.is_empty() {
+            return true;
+        }
+        let now = Instant::now();
+        self.pending_servers
+            .values()
+            .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
     }
 
     /// Get client state.

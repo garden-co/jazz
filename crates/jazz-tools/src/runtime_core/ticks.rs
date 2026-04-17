@@ -258,6 +258,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     crate::transport_manager::TransportInbound::Disconnected => {
                         self.remove_server(server_id);
                     }
+                    crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
+                        debug!(%reason, "transport connect failed; releasing pending-server hold");
+                        self.schema_manager
+                            .query_manager_mut()
+                            .sync_manager_mut()
+                            .remove_pending_server(server_id);
+                    }
                     crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                         self.remove_server(server_id);
                         if let Some(ref cb) = self.auth_failure_callback {
@@ -512,6 +519,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
+            }
+            crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
+                debug!(%reason, "transport connect failed; releasing pending-server hold");
+                self.schema_manager
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .remove_pending_server(server_id);
             }
             crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                 self.remove_server(server_id);
