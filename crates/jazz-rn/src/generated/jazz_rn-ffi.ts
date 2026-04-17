@@ -106,6 +106,7 @@ interface NativeModuleInterface {
     ptr: bigint,
     table: Uint8Array,
     valuesJson: Uint8Array,
+    objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
@@ -113,6 +114,7 @@ interface NativeModuleInterface {
     table: Uint8Array,
     valuesJson: Uint8Array,
     writeContextJson: Uint8Array,
+    objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
