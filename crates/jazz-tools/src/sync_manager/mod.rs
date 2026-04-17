@@ -37,6 +37,7 @@ pub struct SyncManager {
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
+    pub(super) pending_servers: HashSet<ServerId>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -78,6 +79,7 @@ impl std::fmt::Debug for SyncManager {
                 &self.allow_unprivileged_schema_catalogue_writes,
             )
             .field("servers", &self.servers)
+            .field("pending_servers", &self.pending_servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
             .field("outbox", &self.outbox)
@@ -181,6 +183,7 @@ impl SyncManager {
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
+            pending_servers: HashSet::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -259,6 +262,7 @@ impl SyncManager {
         skip_catalogue_sync: bool,
         storage: &H,
     ) {
+        self.pending_servers.remove(&server_id);
         self.servers.insert(server_id, ServerState::default());
         self.queue_full_sync_to_server_from_storage(server_id, storage);
         if !skip_catalogue_sync {
@@ -266,9 +270,18 @@ impl SyncManager {
         }
     }
 
+    /// Mark a transport-owned server as pending while the connection handshake runs.
+    pub fn add_pending_server(&mut self, server_id: ServerId) {
+        if self.servers.contains_key(&server_id) {
+            return;
+        }
+        self.pending_servers.insert(server_id);
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
+        self.pending_servers.remove(&server_id);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
@@ -327,6 +340,10 @@ impl SyncManager {
 
     pub fn has_servers(&self) -> bool {
         !self.servers.is_empty()
+    }
+
+    pub fn has_servers_or_pending_servers(&self) -> bool {
+        !self.servers.is_empty() || !self.pending_servers.is_empty()
     }
 
     /// Get client state.
