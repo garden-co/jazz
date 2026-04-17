@@ -524,11 +524,19 @@ export class CoMapSchema<
     Owner,
     DefaultResolveQuery
   > {
+    const extendedShape = {} as z.core.util.Extend<Shape, ExtendShape>;
+
+    Object.defineProperties(
+      extendedShape,
+      Object.getOwnPropertyDescriptors(this.shape),
+    );
+    Object.defineProperties(
+      extendedShape,
+      Object.getOwnPropertyDescriptors(shape),
+    );
+
     return this.copy({
-      shape: {
-        ...this.shape,
-        ...shape,
-      } as z.core.util.Extend<Shape, ExtendShape>,
+      shape: extendedShape,
     });
   }
 
@@ -549,11 +557,19 @@ export class CoMapSchema<
     Owner,
     DefaultResolveQuery
   > {
+    const extendedShape = {} as z.core.util.Extend<Shape, ExtendShape>;
+
+    Object.defineProperties(
+      extendedShape,
+      Object.getOwnPropertyDescriptors(this.shape),
+    );
+    Object.defineProperties(
+      extendedShape,
+      Object.getOwnPropertyDescriptors(shape),
+    );
+
     return this.copy({
-      shape: {
-        ...this.shape,
-        ...shape,
-      } as z.core.util.Extend<Shape, ExtendShape>,
+      shape: extendedShape,
     });
   }
 
