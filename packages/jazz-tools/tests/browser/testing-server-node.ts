@@ -1,5 +1,4 @@
 import type { BrowserContext, Route } from "playwright";
-
 type JazzNapiTestingServer = import("jazz-napi").TestingServer;
 
 interface StartedTestingServer {
@@ -10,6 +9,7 @@ interface StartedTestingServer {
 }
 
 let testingServerPromise: Promise<StartedTestingServer> | null = null;
+const isolatedTestingServers = new Set<Promise<StartedTestingServer>>();
 const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
@@ -66,21 +66,56 @@ export async function testingServerJwtForUser(
   return server.jwtForUser(userId, claims);
 }
 
+/**
+ * Starts a new isolated testing server and returns its info.
+ */
+export async function isolatedTestingServerInfo(): Promise<{
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+}> {
+  const startedServerPromise = startTestingServer();
+  isolatedTestingServers.add(startedServerPromise);
+
+  try {
+    const { appId, serverUrl, adminSecret } = await startedServerPromise;
+    return { appId, serverUrl, adminSecret };
+  } catch (error) {
+    isolatedTestingServers.delete(startedServerPromise);
+    throw error;
+  }
+}
+
 export async function stopTestingServer(): Promise<void> {
   const runningServer = testingServerPromise;
   testingServerPromise = null;
+  const isolatedServerPromises = [...isolatedTestingServers];
+  isolatedTestingServers.clear();
 
-  if (!runningServer) {
+  if (!runningServer && isolatedServerPromises.length === 0) {
     return;
   }
 
   try {
-    const { server } = await runningServer;
-    await server.stop();
+    if (runningServer) {
+      const { server } = await runningServer;
+      await server.stop();
+    }
   } catch {
     // Swallow all errors: either startup never produced a server (nothing to stop),
     // or stop() itself failed (nothing recoverable during teardown).
   }
+
+  await Promise.all(
+    isolatedServerPromises.map(async (serverPromise) => {
+      try {
+        const { server } = await serverPromise;
+        await server.stop();
+      } catch {
+        // Same best-effort cleanup as the shared testing server.
+      }
+    }),
+  );
 }
 
 function testingServerUrlPattern(serverUrl: string): string {

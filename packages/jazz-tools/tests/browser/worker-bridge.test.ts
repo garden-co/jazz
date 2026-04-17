@@ -23,6 +23,7 @@ import {
 } from "./support.js";
 import {
   blockTestingServerNetwork,
+  getIsolatedTestingServerInfo,
   getTestingServerInfo,
   getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
@@ -33,7 +34,12 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
-import { schema as s } from "../../src/";
+import { CompiledPermissions, schema as s } from "../../src/";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -68,6 +74,17 @@ type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
 const { projects, todos } = app;
 type Todo = s.RowOf<typeof todos>;
+
+const rejectAllPermissions = s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.never(),
+  policy.projects.allowInsert.never(),
+  policy.projects.allowUpdate.never(),
+  policy.projects.allowDelete.never(),
+  policy.todos.allowRead.never(),
+  policy.todos.allowInsert.never(),
+  policy.todos.allowUpdate.never(),
+  policy.todos.allowDelete.never(),
+]);
 
 interface WorkerMessageDebugEvent {
   atMs: number;
@@ -254,6 +271,49 @@ const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
     });
   },
 };
+
+/**
+ * Sets up a server with the given app schema and permissions.
+ */
+async function getServerWithPermissions(
+  app: { wasmSchema: WasmSchema },
+  permissions: CompiledPermissions,
+): Promise<{ appId: string; serverUrl: string; adminSecret: string }> {
+  const { appId, serverUrl, adminSecret } = await getIsolatedTestingServerInfo();
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    adminSecret,
+    schema: app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  await publishStoredPermissions(serverUrl, {
+    adminSecret,
+    schemaHash,
+    permissions,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
+  return { appId, serverUrl, adminSecret };
+}
+
+/**
+ * Creates a non-admin Db with the given appId and serverUrl.
+ */
+async function getNonAdminClientDb(
+  appId: string,
+  serverUrl: string,
+  ctx: TestCleanup,
+): Promise<Db> {
+  const jwtToken = await getTestingServerJwtForUser("browser-offline-rejected-wait", {
+    role: "user",
+  });
+  return ctx.track(
+    await createDb({
+      appId,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-wait-edge-rejected-offline") },
+      serverUrl,
+      jwtToken,
+    }),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1090,6 +1150,61 @@ describe("Worker Bridge with OPFS", () => {
       "edge",
     );
     expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
+  }, 60000);
+
+  it("rejects insert immediately when published server permissions deny writes", async () => {
+    const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
+
+    // Wait for client to fetch permissions from the server
+    const db = await getNonAdminClientDb(appId, serverUrl, ctx);
+    await waitForCondition(
+      async () => db.getAuthState().status === "authenticated",
+      10_000,
+      "client db should authenticate before rejected insert",
+    );
+    await withTimeout(
+      db.all(allTodos, { tier: "edge" }),
+      10_000,
+      "client db should complete an initial edge read before rejected insert",
+    );
+
+    expect(() => db.insert(todos, { title: "Rejected", done: false })).toThrow(
+      'WriteError("policy denied INSERT on table todos")',
+    );
+  });
+
+  it("server permissions check rejects offline insert", async () => {
+    const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
+
+    // Block network to prevent server permissions from being fetched by the client
+    await blockTestingServerNetwork(serverUrl);
+
+    const db = await getNonAdminClientDb(appId, serverUrl, ctx);
+
+    const inserted = db.insert(todos, { title: "Rejected later", done: false });
+    const waitPromise = inserted.wait({ tier: "edge" });
+
+    const todosAfterInsert = await db.all(allTodos, { tier: "worker" });
+    expect(todosAfterInsert.length).toBe(1);
+
+    await unblockTestingServerNetwork(serverUrl);
+    // Insert is reverted in the client
+    await waitForTodos(
+      db,
+      (rows) => rows.length === 0,
+      "offline insert should be reverted once rejected by the server",
+      10_000,
+      "worker",
+    );
+
+    // `InsertHandle.wait` rejects
+    await expect(
+      withTimeout(waitPromise, 20_000, "offline rejected insert wait(edge) timed out"),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      batchId: inserted.batchId,
+      code: "permission_denied",
+    });
   }, 60000);
 
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
