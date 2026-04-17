@@ -543,6 +543,7 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
 
     let mut last_error: Option<String> = None;
+    let mut last_rows: Option<QueryRows> = None;
 
     loop {
         match tokio::time::timeout(
@@ -552,9 +553,10 @@ where
         .await
         {
             Ok(Ok(rows)) => {
-                if let Some(value) = check_rows(rows) {
+                if let Some(value) = check_rows(rows.clone()) {
                     return value;
                 }
+                last_rows = Some(rows);
                 last_error = None;
             }
             Ok(Err(e)) => last_error = Some(e.to_string()),
@@ -564,7 +566,10 @@ where
         if tokio::time::Instant::now() >= deadline {
             match last_error {
                 Some(e) => panic!("timed out waiting for {description}: last query error: {e}"),
-                None => panic!("timed out waiting for {description}"),
+                None => panic!(
+                    "timed out waiting for {description}: last rows: {:?}",
+                    last_rows
+                ),
             }
         }
 

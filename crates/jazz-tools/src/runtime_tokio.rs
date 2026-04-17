@@ -376,10 +376,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
-        let _ = (table, object_id, values, session);
-        Err(RuntimeError::WriteError(
-            "upsert_with_id is not supported on this branch".to_string(),
-        ))
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.upsert_with_id(table, object_id, values, owned.as_ref())?;
+        Ok(())
     }
 
     /// Update a row and return a receiver that resolves when the requested
@@ -407,10 +407,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<PersistedWriteReceiver, RuntimeError> {
-        let _ = (table, object_id, values, session, tier);
-        Err(RuntimeError::WriteError(
-            "upsert_persisted_with_id is not supported on this branch".to_string(),
-        ))
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let receiver =
+            core.upsert_persisted_with_id(table, object_id, values, owned.as_ref(), tier)?;
+        Ok(receiver)
     }
 
     /// Delete a row.

@@ -171,6 +171,36 @@ impl FailingHistoryPatchStorage {
 }
 
 impl Storage for FailingHistoryPatchStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn raw_table_put(
         &mut self,
         table: &str,
@@ -409,16 +439,13 @@ fn memory_size_separates_sync_state_buckets() {
         operation: crate::query_manager::policy::Operation::Insert,
     });
 
-    let (row_objects, index_objects, subscriptions, outbox_inbox, total) = sm.memory_size();
+    let (catalogue, connections, subscriptions, queues, total) = sm.memory_size();
 
-    assert!(row_objects > 0);
-    assert_eq!(index_objects, 0);
+    assert_eq!(catalogue, 0);
+    assert!(connections > 0);
     assert!(subscriptions > 0);
-    assert!(outbox_inbox > 0);
-    assert_eq!(
-        total,
-        row_objects + index_objects + subscriptions + outbox_inbox
-    );
+    assert!(queues > 0);
+    assert_eq!(total, catalogue + connections + subscriptions + queues);
 }
 
 #[test]
@@ -671,6 +698,7 @@ fn row_batch_created_emits_row_batch_state_changed_to_source() {
     let server_id = ServerId::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    seed_users_schema(&mut io);
 
     sm.process_from_server(
         &mut io,
@@ -1010,6 +1038,10 @@ fn initial_query_sync_sends_only_current_row_for_deep_history() {
     );
     assert_eq!(row_payloads[0].batch_id(), newer.batch_id());
     assert_eq!(row_payloads[0].data, newer.data);
+    assert!(
+        row_payloads[0].parents.is_empty(),
+        "initial sync payload should be self-contained for subscribers"
+    );
 }
 
 #[test]

@@ -411,18 +411,21 @@ describe("buildIndex", () => {
 });
 
 describe("packaged docs index", () => {
-  it("ships current auth docs in docs-index.txt", async () => {
+  it("ships current authentication docs in docs-index.txt", async () => {
     const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
 
-    expect(txt).toContain("===PAGE:auth/local-first-auth===");
-    // <APP_ID> is stripped by the JSX tag stripper (uppercase-initial tag)
-    expect(txt).toContain("jazz-tools server  --allow-local-first-auth");
+    expect(txt).toContain("===PAGE:authentication===");
     expect(txt).toContain(
-      'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
+      "DESCRIPTION:Anonymous, demo, and external JWT auth in Jazz 2, from zero-config onboarding to external identity upgrades.",
     );
     expect(txt).toContain(
-      "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
+      "Browser clients default to anonymous local auth when no JWT/backend auth is configured.",
     );
+    expect(txt).toContain('localAuthMode: "anonymous"');
+    expect(txt).toContain("getActiveSyntheticAuth");
+    expect(txt).toContain("useLinkExternalIdentity");
+    expect(txt).toContain("Use `JazzClient.linkExternalIdentity(...)` directly:");
+    expect(txt).toContain("Jazz 2 supports three auth methods:");
 
     expect(txt).not.toContain("allowSelfSigned");
     expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");

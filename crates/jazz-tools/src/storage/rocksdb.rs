@@ -816,8 +816,10 @@ mod tests {
     fn open_rejects_nonempty_store_without_manifest() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("legacy.rocksdb");
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
         let db = TransactionDB::<rocksdb::SingleThreaded>::open(
-            &Options::default(),
+            &opts,
             &TransactionDBOptions::default(),
             &db_path,
         )

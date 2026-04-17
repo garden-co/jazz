@@ -112,6 +112,36 @@ impl Scheduler for CountingScheduler {
 }
 
 impl Storage for RowRegionReadFailingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         if self.fail_row_locator_scans {
             return Err(StorageError::IoError(
@@ -485,6 +515,36 @@ impl Storage for RowRegionReadFailingStorage {
 }
 
 impl Storage for LegacyPersistenceObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -848,6 +908,38 @@ impl Storage for LegacyPersistenceObservingStorage {
 }
 
 impl Storage for RowMutationObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
