@@ -40,7 +40,13 @@ fn bearer_headers(token: &str) -> HeaderMap {
 async fn valid_local_first_jwt_authenticates() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
-    let token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
+    let token = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
 
     let headers = bearer_headers(&token);
     let config = local_first_config();
@@ -59,8 +65,20 @@ async fn same_seed_same_identity() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
 
-    let token1 = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
-    let token2 = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
+    let token1 = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
+    let token2 = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
 
     let config = local_first_config();
 
@@ -84,8 +102,20 @@ async fn different_seeds_different_identities() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
 
-    let alice_token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
-    let bob_token = identity::mint_local_first_token(&bob_seed(), &audience, 3600).unwrap();
+    let alice_token = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
+    let bob_token = identity::mint_jazz_self_signed_token(
+        &bob_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
 
     let config = local_first_config();
 
@@ -106,8 +136,13 @@ async fn different_seeds_different_identities() {
 
 #[tokio::test]
 async fn wrong_audience_rejected() {
-    let token =
-        identity::mint_local_first_token(&alice_seed(), "wrong-app-audience", 3600).unwrap();
+    let token = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        "wrong-app-audience",
+        3600,
+    )
+    .unwrap();
 
     let headers = bearer_headers(&token);
     let config = local_first_config();
@@ -125,7 +160,13 @@ async fn wrong_audience_rejected() {
 async fn local_first_disabled_rejected() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
-    let token = identity::mint_local_first_token(&alice_seed(), &audience, 3600).unwrap();
+    let token = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .unwrap();
 
     let headers = bearer_headers(&token);
     let config = AuthConfig {
@@ -146,7 +187,13 @@ async fn expired_token_rejected() {
     let app_id = test_app_id();
     let audience = app_id.to_string();
     // TTL=0 means exp == iat, which is already expired
-    let token = identity::mint_local_first_token(&alice_seed(), &audience, 0).unwrap();
+    let token = identity::mint_jazz_self_signed_token(
+        &alice_seed(),
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        0,
+    )
+    .unwrap();
 
     let headers = bearer_headers(&token);
     let config = local_first_config();

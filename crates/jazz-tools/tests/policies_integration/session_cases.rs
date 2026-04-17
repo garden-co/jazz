@@ -479,9 +479,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
         &server,
         &schema,
         charlie_user_id,
-        json!({
-            "auth_mode": "external",
-        }),
+        json!({}),
         "documents",
         READY_TIMEOUT,
     )

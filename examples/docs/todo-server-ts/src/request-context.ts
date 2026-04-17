@@ -51,6 +51,7 @@ export async function listTodosWithInheritedPolicy(
 export async function createAttributedHandles(req: Request) {
   const syntheticSession = {
     user_id: "user_123",
+    authMode: "external" as const,
     claims: {},
   };
 

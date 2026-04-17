@@ -346,11 +346,19 @@ describe("forRequest auth and policy", () => {
       ),
     ]);
 
-    const aliceSessionDb = readerContext.forSession({ user_id: alice.userId, claims: {} });
+    const aliceSessionDb = readerContext.forSession({
+      user_id: alice.userId,
+      claims: {},
+      authMode: "external",
+    });
     const aliceRequestDb = await readerContext.forRequest({
       headers: { authorization: `Bearer ${alice.token}` },
     });
-    const bobSessionDb = readerContext.forSession({ user_id: bob.userId, claims: {} });
+    const bobSessionDb = readerContext.forSession({
+      user_id: bob.userId,
+      claims: {},
+      authMode: "external",
+    });
 
     // Backend reader sees all three rows.
     await vi.waitFor(

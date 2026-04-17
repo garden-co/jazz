@@ -96,11 +96,11 @@ describe("RecoveryPhrase integration — identity continuity", () => {
 
     const dbA = await createDb({
       appId: "recovery-phrase-test",
-      auth: { localFirstSecret: originalSecret },
+      secret: originalSecret,
     });
     const dbB = await createDb({
       appId: "recovery-phrase-test",
-      auth: { localFirstSecret: restoredSecret },
+      secret: restoredSecret,
     });
 
     try {

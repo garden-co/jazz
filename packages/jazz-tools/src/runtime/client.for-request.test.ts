@@ -199,6 +199,7 @@ describe("JazzClient.forRequest", () => {
       JSON.stringify({
         user_id: "user-123",
         claims: { role: "admin" },
+        authMode: "external",
       }),
     );
   });
@@ -219,6 +220,7 @@ describe("JazzClient.forRequest", () => {
       JSON.stringify({
         user_id: "user-456",
         claims: {},
+        authMode: "external",
       }),
     );
   });

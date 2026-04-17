@@ -297,6 +297,7 @@ describe("JazzClient mutation durability split", () => {
     const session: Session = {
       user_id: "backend-user",
       claims: { role: "admin" },
+      authMode: "external",
     };
     const insertValues = { title: { type: "Text" as const, value: "Attributed" } };
 

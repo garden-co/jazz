@@ -11837,6 +11837,7 @@ fn remove_client_cleans_active_policy_checks() {
         session: crate::query_manager::session::Session {
             user_id: format!("{client_id}"),
             claims: serde_json::Value::Null,
+            auth_mode: Default::default(),
         },
         schema_wait_started_at: None,
         metadata: Default::default(),
@@ -11907,4 +11908,131 @@ fn remove_client_is_idempotent() {
 
     assert!(server_qm.server_subscriptions.is_empty());
     assert!(server_qm.sync_manager().get_client(alice).is_none());
+}
+
+#[test]
+fn anonymous_insert_is_denied_before_policy_eval() {
+    // Even when the schema has an allow-all insert policy, an anonymous session
+    // must be rejected with AnonymousWriteDenied before policy evaluation runs.
+    use crate::query_manager::policy::Operation;
+    use crate::query_manager::session::AuthMode;
+
+    let mut schema = Schema::new();
+    let mut table_schema = TableSchema::new(RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]));
+    // Allow-all insert policy — anonymous session must still be denied structurally.
+    table_schema.policies = TablePolicies::new().with_insert(PolicyExpr::True);
+    schema.insert(TableName::new("users"), table_schema);
+
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let anon = PolicySession::new("anon-user").with_auth_mode(AuthMode::Anonymous);
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(42)],
+            Some(&anon),
+        )
+        .expect_err("anonymous insert must be denied");
+
+    assert_eq!(
+        err,
+        QueryError::AnonymousWriteDenied {
+            table: TableName::new("users"),
+            operation: Operation::Insert,
+        }
+    );
+}
+
+#[test]
+fn anonymous_update_is_denied_before_policy_eval() {
+    use crate::query_manager::policy::Operation;
+    use crate::query_manager::session::AuthMode;
+
+    let mut schema = Schema::new();
+    let mut table_schema = TableSchema::new(RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]));
+    // Allow-all update policies — anonymous session must still be denied structurally.
+    table_schema.policies =
+        TablePolicies::new().with_update(Some(PolicyExpr::True), PolicyExpr::True);
+    schema.insert(TableName::new("users"), table_schema);
+
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Insert a row without a session so it succeeds.
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(10)],
+        )
+        .expect("insert without session should succeed");
+
+    let anon = PolicySession::new("anon-user").with_auth_mode(AuthMode::Anonymous);
+
+    let err = qm
+        .update_with_session(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("Bob updated".into()), Value::Integer(20)],
+            Some(&anon),
+        )
+        .expect_err("anonymous update must be denied");
+
+    assert_eq!(
+        err,
+        QueryError::AnonymousWriteDenied {
+            table: TableName::new("users"),
+            operation: Operation::Update,
+        }
+    );
+}
+
+#[test]
+fn anonymous_delete_is_denied_before_policy_eval() {
+    use crate::query_manager::policy::Operation;
+    use crate::query_manager::session::AuthMode;
+
+    let mut schema = Schema::new();
+    let mut table_schema = TableSchema::new(RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]));
+    // Allow-all delete policy — anonymous session must still be denied structurally.
+    table_schema.policies = TablePolicies::new().with_delete(PolicyExpr::True);
+    schema.insert(TableName::new("users"), table_schema);
+
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Insert a row without a session so it succeeds.
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Carol".into()), Value::Integer(5)],
+        )
+        .expect("insert without session should succeed");
+
+    let anon = PolicySession::new("anon-user").with_auth_mode(AuthMode::Anonymous);
+
+    let err = qm
+        .delete_with_session(&mut storage, inserted.row_id, Some(&anon))
+        .expect_err("anonymous delete must be denied");
+
+    assert_eq!(
+        err,
+        QueryError::AnonymousWriteDenied {
+            table: TableName::new("users"),
+            operation: Operation::Delete,
+        }
+    );
 }

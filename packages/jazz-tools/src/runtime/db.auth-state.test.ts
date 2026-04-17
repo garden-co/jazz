@@ -148,13 +148,13 @@ describe("Db auth state", () => {
     const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
   });
 
   it("updates auth for same-principal JWT refresh", () => {
@@ -171,17 +171,17 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
     expect(states.at(-1)).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
     });
+    expect(states.at(-1)?.error).toBeUndefined();
   });
 
   it("ignores redundant auth updates when the token is unchanged", () => {
@@ -199,12 +199,12 @@ describe("Db auth state", () => {
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(states).toHaveLength(1);
     expect(states[0]).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
+    expect(states[0]?.error).toBeUndefined();
   });
 
   it("rejects logout principal changes on a live db", () => {
@@ -215,12 +215,12 @@ describe("Db auth state", () => {
     );
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
   });
 
   it("updates mirrored cookie auth for the same principal", () => {

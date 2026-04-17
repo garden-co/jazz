@@ -58,8 +58,8 @@ function App() {
         setConfig({ ...sharedConfig, jwtToken: jwtToken! });
       } else {
         // No external session — use local-first auth
-        const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
-        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+        setConfig({ ...sharedConfig, secret });
       }
     }
 
@@ -89,7 +89,7 @@ function BetterAuthJazzSync({
     if (!hasBetterAuthSession) return;
 
     return db.onAuthChanged((state) => {
-      if (state.status !== "unauthenticated") return;
+      if (state.error !== "expired") return;
 
       // JWT expired — fetch a fresh one from BetterAuth
       getJwtFromBetterAuth().then((jwt) => {

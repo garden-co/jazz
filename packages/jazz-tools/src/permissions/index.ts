@@ -440,6 +440,7 @@ export type WhereInputOrCallback<WhereInput, Row> =
 export type SessionContext = Record<string, SessionRefValue> & {
   readonly user_id: SessionRefValue;
   readonly userId: SessionRefValue;
+  readonly authMode: SessionRefValue;
   where: SessionWhereBuilder;
 };
 
@@ -1433,7 +1434,8 @@ function stripQualifier(column: string): string {
   return bare;
 }
 
-function createSessionContext(): SessionContext {
+/** @internal */
+export function createSessionContext(): SessionContext {
   const claimRef = (path: string): SessionRefValue => ({
     __jazzPermissionKind: "session-ref",
     path: normalizeSessionPath(path),

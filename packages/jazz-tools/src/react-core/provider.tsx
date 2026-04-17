@@ -1,4 +1,11 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
@@ -7,6 +14,7 @@ import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 type CoreJazzDb = {
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
+  updateAuthToken(token: string): void;
 };
 
 type CoreJazzClient = {
@@ -20,8 +28,11 @@ export type CreateJazzClient<TClient extends CoreJazzClient = CoreJazzClient> = 
   config: DbConfig,
 ) => Promise<TClient>;
 
+export type JwtRefreshFn = () => Promise<string | null | undefined>;
+
 export type JazzClientProviderProps = {
-  client: CoreJazzClient;
+  client: Promise<CoreJazzClient> | CoreJazzClient;
+  onJWTExpired?: JwtRefreshFn;
   children: ReactNode;
 };
 
@@ -30,11 +41,11 @@ export type JazzProviderProps = {
   fallback?: ReactNode;
   children: ReactNode;
   createJazzClient: CreateJazzClient;
+  onJWTExpired?: JwtRefreshFn;
 };
 
 type JazzContextValue = {
   client: CoreJazzClient;
-  authState: AuthState;
 };
 
 const JazzContext = createContext<JazzContextValue | null>(null);
@@ -43,7 +54,7 @@ type CachedClientEntry = {
   configKey: string;
   createJazzClient: CreateJazzClient;
   initPromise: Promise<CoreJazzClient>;
-  refs: number;
+  holders: Set<object>;
   releaseTimer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -53,6 +64,7 @@ function acquireClient<TClient extends CoreJazzClient>(
   configKey: string,
   config: DbConfig,
   createJazzClient: CreateJazzClient<TClient>,
+  holder: object,
 ): Promise<TClient> {
   if (
     cachedClientEntry?.configKey !== configKey ||
@@ -62,12 +74,12 @@ function acquireClient<TClient extends CoreJazzClient>(
       configKey,
       createJazzClient,
       initPromise: createJazzClient(config),
-      refs: 0,
+      holders: new Set(),
       releaseTimer: null,
     };
   }
 
-  cachedClientEntry.refs += 1;
+  cachedClientEntry.holders.add(holder);
   if (cachedClientEntry.releaseTimer) {
     clearTimeout(cachedClientEntry.releaseTimer);
     cachedClientEntry.releaseTimer = null;
@@ -76,25 +88,21 @@ function acquireClient<TClient extends CoreJazzClient>(
   return cachedClientEntry.initPromise as Promise<TClient>;
 }
 
-function releaseClient(configKey: string): void {
+function releaseClient(configKey: string, holder: object): void {
   if (!cachedClientEntry || cachedClientEntry.configKey !== configKey) {
     return;
   }
 
-  cachedClientEntry.refs = Math.max(0, cachedClientEntry.refs - 1);
-  if (cachedClientEntry.refs > 0 || cachedClientEntry.releaseTimer) {
+  cachedClientEntry.holders.delete(holder);
+  if (cachedClientEntry.holders.size > 0 || cachedClientEntry.releaseTimer) {
     return;
   }
 
   const entry = cachedClientEntry;
-  // In dev Strict Mode, React does:
-  // 1. mount
-  // 2. immediately unmount
-  // 3. immediately remount
-  // Without the delayed release, the fake unmount would tear the client down before the remount could reuse it,
-  // causing a double initialization. This way, the remount can reacquire the same cached client before shutdown happens.
+  // Delayed release survives Strict Mode's mount→unmount→remount cycle:
+  // without it, the unmount would tear down the client before the remount reuses it.
   entry.releaseTimer = setTimeout(() => {
-    if (entry.refs > 0) {
+    if (entry.holders.size > 0) {
       entry.releaseTimer = null;
       return;
     }
@@ -106,21 +114,54 @@ function releaseClient(configKey: string): void {
   }, 0);
 }
 
+function useJwtRefreshBridge(client: CoreJazzClient, onJWTExpired: JwtRefreshFn | undefined) {
+  // Latch serializes concurrent "expired" rejections into one refresh call.
+  const inFlight = useRef(false);
+  // Refcell keeps the callback fresh without re-subscribing when callers pass
+  // an inline function that changes every render.
+  const callbackRef = useRef(onJWTExpired);
+  callbackRef.current = onJWTExpired;
+
+  useEffect(() => {
+    const unsubscribe = client.db.onAuthChanged((state) => {
+      if (state.error !== "expired") return;
+      const fn = callbackRef.current;
+      if (!fn) return;
+      if (inFlight.current) return;
+      inFlight.current = true;
+
+      Promise.resolve()
+        .then(() => fn())
+        .then((newToken) => {
+          if (newToken) {
+            client.db.updateAuthToken(newToken);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight.current = false;
+        });
+    });
+    return unsubscribe;
+  }, [client]);
+}
+
 /**
  * Makes a Jazz client available to children components through a React context.
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
  */
-export function JazzClientProvider({ client, children }: JazzClientProviderProps) {
-  const [authState, setAuthState] = useState(() => client.db.getAuthState());
+export function JazzClientProvider({
+  client: clientPromise,
+  onJWTExpired,
+  children,
+}: JazzClientProviderProps) {
+  const client = "then" in clientPromise ? React.use(clientPromise) : clientPromise;
 
-  useEffect(() => {
-    setAuthState(client.db.getAuthState());
-    return client.db.onAuthChanged((nextAuthState) => {
-      setAuthState(nextAuthState);
-    });
-  }, [client]);
+  useJwtRefreshBridge(client, onJWTExpired);
 
-  return <JazzContext.Provider value={{ client, authState }}>{children}</JazzContext.Provider>;
+  const value = React.useMemo(() => ({ client }), [client]);
+
+  return <JazzContext.Provider value={value}>{children}</JazzContext.Provider>;
 }
 
 /**
@@ -129,45 +170,45 @@ export function JazzClientProvider({ client, children }: JazzClientProviderProps
  * If you need to create a Jazz client outside of the React component lifecycle,
  * use {@link JazzClientProvider}.
  */
-export function JazzProvider({ config, fallback, children, createJazzClient }: JazzProviderProps) {
-  const configKey = JSON.stringify(config);
-  const [client, setClient] = useState<CoreJazzClient | null>(null);
-  const [error, setError] = useState<unknown>(null);
+export function JazzProvider({
+  config,
+  fallback,
+  children,
+  createJazzClient,
+  onJWTExpired,
+}: JazzProviderProps) {
+  // Stable per-provider identity; used as the Set key so the useState
+  // initializer and useEffect don't double-count the same provider.
+  const holder = useRef({}).current;
+
+  const [clientPromise, setClientPromise] = useState(() => {
+    const configKey = JSON.stringify(config);
+    return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
+  });
 
   useEffect(() => {
-    let active = true;
-    const pendingClient = acquireClient<CoreJazzClient>(configKey, config, createJazzClient);
-
-    void pendingClient.then(
-      (resolved) => {
-        if (!active) {
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) {
-          return;
-        }
-        setError(reason);
-      },
+    const configKey = JSON.stringify(config);
+    const clientPromise = acquireClient<CoreJazzClient>(
+      configKey,
+      config,
+      createJazzClient,
+      holder,
     );
 
+    setClientPromise(clientPromise);
+
     return () => {
-      active = false;
-      releaseClient(configKey);
+      releaseClient(configKey, holder);
     };
-  }, [config, configKey, createJazzClient]);
+  }, [config, createJazzClient, holder]);
 
-  if (error) {
-    throw error;
-  }
-
-  if (!client) {
-    return <>{fallback ?? null}</>;
-  }
-
-  return <JazzClientProvider client={client}>{children}</JazzClientProvider>;
+  return (
+    <React.Suspense fallback={fallback}>
+      <JazzClientProvider client={clientPromise} onJWTExpired={onJWTExpired}>
+        {children}
+      </JazzClientProvider>
+    </React.Suspense>
+  );
 }
 
 export function useJazzClient(): CoreJazzClient {

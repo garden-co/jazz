@@ -33,13 +33,20 @@ export interface RuntimeSourcesConfig {
 }
 
 /**
+ * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/query_manager/session.rs`.
+ */
+export type AuthMode = "external" | "local-first" | "anonymous";
+
+/**
  * Session context for policy evaluation.
  */
 export interface Session {
   /** User identifier */
   user_id: string;
-  /** Additional claims (roles, teams, etc.) */
+  /** User-defined claims (roles, teams, etc.) */
   claims: Record<string, unknown>;
+  /** Auth mode — derived from the JWT's `iss` claim. */
+  authMode: AuthMode;
 }
 
 /**
