@@ -414,18 +414,16 @@ describe("packaged docs index", () => {
   it("ships current authentication docs in docs-index.txt", async () => {
     const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
 
-    expect(txt).toContain("===PAGE:authentication===");
+    expect(txt).toContain("===PAGE:auth/authentication===");
     expect(txt).toContain(
-      "DESCRIPTION:Anonymous, demo, and external JWT auth in Jazz 2, from zero-config onboarding to external identity upgrades.",
+      'DESCRIPTION:"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
     );
-    expect(txt).toContain(
-      "Browser clients default to anonymous local auth when no JWT/backend auth is configured.",
-    );
-    expect(txt).toContain('localAuthMode: "anonymous"');
-    expect(txt).toContain("getActiveSyntheticAuth");
-    expect(txt).toContain("useLinkExternalIdentity");
-    expect(txt).toContain("Use `JazzClient.linkExternalIdentity(...)` directly:");
-    expect(txt).toContain("Jazz 2 supports three auth methods:");
+    expect(txt).toContain("Jazz has two auth modes: `local-first` and `external`.");
+    expect(txt).toContain('jwtToken: "<provider-jwt>"');
+    expect(txt).toContain("db.updateAuthToken(jwt)");
+    expect(txt).toContain("recreate `JazzProvider` or `Db` with a new auth config");
+    expect(txt).toContain("### Managing JWT changes on a live client");
+    expect(txt).toContain("### Reacting to expiry and unauthenticated responses");
 
     expect(txt).not.toContain("allowSelfSigned");
     expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");
