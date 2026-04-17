@@ -25,6 +25,8 @@ export interface InitMessage {
   jwtToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
+  /** Computed WASM URL fallback for non-bundled contexts — used after wasmModule.default() fails. */
+  fallbackWasmUrl?: string;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
