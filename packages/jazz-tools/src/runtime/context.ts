@@ -81,6 +81,12 @@ export interface AppContext {
   jwtToken?: string;
 
   /**
+   * Mirrored session used for local permission evaluation when auth rides on
+   * an HttpOnly cookie instead of a JS-readable bearer token.
+   */
+  cookieSession?: Session;
+
+  /**
    * Backend secret for session impersonation.
    * Enables `forSession()` to act as any user.
    */

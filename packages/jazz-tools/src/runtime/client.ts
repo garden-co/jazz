@@ -1148,6 +1148,33 @@ export class JazzClient {
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private shutdownPromise: Promise<void> | null = null;
 
+  private resolveSessionFromContext(): Session | null {
+    return resolveClientSessionStateSync({
+      appId: this.context.appId,
+      jwtToken: this.context.jwtToken,
+      cookieSession: this.context.cookieSession,
+    }).session;
+  }
+
+  private buildTransportAuthPayload(): {
+    jwt_token: string | null;
+    admin_secret?: string;
+    backend_secret?: string;
+  } {
+    const payload: {
+      jwt_token: string | null;
+      admin_secret?: string;
+      backend_secret?: string;
+    } = { jwt_token: this.context.jwtToken ?? null };
+    if (this.context.adminSecret) {
+      payload.admin_secret = this.context.adminSecret;
+    }
+    if (this.context.backendSecret) {
+      payload.backend_secret = this.context.backendSecret;
+    }
+    return payload;
+  }
+
   private constructor(
     runtime: Runtime,
     context: AppContext,
@@ -1158,10 +1185,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: context.appId,
-      jwtToken: context.jwtToken,
-    }).session;
+    this.resolvedSession = this.resolveSessionFromContext();
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -1389,28 +1413,20 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: this.context.appId,
-      jwtToken,
-    }).session;
+    this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport. `updateAuth`
     // is optional on the Runtime interface because not every binding exposes
     // it yet; bindings that do will route this to TransportControl::UpdateAuth.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
-    const payload: {
-      jwt_token: string | null;
-      admin_secret?: string;
-      backend_secret?: string;
-    } = { jwt_token: jwtToken ?? null };
-    if (this.context.adminSecret) {
-      payload.admin_secret = this.context.adminSecret;
-    }
-    if (this.context.backendSecret) {
-      payload.backend_secret = this.context.backendSecret;
-    }
-    this.runtime.updateAuth?.(JSON.stringify(payload));
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
+  }
+
+  updateCookieSession(cookieSession?: Session): void {
+    this.context.cookieSession = cookieSession;
+    this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   private normalizeQueryExecutionOptions(
