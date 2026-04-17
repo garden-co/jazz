@@ -25,6 +25,11 @@
   color: #f48f8f;
 }
 
+.actionRow {
+  display: flex;
+  gap: 10px;
+}
+
 .actionButton {
   border: 1px solid #33445d;
   border-radius: 6px;
@@ -37,6 +42,20 @@
 
 .actionButton:hover {
   background: #273346;
+}
+
+.actionButtonSecondary {
+  border: 1px solid #33445d;
+  border-radius: 6px;
+  background: transparent;
+  color: #d5dfef;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actionButtonSecondary:hover {
+  background: #1d2633;
 }
 
 .loadingText {
