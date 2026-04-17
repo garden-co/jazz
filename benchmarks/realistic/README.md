@@ -150,6 +150,7 @@ The workflow currently:
 - runs on PRs only when the PR has the `benchmark` label
 - runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
 - keeps a checked-in skip set at `benchmarks/realistic/ci_skip_set.json`
+- only activates configured skips after 3 timed-out observations for the same benchmark id
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
 - records browser outputs per scenario when they complete within budget
 
