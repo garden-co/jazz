@@ -202,6 +202,15 @@ test("trimmed CI scenarios keep their non-trivial topology", () => {
   const r4Ci = JSON.parse(
     readFileSync(new URL("./ci/scenarios/r4_fanout_updates.json", import.meta.url), "utf8"),
   );
+  const r5Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r5_permission_recursive.json", import.meta.url), "utf8"),
+  );
+  const r6Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r6_permission_write_heavy.json", import.meta.url), "utf8"),
+  );
+  const r7Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r7_hotspot_history.json", import.meta.url), "utf8"),
+  );
   const r8Ci = JSON.parse(
     readFileSync(new URL("./ci/scenarios/r8_many_branches.json", import.meta.url), "utf8"),
   );
@@ -217,6 +226,16 @@ test("trimmed CI scenarios keep their non-trivial topology", () => {
   assert.equal(w4Ci.reopen_cycles, 50);
   assert.equal(r4Ci.operation_count, 4);
   assert.deepEqual(r4Ci.fanout_clients, [10, 20]);
+  assert.equal(r5Ci.docs_per_folder, 16);
+  assert.equal(r5Ci.denied_docs, 64);
+  assert.equal(r5Ci.shared_chain_depth, 4);
+  assert.deepEqual(r5Ci.recursive_depths, [1, 3, 6]);
+  assert.equal(r6Ci.docs_per_folder, 16);
+  assert.equal(r6Ci.denied_docs, 64);
+  assert.equal(r6Ci.shared_chain_depth, 4);
+  assert.deepEqual(r6Ci.recursive_depths, [1, 3, 6]);
+  assert.equal(r7Ci.operation_count, 512);
+  assert.equal(r7Ci.hot_task_count, 10);
   assert.equal(r8Ci.branch_count, 1000);
   assert.equal(r8Ci.commits_per_branch, 4);
   assert.equal(r8Ci.merge_fanin, 8);
