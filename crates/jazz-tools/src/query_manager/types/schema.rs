@@ -120,6 +120,7 @@ impl ColumnType {
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
+            ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
             ColumnType::Enum { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length

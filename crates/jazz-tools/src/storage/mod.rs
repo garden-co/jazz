@@ -117,15 +117,15 @@ const BRANCH_ORD_REGISTRY_TABLE: &str = "__branch_ord_registry";
 const BRANCH_ORD_REGISTRY_KEY: &str = "registry";
 pub(crate) const STORE_MANIFEST_KEY: &str = "__jazz_store_manifest";
 const STORE_MANIFEST_MAGIC: &[u8; 10] = b"JAZZSTORE1";
-const STORE_FORMAT_V1: i32 = 1;
-const ROW_STORAGE_FORMAT_V1: i32 = 1;
+const STORE_FORMAT_V2: i32 = 2;
+const ROW_STORAGE_FORMAT_V2: i32 = 2;
 const ROW_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
 const EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
 const CATALOGUE_STORAGE_FORMAT_V1: i32 = 1;
 const BRANCH_ORD_REGISTRY_FORMAT_V1: i32 = 1;
-const SEALED_BATCH_SUBMISSION_FORMAT_V1: i32 = 1;
-const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V1: i32 = 1;
-const LOCAL_BATCH_RECORD_FORMAT_V2: i32 = 2;
+const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
+const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
+const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
 
 pub type BranchOrd = i32;
 
@@ -152,7 +152,7 @@ pub(crate) struct StoreManifest {
 pub(crate) fn expected_store_manifest(store_kind: &str) -> StoreManifest {
     StoreManifest {
         store_kind: store_kind.to_string(),
-        store_format_version: STORE_FORMAT_V1,
+        store_format_version: STORE_FORMAT_V2,
     }
 }
 
@@ -254,7 +254,7 @@ impl RawTableHeader {
         let table_name: SharedString = table_name.into().into();
         Self {
             storage_kind: kind.storage_kind().into(),
-            storage_format_version: ROW_STORAGE_FORMAT_V1,
+            storage_format_version: ROW_STORAGE_FORMAT_V2,
             logical_table_name: Some(table_name),
             schema_hash: Some(schema_hash),
             row_descriptor_bytes: Some(
@@ -955,11 +955,11 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
             Ok(EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1)
         }
         STORAGE_KIND_BRANCH_ORD_REGISTRY => Ok(BRANCH_ORD_REGISTRY_FORMAT_V1),
-        STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V2),
-        STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V1),
-        STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V1),
+        STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V3),
+        STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
+        STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
         STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),
-        "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V1),
+        "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V2),
         other => Err(StorageError::IoError(format!(
             "unknown raw table header storage_kind '{other}'"
         ))),
@@ -2979,7 +2979,7 @@ pub trait Storage {
             LOCAL_BATCH_RECORD_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_LOCAL_BATCH_RECORD,
-                LOCAL_BATCH_RECORD_FORMAT_V2,
+                LOCAL_BATCH_RECORD_FORMAT_V3,
             ),
         )?;
         let bytes = encode_local_batch_record_with_branch_ords(self, record)?;
@@ -3000,7 +3000,7 @@ pub trait Storage {
                     self,
                     LOCAL_BATCH_RECORD_TABLE,
                     STORAGE_KIND_LOCAL_BATCH_RECORD,
-                    LOCAL_BATCH_RECORD_FORMAT_V2,
+                    LOCAL_BATCH_RECORD_FORMAT_V3,
                 )?;
                 decode_local_batch_record_with_branch_ords(self, &bytes).map(Some)
             }
@@ -3019,7 +3019,7 @@ pub trait Storage {
                 self,
                 LOCAL_BATCH_RECORD_TABLE,
                 STORAGE_KIND_LOCAL_BATCH_RECORD,
-                LOCAL_BATCH_RECORD_FORMAT_V2,
+                LOCAL_BATCH_RECORD_FORMAT_V3,
             )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let record = decode_local_batch_record_with_branch_ords(self, &bytes)?;
@@ -3043,7 +3043,7 @@ pub trait Storage {
             SEALED_BATCH_SUBMISSION_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_SEALED_BATCH_SUBMISSION,
-                SEALED_BATCH_SUBMISSION_FORMAT_V1,
+                SEALED_BATCH_SUBMISSION_FORMAT_V2,
             ),
         )?;
         let bytes = encode_sealed_batch_submission_with_branch_ords(self, submission)?;
@@ -3067,7 +3067,7 @@ pub trait Storage {
                     self,
                     SEALED_BATCH_SUBMISSION_TABLE,
                     STORAGE_KIND_SEALED_BATCH_SUBMISSION,
-                    SEALED_BATCH_SUBMISSION_FORMAT_V1,
+                    SEALED_BATCH_SUBMISSION_FORMAT_V2,
                 )?;
                 decode_sealed_batch_submission_with_branch_ords(self, &bytes).map(Some)
             }
@@ -3089,7 +3089,7 @@ pub trait Storage {
                 self,
                 SEALED_BATCH_SUBMISSION_TABLE,
                 STORAGE_KIND_SEALED_BATCH_SUBMISSION,
-                SEALED_BATCH_SUBMISSION_FORMAT_V1,
+                SEALED_BATCH_SUBMISSION_FORMAT_V2,
             )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let submission = decode_sealed_batch_submission_with_branch_ords(self, &bytes)?;
@@ -3113,7 +3113,7 @@ pub trait Storage {
             AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
-                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V1,
+                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
             ),
         )?;
         let bytes = settlement.encode_storage_row().map_err(|err| {
@@ -3139,7 +3139,7 @@ pub trait Storage {
                     self,
                     AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
                     STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
-                    AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V1,
+                    AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
                 )?;
                 BatchSettlement::decode_storage_row(&bytes)
                     .map(Some)
@@ -3162,7 +3162,7 @@ pub trait Storage {
                 self,
                 AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
                 STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
-                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V1,
+                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
             )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let settlement = BatchSettlement::decode_storage_row(&bytes).map_err(|err| {

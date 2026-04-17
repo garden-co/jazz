@@ -590,6 +590,11 @@ fn decode_bool_bytes(bytes: &[u8], label: &str) -> Result<bool, EncodingError> {
 
 fn decode_row_state_bytes(bytes: &[u8]) -> Result<RowState, EncodingError> {
     match bytes {
+        [0] => Ok(RowState::StagingPending),
+        [1] => Ok(RowState::Superseded),
+        [2] => Ok(RowState::Rejected),
+        [3] => Ok(RowState::VisibleDirect),
+        [4] => Ok(RowState::VisibleTransactional),
         b"staging_pending" => Ok(RowState::StagingPending),
         b"superseded" => Ok(RowState::Superseded),
         b"rejected" => Ok(RowState::Rejected),
@@ -607,6 +612,9 @@ fn decode_optional_durability_tier_bytes(
 ) -> Result<Option<DurabilityTier>, EncodingError> {
     match bytes {
         None => Ok(None),
+        Some([0]) => Ok(Some(DurabilityTier::Worker)),
+        Some([1]) => Ok(Some(DurabilityTier::EdgeServer)),
+        Some([2]) => Ok(Some(DurabilityTier::GlobalServer)),
         Some(b"worker") => Ok(Some(DurabilityTier::Worker)),
         Some(b"edge") => Ok(Some(DurabilityTier::EdgeServer)),
         Some(b"global") => Ok(Some(DurabilityTier::GlobalServer)),
@@ -622,6 +630,8 @@ fn decode_optional_delete_kind_bytes(
 ) -> Result<Option<DeleteKind>, EncodingError> {
     match bytes {
         None => Ok(None),
+        Some([0]) => Ok(Some(DeleteKind::Soft)),
+        Some([1]) => Ok(Some(DeleteKind::Hard)),
         Some(b"soft") => Ok(Some(DeleteKind::Soft)),
         Some(b"hard") => Ok(Some(DeleteKind::Hard)),
         Some(bytes) => Err(malformed(format!(
@@ -2189,6 +2199,60 @@ mod tests {
         .expect("decode hard delete");
         assert_eq!(decoded.data.as_ref(), &[] as &[u8]);
         assert!(decoded.is_hard_deleted());
+    }
+
+    #[test]
+    fn flat_history_row_binary_compacts_hot_enums_to_single_bytes() {
+        let user_descriptor = user_descriptor();
+        let mut row = StoredRowBatch::new(
+            ObjectId::from_uuid(Uuid::from_u128(45)),
+            "main",
+            vec![BatchId([4; 16])],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("Compact".into()), Value::Boolean(false)],
+            )
+            .expect("encode user row"),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::EdgeServer),
+        );
+        row.delete_kind = Some(DeleteKind::Hard);
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
+        let descriptor = history_row_physical_descriptor(&user_descriptor);
+        let layout = crate::row_format::compiled_row_layout(&descriptor);
+
+        let state = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_state").unwrap(),
+        )
+        .expect("read state bytes")
+        .expect("state should be present");
+        let tier = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_confirmed_tier").unwrap(),
+        )
+        .expect("read tier bytes")
+        .expect("tier should be present");
+        let delete_kind = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_delete_kind").unwrap(),
+        )
+        .expect("read delete kind bytes")
+        .expect("delete kind should be present");
+
+        assert_eq!(state.len(), 1);
+        assert_eq!(tier.len(), 1);
+        assert_eq!(delete_kind.len(), 1);
     }
 
     #[test]
