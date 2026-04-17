@@ -189,12 +189,6 @@ impl ReconnectState {
     }
 }
 
-/// Maximum number of outbox entries coalesced into a single `SyncBatchRequest`
-/// frame. Bounds per-frame memory / JSON size and guarantees the connected loop
-/// returns to `select!` promptly under heavy write load so `ws.recv()` cannot
-/// starve.
-const OUTBOX_BATCH_MAX: usize = 128;
-
 pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     pub server_id: ServerId,
     pub url: String,
@@ -209,12 +203,9 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     /// Shared with `TransportHandle::catalogue_state_hash`. Read at each
     /// handshake attempt so reconnects can reflect catalogue changes.
     catalogue_state_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Reusable scratch buffer for outbox draining. Held across iterations so a
-    /// single `OUTBOX_BATCH_MAX`-capacity allocation is shared by every frame.
-    outbox_batch: Vec<crate::sync_manager::types::SyncPayload>,
-    /// Reusable length-prefixed frame buffer. Grows once to the largest batch
-    /// size seen, then is reused for every subsequent send — no per-frame
-    /// allocation for JSON serialization or framing.
+    /// Reusable length-prefixed frame buffer. Grows once to the largest
+    /// serialized OutboxEntry seen, then is reused for every subsequent send —
+    /// no per-frame allocation for JSON serialization or framing.
     outbox_frame_buf: Vec<u8>,
     _stream: std::marker::PhantomData<W>,
 }
@@ -252,7 +243,6 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         ever_connected,
         control_rx,
         catalogue_state_hash,
-        outbox_batch: Vec::with_capacity(OUTBOX_BATCH_MAX),
         outbox_frame_buf: Vec::new(),
         _stream: std::marker::PhantomData,
     };
@@ -354,18 +344,14 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         HandshakeResult::NetworkError("unexpected handshake response".to_string())
     }
 
-    /// Serialize `self.outbox_batch` as a `SyncBatchRequest` frame into the
-    /// reusable `outbox_frame_buf` and send it. Returns `false` only on stream
-    /// send failure — the caller should treat that as a network error.
-    /// Serialization errors drop the frame silently (not a network error).
-    async fn send_outbox_batch(&mut self, ws: &mut W) -> bool {
+    /// Serialize `entry` as a length-prefixed frame into the reusable
+    /// `outbox_frame_buf` and send it. Returns `false` only on stream send
+    /// failure — the caller should treat that as a network error. Serialization
+    /// errors drop the frame silently (not a network error).
+    async fn send_outbox_entry(&mut self, entry: &OutboxEntry, ws: &mut W) -> bool {
         self.outbox_frame_buf.clear();
         self.outbox_frame_buf.extend_from_slice(&[0u8; 4]);
-        let batch = crate::transport_protocol::SyncBatchRequestRef {
-            payloads: &self.outbox_batch,
-            client_id: self.client_id,
-        };
-        if serde_json::to_writer(&mut self.outbox_frame_buf, &batch).is_err() {
+        if serde_json::to_writer(&mut self.outbox_frame_buf, entry).is_err() {
             return true;
         }
         let len = (self.outbox_frame_buf.len() - 4) as u32;
@@ -544,16 +530,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 out = self.outbox_rx.next() => {
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
-                    let Some(first) = out else { return ConnectedExit::Shutdown; };
-                    self.outbox_batch.clear();
-                    self.outbox_batch.push(first.payload);
-                    while self.outbox_batch.len() < OUTBOX_BATCH_MAX {
-                        match self.outbox_rx.try_recv() {
-                            Ok(entry) => self.outbox_batch.push(entry.payload),
-                            Err(_) => break,
-                        }
-                    }
-                    if !self.send_outbox_batch(ws).await { return ConnectedExit::NetworkError; }
+                    let Some(entry) = out else { return ConnectedExit::Shutdown; };
+                    if !self.send_outbox_entry(&entry, ws).await { return ConnectedExit::NetworkError; }
                 }
                 incoming = ws.recv() => {
                     match incoming {
@@ -759,16 +737,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 out = self.outbox_rx.next().fuse() => {
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
-                    let Some(first) = out else { return WasmConnectedExit::Shutdown; };
-                    self.outbox_batch.clear();
-                    self.outbox_batch.push(first.payload);
-                    while self.outbox_batch.len() < OUTBOX_BATCH_MAX {
-                        match self.outbox_rx.try_recv() {
-                            Ok(entry) => self.outbox_batch.push(entry.payload),
-                            Err(_) => break,
-                        }
-                    }
-                    if !self.send_outbox_batch(ws).await { return WasmConnectedExit::NetworkError; }
+                    let Some(entry) = out else { return WasmConnectedExit::Shutdown; };
+                    if !self.send_outbox_entry(&entry, ws).await { return WasmConnectedExit::NetworkError; }
                 }
                 incoming = ws.recv().fuse() => {
                     match incoming {
@@ -1225,125 +1195,5 @@ mod tests {
             .await
             .expect("dropping the handle should shut down the manager")
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn outbox_entries_coalesce_into_single_sync_batch_frame() {
-        use crate::sync_manager::types::{Destination, QueryId, SyncPayload};
-        use crate::transport_protocol::SyncBatchRequest;
-
-        let controller = Arc::new(TestStreamController::default());
-        *controller.handshake_response.lock().unwrap() = Some(make_handshake_response_frame());
-        controller.recv_pending.store(true, Ordering::SeqCst);
-        install_controller(controller.clone());
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
-            "mock://".to_string(),
-            AuthConfig::default(),
-            CountingTick(counter.clone()),
-        );
-        let server_id = handle.server_id;
-        let task = tokio::spawn(manager.run());
-
-        // Wait for handshake to complete.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(handle.has_ever_connected());
-
-        // Push 3 entries in quick succession (no awaits between sends) so they
-        // all land in the channel before the manager's select! wakes.
-        for qid in [1u64, 2, 3] {
-            handle.send_outbox(OutboxEntry {
-                destination: Destination::Server(server_id),
-                payload: SyncPayload::QueryUnsubscription {
-                    query_id: QueryId(qid),
-                },
-            });
-        }
-
-        // Let the manager drain and send frames.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let frames = controller.sent_frames.lock().unwrap().clone();
-        let batches: Vec<SyncBatchRequest> = frames
-            .iter()
-            .filter_map(|f| {
-                let payload = frame_decode(f)?;
-                serde_json::from_slice::<SyncBatchRequest>(payload).ok()
-            })
-            .collect();
-
-        let total_payloads: usize = batches.iter().map(|b| b.payloads.len()).sum();
-        assert_eq!(
-            total_payloads, 3,
-            "all 3 outbox payloads should be transmitted (got {total_payloads})"
-        );
-        assert_eq!(
-            batches.len(),
-            1,
-            "3 rapidly-enqueued outbox entries must coalesce into a single SyncBatchRequest frame (got {} batches)",
-            batches.len()
-        );
-
-        handle.disconnect();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
-    }
-
-    #[tokio::test]
-    async fn outbox_batch_is_capped_so_recv_is_not_starved() {
-        use crate::sync_manager::types::{Destination, QueryId, SyncPayload};
-        use crate::transport_protocol::SyncBatchRequest;
-
-        let controller = Arc::new(TestStreamController::default());
-        *controller.handshake_response.lock().unwrap() = Some(make_handshake_response_frame());
-        controller.recv_pending.store(true, Ordering::SeqCst);
-        install_controller(controller.clone());
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        let (handle, manager) = create::<TestStreamAdapter, CountingTick>(
-            "mock://".to_string(),
-            AuthConfig::default(),
-            CountingTick(counter.clone()),
-        );
-        let server_id = handle.server_id;
-        let task = tokio::spawn(manager.run());
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(handle.has_ever_connected());
-
-        // Push well above the per-batch cap in one shot.
-        let total = OUTBOX_BATCH_MAX * 2 + 7;
-        for i in 0..total {
-            handle.send_outbox(OutboxEntry {
-                destination: Destination::Server(server_id),
-                payload: SyncPayload::QueryUnsubscription {
-                    query_id: QueryId(i as u64),
-                },
-            });
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let frames = controller.sent_frames.lock().unwrap().clone();
-        let batches: Vec<SyncBatchRequest> = frames
-            .iter()
-            .filter_map(|f| {
-                let payload = frame_decode(f)?;
-                serde_json::from_slice::<SyncBatchRequest>(payload).ok()
-            })
-            .collect();
-
-        let total_payloads: usize = batches.iter().map(|b| b.payloads.len()).sum();
-        assert_eq!(total_payloads, total, "all payloads must be delivered");
-        assert!(
-            batches.iter().all(|b| b.payloads.len() <= OUTBOX_BATCH_MAX),
-            "no single batch may exceed OUTBOX_BATCH_MAX"
-        );
-        assert!(
-            batches.len() >= 3,
-            "{total} entries must split across multiple batches (got {} frames)",
-            batches.len()
-        );
-
-        handle.disconnect();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), task).await;
     }
 }
