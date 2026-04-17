@@ -26,7 +26,7 @@ use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
 };
-use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
@@ -328,7 +328,7 @@ impl RnRuntime {
 
             let app_id_obj =
                 AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
-            let schema_manager =
+            let mut schema_manager =
                 SchemaManager::new(sync_manager, schema, app_id_obj, &jazz_env, &user_branch)
                     .map_err(|e| JazzRnError::Schema {
                         message: format!("{:?}", e),
@@ -356,6 +356,18 @@ impl RnRuntime {
                         resolved_data_path, e
                     ),
                 })?;
+
+            // Load previously-persisted schema history, permissions bundle, and lens
+            // catalogue entries from storage into the in-memory schema manager so
+            // offline cold-starts can decode and serve locally stored rows.
+            if let Err(error) =
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id_obj)
+            {
+                eprintln!(
+                    "jazz-rn: failed to rehydrate schema manager from catalogue storage for app {app_id_obj}: {error}"
+                );
+            }
+
             let scheduler = RnScheduler::default();
 
             let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
