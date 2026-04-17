@@ -66,6 +66,14 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
+    fn store_has_any_rows(conn: &rusqlite::Connection) -> Result<bool, StorageError> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM kv LIMIT 1)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|exists| exists != 0)
+        .map_err(|e| StorageError::IoError(format!("sqlite inspect store contents: {e}")))
+    }
+
     fn ensure_store_manifest(conn: &rusqlite::Connection) -> Result<(), StorageError> {
         let expected = super::expected_store_manifest(super::SQLITE_STORE_KIND);
         let existing = conn
@@ -83,6 +91,11 @@ impl SqliteStorage {
                 super::validate_store_manifest(&actual, &expected)
             }
             None => {
+                if Self::store_has_any_rows(conn)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty sqlite store".to_string(),
+                    ));
+                }
                 let bytes = super::encode_store_manifest(&expected)?;
                 conn.execute(
                     "INSERT INTO kv(key, value) VALUES (?1, ?2)",
@@ -906,6 +919,36 @@ mod tests {
         };
         assert!(
             err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                 key   BLOB PRIMARY KEY,
+                 value BLOB NOT NULL
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+            rusqlite::params![b"raw:legacy:alice".as_slice(), b"hello".as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty sqlite store"),
             "unexpected error: {err}"
         );
     }

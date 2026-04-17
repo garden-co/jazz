@@ -105,6 +105,13 @@ pub struct OpfsBTreeStorage {
 }
 
 impl OpfsBTreeStorage {
+    fn tree_has_any_rows(tree: &mut OpfsBTree<AnyFile>) -> Result<bool, StorageError> {
+        Ok(!tree
+            .range(b"", &[0xFF], 1)
+            .map_err(map_storage_err)?
+            .is_empty())
+    }
+
     fn ensure_store_manifest(tree: &mut OpfsBTree<AnyFile>) -> Result<(), StorageError> {
         let expected = super::expected_store_manifest(super::OPFS_BTREE_STORE_KIND);
         match tree
@@ -116,6 +123,11 @@ impl OpfsBTreeStorage {
                 super::validate_store_manifest(&actual, &expected)
             }
             None => {
+                if Self::tree_has_any_rows(tree)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty opfs_btree store".to_string(),
+                    ));
+                }
                 let bytes = super::encode_store_manifest(&expected)?;
                 tree.put(super::STORE_MANIFEST_KEY.as_bytes(), &bytes)
                     .and_then(|_| tree.checkpoint())
@@ -600,6 +612,30 @@ mod tests {
         };
         assert!(
             err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.opfs");
+        let storage = OpfsBTreeStorage::open(&path, 4 * 1024 * 1024).unwrap();
+        storage.tree_insert("raw:legacy:alice", b"hello").unwrap();
+        storage
+            .tree_delete(crate::storage::STORE_MANIFEST_KEY)
+            .unwrap();
+        storage.flush();
+        drop(storage);
+
+        let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty opfs_btree store"),
             "unexpected error: {err}"
         );
     }
