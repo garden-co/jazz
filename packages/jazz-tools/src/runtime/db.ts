@@ -19,6 +19,7 @@ import {
   JazzClient,
   loadWasmModule,
   type LocalBatchRecord,
+  type MutationErrorEvent,
   PersistedWrite as RuntimePersistedWrite,
   Transaction as RuntimeTransaction,
   type WasmModule,
@@ -724,6 +725,16 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
+  /**
+   * Listeners attached with {@link Db.onMutationError} that are notified when a write operation
+   * (insert, update, delete) is rejected. Errors from all {@link Db.clients} (including those
+   * added after the listeners are attached) are forwarded to all Db listeners.
+   */
+  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
+  /**
+   * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
+   */
+  private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -950,10 +961,32 @@ export class Db {
         this.attachWorkerBridge(key, client);
       }
 
+      this.attachMutationErrorHandler(client);
       this.clients.set(key, client);
     }
 
     return this.clients.get(key)!;
+  }
+
+  /**
+   * Attaches a mutation error handler to the given client, ensuring all listeners in
+   * {@link Db.mutationErrorListeners} are notified.
+   */
+  private attachMutationErrorHandler(client: JazzClient): void {
+    if (this.mutationErrorListeners.size === 0) {
+      return;
+    }
+    if (this.clientMutationErrorUnsubscribers.has(client)) {
+      return;
+    }
+    this.clientMutationErrorUnsubscribers.set(
+      client,
+      client.onMutationError((event) => {
+        for (const listener of this.mutationErrorListeners) {
+          listener(event);
+        }
+      }),
+    );
   }
 
   protected wrapPersistedWrite<T>(
@@ -1472,6 +1505,31 @@ export class Db {
     });
   }
 
+  /**
+   * Attach a fallback listener to be notified when a write operation
+   * (insert, update, delete) is rejected.
+   * This callback is only called if the write error is not surfaced by
+   * {@link WriteHandle.wait}.
+   * This callback is called even after app restarts (which does not
+   * happen with {@link WriteHandle.wait}).
+   */
+  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.mutationErrorListeners.add(listener);
+    for (const client of this.clients.values()) {
+      this.attachMutationErrorHandler(client);
+    }
+    return () => {
+      this.mutationErrorListeners.delete(listener);
+      if (this.mutationErrorListeners.size > 0) {
+        return;
+      }
+      for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
+        unsubscribe();
+      }
+      this.clientMutationErrorUnsubscribers.clear();
+    };
+  }
+
   getConfig(): DbConfig {
     // Return a copy of the config to avoid editing the original config.
     return structuredClone(this.config);
@@ -1940,6 +1998,11 @@ export class Db {
       this.workerBridge = null;
     }
 
+    for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
+      unsubscribe();
+    }
+    this.clientMutationErrorUnsubscribers.clear();
+    this.mutationErrorListeners.clear();
     for (const client of this.clients.values()) {
       await client.shutdown();
     }
@@ -2033,6 +2096,10 @@ export class Db {
   }
 }
 
+/**
+ * A Db implementation that delegates all operations to an existing {@link JazzClient}.
+ * Used only for tests.
+ */
 class ClientBackedDb extends Db {
   private readonly hasScopedAuthState: boolean;
 
@@ -2066,6 +2133,10 @@ class ClientBackedDb extends Db {
     }
 
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
+  }
+
+  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    return this.runtimeClient.onMutationError(listener);
   }
 
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {

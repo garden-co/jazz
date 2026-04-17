@@ -194,7 +194,7 @@ await committed.wait();
 
 - [x] Introduce a shared `WriteHandle<T>` type on the Typescript runtime surface and make `insert(...)` return a handle with `{ value }` instead of returning the row directly. Do this first without changing wait behavior yet. Update TypeScript typing, runtime wrappers, examples, and tests that currently assume `insert(...)` returns a row directly.
 - [x] Add `wait({ tier })` to `WriteHandle<T>` for insert handles. Teach insert handles to resolve or reject `wait()` from replayable batch-settlement state instead of the old `insertDurable` / `insertPersisted` split.
-- [ ] Change `update(...)` and `delete(...)` to return write handles as well, with no immediate value and with `wait()`.
+- [x] Change `update(...)` and `delete(...)` to return write handles as well, with no immediate value and with `wait()`.
 - [ ] Migrate existing `insertDurable` / `updateDurable` / `deleteDurable` call sites and tests to the unified handle + `wait()` shape.
 - [ ] Migrate existing `insertPersisted` / `updatePersisted` / `deletePersisted` call sites and tests to the unified handle shape, then remove those user-facing methods.
 - [ ] Add a global mutation error registration API backed by replayable batch-settlement state so late failures can still surface after reconnect and restart.
