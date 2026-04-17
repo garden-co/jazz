@@ -26,7 +26,7 @@ use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
@@ -263,6 +263,30 @@ impl Storage for OpfsBTreeStorage {
 
     fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         raw_table_delete_core(table, key, |storage_key| self.tree_delete(storage_key))
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_tree_mut(|tree| {
+            for mutation in mutations {
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_table_put_core(table, key, value, |storage_key, bytes| {
+                            tree.put(storage_key.as_bytes(), bytes)
+                                .map_err(map_storage_err)
+                        })?;
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        raw_table_delete_core(table, key, |storage_key| {
+                            tree.delete(storage_key.as_bytes()).map_err(map_storage_err)
+                        })?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
