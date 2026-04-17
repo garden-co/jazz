@@ -166,12 +166,7 @@ export function PricingCalculator() {
   const monthlyCostPerUser = mau > 0 ? estimate.totalMonthlyCost / mau : 0;
 
   return (
-    <div className="grid gap-12 lg:grid-cols-[minmax(0,0.78fr)_minmax(0,1.22fr)]">
-      <div className="max-w-[30rem] space-y-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-          Estimator
-        </p>
-      </div>
+    <div className="">
       <div className="space-y-12">
         <div className="grid gap-6 sm:grid-cols-2">
           <TickSlider
@@ -231,15 +226,7 @@ export function PricingCalculator() {
         </div>
         <div className="space-y-8 border-t pt-8">
           <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-end">
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Estimated monthly bill
-              </p>
-              <p className="text-5xl font-black tracking-[-0.06em]">
-                {formatCurrency(estimate.totalMonthlyCost)}
-              </p>
-            </div>
-            <div className="border-t pt-4">
+            <div className="pt-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Cost per user / mo
               </p>
@@ -250,12 +237,20 @@ export function PricingCalculator() {
                 Based on {formatCount(mau)} monthly active users
               </p>
             </div>
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+                Estimated monthly bill
+              </p>
+              <p className="text-5xl font-black tracking-[-0.06em]">
+                {formatCurrency(estimate.totalMonthlyCost)}
+              </p>
+            </div>
           </div>
           <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
             Rough self-serve estimate based on the draft public meters on this page. Enterprise
             contracts can still diverge.
           </p>
-          <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
+          {/* <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
             <div className="border-t pt-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Monthly I/O
@@ -289,7 +284,7 @@ export function PricingCalculator() {
                 {formatCurrency(estimate.egressCost)} at $0.09 per GB out
               </p>
             </div>
-            {/* <div className="border-t pt-4">
+            <div className="border-t pt-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Rough peak IOPS
               </p>
@@ -299,18 +294,8 @@ export function PricingCalculator() {
               <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
                 Planning signal only, not billed
               </p>
-            </div> */}
-          </div>
-          <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
-            <p>
-              Structured storage baseline: {formatData(estimate.structuredStorageGb)}. Blob storage:{" "}
-              {formatData(estimate.blobStorageGb)}.
-            </p>
-            <p>
-              Structured sync egress: {formatData(estimate.structuredEgressGb)}. Blob egress:{" "}
-              {formatData(estimate.blobEgressGb)}.
-            </p>
-          </div>
+            </div>
+          </div>*/}
         </div>
       </div>
     </div>

@@ -11,9 +11,9 @@ const homepageSections = [
           backend &mdash; but also automatically syncs it to the cloud.
         </p>
         <p className="max-w-[38rem] text-base">
-          This is what makes Jazz feel like magically shared reactive state that completely
-          abstracts away networking. Because data is granularly synced on-demand, your app is super
-          snappy on first use and only gets faster.
+          This is what makes Jazz feel like magically shared reactive state that abstracts away
+          networking. Because data is granularly synced on-demand, your app is fast on first use and
+          instant afterwards.
         </p>
         <p className="max-w-[38rem] text-base">
           This is possible because Jazz is eventually-consistent by default. But where
@@ -29,8 +29,8 @@ const homepageSections = [
       <>
         <p className="max-w-[38rem] text-base">
           Row-level security allows you to express permissions in a well-defined and testable way.
-          This removes significant complexity and compute effort from your backend and makes
-          security a zero-roundtrip
+          This removes significant complexity and compute effort from your backend and gives you
+          zero-roundtrip security.
         </p>
         <p className="max-w-[38rem] text-base">
           Jazz modernizes RLS by integrating it deeply with auth (policies over both data and user
@@ -53,9 +53,8 @@ const homepageSections = [
           important than ever to reason about data after-the-fact.
         </p>
         <p className="max-w-[38rem] text-base">
-          By giving each row a full git-like branching history, Jazz gives you the perfect
-          primitives and powerful APIs to work with historical data and complex collaboration
-          traces.
+          By giving each row a full git-like branching history, Jazz gives you powerful APIs to work
+          with historical data and complex collaboration traces.
         </p>
       </>
     ),
@@ -71,14 +70,14 @@ const homepageSections = [
         </p>
         <p>
           This allows you to iterate on app features at high speed in a full-stack way. It also
-          automatically enables backwards-compatiblity for old clients and makes complex apps with
+          automatically enables backwards-compatibility for old clients and makes complex apps with
           many feature flags much safer to manage.
         </p>
       </>
     ),
   },
   {
-    title: "Replaces 90% of your backend and infra",
+    title: "Slims your backend and simplifies your infra",
     body: (
       <>
         <p className="max-w-[38rem] text-base">
@@ -93,8 +92,8 @@ const homepageSections = [
           In addition, it takes on data-centric roles that usually require dedicated infrastructure
           components or even vendors: blob storage, file and image CDN, durable streams and
           real-time message queues. This means that you can build complex systems much faster using
-          only Jazz - and where integration points are still ecessary, Jazz is the ideal glue
-          between other systems.
+          only Jazz - and where integration points are still necessary, Jazz is great glue between
+          other systems.
         </p>
       </>
     ),
@@ -152,8 +151,8 @@ export default function HomePage() {
               </p>
               <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
                 It's zero-config to set up, gives you a "it just works" experience from your first
-                experiments and scales automatically in ways that even most other hosted databases
-                can't offer.
+                experiments and scales much more granularly than traditional instance-based
+                databases.
               </p>
             </div>
           </div>
@@ -161,13 +160,15 @@ export default function HomePage() {
       </section>
       <section className="w-full pb-28 pt-10 sm:pb-32 sm:pt-12 lg:pb-40 lg:pt-16">
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
-          <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)] lg:items-end">
+          <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
             <div className="max-w-[34rem] space-y-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Usage-based pricing
               </p>
               <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
-                Simple billing that scales to zero
+                Simple billing
+                <br />
+                that scales to zero
               </h2>
               <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
                 Because Jazz is incredibly flexible and supports a wide range of different apps,
@@ -196,10 +197,11 @@ export default function HomePage() {
                 </div>
               ))}
             </div>
+            <div className="sm:col-start-2">
+              <PricingCalculator />
+            </div>
           </div>
-          <div className="mt-20 border-t pt-12 sm:mt-24 sm:pt-14">
-            <PricingCalculator />
-          </div>
+          <div className="mt-20 border-t pt-12 sm:mt-24 sm:pt-14"></div>
         </div>
       </section>
     </div>
