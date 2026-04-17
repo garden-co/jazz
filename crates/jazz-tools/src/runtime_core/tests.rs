@@ -3380,6 +3380,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3428,6 +3429,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3495,6 +3497,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3562,6 +3565,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3633,6 +3637,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -3705,6 +3710,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -3770,6 +3776,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let open_write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3796,6 +3803,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let sealed_write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -3870,6 +3878,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3948,6 +3957,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4136,6 +4146,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4183,6 +4194,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5042,6 +5054,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5158,6 +5171,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5226,6 +5240,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5950,6 +5965,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -6038,6 +6054,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -6124,6 +6141,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
