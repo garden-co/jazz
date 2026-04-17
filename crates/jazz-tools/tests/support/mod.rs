@@ -705,12 +705,14 @@ pub async fn wait_for_subscription_update<F>(
 
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            panic!("timed out waiting for {description}");
+            panic!("timed out waiting for {description}; observed log: {log:#?}");
         }
 
         let delta = tokio::time::timeout(deadline - now, stream.next())
             .await
-            .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for {description}; observed log: {log:#?}")
+            })
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });

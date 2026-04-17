@@ -1081,6 +1081,28 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     )
 }
 
+fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    let needs_exact_locator = storage
+        .load_row_locator(row_id)?
+        .and_then(|locator| locator.origin_schema_hash)
+        != Some(schema_hash);
+    Ok(PreparedRowWriteContext {
+        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
+        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
+            storage,
+            table_name,
+            schema_hash,
+        )?),
+        needs_exact_locator,
+    })
+}
+
 fn load_user_descriptor_from_raw_table_header(
     header: &RawTableHeader,
 ) -> Result<Option<RowDescriptor>, StorageError> {
@@ -1670,16 +1692,10 @@ pub(crate) fn resolve_history_row_write_context<H: Storage + ?Sized>(
 ) -> Result<PreparedRowWriteContext, StorageError> {
     let (schema_hash, user_descriptor) =
         required_history_user_descriptor_and_schema_hash_for_row(storage, table, row)?;
-    let needs_exact_locator = storage
-        .load_row_locator(row.row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(PreparedRowWriteContext {
-        history_row_raw_table_id: history_row_raw_table_id(table, schema_hash),
-        visible_row_raw_table_id: visible_row_raw_table_id(table, schema_hash),
-        user_descriptor: Arc::new(user_descriptor),
-        needs_exact_locator,
-    })
+    let mut context =
+        prepared_row_write_context_for_schema_hash(storage, table, schema_hash, row.row_id)?;
+    context.user_descriptor = Arc::new(user_descriptor);
+    Ok(context)
 }
 
 pub(crate) fn encode_history_row_bytes_with_context(
@@ -1958,6 +1974,33 @@ pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
             needs_exact_locator: true,
             bytes,
         }))
+}
+
+fn scan_history_row_batches_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<Vec<StoredRowBatch>, StorageError> {
+    let row_raw_table_id = history_row_raw_table_id(table, schema_hash);
+    let Some(resolved) = resolved_row_table_from_id(storage, row_raw_table_id.clone())? else {
+        return Ok(Vec::new());
+    };
+
+    let prefix = key_codec::history_row_raw_table_prefix(Some(row_id));
+    let mut rows = Vec::new();
+    for (key, bytes) in storage.raw_table_scan_prefix(row_raw_table_id.raw_table_name(), &prefix)? {
+        let (decoded_row_id, branch, batch_id) = key_codec::decode_history_row_raw_table_key(&key)?;
+        rows.push(decode_history_row_bytes_in_table(
+            &resolved,
+            decoded_row_id,
+            branch.as_str(),
+            batch_id,
+            &bytes,
+        )?);
+    }
+    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
+    Ok(rows)
 }
 
 pub(super) fn scan_visible_region_row_batch_branches_with_storage<H: Storage + ?Sized>(
@@ -3819,7 +3862,8 @@ pub trait Storage {
             });
         }
 
-        let history_rows = self.scan_history_row_batches(table, row_id)?;
+        let history_rows =
+            scan_history_row_batches_for_schema_hash(self, table, schema_hash, row_id)?;
         let mut patched_history = history_rows.clone();
         if let Some(existing) = patched_history
             .iter_mut()
@@ -3834,11 +3878,27 @@ pub trait Storage {
             .max_by_key(|candidate| (candidate.updated_at, candidate.batch_id()))
             .map(|current_row| vec![VisibleRowEntry::rebuild(current_row, &patched_history)])
             .unwrap_or_default();
+        let context = prepared_row_write_context_for_schema_hash(
+            self,
+            table,
+            schema_hash,
+            current_row.row_id,
+        )?;
+        let encoded_history_rows = vec![encode_history_row_bytes_with_context(
+            &context,
+            &current_row,
+        )?];
+        let encoded_visible_rows = visible_entries
+            .iter()
+            .map(|entry| encode_visible_row_bytes_with_context(&context, entry))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        self.apply_row_mutation(
+        self.apply_prepared_row_mutation(
             table,
             std::slice::from_ref(&current_row),
             &visible_entries,
+            &encoded_history_rows,
+            &encoded_visible_rows,
             &[],
         )?;
         if visible_entries.is_empty() {

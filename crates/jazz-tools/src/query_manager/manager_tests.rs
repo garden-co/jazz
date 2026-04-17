@@ -2438,6 +2438,173 @@ fn update_passes_filter_emits_addition() {
 }
 
 #[test]
+fn synced_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(75))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(30)],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
+fn synced_boolean_eq_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("todos"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+            ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
+            ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+        ])
+        .into(),
+    );
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("watch-me".into()),
+                Value::Boolean(false),
+                Value::Null,
+                Value::Null,
+                Value::Array(vec![Value::Text("x".into())]),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("done", ColumnType::Boolean),
+        ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+        ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+        ColumnDescriptor::new(
+            "tags",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+        ),
+        ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[
+            Value::Text("watch-me".into()),
+            Value::Boolean(true),
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![Value::Text("x".into())]),
+            Value::Null,
+        ],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced boolean update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
 fn update_still_passes_filter_emits_update() {
     // Verify: row passes filter, update still passes filter -> update delta
 

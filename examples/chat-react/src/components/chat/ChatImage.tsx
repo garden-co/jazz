@@ -12,13 +12,14 @@ interface ChatImageProps {
 export function ChatImage({ attachment }: ChatImageProps) {
   const db = useDb();
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const fileReadOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   useEffect(() => {
     let isActive = true;
     let objectUrl: string | null = null;
 
     async function loadImage() {
-      const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "worker" });
+      const blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
       if (!isActive) return;
 
       objectUrl = URL.createObjectURL(blob);
@@ -33,7 +34,7 @@ export function ChatImage({ attachment }: ChatImageProps) {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [attachment.fileId, db]);
+  }, [attachment.fileId, db, fileReadOptions]);
 
   const handleDownload = () => {
     if (!imageUrl) return;

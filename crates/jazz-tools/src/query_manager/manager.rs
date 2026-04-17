@@ -1472,7 +1472,7 @@ impl QueryManager {
             return;
         }
 
-        if old_row.is_none() || update.is_new_object {
+        if old_row.is_none() {
             if apply_index_mutations
                 && let Err(error) = Self::update_indices_for_insert_on_branch(
                     storage,
