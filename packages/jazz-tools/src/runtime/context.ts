@@ -87,8 +87,8 @@ export interface AppContext {
   backendSecret?: string;
 
   /**
-   * Admin secret for schema/policy sync.
-   * Required to sync catalogue objects.
+   * Admin secret for privileged sync and `/admin/*` catalogue endpoints.
+   * On `/ws`, a valid admin secret authenticates this client as the backend.
    */
   adminSecret?: string;
 

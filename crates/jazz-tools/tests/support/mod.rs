@@ -152,7 +152,7 @@ impl<'a> TestingClient<'a> {
             server: None,
             schema: None,
             user_id: None,
-            auth: TestingClientAuth::Admin,
+            auth: TestingClientAuth::User,
             storage: TestingClientStorage::Memory,
             ready_table: None,
             ready_timeout: None,
@@ -172,6 +172,12 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
         self.user_id = Some(user_id.into());
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn as_admin(mut self) -> Self {
+        self.auth = TestingClientAuth::Admin;
         self
     }
 
@@ -267,7 +273,14 @@ impl<'a> TestingClient<'a> {
             );
 
         match &self.auth {
-            TestingClientAuth::Admin => {}
+            TestingClientAuth::Admin => {
+                context.admin_secret = Some(
+                    self.server
+                        .expect("TestingClient requires `with_server(...)` before building")
+                        .admin_secret()
+                        .to_string(),
+                );
+            }
             TestingClientAuth::User => {
                 context.backend_secret = None;
                 context.admin_secret = None;

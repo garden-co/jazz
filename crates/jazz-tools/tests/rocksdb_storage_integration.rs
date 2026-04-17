@@ -264,8 +264,8 @@ async fn make_client_external_jwks(
         data_dir: tempfile::TempDir::new().expect("temp client dir").keep(),
         storage: ClientStorage::Memory,
         jwt_token: Some(TestingServer::jwt_for_user(user_id)),
-        backend_secret: Some(TestingServer::BACKEND_SECRET.to_string()),
-        admin_secret: Some(TestingServer::ADMIN_SECRET.to_string()),
+        backend_secret: None,
+        admin_secret: None,
         sync_tracer: None,
     };
 

@@ -44,6 +44,11 @@
   font-size: 13px;
 }
 
+.buttonRow {
+  display: flex;
+  gap: 10px;
+}
+
 .submitButton {
   border: 1px solid #3a4d66;
   background: #283a52;
@@ -62,4 +67,18 @@
 .submitButton:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.resetButton {
+  border: 1px solid #33445d;
+  background: #1c2635;
+  color: #d5dfef;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.resetButton:hover {
+  background: #243144;
 }

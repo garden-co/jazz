@@ -581,6 +581,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                     tracing::warn!(%server_id, %reason, "transport connect failed");
+                    self.schema_manager
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .remove_pending_server(server_id);
                 }
                 crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                     tracing::warn!(%server_id, %reason, "transport auth failure");
@@ -712,6 +716,63 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .insert(server_id, next_sequence.saturating_sub(1));
         if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
             buffered.retain(|seq, _| *seq >= next_sequence);
+        }
+    }
+
+    /// Test seam: directly dispatch a `TransportInbound` event as if it arrived
+    /// from `server_id`, exercising the same match arm as `batched_tick`.
+    #[cfg(test)]
+    #[cfg(feature = "transport-websocket")]
+    pub(crate) fn handle_transport_inbound_for_test(
+        &mut self,
+        server_id: ServerId,
+        event: crate::transport_manager::TransportInbound,
+    ) {
+        let mut released_server_hold = false;
+        match event {
+            crate::transport_manager::TransportInbound::Connected {
+                catalogue_state_hash,
+                next_sync_seq,
+            } => {
+                self.remove_server(server_id);
+                self.add_server_with_catalogue_state_hash(
+                    server_id,
+                    catalogue_state_hash.as_deref(),
+                );
+                if let Some(seq) = next_sync_seq {
+                    self.set_next_expected_server_sequence(server_id, seq);
+                }
+            }
+            crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
+                if let Some(seq) = sequence {
+                    self.park_sync_message_with_sequence(*entry, seq);
+                } else {
+                    self.park_sync_message(*entry);
+                }
+            }
+            crate::transport_manager::TransportInbound::Disconnected => {
+                self.remove_server(server_id);
+                released_server_hold = true;
+            }
+            crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
+                debug!(%reason, "transport connect failed; releasing pending-server hold");
+                self.schema_manager
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .remove_pending_server(server_id);
+                released_server_hold = true;
+            }
+            crate::transport_manager::TransportInbound::AuthFailure { reason } => {
+                self.remove_server(server_id);
+                released_server_hold = true;
+                if let Some(ref cb) = self.auth_failure_callback {
+                    cb(reason);
+                }
+            }
+        }
+
+        if released_server_hold {
+            self.immediate_tick();
         }
     }
 }
