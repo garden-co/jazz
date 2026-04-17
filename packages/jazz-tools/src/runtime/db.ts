@@ -49,7 +49,6 @@ import { normalizeBuiltQuery } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
-  resolveRuntimeConfigWasmUrl,
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
