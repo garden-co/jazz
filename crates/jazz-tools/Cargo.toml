@@ -96,6 +96,9 @@ opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = t
 opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+
 [dev-dependencies]
 criterion = "0.5"
 insta = "1"
