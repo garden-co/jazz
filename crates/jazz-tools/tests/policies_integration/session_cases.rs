@@ -906,6 +906,7 @@ async fn select_policy_excludes_rows_from_join_results() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("team_memberships", READY_TIMEOUT)
         .connect()
         .await;
@@ -991,6 +992,7 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("team_documents", READY_TIMEOUT)
         .connect()
         .await;
