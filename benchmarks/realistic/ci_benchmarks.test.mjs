@@ -2,11 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import {
-  ACTIVE_SKIP_MIN_OBSERVATIONS,
-  NATIVE_BENCHMARKS,
-  skipIds,
-} from "./ci_benchmarks.mjs";
+import { ACTIVE_SKIP_MIN_OBSERVATIONS, NATIVE_BENCHMARKS, skipIds } from "./ci_benchmarks.mjs";
 import {
   buildNativeCriterionCommand,
   buildNativeExampleBaseCommand,
@@ -194,4 +190,26 @@ test("configured skips only activate after repeated timeout observations", () =>
   };
 
   assert.deepEqual([...skipIds(skipSet)].sort(), ["native:rocksdb:w1_interactive"]);
+});
+
+test("timed-out CI scenarios stay on the reduced sizing", () => {
+  const w1Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/w1_interactive.json", import.meta.url), "utf8"),
+  );
+  const r4Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r4_fanout_updates.json", import.meta.url), "utf8"),
+  );
+  const r9Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r9_subscribed_write_path.json", import.meta.url), "utf8"),
+  );
+  const browserHarness = readFileSync(
+    new URL("../../packages/jazz-tools/tests/browser/realistic-bench.test.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(w1Ci.operation_count, 37500);
+  assert.equal(r4Ci.operation_count, 4);
+  assert.deepEqual(r4Ci.fanout_clients, [10, 20]);
+  assert.equal(r9Ci.scale, 250);
+  assert.match(browserHarness, /b6UpdateCount:\s*6000\b/);
 });

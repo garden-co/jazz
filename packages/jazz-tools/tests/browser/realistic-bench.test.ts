@@ -238,7 +238,7 @@ const CI_BROWSER_LIMITS = {
   b4Rounds: 12,
   b5ReadRequests: 160,
   b5UpdateAttempts: 120,
-  b6UpdateCount: 12000,
+  b6UpdateCount: 6000,
 } as const;
 
 const schema = (schemaJson as { tables: WasmSchema }).tables;
