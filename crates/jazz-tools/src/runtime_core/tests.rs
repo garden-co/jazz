@@ -1021,6 +1021,35 @@ mod install_transport_tests {
             "install_transport must seed the handle's catalogue_state_hash",
         );
     }
+
+    #[test]
+    fn install_transport_holds_initial_remote_query_frontier_while_connecting() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query should stay pending until the transport finishes connecting"
+        );
+    }
 }
 
 fn documents_query_by_title(title: &str) -> Query {
