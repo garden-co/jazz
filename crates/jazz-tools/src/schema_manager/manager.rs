@@ -618,6 +618,11 @@ impl SchemaManager {
         }
     }
 
+    pub fn are_schema_hashes_connected(&self, from_hash: SchemaHash, to_hash: SchemaHash) -> bool {
+        self.non_draft_reachable_hashes(from_hash)
+            .contains(&to_hash)
+    }
+
     fn non_draft_reachable_hashes(&self, start_hash: SchemaHash) -> HashSet<SchemaHash> {
         if !self.is_schema_known(&start_hash) {
             return HashSet::new();
@@ -2238,6 +2243,49 @@ mod tests {
             Some(v2_hash)
         );
         assert!(diagnostics.unreachable_schema_hashes.is_empty());
+    }
+
+    #[test]
+    fn schema_hash_connectivity_requires_non_draft_uploaded_lenses() {
+        let v1 = make_schema_v1();
+        let v1_hash = SchemaHash::compute(&v1);
+        let draft_target = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+        let draft_target_hash = SchemaHash::compute(&draft_target);
+        let draft_lens = generate_lens(&v1, &draft_target);
+
+        assert!(draft_lens.is_draft());
+
+        let mut disconnected = SchemaManager::new(
+            SyncManager::new(),
+            draft_target,
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        disconnected.add_known_schema(v1.clone());
+        disconnected.context.register_lens(draft_lens);
+        assert!(!disconnected.are_schema_hashes_connected(v1_hash, draft_target_hash));
+
+        let live_target = make_schema_v2();
+        let live_target_hash = SchemaHash::compute(&live_target);
+        let mut connected = SchemaManager::new(
+            SyncManager::new(),
+            live_target,
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        connected.add_live_schema(v1).unwrap();
+        assert!(connected.are_schema_hashes_connected(v1_hash, live_target_hash));
     }
 
     #[test]
