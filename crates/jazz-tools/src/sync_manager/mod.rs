@@ -516,6 +516,15 @@ impl SyncManager {
         std::mem::take(&mut self.outbox)
     }
 
+    /// Restore previously dequeued outbox entries ahead of any newly queued ones.
+    pub(crate) fn prepend_outbox(&mut self, mut entries: Vec<OutboxEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        entries.append(&mut self.outbox);
+        self.outbox = entries;
+    }
+
     /// Get a reference to the outbox (for checking if empty).
     pub fn outbox(&self) -> &[OutboxEntry] {
         &self.outbox

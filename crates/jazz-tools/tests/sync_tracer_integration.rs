@@ -84,10 +84,10 @@ async fn alice_write_bob_read() {
     alice    => server  : RowBatchCreated (1)
     bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
     bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
-    server   -> alice   : RowBatchStateChanged (2)
-    server   -> bob     : QuerySettled (1), RowBatchNeeded (1)
-    server   => alice   : RowBatchStateChanged (2)
-    server   => bob     : QuerySettled (1), RowBatchNeeded (1)
+    server   -> alice   : BatchSettlement (1), RowBatchStateChanged (2)
+    server   -> bob     : BatchSettlement (1), QueryScopeSnapshot (2), QuerySettled (1), RowBatchNeeded (1)
+    server   => alice   : BatchSettlement (1), RowBatchStateChanged (2)
+    server   => bob     : BatchSettlement (1), QueryScopeSnapshot (2), QuerySettled (1), RowBatchNeeded (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -262,8 +262,8 @@ async fn single_writer_flow() {
     insta::assert_snapshot!(tracer.tally(), @"
     alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1)
     alice    => server  : RowBatchCreated (1)
-    server   -> alice   : RowBatchStateChanged (2)
-    server   => alice   : RowBatchStateChanged (2)
+    server   -> alice   : BatchSettlement (1), RowBatchStateChanged (2)
+    server   => alice   : BatchSettlement (1), RowBatchStateChanged (2)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -315,6 +315,8 @@ async fn named_object_trace() {
     alice    -> server    QueryUnsubscription  query:0
     alice    => server    RowBatchCreated      created row:my-todo branch:main batch:B1
     alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    server   => alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
+    server   -> alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
     server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
     server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
     server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
