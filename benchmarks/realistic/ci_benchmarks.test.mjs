@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { NATIVE_BENCHMARKS } from "./ci_benchmarks.mjs";
+import {
+  ACTIVE_SKIP_MIN_OBSERVATIONS,
+  NATIVE_BENCHMARKS,
+  skipIds,
+} from "./ci_benchmarks.mjs";
 import {
   buildNativeCriterionCommand,
   buildNativeExampleBaseCommand,
@@ -178,4 +182,16 @@ test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
   );
 
   assert.match(workflow, /pnpm --filter jazz-napi build/);
+});
+
+test("configured skips only activate after repeated timeout observations", () => {
+  const skipSet = {
+    entries: [
+      { id: "browser:b6", observations: ACTIVE_SKIP_MIN_OBSERVATIONS - 1 },
+      { id: "native:rocksdb:w1_interactive", observations: ACTIVE_SKIP_MIN_OBSERVATIONS },
+      { id: "native:sqlite:w1_interactive" },
+    ],
+  };
+
+  assert.deepEqual([...skipIds(skipSet)].sort(), ["native:rocksdb:w1_interactive"]);
 });
