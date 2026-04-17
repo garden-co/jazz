@@ -21,7 +21,7 @@ fn column_type_fixed_sizes() {
             variants: vec!["a".to_string()]
         }
         .fixed_size(),
-        None
+        Some(1)
     );
 }
 

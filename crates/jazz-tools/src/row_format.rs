@@ -337,6 +337,20 @@ fn validate_value_size(
     }
 }
 
+fn encode_enum_variant_index(variants: &[String], value: &str) -> Result<u8, EncodingError> {
+    variants
+        .iter()
+        .position(|variant| variant == value)
+        .and_then(|index| u8::try_from(index).ok())
+        .ok_or_else(|| EncodingError::TypeMismatch {
+            column: "enum".to_string(),
+            expected: ColumnType::Enum {
+                variants: variants.to_vec(),
+            },
+            actual: Some(ColumnType::Text),
+        })
+}
+
 /// Encode a fixed-size value to the buffer.
 fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
     if col.nullable {
@@ -349,6 +363,18 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         } else {
             buf.push(1); // present marker
         }
+    }
+
+    if let ColumnType::Enum { variants } = &col.column_type {
+        let index = match val {
+            Value::Text(value) => {
+                encode_enum_variant_index(variants, value).unwrap_or_else(|_| unreachable!())
+            }
+            Value::Null => 0,
+            other => unreachable!("Enum is fixed-size only for text values, got {other:?}"),
+        };
+        buf.push(index);
+        return;
     }
 
     match val {
@@ -458,6 +484,20 @@ fn decode_text_value(data: &[u8], variants: Option<&[String]>) -> Result<Value, 
     Ok(Value::Text(s.to_string()))
 }
 
+fn decode_enum_value(data: &[u8], variants: &[String]) -> Result<Value, EncodingError> {
+    if variants.len() <= u8::MAX as usize + 1 && data.len() == 1 {
+        let index = data[0] as usize;
+        let value = variants
+            .get(index)
+            .ok_or_else(|| EncodingError::MalformedData {
+                message: format!("invalid enum variant index: {index}"),
+            })?;
+        return Ok(Value::Text(value.clone()));
+    }
+
+    decode_text_value(data, Some(variants))
+}
+
 fn decode_non_null_value(
     data: &[u8],
     column_type: &ColumnType,
@@ -534,7 +574,7 @@ fn decode_non_null_value(
         }
         ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
         ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
-        ColumnType::Enum { variants } => decode_text_value(data, Some(variants)),
+        ColumnType::Enum { variants } => decode_enum_value(data, variants),
         ColumnType::Array {
             element: element_type,
         } => {
@@ -990,6 +1030,9 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
 /// Encode a Value to binary bytes with type information (needed for Row values).
 pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
     match (value, col_type) {
+        (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
+            vec![encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!())]
+        }
         (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
             let mut buf = Vec::new();
             // Encode optional row id: 1-byte flag + 16-byte UUID if present
@@ -2392,10 +2435,26 @@ mod tests {
         )]);
 
         let mut encoded = encode_row(&descriptor, &[Value::Text("todo".to_string())]).unwrap();
-        encoded.as_mut_slice().clone_from_slice(b"nope");
+        encoded[0] = 9;
 
         let err = decode_row(&descriptor, &encoded).unwrap_err();
         assert!(matches!(err, EncodingError::MalformedData { .. }));
+    }
+
+    #[test]
+    fn enum_columns_encode_as_single_byte_indices() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "status",
+            ColumnType::Enum {
+                variants: vec!["todo".to_string(), "doing".to_string(), "done".to_string()],
+            },
+        )]);
+
+        let encoded = encode_row(&descriptor, &[Value::Text("done".to_string())]).unwrap();
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+
+        assert_eq!(encoded, vec![2]);
+        assert_eq!(decoded, vec![Value::Text("done".to_string())]);
     }
 
     #[test]
