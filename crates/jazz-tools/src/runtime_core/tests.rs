@@ -19,8 +19,18 @@ use crate::sync_manager::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
-type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSyncSender>;
+type TestCore = RuntimeCore<MemoryStorage, NoopScheduler>;
+type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler>;
+
+fn new_test_core<S: Storage, Sch: Scheduler>(
+    schema_manager: SchemaManager,
+    storage: S,
+    scheduler: Sch,
+) -> RuntimeCore<S, Sch> {
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+    core.set_sync_sender(Box::new(VecSyncSender::new()));
+    core
+}
 
 struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
@@ -1353,12 +1363,7 @@ fn create_runtime_with_schema_and_sync_manager(
 ) -> TestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1379,7 +1384,7 @@ fn create_runtime_with_storage_and_sync_manager(
 ) -> TestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1392,7 +1397,7 @@ fn create_runtime_with_boxed_storage(
     let app_id = AppId::from_name(app_name);
     let schema_manager =
         SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -2226,32 +2231,17 @@ fn create_3tier_rc() -> ThreeTierRC {
     // A = client (no tier)
     let sm_a = SyncManager::new();
     let mgr_a = SchemaManager::new(sm_a, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     // B = Worker server
     let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
     let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = new_test_core(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     // C = EdgeServer
     let sm_c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mgr_c = SchemaManager::new(sm_c, schema, app_id, "dev", "main").unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = new_test_core(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -2461,12 +2451,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
 
     let mgr_a =
         SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     let mgr_b = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::Worker),
@@ -2476,12 +2461,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
         "main",
     )
     .unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = new_test_core(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     let mgr_c = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
@@ -2491,12 +2471,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
         "main",
     )
     .unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = new_test_core(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -2778,12 +2753,7 @@ fn rc_local_write_without_outbox_still_schedules_batched_tick_for_flush() {
     let app_id = AppId::from_name("row-schedule-flush-without-outbox");
     let schema_manager =
         SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        scheduler.clone(),
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), scheduler.clone());
     core.immediate_tick();
     let scheduled_before = scheduler.schedule_count();
 
@@ -6130,12 +6100,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
     let schema = test_schema();
     let app_id = AppId::from_name("durability-test");
     let mgr_d = SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut d = RuntimeCore::new(
-        mgr_d,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut d = new_test_core(mgr_d, MemoryStorage::new(), NoopScheduler);
 
     let d_client_of_b = ClientId::new();
     let b_server_for_d = ServerId::new();
@@ -6670,12 +6635,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     // NO immediate_tick() here — matches WASM openPersistent flow
 
     // persist_schema — stages a catalogue object before the first tick
@@ -6741,12 +6701,7 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
     let schema_hash = SchemaHash::compute(&schema);
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     core.persist_schema();
     core.publish_permissions_bundle(
@@ -6803,12 +6758,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     let schema_obj_id = core.persist_schema();
     let (row_object_id, _) = core
@@ -6879,12 +6829,7 @@ fn create_fk_runtime() -> TestCore {
     let app_id = AppId::from_name("fk-test");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }

@@ -12,6 +12,7 @@
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -137,6 +138,10 @@ impl CallbackSyncSender {
 impl SyncSender for CallbackSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         (self.callback)(message);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

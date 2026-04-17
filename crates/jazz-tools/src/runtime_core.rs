@@ -27,6 +27,7 @@
 //! let results = future.await?;
 //! ```
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -69,6 +70,7 @@ pub trait Scheduler {
 /// by the concrete wrapping type where needed.
 pub trait SyncSender {
     fn send_sync_message(&self, message: OutboxEntry);
+    fn as_any(&self) -> &dyn Any;
 }
 
 // ============================================================================
@@ -109,6 +111,10 @@ impl VecSyncSender {
 impl SyncSender for VecSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         self.messages.lock().unwrap().push(message);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -519,6 +525,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// the per-connection `ConnectionEventHub` channels.
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
+    }
+
+    #[cfg(test)]
+    pub fn sync_sender(&self) -> &VecSyncSender {
+        self.sync_sender
+            .as_ref()
+            .expect("test runtime must install a VecSyncSender")
+            .as_any()
+            .downcast_ref::<VecSyncSender>()
+            .expect("test runtime sync sender must be VecSyncSender")
     }
 }
 
