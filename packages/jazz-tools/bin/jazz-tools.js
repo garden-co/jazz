@@ -101,8 +101,8 @@ function printWrapperHelp() {
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
   );
+  console.log("  deploy                Publish the current schema and permissions to the server");
   console.log("  permissions status    Show the current server permissions head for this app");
-  console.log("  permissions push      Publish the current permissions.ts with head-parent checks");
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
@@ -135,6 +135,7 @@ if (!command || command === "--help" || command === "-h") {
   fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
 } else if (
   command === "validate" ||
+  command === "deploy" ||
   command === "migrations" ||
   command === "permissions" ||
   command === "schema"
