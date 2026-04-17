@@ -25,7 +25,7 @@ use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
 };
-use crate::schema_manager::manager::PermissionsHeadSummary;
+use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
@@ -279,6 +279,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().current_permissions_head())
+    }
+
+    pub fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().current_permissions())
     }
 
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.

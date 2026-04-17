@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
@@ -247,6 +248,81 @@ describe("schema-fetch", () => {
         },
       },
     });
+  });
+
+  it("fetches stored permissions with admin secret header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        head: {
+          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          version: 2,
+          parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+          bundleObjectId: "22222222-2222-2222-2222-222222222222",
+        },
+        permissions: {
+          users: {
+            select: {
+              using: {
+                type: "True",
+              },
+            },
+          },
+        },
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchStoredPermissions("http://localhost:1625/", {
+      adminSecret: "admin-secret",
+      pathPrefix: "/apps/app-123",
+    });
+
+    expect(result).toEqual({
+      head: {
+        schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        version: 2,
+        parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+        bundleObjectId: "22222222-2222-2222-2222-222222222222",
+      },
+      permissions: {
+        users: {
+          select: {
+            using: {
+              type: "True",
+            },
+          },
+        },
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/app-123/admin/permissions",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
+  });
+
+  it("throws a descriptive error when fetching stored permissions fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      text: async () => '{"error":"bad secret"}',
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      fetchStoredPermissions("http://localhost:1625", {
+        adminSecret: "admin-secret",
+      }),
+    ).rejects.toThrow('Permissions fetch failed: 401 Unauthorized - {"error":"bad secret"}');
   });
 
   it("fetches grouped server subscriptions with admin secret and app id", async () => {

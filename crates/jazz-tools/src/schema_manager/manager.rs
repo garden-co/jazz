@@ -64,6 +64,12 @@ pub struct PermissionsHeadSummary {
     pub bundle_object_id: ObjectId,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurrentPermissionsSummary {
+    pub head: PermissionsHeadSummary,
+    pub permissions: HashMap<TableName, TablePolicies>,
+}
+
 /// SchemaManager coordinates schema evolution with query execution.
 ///
 /// It manages:
@@ -573,6 +579,15 @@ impl SchemaManager {
                 parent_bundle_object_id: head.parent_bundle_object_id,
                 bundle_object_id: head.bundle_object_id,
             })
+    }
+
+    pub fn current_permissions(&self) -> Option<CurrentPermissionsSummary> {
+        let head = self.current_permissions_head()?;
+        let bundle = self.known_permissions_bundles.get(&head.bundle_object_id)?;
+        Some(CurrentPermissionsSummary {
+            head,
+            permissions: bundle.permissions.clone(),
+        })
     }
 
     pub fn connection_schema_diagnostics(
