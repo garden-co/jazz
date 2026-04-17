@@ -2945,6 +2945,25 @@ pub trait Storage {
         Ok(())
     }
 
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        let _ = history_rows;
+        let _ = visible_entries;
+        self.apply_encoded_row_mutation(
+            table,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn upsert_visible_region_row_bytes(
         &mut self,
         _table: &str,
@@ -3043,8 +3062,10 @@ pub trait Storage {
         let encoded_history_rows = encode_history_row_bytes_for_storage(self, table, history_rows)?;
         let encoded_visible_rows =
             encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
-        self.apply_encoded_row_mutation(
+        self.apply_prepared_row_mutation(
             table,
+            history_rows,
+            visible_entries,
             &encoded_history_rows,
             &encoded_visible_rows,
             index_mutations,
@@ -3832,6 +3853,25 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
     }
 
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn upsert_visible_region_rows(
         &mut self,
         table: &str,
@@ -4219,6 +4259,8 @@ impl TableRowHistories {
 pub struct MemoryStorage {
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
+    /// Raw table headers already validated/inserted in this storage instance.
+    ensured_raw_table_headers: HashSet<String>,
     /// Decoded row locators keyed by logical row id.
     row_locators: HashMap<ObjectId, RowLocator>,
     /// Row-history storage keyed by table.
@@ -4231,6 +4273,19 @@ impl MemoryStorage {
     /// Create a new empty MemoryStorage.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn ensure_cached_raw_table_header(
+        &mut self,
+        raw_table: &str,
+        expected_header: &RawTableHeader,
+    ) -> Result<(), StorageError> {
+        if self.ensured_raw_table_headers.contains(raw_table) {
+            return Ok(());
+        }
+        ensure_raw_table_header(self, raw_table, expected_header)?;
+        self.ensured_raw_table_headers.insert(raw_table.to_string());
+        Ok(())
     }
 }
 
@@ -4342,6 +4397,101 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if history_rows.len() != encoded_history_rows.len() {
+            return Err(StorageError::IoError(format!(
+                "prepared history row count mismatch: {} decoded vs {} encoded",
+                history_rows.len(),
+                encoded_history_rows.len()
+            )));
+        }
+        if visible_entries.len() != encoded_visible_rows.len() {
+            return Err(StorageError::IoError(format!(
+                "prepared visible row count mismatch: {} decoded vs {} encoded",
+                visible_entries.len(),
+                encoded_visible_rows.len()
+            )));
+        }
+
+        let table = table.to_string();
+
+        for (row, encoded) in history_rows.iter().zip(encoded_history_rows) {
+            self.ensure_cached_raw_table_header(
+                encoded.row_raw_table.as_str(),
+                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+            )?;
+            if encoded.needs_exact_locator {
+                self.put_history_row_batch_table_locator(
+                    encoded.branch.as_str(),
+                    encoded.row_id,
+                    encoded.batch_id,
+                    Some(&ExactRowTableLocator {
+                        row_raw_table: encoded.row_raw_table.clone().into(),
+                        table_name: encoded.row_raw_table_id.table_name.clone(),
+                        schema_hash: encoded.row_raw_table_id.schema_hash,
+                    }),
+                )?;
+            }
+            self.row_histories
+                .entry(table.clone())
+                .or_default()
+                .history
+                .insert(
+                    (row.row_id, row.branch.clone(), row.batch_id()),
+                    row.clone(),
+                );
+            self.row_history_bytes
+                .entry(table.clone())
+                .or_default()
+                .insert(
+                    (
+                        encoded.row_id,
+                        encoded.branch.clone().into(),
+                        encoded.batch_id,
+                    ),
+                    encoded.bytes.clone(),
+                );
+        }
+
+        for (entry, encoded) in visible_entries.iter().zip(encoded_visible_rows) {
+            self.ensure_cached_raw_table_header(
+                encoded.row_raw_table.as_str(),
+                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+            )?;
+            if encoded.needs_exact_locator {
+                self.put_visible_row_table_locator(
+                    encoded.branch.as_str(),
+                    encoded.row_id,
+                    Some(&ExactRowTableLocator {
+                        row_raw_table: encoded.row_raw_table.clone().into(),
+                        table_name: encoded.row_raw_table_id.table_name.clone(),
+                        schema_hash: encoded.row_raw_table_id.schema_hash,
+                    }),
+                )?;
+            }
+            self.row_histories
+                .entry(table.clone())
+                .or_default()
+                .visible
+                .entry(entry.current_row.branch.clone())
+                .or_default()
+                .insert(entry.current_row.row_id, entry.clone());
+        }
+
+        if !index_mutations.is_empty() {
+            self.apply_index_mutations(index_mutations)?;
+        }
+        Ok(())
+    }
+
     fn apply_encoded_row_mutation(
         &mut self,
         table: &str,
@@ -4352,8 +4502,7 @@ impl Storage for MemoryStorage {
         let table = table.to_string();
 
         for row in history_rows {
-            ensure_raw_table_header(
-                self,
+            self.ensure_cached_raw_table_header(
                 row.row_raw_table.as_str(),
                 &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
             )?;
@@ -4398,8 +4547,7 @@ impl Storage for MemoryStorage {
         }
 
         for row in visible_rows {
-            ensure_raw_table_header(
-                self,
+            self.ensure_cached_raw_table_header(
                 row.row_raw_table.as_str(),
                 &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
             )?;
@@ -4610,8 +4758,7 @@ impl Storage for MemoryStorage {
             }
         }
         for row in &encoded_rows {
-            ensure_raw_table_header(
-                self,
+            self.ensure_cached_raw_table_header(
                 row.row_raw_table.as_str(),
                 &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
             )?;
@@ -4670,8 +4817,7 @@ impl Storage for MemoryStorage {
             }
         }
         for row in encoded_rows {
-            ensure_raw_table_header(
-                self,
+            self.ensure_cached_raw_table_header(
                 row.row_raw_table.as_str(),
                 &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
             )?;

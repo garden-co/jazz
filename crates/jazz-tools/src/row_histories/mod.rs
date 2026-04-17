@@ -1610,9 +1610,11 @@ pub fn apply_row_batch<H: Storage>(
         } else {
             Vec::new()
         };
-        <H as Storage>::apply_encoded_row_mutation(
+        <H as Storage>::apply_prepared_row_mutation(
             io,
             &table,
+            std::slice::from_ref(&row),
+            visible_entries,
             std::slice::from_ref(&encoded_history),
             &encoded_visible,
             index_mutations,
