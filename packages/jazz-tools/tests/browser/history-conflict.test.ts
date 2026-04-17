@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import type { TableProxy } from "../../src/runtime/db.js";
+import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -18,11 +18,16 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
-import { getTestingServerInfo } from "./testing-server.js";
+import {
+  getTestingServerInfo,
+  unblockTestingServerNetwork,
+  type TestingServerInfo,
+} from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
   makeQuery,
+  uniqueDbName,
   waitForCondition,
   waitForQuery,
   withTimeout,
@@ -67,9 +72,12 @@ const allTodos = makeQuery<Todo>("todos", schema);
 
 describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
+  let testingServer: TestingServerInfo;
   afterEach(() => ctx.cleanup());
   beforeEach(async () => {
-    const { serverUrl, adminSecret } = await getTestingServerInfo();
+    testingServer = await getTestingServerInfo(uniqueDbName("history-conflict-app"));
+    const { serverUrl, adminSecret } = testingServer;
+    await unblockTestingServerNetwork(serverUrl);
     const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
       adminSecret,
       schema,
@@ -107,8 +115,9 @@ describe("History & Conflict Management", () => {
    */
   it("concurrent updates converge in browser", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-concurrent", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-concurrent", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-concurrent", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-concurrent", token, testingServer);
+    await waitForPeerSync(dbAlice, dbBob, "hc-concurrent");
 
     // Alice inserts a todo
     const uniqueTitle = `original-${Date.now()}`;
@@ -155,8 +164,9 @@ describe("History & Conflict Management", () => {
 
   it("sequential update propagates from A to B", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-seq-upd", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-seq-upd", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-seq-upd", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-seq-upd", token, testingServer);
+    await waitForPeerSync(dbAlice, dbBob, "hc-seq-upd");
 
     // Alice inserts
     const { id } = await withTimeout(
@@ -206,8 +216,9 @@ describe("History & Conflict Management", () => {
    */
   it("concurrent creates both visible in browser", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-creates", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-creates", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-creates", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-creates", token, testingServer);
+    await waitForPeerSync(dbAlice, dbBob, "hc-creates");
 
     const milkTitle = `buy-milk-${Date.now()}`;
     const eggsTitle = `buy-eggs-${Date.now()}`;
@@ -260,8 +271,9 @@ describe("History & Conflict Management", () => {
    */
   it("subscription fires on remote concurrent update", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-sub", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-sub", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-sub", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-sub", token, testingServer);
+    await waitForPeerSync(dbAlice, dbBob, "hc-sub");
 
     // Alice inserts a todo
     const originalTitle = `sub-test-${Date.now()}`;
@@ -327,8 +339,9 @@ describe("History & Conflict Management", () => {
    */
   it("fresh db sees converged state", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-fresh", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-fresh", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-fresh", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-fresh", token, testingServer);
+    await waitForPeerSync(dbAlice, dbBob, "hc-fresh");
 
     // Alice inserts a todo
     const originalTitle = `fresh-test-${Date.now()}`;
@@ -377,7 +390,7 @@ describe("History & Conflict Management", () => {
     );
 
     // Charlie connects fresh — must see the same winner
-    const dbCharlie = await createSyncedDb(ctx, "hc-charlie-fresh", token);
+    const dbCharlie = await createReadySyncedDb(ctx, "hc-charlie-fresh", token, testingServer);
 
     const charlieRows = await waitForQuery(
       dbCharlie,
@@ -401,8 +414,8 @@ describe("History & Conflict Management", () => {
    */
   it.skip("concurrent edits on different fields", async () => {
     const token = generateAuthSecret();
-    const dbAlice = await createSyncedDb(ctx, "hc-alice-fields", token);
-    const dbBob = await createSyncedDb(ctx, "hc-bob-fields", token);
+    const dbAlice = await createReadySyncedDb(ctx, "hc-alice-fields", token, testingServer);
+    const dbBob = await createReadySyncedDb(ctx, "hc-bob-fields", token, testingServer);
 
     const { id } = await withTimeout(
       dbAlice.insertDurable(todos, { title: "task", done: false }, { tier: "worker" }),
@@ -439,3 +452,70 @@ describe("History & Conflict Management", () => {
     );
   }, 90000);
 });
+
+async function createReadySyncedDb(
+  ctx: TestCleanup,
+  label: string,
+  secret: string,
+  testingServer: TestingServerInfo,
+): Promise<Db> {
+  const db = await createSyncedDb(ctx, label, secret, testingServer);
+  const warmupTitle = `warmup-${label}-${Date.now()}`;
+
+  await waitForCondition(
+    async () => {
+      try {
+        await withTimeout(
+          db.insertDurable(todos, { title: warmupTitle, done: false }, { tier: "worker" }),
+          2_000,
+          `${label} warmup insert did not resolve`,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    12_000,
+    `${label} should accept durable writes after permissions publication`,
+  );
+
+  return db;
+}
+
+async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<void> {
+  const { id: aliceToBobId } = await withTimeout(
+    dbAlice.insertDurable(
+      todos,
+      { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false },
+      { tier: "worker" },
+    ),
+    10_000,
+    `${label} Alice->Bob peer sync insert did not resolve`,
+  );
+
+  await waitForQuery(
+    dbBob,
+    allTodos,
+    (rows) => rows.some((row) => row.id === aliceToBobId),
+    `${label} Alice->Bob peer sync should reach Bob`,
+    20_000,
+  );
+
+  const { id: bobToAliceId } = await withTimeout(
+    dbBob.insertDurable(
+      todos,
+      { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false },
+      { tier: "worker" },
+    ),
+    10_000,
+    `${label} Bob->Alice peer sync insert did not resolve`,
+  );
+
+  await waitForQuery(
+    dbAlice,
+    allTodos,
+    (rows) => rows.some((row) => row.id === bobToAliceId),
+    `${label} Bob->Alice peer sync should reach Alice`,
+    20_000,
+  );
+}

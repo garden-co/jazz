@@ -7,7 +7,7 @@ import {
   type QueryBuilder,
   type TableProxy,
 } from "../../src/runtime/index.js";
-import { publishStoredSchema } from "../../src/runtime/schema-fetch.js";
+import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
@@ -105,6 +105,8 @@ describe("Db auth refresh browser integration", () => {
       "expected at least one published schema hash before publishing test permissions",
     );
 
+    const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+
     await publishStoredPermissions(serverUrl, {
       adminSecret,
       schemaHash: latestSchemaHash!,
@@ -119,6 +121,7 @@ describe("Db auth refresh browser integration", () => {
           delete: { using: { type: "True" } },
         },
       },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
 
     const marker = `queued-after-auth-loss-${Date.now()}`;
