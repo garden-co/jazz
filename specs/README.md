@@ -77,6 +77,7 @@ If you want one sentence to hold onto while reading the rest:
 
 Design work that has not landed yet lives in [`specs/todo/`](todo/). Useful entry points:
 
+- **[Polymorphic Contract Tables and References](todo/a_mvp/polymorphic_contract_tables_and_references.md)** — nominal contract/variant tables with contract refs and coordinated variant writes
 - **[Opt-In Transactions with Replayable Reconciliation](todo/a_mvp/opt_in_transactions_replayable_reconciliation.md)** — transaction-shaped write semantics on top of the row-history foundation
 - **[Protocol and Storage Version Tags](todo/b_launch/protocol_and_storage_version_tags.md)** — explicit format/versioning strategy for on-disk state and wire payloads
 - **[Sharding Design Sketch](todo/b_launch/sharding_design_sketch.md)** — future distribution work
