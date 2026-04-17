@@ -2829,8 +2829,8 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     .expect("open rocksdb for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -2877,8 +2877,8 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     .expect("open sqlite for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(

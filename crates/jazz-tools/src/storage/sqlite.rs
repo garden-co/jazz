@@ -400,15 +400,18 @@ impl Storage for SqliteStorage {
 
     fn delete_visible_region_row(
         &mut self,
-        _table: &str,
+        table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        let cache_key = (branch.to_string(), row_id);
+        let locator = self
+            .with_inner_mut(|inner| Ok(inner.visible_row_table_locators.remove(&cache_key)))?
+            .or(super::exact_visible_row_table_locator_for_delete(
+                self, table, branch, row_id,
+            )?);
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
-            let locator = inner
-                .visible_row_table_locators
-                .remove(&(branch.to_string(), row_id));
             Self::with_savepoint(&inner.conn, || {
                 let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
                 if let Some(locator) = locator.as_ref() {
