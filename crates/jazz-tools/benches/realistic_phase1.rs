@@ -2797,8 +2797,8 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     .expect("open rocksdb for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -2845,8 +2845,8 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     .expect("open sqlite for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -3453,13 +3453,6 @@ fn many_branches_benchmark_name(
     )
 }
 
-fn many_branches_row_metadata() -> HashMap<String, String> {
-    HashMap::from([(
-        MetadataKey::Table.to_string(),
-        MANY_BRANCHES_TABLE.to_string(),
-    )])
-}
-
 fn many_branches_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder(MANY_BRANCHES_TABLE).column("payload", ColumnType::Bytea))
@@ -3495,9 +3488,6 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
 ) -> ManyBranchesDataset {
     let (schema_hash, user_descriptor) = ensure_many_branches_schema(storage);
     let object_id = ObjectId::new();
-    storage
-        .put_metadata(object_id, many_branches_row_metadata())
-        .expect("seed many-branches metadata");
     storage
         .put_row_locator(
             object_id,

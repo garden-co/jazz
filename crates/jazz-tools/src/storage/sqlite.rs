@@ -525,17 +525,32 @@ mod tests {
     #[test]
     fn flush_does_not_panic() {
         use crate::object::ObjectId;
-        use std::collections::HashMap;
+        use crate::query_manager::types::{SchemaBuilder, TableSchema};
+        use crate::storage::RowLocator;
 
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.sqlite");
         let mut storage = SqliteStorage::open(&path).unwrap();
+        let schema_hash = crate::query_manager::types::SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("users")
+                        .column("name", crate::query_manager::types::ColumnType::Text),
+                )
+                .build(),
+        );
 
         for _ in 0..10 {
             let id = ObjectId::new();
-            let mut meta = HashMap::new();
-            meta.insert("k".to_string(), "v".to_string());
-            storage.put_metadata(id, meta).unwrap();
+            storage
+                .put_row_locator(
+                    id,
+                    Some(&RowLocator {
+                        table: "users".into(),
+                        origin_schema_hash: Some(schema_hash),
+                    }),
+                )
+                .unwrap();
         }
 
         // flush() should not panic or return an error (it returns ())
@@ -553,10 +568,10 @@ mod tests {
 
         // Storage is closed but NOT yet dropped.
         // A real close() takes the inner; the next call must return Err, not succeed or panic.
-        let result = storage.load_metadata(ObjectId::new());
+        let result = storage.load_row_locator(ObjectId::new());
         assert!(
             result.is_err(),
-            "load_metadata should return Err after close, got Ok"
+            "load_row_locator should return Err after close, got Ok"
         );
     }
 

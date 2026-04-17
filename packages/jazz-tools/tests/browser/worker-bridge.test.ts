@@ -24,6 +24,7 @@ import {
 import {
   blockTestingServerNetwork,
   getTestingServerInfo,
+  getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
   unblockTestingServerNetwork,
 } from "./testing-server.js";
@@ -955,6 +956,118 @@ describe("Worker Bridge with OPFS", () => {
 
     unsub();
   });
+
+  it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
+    const sharedLocalAuthToken = generateAuthSecret();
+    const db = await createSyncedDb(ctx, "subscribe-initial-snapshot", sharedLocalAuthToken);
+
+    const insertedIds: string[] = [];
+    for (let i = 0; i < 120; i += 1) {
+      const { id } = await db.insertDurable(
+        todos,
+        { title: `seeded-${i}`, done: i % 2 === 0 },
+        { tier: "worker" },
+      );
+      insertedIds.push(id);
+    }
+
+    const targetId = insertedIds[0];
+    const received: Todo[][] = [];
+    const unsub = trackSubscription(
+      db.subscribeAll(
+        {
+          _table: "todos",
+          _schema: schema,
+          _rowType: {} as Todo,
+          _build() {
+            return JSON.stringify({
+              table: "todos",
+              conditions: [{ column: "id", op: "eq", value: targetId }],
+              includes: {},
+              orderBy: [],
+            });
+          },
+        },
+        (delta) => {
+          received.push([...delta.all]);
+        },
+      ),
+    );
+
+    await waitForCondition(
+      async () =>
+        received.some((rows) => rows.length === 1 && rows[0]?.id === targetId && rows[0]?.title),
+      8000,
+      "Seeded synced row should appear in initial scoped subscription snapshot",
+    );
+
+    const last = received[received.length - 1];
+    expect(last).toHaveLength(1);
+    expect(last[0].id).toBe(targetId);
+    expect(last[0].title).toBe("seeded-0");
+
+    unsub();
+  }, 60000);
+
+  it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const db = track(
+      await createDb({
+        appId,
+        driver: { type: "persistent", dbName: uniqueDbName("subscribe-initial-jwt") },
+        serverUrl,
+        adminSecret,
+        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt"),
+      }),
+    );
+
+    const insertedIds: string[] = [];
+    for (let i = 0; i < 120; i += 1) {
+      const { id } = await db.insertDurable(
+        todos,
+        { title: `seeded-jwt-${i}`, done: i % 2 === 0 },
+        { tier: "worker" },
+      );
+      insertedIds.push(id);
+    }
+
+    const targetId = insertedIds[0];
+    const received: Todo[][] = [];
+    const unsub = trackSubscription(
+      db.subscribeAll(
+        {
+          _table: "todos",
+          _schema: schema,
+          _rowType: {} as Todo,
+          _build() {
+            return JSON.stringify({
+              table: "todos",
+              conditions: [{ column: "id", op: "eq", value: targetId }],
+              includes: {},
+              orderBy: [],
+            });
+          },
+        },
+        (delta) => {
+          received.push([...delta.all]);
+        },
+      ),
+    );
+
+    await waitForCondition(
+      async () =>
+        received.some((rows) => rows.length === 1 && rows[0]?.id === targetId && rows[0]?.title),
+      8000,
+      "JWT-backed seeded row should appear in initial scoped subscription snapshot",
+    );
+
+    const last = received[received.length - 1];
+    expect(last).toHaveLength(1);
+    expect(last[0].id).toBe(targetId);
+    expect(last[0].title).toBe("seeded-jwt-0");
+
+    unsub();
+  }, 60000);
 
   it("forwards page lifecycle hints from main thread to worker bridge", async () => {
     const db = track(

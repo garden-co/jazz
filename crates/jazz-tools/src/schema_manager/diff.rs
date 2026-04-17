@@ -373,6 +373,7 @@ fn heuristic_default_for_type(ct: &ColumnType, nullable: bool) -> Value {
             .unwrap_or(Value::Null),
         ColumnType::Timestamp => Value::Timestamp(0),
         ColumnType::Uuid => Value::Null, // Can't generate a sensible default
+        ColumnType::BatchId => Value::BatchId([0; 16]),
         ColumnType::Bytea => Value::Bytea(vec![]),
         ColumnType::Json { schema: _ } => Value::Null,
         ColumnType::Array { element: _ } => Value::Array(vec![]),

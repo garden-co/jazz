@@ -731,6 +731,14 @@ function parseBrowserReport(lines) {
   return null;
 }
 
+function browserReportFile(runId) {
+  return path.resolve(
+    process.cwd(),
+    "packages/jazz-tools/.vitest-browser-bench",
+    `${runId}.json`,
+  );
+}
+
 async function runBrowserBenchmark(benchmark, args) {
   const outputFile = path.resolve(args.outDir, benchmark.output_path);
   const command = ["pnpm", "--dir", "packages/jazz-tools", "run", "bench:realistic:browser"];
@@ -753,8 +761,10 @@ async function runBrowserBenchmark(benchmark, args) {
       JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
       JAZZ_REALISTIC_BROWSER_RUN_ID: `${fileSafeId(benchmark.id)}-attempt-${attemptIndex}`,
     };
+    const reportFile = browserReportFile(env.JAZZ_REALISTIC_BROWSER_RUN_ID);
 
     fs.rmSync(attemptOutputFile, { force: true });
+    fs.rmSync(reportFile, { force: true });
     console.log(`\n==> ${benchmark.label} (${attemptIndex}/${repeatCount})`);
     console.log(`JAZZ_REALISTIC_BROWSER_SCENARIOS=${benchmark.scenario_id} ${shellQuote(command)}`);
     const result = await runCommand({
@@ -772,7 +782,7 @@ async function runBrowserBenchmark(benchmark, args) {
     let note = null;
     if (status === "passed") {
       try {
-        const report = parseBrowserReport(result.stdoutLines);
+        const report = readJsonIfExists(reportFile) ?? parseBrowserReport(result.stdoutLines);
         const reportedScenarios = Array.isArray(report?.scenarios) ? report.scenarios : [];
         scenario =
           reportedScenarios.find((entry) => entry?.scenario_id === benchmark.scenario_id) ?? null;

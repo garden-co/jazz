@@ -10,7 +10,7 @@ use crate::row_format::encode_row;
 use crate::row_histories::BatchId;
 use crate::schema_manager::AppId;
 use crate::storage::{
-    MemoryStorage, MetadataRows, RawTableKeys, RawTableRows, RowLocator, Storage, StorageError,
+    MemoryStorage, RawTableKeys, RawTableRows, RowLocator, Storage, StorageError,
 };
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
@@ -102,22 +102,6 @@ impl Scheduler for CountingScheduler {
 }
 
 impl Storage for RowRegionReadFailingStorage {
-    fn put_metadata(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_metadata(id, metadata)
-    }
-
-    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_metadata(id)
-    }
-
-    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
-        self.inner.scan_metadata()
-    }
-
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         if self.fail_row_locator_scans {
             return Err(StorageError::IoError(
@@ -491,22 +475,6 @@ impl Storage for RowRegionReadFailingStorage {
 }
 
 impl Storage for LegacyPersistenceObservingStorage {
-    fn put_metadata(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_metadata(id, metadata)
-    }
-
-    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_metadata(id)
-    }
-
-    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
-        self.inner.scan_metadata()
-    }
-
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -870,22 +838,6 @@ impl Storage for LegacyPersistenceObservingStorage {
 }
 
 impl Storage for RowMutationObservingStorage {
-    fn put_metadata(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_metadata(id, metadata)
-    }
-
-    fn load_metadata(&self, id: ObjectId) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_metadata(id)
-    }
-
-    fn scan_metadata(&self) -> Result<MetadataRows, StorageError> {
-        self.inner.scan_metadata()
-    }
-
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }

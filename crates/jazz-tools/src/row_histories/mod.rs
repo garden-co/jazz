@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,10 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
-use crate::row_format::{EncodingError, decode_row, encode_row};
+use crate::row_format::{
+    CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
+    compiled_row_layout, decode_array, decode_row, encode_row, project_row_with_layout,
+};
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
@@ -216,7 +219,7 @@ fn history_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new(
             "_jazz_parents",
             ColumnType::Array {
-                element: Box::new(ColumnType::Bytea),
+                element: Box::new(ColumnType::BatchId),
             },
         )
         .nullable(),
@@ -265,7 +268,7 @@ fn history_row_system_column_count() -> usize {
 
 fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
     let mut columns = vec![
-        ColumnDescriptor::new("_jazz_batch_id", ColumnType::Bytea),
+        ColumnDescriptor::new("_jazz_batch_id", ColumnType::BatchId),
         ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
         ColumnDescriptor::new("_jazz_created_by", ColumnType::Text),
         ColumnDescriptor::new("_jazz_created_at", ColumnType::Timestamp),
@@ -278,13 +281,13 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new(
             "_jazz_branch_frontier",
             ColumnType::Array {
-                element: Box::new(ColumnType::Bytea),
+                element: Box::new(ColumnType::BatchId),
             },
         )
         .nullable(),
-        ColumnDescriptor::new("_jazz_worker_batch_id", ColumnType::Bytea).nullable(),
-        ColumnDescriptor::new("_jazz_edge_batch_id", ColumnType::Bytea).nullable(),
-        ColumnDescriptor::new("_jazz_global_batch_id", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_worker_batch_id", ColumnType::BatchId).nullable(),
+        ColumnDescriptor::new("_jazz_edge_batch_id", ColumnType::BatchId).nullable(),
+        ColumnDescriptor::new("_jazz_global_batch_id", ColumnType::BatchId).nullable(),
     ]);
     columns
 }
@@ -319,6 +322,60 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
 
 fn visible_row_system_column_count() -> usize {
     visible_row_system_columns().len()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FlatRowCodecs {
+    user_descriptor: Arc<RowDescriptor>,
+    history_descriptor: Arc<RowDescriptor>,
+    history_layout: Arc<CompiledRowLayout>,
+    history_user_projection: Vec<(usize, usize)>,
+    visible_descriptor: Arc<RowDescriptor>,
+    visible_layout: Arc<CompiledRowLayout>,
+    visible_user_projection: Vec<(usize, usize)>,
+}
+
+fn flat_row_codecs_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<FlatRowCodecs>>> {
+    static CACHE: OnceLock<Mutex<HashMap<[u8; 32], Arc<FlatRowCodecs>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCodecs> {
+    let key = user_descriptor.content_hash();
+    {
+        let guard = flat_row_codecs_cache()
+            .lock()
+            .expect("flat row codec cache poisoned");
+        if let Some(codecs) = guard.get(&key) {
+            return codecs.clone();
+        }
+    }
+
+    let user_descriptor = Arc::new(user_descriptor.clone());
+    let history_descriptor = Arc::new(history_row_physical_descriptor(user_descriptor.as_ref()));
+    let visible_descriptor = Arc::new(visible_row_physical_descriptor(user_descriptor.as_ref()));
+    let history_system_count = history_row_system_column_count();
+    let visible_system_count = visible_row_system_column_count();
+    let user_projection_len = user_descriptor.columns.len();
+    let codecs = Arc::new(FlatRowCodecs {
+        user_descriptor: user_descriptor.clone(),
+        history_layout: compiled_row_layout(history_descriptor.as_ref()),
+        history_descriptor,
+        history_user_projection: (0..user_projection_len)
+            .map(|index| (history_system_count + index, index))
+            .collect(),
+        visible_layout: compiled_row_layout(visible_descriptor.as_ref()),
+        visible_descriptor,
+        visible_user_projection: (0..user_projection_len)
+            .map(|index| (visible_system_count + index, index))
+            .collect(),
+    });
+
+    flat_row_codecs_cache()
+        .lock()
+        .expect("flat row codec cache poisoned")
+        .insert(key, codecs.clone());
+    codecs
 }
 
 /// Build the physical row descriptor used when row-history state is stored as a
@@ -357,72 +414,16 @@ fn flat_user_values(
     }
 }
 
-fn flat_user_data_from_values(
-    user_descriptor: &RowDescriptor,
-    user_values: &[Value],
-    delete_kind: Option<DeleteKind>,
-    is_deleted: bool,
-) -> Result<Vec<u8>, EncodingError> {
-    if delete_kind == Some(DeleteKind::Hard)
-        || (is_deleted && user_values.iter().all(Value::is_null))
-    {
-        Ok(Vec::new())
-    } else {
-        encode_row(user_descriptor, user_values)
-    }
-}
-
-fn stored_row_batch_from_flat_parts(
-    user_descriptor: &RowDescriptor,
-    row_id: ObjectId,
-    branch: &str,
-    batch_id: BatchId,
-    system_values: &[Value],
-    user_values: &[Value],
-) -> Result<StoredRowBatch, EncodingError> {
-    let delete_kind = delete_kind_from_value(&system_values[7])?;
-    let is_deleted = expect_bool(&system_values[8], "is_deleted")?;
-    let user_data =
-        flat_user_data_from_values(user_descriptor, user_values, delete_kind, is_deleted)?;
-
-    let parents = match &system_values[0] {
-        Value::Null => SmallVec::new(),
-        Value::Array(values) => values
-            .iter()
-            .map(batch_id_from_value)
-            .collect::<Result<SmallVec<[BatchId; 2]>, _>>()?,
-        other => {
-            return Err(malformed(format!("expected parents array, got {other:?}")));
-        }
-    };
-
-    Ok(StoredRowBatch {
-        row_id,
-        batch_id,
-        branch: branch.into(),
-        parents,
-        updated_at: expect_timestamp(&system_values[1], "updated_at")?,
-        created_by: expect_text(&system_values[2], "created_by")?.into(),
-        created_at: expect_timestamp(&system_values[3], "created_at")?,
-        updated_by: expect_text(&system_values[4], "updated_by")?.into(),
-        state: row_state_from_value(&system_values[5])?,
-        confirmed_tier: durability_tier_from_value(&system_values[6])?,
-        delete_kind,
-        is_deleted,
-        data: user_data.into(),
-        metadata: metadata_from_value(&system_values[9])?,
-    })
-}
-
 /// Encode a row-history version into a single flat physical row.
 pub fn encode_flat_history_row(
     user_descriptor: &RowDescriptor,
     row: &StoredRowBatch,
 ) -> Result<Vec<u8>, EncodingError> {
+    let codecs = flat_row_codecs(user_descriptor);
     let mut values = history_row_system_values(row);
     values.extend(flat_user_values(user_descriptor, &row.data)?);
 
-    encode_row(&history_row_physical_descriptor(user_descriptor), &values)
+    encode_row(codecs.history_descriptor.as_ref(), &values)
 }
 
 /// Decode a flat physical row back into the current `StoredRowBatch` shape.
@@ -433,26 +434,18 @@ pub fn decode_flat_history_row(
     batch_id: BatchId,
     data: &[u8],
 ) -> Result<StoredRowBatch, EncodingError> {
-    let descriptor = history_row_physical_descriptor(user_descriptor);
-    let values = decode_row(&descriptor, data)?;
-    let (system_values, user_values) = values.split_at(history_row_system_column_count());
-    stored_row_batch_from_flat_parts(
-        user_descriptor,
-        row_id,
-        branch,
-        batch_id,
-        system_values,
-        user_values,
-    )
+    let codecs = flat_row_codecs(user_descriptor);
+    decode_flat_history_row_with_codecs(codecs.as_ref(), row_id, branch, batch_id, data)
 }
 
 pub fn encode_flat_visible_row_entry(
     user_descriptor: &RowDescriptor,
     entry: &VisibleRowEntry,
 ) -> Result<Vec<u8>, EncodingError> {
+    let codecs = flat_row_codecs(user_descriptor);
     let mut values = visible_row_system_values(entry);
     values.extend(flat_user_values(user_descriptor, &entry.current_row.data)?);
-    encode_row(&visible_row_physical_descriptor(user_descriptor), &values)
+    encode_row(codecs.visible_descriptor.as_ref(), &values)
 }
 
 pub fn decode_flat_visible_row_entry(
@@ -461,42 +454,8 @@ pub fn decode_flat_visible_row_entry(
     branch: &str,
     data: &[u8],
 ) -> Result<VisibleRowEntry, EncodingError> {
-    let descriptor = visible_row_physical_descriptor(user_descriptor);
-    let values = decode_row(&descriptor, data)?;
-    let visible_system_count = visible_row_system_column_count();
-    let batch_id = batch_id_from_value(&values[0])?;
-    let delete_kind = delete_kind_from_value(&values[7])?;
-    let current_row = StoredRowBatch {
-        row_id,
-        batch_id,
-        branch: branch.into(),
-        parents: SmallVec::new(),
-        updated_at: expect_timestamp(&values[1], "updated_at")?,
-        created_by: expect_text(&values[2], "created_by")?.into(),
-        created_at: expect_timestamp(&values[3], "created_at")?,
-        updated_by: expect_text(&values[4], "updated_by")?.into(),
-        state: row_state_from_value(&values[5])?,
-        confirmed_tier: durability_tier_from_value(&values[6])?,
-        delete_kind,
-        is_deleted: delete_kind.is_some(),
-        data: flat_user_data_from_values(
-            user_descriptor,
-            &values[visible_system_count..],
-            delete_kind,
-            delete_kind.is_some(),
-        )?
-        .into(),
-        metadata: RowMetadata::default(),
-    };
-    let current_batch_id = current_row.batch_id();
-
-    Ok(VisibleRowEntry {
-        current_row,
-        branch_frontier: visible_frontier_from_value(&values[8], current_batch_id)?,
-        worker_batch_id: optional_batch_id_from_value(&values[9])?,
-        edge_batch_id: optional_batch_id_from_value(&values[10])?,
-        global_batch_id: optional_batch_id_from_value(&values[11])?,
-    })
+    let codecs = flat_row_codecs(user_descriptor);
+    decode_flat_visible_row_entry_with_codecs(codecs.as_ref(), row_id, branch, data)
 }
 
 fn visible_frontier_to_value(entry: &VisibleRowEntry) -> Value {
@@ -505,17 +464,6 @@ fn visible_frontier_to_value(entry: &VisibleRowEntry) -> Value {
         Value::Null
     } else {
         batch_ids_to_value(&entry.branch_frontier)
-    }
-}
-
-fn visible_frontier_from_value(
-    value: &Value,
-    current_batch_id: BatchId,
-) -> Result<Vec<BatchId>, EncodingError> {
-    if matches!(value, Value::Null) {
-        Ok(vec![current_batch_id])
-    } else {
-        batch_ids_from_value(value, "branch_frontier")
     }
 }
 
@@ -532,20 +480,6 @@ fn row_state_to_value(state: RowState) -> Value {
     )
 }
 
-fn row_state_from_value(value: &Value) -> Result<RowState, EncodingError> {
-    match value {
-        Value::Text(value) => match value.as_str() {
-            "staging_pending" => Ok(RowState::StagingPending),
-            "superseded" => Ok(RowState::Superseded),
-            "rejected" => Ok(RowState::Rejected),
-            "visible_direct" => Ok(RowState::VisibleDirect),
-            "visible_transactional" => Ok(RowState::VisibleTransactional),
-            _ => Err(malformed(format!("invalid row state: {value}"))),
-        },
-        other => Err(malformed(format!("expected row state text, got {other:?}"))),
-    }
-}
-
 fn durability_tier_to_value(tier: DurabilityTier) -> Value {
     Value::Text(
         match tier {
@@ -557,84 +491,43 @@ fn durability_tier_to_value(tier: DurabilityTier) -> Value {
     )
 }
 
-fn durability_tier_from_value(value: &Value) -> Result<Option<DurabilityTier>, EncodingError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Text(value) => match value.as_str() {
-            "worker" => Ok(Some(DurabilityTier::Worker)),
-            "edge" => Ok(Some(DurabilityTier::EdgeServer)),
-            "global" => Ok(Some(DurabilityTier::GlobalServer)),
-            _ => Err(malformed(format!("invalid durability tier: {value}"))),
-        },
-        other => Err(malformed(format!(
-            "expected durability tier text or null, got {other:?}"
-        ))),
-    }
-}
-
 fn delete_kind_to_value(kind: DeleteKind) -> Value {
     Value::Text(kind.as_str().to_string())
 }
 
-fn delete_kind_from_value(value: &Value) -> Result<Option<DeleteKind>, EncodingError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Text(value) => match value.as_str() {
-            "soft" => Ok(Some(DeleteKind::Soft)),
-            "hard" => Ok(Some(DeleteKind::Hard)),
-            _ => Err(malformed(format!("invalid delete kind: {value}"))),
-        },
-        other => Err(malformed(format!(
-            "expected delete kind text or null, got {other:?}"
-        ))),
-    }
-}
-
 fn batch_id_to_value(batch_id: BatchId) -> Value {
-    Value::Bytea(batch_id.as_bytes().to_vec())
-}
-
-fn batch_id_from_value(value: &Value) -> Result<BatchId, EncodingError> {
-    match value {
-        Value::Bytea(bytes) if bytes.len() == 16 => {
-            let bytes: [u8; 16] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| malformed("invalid 16-byte batch id"))?;
-            Ok(BatchId(bytes))
-        }
-        Value::Bytea(bytes) => Err(malformed(format!(
-            "expected 16-byte batch id, got {} bytes",
-            bytes.len()
-        ))),
-        other => Err(malformed(format!("expected batch id bytes, got {other:?}"))),
-    }
+    Value::BatchId(*batch_id.as_bytes())
 }
 
 fn optional_batch_id_to_value(batch_id: Option<BatchId>) -> Value {
     batch_id.map(batch_id_to_value).unwrap_or(Value::Null)
 }
 
-fn optional_batch_id_from_value(value: &Value) -> Result<Option<BatchId>, EncodingError> {
-    match value {
-        Value::Null => Ok(None),
-        _ => batch_id_from_value(value).map(Some),
-    }
-}
-
 fn batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
     Value::Array(batch_ids.iter().copied().map(batch_id_to_value).collect())
 }
 
-fn batch_ids_from_value(value: &Value, label: &str) -> Result<Vec<BatchId>, EncodingError> {
-    if matches!(value, Value::Null) {
-        return Ok(Vec::new());
+fn decode_batch_ids_array_bytes(data: &[u8], label: &str) -> Result<Vec<BatchId>, EncodingError> {
+    if data.len() < 4 {
+        return Err(malformed(format!("{label} array too short for count")));
     }
-    let Value::Array(values) = value else {
-        return Err(malformed(format!("expected {label} array, got {value:?}")));
-    };
 
-    values.iter().map(batch_id_from_value).collect()
+    let count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    let expected_len = 4 + count * 16;
+    if data.len() != expected_len {
+        return Err(malformed(format!(
+            "{label} batch-id array expected {expected_len} bytes, got {}",
+            data.len()
+        )));
+    }
+
+    let mut batch_ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = 4 + index * 16;
+        let end = start + 16;
+        batch_ids.push(BatchId(data[start..end].try_into().unwrap()));
+    }
+    Ok(batch_ids)
 }
 
 fn metadata_to_value(metadata: &RowMetadata) -> Value {
@@ -688,29 +581,295 @@ fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
     Ok(RowMetadata::from_entries(metadata))
 }
 
-fn expect_text(value: &Value, label: &str) -> Result<String, EncodingError> {
-    match value {
-        Value::Text(value) => Ok(value.clone()),
-        other => Err(malformed(format!("expected {label} text, got {other:?}"))),
-    }
+fn decode_required_column_bytes<'a>(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &'a [u8],
+    column_index: usize,
+    label: &str,
+) -> Result<&'a [u8], EncodingError> {
+    column_bytes_with_layout(descriptor, layout, data, column_index)?.ok_or_else(|| {
+        malformed(format!(
+            "expected {label} column '{}' to be non-null",
+            descriptor.columns[column_index].name
+        ))
+    })
 }
 
-fn expect_timestamp(value: &Value, label: &str) -> Result<u64, EncodingError> {
-    match value {
-        Value::Timestamp(value) => Ok(*value),
-        other => Err(malformed(format!(
-            "expected {label} timestamp, got {other:?}"
+fn decode_text_bytes(bytes: &[u8], label: &str) -> Result<String, EncodingError> {
+    std::str::from_utf8(bytes)
+        .map(|raw| raw.to_string())
+        .map_err(|err| malformed(format!("expected {label} utf8 text: {err}")))
+}
+
+fn decode_timestamp_bytes(bytes: &[u8], label: &str) -> Result<u64, EncodingError> {
+    if bytes.len() != 8 {
+        return Err(malformed(format!(
+            "expected {label} timestamp to be 8 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn decode_bool_bytes(bytes: &[u8], label: &str) -> Result<bool, EncodingError> {
+    if bytes.len() != 1 {
+        return Err(malformed(format!(
+            "expected {label} boolean to be 1 byte, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes[0] != 0)
+}
+
+fn decode_row_state_bytes(bytes: &[u8]) -> Result<RowState, EncodingError> {
+    match bytes {
+        b"staging_pending" => Ok(RowState::StagingPending),
+        b"superseded" => Ok(RowState::Superseded),
+        b"rejected" => Ok(RowState::Rejected),
+        b"visible_direct" => Ok(RowState::VisibleDirect),
+        b"visible_transactional" => Ok(RowState::VisibleTransactional),
+        _ => Err(malformed(format!(
+            "invalid row state bytes '{}'",
+            String::from_utf8_lossy(bytes)
         ))),
     }
 }
 
-fn expect_bool(value: &Value, label: &str) -> Result<bool, EncodingError> {
-    match value {
-        Value::Boolean(value) => Ok(*value),
-        other => Err(malformed(format!(
-            "expected {label} boolean, got {other:?}"
+fn decode_optional_durability_tier_bytes(
+    bytes: Option<&[u8]>,
+) -> Result<Option<DurabilityTier>, EncodingError> {
+    match bytes {
+        None => Ok(None),
+        Some(b"worker") => Ok(Some(DurabilityTier::Worker)),
+        Some(b"edge") => Ok(Some(DurabilityTier::EdgeServer)),
+        Some(b"global") => Ok(Some(DurabilityTier::GlobalServer)),
+        Some(bytes) => Err(malformed(format!(
+            "invalid durability tier bytes '{}'",
+            String::from_utf8_lossy(bytes)
         ))),
     }
+}
+
+fn decode_optional_delete_kind_bytes(
+    bytes: Option<&[u8]>,
+) -> Result<Option<DeleteKind>, EncodingError> {
+    match bytes {
+        None => Ok(None),
+        Some(b"soft") => Ok(Some(DeleteKind::Soft)),
+        Some(b"hard") => Ok(Some(DeleteKind::Hard)),
+        Some(bytes) => Err(malformed(format!(
+            "invalid delete kind bytes '{}'",
+            String::from_utf8_lossy(bytes)
+        ))),
+    }
+}
+
+fn decode_required_batch_id_bytes(bytes: &[u8], label: &str) -> Result<BatchId, EncodingError> {
+    if bytes.len() != 16 {
+        return Err(malformed(format!(
+            "expected {label} batch id to be 16 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(BatchId(bytes.try_into().unwrap()))
+}
+
+fn decode_optional_batch_id_bytes(bytes: Option<&[u8]>) -> Result<Option<BatchId>, EncodingError> {
+    bytes
+        .map(|bytes| decode_required_batch_id_bytes(bytes, "optional"))
+        .transpose()
+}
+
+fn decode_metadata_bytes(bytes: Option<&[u8]>) -> Result<RowMetadata, EncodingError> {
+    let Some(bytes) = bytes else {
+        return Ok(RowMetadata::default());
+    };
+    let entries = decode_array(
+        bytes,
+        &ColumnType::Row {
+            columns: Box::new(metadata_entry_descriptor().clone()),
+        },
+    )?;
+    metadata_from_value(&Value::Array(entries))
+}
+
+fn project_user_row_data_from_physical(
+    physical_descriptor: &RowDescriptor,
+    physical_layout: &CompiledRowLayout,
+    user_descriptor: &RowDescriptor,
+    projection: &[(usize, usize)],
+    data: &[u8],
+    delete_kind: Option<DeleteKind>,
+    is_deleted: bool,
+) -> Result<Vec<u8>, EncodingError> {
+    if delete_kind == Some(DeleteKind::Hard) {
+        return Ok(Vec::new());
+    }
+
+    let all_user_columns_null = projection
+        .iter()
+        .try_fold(true, |all_null, (src_index, _)| {
+            if !all_null {
+                return Ok(false);
+            }
+            column_is_null_with_layout(physical_descriptor, physical_layout, data, *src_index)
+        })?;
+    if is_deleted && all_user_columns_null {
+        return Ok(Vec::new());
+    }
+
+    project_row_with_layout(
+        physical_descriptor,
+        physical_layout,
+        data,
+        user_descriptor,
+        projection,
+    )
+}
+
+pub(crate) fn decode_flat_history_row_with_codecs(
+    codecs: &FlatRowCodecs,
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
+    data: &[u8],
+) -> Result<StoredRowBatch, EncodingError> {
+    let descriptor = codecs.history_descriptor.as_ref();
+    let layout = codecs.history_layout.as_ref();
+    let delete_kind =
+        decode_optional_delete_kind_bytes(column_bytes_with_layout(descriptor, layout, data, 7)?)?;
+    let is_deleted = decode_bool_bytes(
+        decode_required_column_bytes(descriptor, layout, data, 8, "is_deleted")?,
+        "is_deleted",
+    )?;
+    let user_data = project_user_row_data_from_physical(
+        descriptor,
+        layout,
+        codecs.user_descriptor.as_ref(),
+        &codecs.history_user_projection,
+        data,
+        delete_kind,
+        is_deleted,
+    )?;
+
+    let parents = match column_bytes_with_layout(descriptor, layout, data, 0)? {
+        None => SmallVec::new(),
+        Some(bytes) => SmallVec::from_vec(decode_batch_ids_array_bytes(bytes, "parents")?),
+    };
+
+    Ok(StoredRowBatch {
+        row_id,
+        batch_id,
+        branch: branch.into(),
+        parents,
+        updated_at: decode_timestamp_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 1, "updated_at")?,
+            "updated_at",
+        )?,
+        created_by: decode_text_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 2, "created_by")?,
+            "created_by",
+        )?
+        .into(),
+        created_at: decode_timestamp_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 3, "created_at")?,
+            "created_at",
+        )?,
+        updated_by: decode_text_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 4, "updated_by")?,
+            "updated_by",
+        )?
+        .into(),
+        state: decode_row_state_bytes(decode_required_column_bytes(
+            descriptor, layout, data, 5, "state",
+        )?)?,
+        confirmed_tier: decode_optional_durability_tier_bytes(column_bytes_with_layout(
+            descriptor, layout, data, 6,
+        )?)?,
+        delete_kind,
+        is_deleted,
+        data: user_data.into(),
+        metadata: decode_metadata_bytes(column_bytes_with_layout(descriptor, layout, data, 9)?)?,
+    })
+}
+
+pub(crate) fn decode_flat_visible_row_entry_with_codecs(
+    codecs: &FlatRowCodecs,
+    row_id: ObjectId,
+    branch: &str,
+    data: &[u8],
+) -> Result<VisibleRowEntry, EncodingError> {
+    let descriptor = codecs.visible_descriptor.as_ref();
+    let layout = codecs.visible_layout.as_ref();
+    let batch_id = decode_required_batch_id_bytes(
+        decode_required_column_bytes(descriptor, layout, data, 0, "batch_id")?,
+        "batch_id",
+    )?;
+    let delete_kind =
+        decode_optional_delete_kind_bytes(column_bytes_with_layout(descriptor, layout, data, 7)?)?;
+    let is_deleted = delete_kind.is_some();
+    let current_row = StoredRowBatch {
+        row_id,
+        batch_id,
+        branch: branch.into(),
+        parents: SmallVec::new(),
+        updated_at: decode_timestamp_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 1, "updated_at")?,
+            "updated_at",
+        )?,
+        created_by: decode_text_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 2, "created_by")?,
+            "created_by",
+        )?
+        .into(),
+        created_at: decode_timestamp_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 3, "created_at")?,
+            "created_at",
+        )?,
+        updated_by: decode_text_bytes(
+            decode_required_column_bytes(descriptor, layout, data, 4, "updated_by")?,
+            "updated_by",
+        )?
+        .into(),
+        state: decode_row_state_bytes(decode_required_column_bytes(
+            descriptor, layout, data, 5, "state",
+        )?)?,
+        confirmed_tier: decode_optional_durability_tier_bytes(column_bytes_with_layout(
+            descriptor, layout, data, 6,
+        )?)?,
+        delete_kind,
+        is_deleted,
+        data: project_user_row_data_from_physical(
+            descriptor,
+            layout,
+            codecs.user_descriptor.as_ref(),
+            &codecs.visible_user_projection,
+            data,
+            delete_kind,
+            is_deleted,
+        )?
+        .into(),
+        metadata: RowMetadata::default(),
+    };
+    let current_batch_id = current_row.batch_id();
+
+    Ok(VisibleRowEntry {
+        current_row,
+        branch_frontier: match column_bytes_with_layout(descriptor, layout, data, 8)? {
+            None => vec![current_batch_id],
+            Some(bytes) => decode_batch_ids_array_bytes(bytes, "branch_frontier")?,
+        },
+        worker_batch_id: decode_optional_batch_id_bytes(column_bytes_with_layout(
+            descriptor, layout, data, 9,
+        )?)?,
+        edge_batch_id: decode_optional_batch_id_bytes(column_bytes_with_layout(
+            descriptor, layout, data, 10,
+        )?)?,
+        global_batch_id: decode_optional_batch_id_bytes(column_bytes_with_layout(
+            descriptor, layout, data, 11,
+        )?)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1008,7 +1167,7 @@ fn row_locator_from_storage<H: Storage>(
     io: &H,
     object_id: ObjectId,
 ) -> Result<RowLocator, RowHistoryError> {
-    crate::storage::load_row_locator_or_metadata(io, object_id)
+    io.load_row_locator(object_id)
         .map_err(RowHistoryError::StorageError)?
         .ok_or(RowHistoryError::ObjectNotFound(object_id))
 }

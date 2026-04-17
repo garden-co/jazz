@@ -97,9 +97,16 @@ fn make_visible_entry(
 
 pub fn test_row_raw_table_header_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let schema_hash = SchemaHash::from_bytes([0x11; 32]);
+    let schema = row_history_test_schema("todos");
+    let schema_hash = SchemaHash::compute(&schema);
+    let user_descriptor = schema[&"todos".into()].columns.clone();
     let row_raw_table_id = RowRawTableId::new(RowRawTableKind::Visible, "todos", schema_hash);
-    let header = RawTableHeader::row_raw_table(RowRawTableKind::Visible, "todos", schema_hash);
+    let header = RawTableHeader::row_raw_table(
+        RowRawTableKind::Visible,
+        "todos",
+        schema_hash,
+        &user_descriptor,
+    );
 
     storage
         .upsert_raw_table_header(&row_raw_table_id.raw_table_name(), &header)
@@ -140,50 +147,71 @@ pub fn test_branch_ord_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
 }
 
 // ============================================================================
-// Object metadata tests
+// Row locator tests
 // ============================================================================
 
-pub fn test_object_create_and_load_metadata(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_object_create_and_load_row_locator(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let object_id = ObjectId::new();
-    let metadata = HashMap::from([
-        ("owner".to_string(), "alice".to_string()),
-        ("role".to_string(), "admin".to_string()),
-    ]);
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
+    let locator = RowLocator {
+        table: "users".into(),
+        origin_schema_hash: Some(schema_hash),
+    };
 
-    storage.put_metadata(object_id, metadata.clone()).unwrap();
+    storage.put_row_locator(object_id, Some(&locator)).unwrap();
 
-    assert_eq!(storage.load_metadata(object_id).unwrap().unwrap(), metadata);
+    assert_eq!(storage.load_row_locator(object_id).unwrap(), Some(locator));
 }
 
-pub fn test_object_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_row_locator_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
     let storage = factory();
-    assert!(storage.load_metadata(ObjectId::new()).unwrap().is_none());
+    assert!(storage.load_row_locator(ObjectId::new()).unwrap().is_none());
 }
 
-pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_row_locator_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
     let bob = ObjectId::new();
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
 
     storage
-        .put_metadata(
+        .put_row_locator(
             alice,
-            HashMap::from([("owner".to_string(), "alice".to_string())]),
+            Some(&RowLocator {
+                table: "users".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
         )
         .unwrap();
     storage
-        .put_metadata(
+        .put_row_locator(
             bob,
-            HashMap::from([("owner".to_string(), "bob".to_string())]),
+            Some(&RowLocator {
+                table: "posts".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
         )
         .unwrap();
 
     assert_eq!(
-        storage.load_metadata(alice).unwrap().unwrap()["owner"],
-        "alice"
+        storage
+            .load_row_locator(alice)
+            .unwrap()
+            .unwrap()
+            .table
+            .as_str(),
+        "users"
     );
-    assert_eq!(storage.load_metadata(bob).unwrap().unwrap()["owner"], "bob");
+    assert_eq!(
+        storage
+            .load_row_locator(bob)
+            .unwrap()
+            .unwrap()
+            .table
+            .as_str(),
+        "posts"
+    );
 }
 
 // ============================================================================
@@ -1130,7 +1158,6 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
 
-    let object_id = ObjectId::new();
     let row_id = ObjectId::new();
     let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
     let version = make_row_batch(row_id, "main", 10, "alice");
@@ -1139,12 +1166,6 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
         let mut storage = factory(path);
         seed_row_history_table(storage.as_mut(), "users");
         seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
-        storage
-            .put_metadata(
-                object_id,
-                HashMap::from([("owner".to_string(), "alice".to_string())]),
-            )
-            .unwrap();
         storage.raw_table_put("users", "alice", b"hello").unwrap();
         storage
             .append_history_region_rows("users", std::slice::from_ref(&version))
@@ -1173,10 +1194,6 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
 
     {
         let storage = factory(path);
-        assert_eq!(
-            storage.load_metadata(object_id).unwrap().unwrap()["owner"],
-            "alice"
-        );
         assert_eq!(
             storage.raw_table_get("users", "alice").unwrap(),
             Some(b"hello".to_vec())
@@ -1455,18 +1472,18 @@ macro_rules! storage_conformance_tests {
             use $crate::storage::conformance;
 
             #[test]
-            fn object_create_and_load_metadata() {
-                conformance::test_object_create_and_load_metadata(&$factory);
+            fn object_create_and_load_row_locator() {
+                conformance::test_object_create_and_load_row_locator(&$factory);
             }
 
             #[test]
-            fn object_load_nonexistent_returns_none() {
-                conformance::test_object_load_nonexistent_returns_none(&$factory);
+            fn row_locator_load_nonexistent_returns_none() {
+                conformance::test_row_locator_load_nonexistent_returns_none(&$factory);
             }
 
             #[test]
-            fn object_metadata_isolation() {
-                conformance::test_object_metadata_isolation(&$factory);
+            fn row_locator_isolation() {
+                conformance::test_row_locator_isolation(&$factory);
             }
 
             #[test]
