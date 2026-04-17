@@ -310,6 +310,24 @@ describe("jazzSvelteKit", () => {
   });
 });
 
+it("config hook adds jazz-napi to ssr.external", () => {
+  const plugin = jazzSvelteKit();
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+  expect(config).toBeDefined();
+  const result = config!({}) as { ssr?: { external?: string[] } };
+  expect(result.ssr?.external).toContain("jazz-napi");
+});
+
+it("config hook preserves existing ssr.external entries", () => {
+  const plugin = jazzSvelteKit();
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+  const result = config!({ ssr: { external: ["some-other-pkg"] } }) as {
+    ssr?: { external?: string[] };
+  };
+  expect(result.ssr?.external).toContain("jazz-napi");
+  expect(result.ssr?.external).toContain("some-other-pkg");
+});
+
 describe("dev barrel", () => {
   it("exposes jazzSvelteKit", () => {
     expect((dev as Record<string, unknown>).jazzSvelteKit).toBeDefined();
