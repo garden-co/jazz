@@ -2,6 +2,7 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use serde_json::json;
@@ -16,9 +17,12 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch};
+use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::{
+    HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
+    RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
     apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
@@ -116,6 +120,123 @@ fn create_query_manager(
 /// Get the current branch name from a QueryManager.
 fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
+}
+
+struct CountingCatalogueUpsertsStorage {
+    inner: MemoryStorage,
+    catalogue_upserts: Cell<usize>,
+}
+
+impl CountingCatalogueUpsertsStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            catalogue_upserts: Cell::new(0),
+        }
+    }
+
+    fn catalogue_upserts(&self) -> usize {
+        self.catalogue_upserts.get()
+    }
+}
+
+impl Storage for CountingCatalogueUpsertsStorage {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_raw_table_mutations(mutations)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[OwnedHistoryRowBytes],
+        visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn upsert_catalogue_entry(
+        &mut self,
+        entry: &crate::catalogue::CatalogueEntry,
+    ) -> Result<(), StorageError> {
+        self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+        self.inner.upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: crate::object::ObjectId,
+    ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.inner.load_catalogue_entry(object_id)
+    }
 }
 
 fn get_branch_for_user_branch(qm: &QueryManager, user_branch: &str) -> String {
@@ -236,6 +357,32 @@ fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_s
             .len(),
         history_bytes.len(),
         "direct QueryManager writes should persist keyed-decodable flat history rows after schema bootstrap"
+    );
+}
+
+#[test]
+fn direct_query_manager_catalogues_known_schemas_only_once_per_storage() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::new();
+
+    let first = vec![Value::Text("Alice".into()), Value::Integer(1)];
+    qm.insert(&mut storage, "users", &first)
+        .expect("first insert should succeed");
+    let first_upserts = storage.catalogue_upserts();
+    assert!(
+        first_upserts >= 1,
+        "first insert should catalogue the current schema"
+    );
+
+    let second = vec![Value::Text("Bob".into()), Value::Integer(2)];
+    qm.insert(&mut storage, "users", &second)
+        .expect("second insert should succeed");
+
+    assert_eq!(
+        storage.catalogue_upserts(),
+        first_upserts,
+        "ordinary writes should not recatalogue unchanged schemas on the same storage",
     );
 }
 

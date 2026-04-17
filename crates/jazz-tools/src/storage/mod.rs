@@ -452,9 +452,40 @@ struct ResolvedRowTable {
 
 #[derive(Clone)]
 pub(crate) struct PreparedRowWriteContext {
-    pub row_raw_table_id: RowRawTableId,
+    pub history_row_raw_table_id: RowRawTableId,
+    pub visible_row_raw_table_id: RowRawTableId,
     pub user_descriptor: Arc<RowDescriptor>,
     pub needs_exact_locator: bool,
+}
+
+type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
+
+fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
+    static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_row_raw_table_id(
+    kind: RowRawTableKind,
+    table: &str,
+    schema_hash: SchemaHash,
+) -> RowRawTableId {
+    let cache_key = (kind, table.to_string(), schema_hash);
+    if let Some(cached) = row_raw_table_id_cache()
+        .lock()
+        .expect("row raw table id cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return cached;
+    }
+
+    let created = RowRawTableId::new(kind, table, schema_hash);
+    row_raw_table_id_cache()
+        .lock()
+        .expect("row raw table id cache poisoned")
+        .insert(cache_key, created.clone());
+    created
 }
 
 fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDescriptor>>> {
@@ -1029,11 +1060,11 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
 }
 
 fn history_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    RowRawTableId::new(RowRawTableKind::History, table, schema_hash)
+    cached_row_raw_table_id(RowRawTableKind::History, table, schema_hash)
 }
 
 fn visible_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    RowRawTableId::new(RowRawTableKind::Visible, table, schema_hash)
+    cached_row_raw_table_id(RowRawTableKind::Visible, table, schema_hash)
 }
 
 fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
@@ -1644,7 +1675,8 @@ pub(crate) fn resolve_history_row_write_context<H: Storage + ?Sized>(
         .and_then(|locator| locator.origin_schema_hash)
         != Some(schema_hash);
     Ok(PreparedRowWriteContext {
-        row_raw_table_id: history_row_raw_table_id(table, schema_hash),
+        history_row_raw_table_id: history_row_raw_table_id(table, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table, schema_hash),
         user_descriptor: Arc::new(user_descriptor),
         needs_exact_locator,
     })
@@ -1659,8 +1691,11 @@ pub(crate) fn encode_history_row_bytes_with_context(
             .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
 
     Ok(OwnedHistoryRowBytes {
-        row_raw_table: context.row_raw_table_id.raw_table_name().to_string(),
-        row_raw_table_id: context.row_raw_table_id.clone(),
+        row_raw_table: context
+            .history_row_raw_table_id
+            .raw_table_name()
+            .to_string(),
+        row_raw_table_id: context.history_row_raw_table_id.clone(),
         user_descriptor: context.user_descriptor.clone(),
         branch: row.branch.to_string(),
         row_id: row.row_id,
@@ -1681,16 +1716,11 @@ pub(crate) fn encode_visible_row_bytes_with_context(
     .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
 
     Ok(OwnedVisibleRowBytes {
-        row_raw_table: visible_row_raw_table_id(
-            context.row_raw_table_id.table_name.as_str(),
-            context.row_raw_table_id.schema_hash,
-        )
-        .raw_table_name()
-        .to_string(),
-        row_raw_table_id: visible_row_raw_table_id(
-            context.row_raw_table_id.table_name.as_str(),
-            context.row_raw_table_id.schema_hash,
-        ),
+        row_raw_table: context
+            .visible_row_raw_table_id
+            .raw_table_name()
+            .to_string(),
+        row_raw_table_id: context.visible_row_raw_table_id.clone(),
         user_descriptor: context.user_descriptor.clone(),
         branch: entry.current_row.branch.to_string(),
         row_id: entry.current_row.row_id,

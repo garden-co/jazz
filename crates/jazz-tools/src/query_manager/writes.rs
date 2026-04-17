@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::batch_fate::BatchMode;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
@@ -14,6 +15,7 @@ use crate::sync_manager::RowBatchKey;
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
+    WriteTableCacheEntry,
 };
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
@@ -33,7 +35,7 @@ pub struct RowBranchWrite<'a> {
 
 struct PreparedUpdateWrite {
     new_data: Vec<u8>,
-    descriptor: RowDescriptor,
+    descriptor: Arc<RowDescriptor>,
 }
 
 struct PreparedUpdateCommit<'a> {
@@ -59,6 +61,59 @@ pub struct RowBranchDelete<'a> {
 }
 
 impl QueryManager {
+    fn schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        self.branch_schema_map
+            .get(branch)
+            .copied()
+            .or_else(|| self.origin_schema_hash_for_branch(branch))
+    }
+
+    fn write_table_cache_entry_for_schema(
+        &mut self,
+        branch: &str,
+        table_name: TableName,
+        write_schema: &Schema,
+    ) -> Result<Arc<WriteTableCacheEntry>, QueryError> {
+        let schema_hash = self
+            .schema_hash_for_branch(branch)
+            .unwrap_or_else(|| SchemaHash::compute(write_schema));
+        let cache_key = (schema_hash, table_name);
+        if let Some(entry) = self.write_table_cache.get(&cache_key) {
+            return Ok(entry.clone());
+        }
+
+        let table_name = cache_key.1;
+        let table_schema = write_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let entry = Arc::new(WriteTableCacheEntry {
+            descriptor: Arc::new(table_schema.columns.clone()),
+            row_locator: RowLocator {
+                table: table_name.as_str().to_string().into(),
+                origin_schema_hash: Some(schema_hash),
+            },
+            insert_policy: table_schema.policies.insert_policy().cloned().map(Arc::new),
+            update_using_policy: table_schema
+                .policies
+                .update_using_policy()
+                .cloned()
+                .map(Arc::new),
+            update_check_policy: table_schema
+                .policies
+                .update_check_policy()
+                .cloned()
+                .map(Arc::new),
+            delete_using_policy: table_schema
+                .policies
+                .effective_delete_using()
+                .cloned()
+                .map(Arc::new),
+            select_policy: table_schema.policies.select_policy().cloned().map(Arc::new),
+        });
+        self.write_table_cache.insert(cache_key, entry.clone());
+        Ok(entry)
+    }
+
     fn resolve_insert_object_id<H: Storage>(
         &self,
         storage: &H,
@@ -331,6 +386,9 @@ impl QueryManager {
     }
 
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        if let Some(schema_hash) = self.branch_schema_map.get(branch).copied() {
+            return Some(schema_hash);
+        }
         if branch == self.current_branch() {
             return Some(self.schema_context.current_hash);
         }
@@ -356,7 +414,7 @@ impl QueryManager {
     fn row_locator_for_branch(&self, table: &str, branch: &str) -> RowLocator {
         RowLocator {
             table: table.to_string().into(),
-            origin_schema_hash: self.origin_schema_hash_for_branch(branch),
+            origin_schema_hash: self.schema_hash_for_branch(branch),
         }
     }
 
@@ -519,16 +577,11 @@ impl QueryManager {
             old_provenance_for_policy,
         } = write;
         let table_name = TableName::new(table);
-        let (descriptor, using_policy, check_policy) = {
-            let table_schema = write_schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.update_using_policy().cloned(),
-                table_schema.policies.update_check_policy().cloned(),
-            )
-        };
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.update_using_policy.as_deref();
+        let check_policy = table_write.update_check_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -537,11 +590,11 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
 
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let new_data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -620,7 +673,7 @@ impl QueryManager {
                         policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
-                        &descriptor,
+                        descriptor,
                         session,
                         table,
                         branch,
@@ -644,10 +697,10 @@ impl QueryManager {
                 let mut visited = HashSet::new();
                 if !self.evaluate_policy_for_content_with_context_for_row(
                     storage,
-                    &policy,
+                    policy,
                     &new_data,
                     new_provenance,
-                    &descriptor,
+                    descriptor,
                     session,
                     table,
                     branch,
@@ -663,11 +716,9 @@ impl QueryManager {
             }
         }
 
-        let _ = table_name;
-        let _ = descriptor;
         Ok(PreparedUpdateWrite {
             new_data,
-            descriptor: descriptor.clone(),
+            descriptor: table_write.descriptor.clone(),
         })
     }
 
@@ -815,13 +866,16 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
+        let current_branch = self.current_branch().as_str().to_string();
         let table_name = TableName::new(table);
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        let insert_policy = table_schema.policies.insert_policy().cloned();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -830,25 +884,25 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
+        self.validate_json_for_values(descriptor, values)?;
         Self::validate_write_index_values_on_branch(
             table,
             self.current_branch().as_str(),
             values,
-            &descriptor,
+            descriptor,
         )?;
 
         // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
         // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) = self
-                .local_write_authorization_context(self.current_branch().as_str(), Some(session))
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(&current_branch, Some(session))
             {
                 let allowed = auth_schema
                     .get(&table_name)
@@ -857,7 +911,7 @@ impl QueryManager {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
-                            self.current_branch().as_str(),
+                            &current_branch,
                             table_name,
                             policy,
                             &data,
@@ -890,13 +944,13 @@ impl QueryManager {
                     let mut visited = HashSet::new();
                     if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
-                        &policy,
+                        policy,
                         &data,
                         &provenance,
-                        &descriptor,
+                        descriptor,
                         session,
                         table,
-                        self.current_branch().as_str(),
+                        &current_branch,
                         object_id,
                         0,
                         &mut visited,
@@ -911,27 +965,24 @@ impl QueryManager {
         }
 
         // Create row locator for the new row object
-        let row_locator = self.row_locator_for_branch(table, self.current_branch().as_str());
-
-        self.persist_row_locator(storage, object_id, &row_locator);
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data
-        let branch = self.current_branch();
         let index_mutations = Self::index_mutations_for_insert_on_branch(
             table,
-            branch.as_str(),
+            &current_branch,
             object_id,
             &data,
-            &descriptor,
+            descriptor,
         );
         let row = self.authored_row_batch(
             object_id,
-            branch.as_str(),
+            &current_branch,
             vec![],
             data.clone(),
             self.row_batch_authoring(&provenance, None, write_context),
         );
-        let branch_name = BranchName::new(branch.as_str());
+        let branch_name = BranchName::new(&current_branch);
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
@@ -1014,12 +1065,11 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        let insert_policy = table_schema.policies.insert_policy().cloned();
+        let write_schema = self.schema.clone();
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1028,12 +1078,12 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
 
         // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
@@ -1083,10 +1133,10 @@ impl QueryManager {
                     let mut visited = HashSet::new();
                     if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
-                        &policy,
+                        policy,
                         &data,
                         &provenance,
-                        &descriptor,
+                        descriptor,
                         session,
                         table,
                         branch,
@@ -1104,18 +1154,11 @@ impl QueryManager {
         }
 
         // Create row locator for the new row object
-        let row_locator = self.row_locator_for_branch(table, branch);
-
-        self.persist_row_locator(storage, object_id, &row_locator);
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data to specified branch
-        let index_mutations = Self::index_mutations_for_insert_on_branch(
-            table,
-            branch,
-            object_id,
-            &data,
-            &descriptor,
-        );
+        let index_mutations =
+            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1183,11 +1226,10 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
-        let table_schema = write_schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        let insert_policy = table_schema.policies.insert.with_check.clone();
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1196,11 +1238,11 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
 
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
@@ -1237,10 +1279,10 @@ impl QueryManager {
             } else if let Some(policy) = insert_policy
                 && !self.evaluate_policy_for_content_with_context(
                     storage,
-                    &policy,
+                    policy,
                     &data,
                     &provenance,
-                    &descriptor,
+                    descriptor,
                     session,
                     table,
                     branch,
@@ -1253,16 +1295,10 @@ impl QueryManager {
             }
         }
 
-        let row_locator = self.row_locator_for_branch(table, branch);
-        self.persist_row_locator(storage, object_id, &row_locator);
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
-        let index_mutations = Self::index_mutations_for_insert_on_branch(
-            table,
-            branch,
-            object_id,
-            &data,
-            &descriptor,
-        );
+        let index_mutations =
+            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1764,27 +1800,29 @@ impl QueryManager {
             return false;
         };
 
-        let Some(table_schema) = self.schema.get(&table_name).cloned() else {
+        let write_schema = self.schema.clone();
+        let Ok(table_write) =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())
+        else {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
 
         let local_policy = match operation {
-            Operation::Select => table_schema.policies.select_policy().cloned(),
-            Operation::Insert => table_schema.policies.insert_policy().cloned(),
-            Operation::Update => table_schema.policies.update_using_policy().cloned(),
-            Operation::Delete => table_schema.policies.effective_delete_using().cloned(),
+            Operation::Select => table_write.select_policy.as_deref(),
+            Operation::Insert => table_write.insert_policy.as_deref(),
+            Operation::Update => table_write.update_using_policy.as_deref(),
+            Operation::Delete => table_write.delete_using_policy.as_deref(),
         };
 
         let local_allow = local_policy
-            .as_ref()
             .map(|policy| {
                 self.evaluate_policy_for_content_with_context_for_row(
                     storage,
                     policy,
                     &content,
                     &provenance,
-                    &table_schema.columns,
+                    table_write.descriptor.as_ref(),
                     session,
                     table_name.as_str(),
                     branch,
@@ -1886,7 +1924,7 @@ impl QueryManager {
             id,
             &old_data,
             &prepared.new_data,
-            &prepared.descriptor,
+            prepared.descriptor.as_ref(),
         );
         let batch_id = self.commit_prepared_update_write(
             storage,
@@ -1982,7 +2020,7 @@ impl QueryManager {
                 branch,
                 id,
                 &prepared.new_data,
-                &prepared.descriptor,
+                prepared.descriptor.as_ref(),
             )
         } else if let Some(old_branch_data) = existing_branch_data.as_deref() {
             Self::index_mutations_for_update_on_branch(
@@ -1991,7 +2029,7 @@ impl QueryManager {
                 id,
                 old_branch_data,
                 &prepared.new_data,
-                &prepared.descriptor,
+                prepared.descriptor.as_ref(),
             )
         } else {
             Self::index_mutations_for_insert_on_branch(
@@ -1999,7 +2037,7 @@ impl QueryManager {
                 branch,
                 id,
                 &prepared.new_data,
-                &prepared.descriptor,
+                prepared.descriptor.as_ref(),
             )
         };
         let batch_id = self.commit_prepared_update_write(
@@ -2088,17 +2126,14 @@ impl QueryManager {
             .ok_or(QueryError::ObjectNotFound(id))?;
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
-
-        let (descriptor, using_policy) = {
-            let table_schema = self
-                .schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.effective_delete_using().cloned(),
-            )
-        };
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.delete_using_policy.as_deref();
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -2154,10 +2189,10 @@ impl QueryManager {
                         let mut visited = HashSet::new();
                         !self.evaluate_policy_for_content_with_context_for_row(
                             storage,
-                            &policy,
+                            policy,
                             &old_data,
                             &old_provenance,
-                            &descriptor,
+                            descriptor,
                             session,
                             &table,
                             &current_branch,
@@ -2197,7 +2232,7 @@ impl QueryManager {
             branch.as_str(),
             id,
             &old_data,
-            &descriptor,
+            descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2282,16 +2317,10 @@ impl QueryManager {
         {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
-
-        let (descriptor, using_policy) = {
-            let table_schema = write_schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.effective_delete_using().cloned(),
-            )
-        };
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.delete_using_policy.as_deref();
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
@@ -2346,10 +2375,10 @@ impl QueryManager {
                     let mut visited = HashSet::new();
                     if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
-                        &policy,
+                        policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
-                        &descriptor,
+                        descriptor,
                         session,
                         table,
                         branch,
@@ -2393,7 +2422,7 @@ impl QueryManager {
             branch,
             id,
             old_data_for_policy,
-            &descriptor,
+            descriptor,
         );
         let branch_name = BranchName::new(branch);
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2413,7 +2442,6 @@ impl QueryManager {
         );
 
         let _ = old_branch_data;
-        let _ = descriptor;
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
@@ -2461,11 +2489,14 @@ impl QueryManager {
             return Err(QueryError::RowNotDeleted(id));
         }
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -2474,17 +2505,12 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            &table,
-            self.current_branch().as_str(),
-            values,
-            &descriptor,
-        )?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(&table, &current_branch, values, descriptor)?;
 
         // Encode new row data
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let new_data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Get parent commit
         let branch = self.current_branch();
@@ -2510,7 +2536,7 @@ impl QueryManager {
             branch.as_str(),
             id,
             &new_data,
-            &descriptor,
+            descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2570,11 +2596,14 @@ impl QueryManager {
             .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
         // Get parent commit
         let branch = self.current_branch();
         let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
@@ -2599,7 +2628,7 @@ impl QueryManager {
             branch.as_str(),
             id,
             old_data.as_deref(),
-            &descriptor,
+            descriptor,
         );
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2619,7 +2648,6 @@ impl QueryManager {
         );
 
         let _ = old_data;
-        let _ = descriptor;
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
         }
