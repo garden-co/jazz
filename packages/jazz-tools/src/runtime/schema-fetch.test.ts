@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchSchemaConnectivity,
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
@@ -323,6 +324,37 @@ describe("schema-fetch", () => {
         adminSecret: "admin-secret",
       }),
     ).rejects.toThrow('Permissions fetch failed: 401 Unauthorized - {"error":"bad secret"}');
+  });
+
+  it("fetches schema connectivity with admin secret and query params", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        connected: true,
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchSchemaConnectivity("http://localhost:1625/", {
+      adminSecret: "admin-secret",
+      pathPrefix: "/apps/app-123",
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+
+    expect(result).toEqual({ connected: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/app-123/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
   });
 
   it("fetches grouped server subscriptions with admin secret and app id", async () => {
