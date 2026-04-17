@@ -3,7 +3,7 @@ use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
 use crate::storage::metadata_from_row_locator;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn local_batch_rows(
         &self,
         batch_id: crate::row_histories::BatchId,
@@ -492,7 +492,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing outbox");
         }
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
+            if let Some(sync_sender) = self.sync_sender.as_ref() {
+                sync_sender.send_sync_message(msg);
+            }
         }
 
         // 2. Process parked sync messages
@@ -510,7 +512,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
         for msg in outbox {
-            self.sync_sender.send_sync_message(msg);
+            if let Some(sync_sender) = self.sync_sender.as_ref() {
+                sync_sender.send_sync_message(msg);
+            }
         }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).

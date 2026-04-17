@@ -1,7 +1,7 @@
 //! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
-//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
+//! `RuntimeCore<S, TokioScheduler<S>>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
@@ -18,33 +18,30 @@ use std::sync::{Arc, Mutex, Weak};
 
 use futures::channel::oneshot;
 
-use crate::batch_fate::LocalBatchRecord;
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
-use crate::row_histories::BatchId;
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
-    PersistedWriteAck, QueryFuture, ReadDurabilityOptions, RuntimeCore,
-    RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta, SyncSender,
+    QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
+    SubscriptionDelta, SyncSender,
 };
-use crate::schema_manager::manager::PermissionsHeadSummary;
+use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
+};
 
 // ============================================================================
 // TokioScheduler
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
-type PersistedWriteResult = (
-    (ObjectId, Vec<Value>),
-    BatchId,
-    oneshot::Receiver<PersistedWriteAck>,
-);
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
+type PersistedWriteReceiver = oneshot::Receiver<crate::runtime_core::PersistedWriteAck>;
+type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteReceiver);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -87,16 +84,31 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
             let flag = self.scheduled.clone();
 
             tokio::spawn(async move {
-                // Call batched_tick on the core
+                // Clear the debounce flag BEFORE running batched_tick so that
+                // messages arriving while the tick executes can successfully
+                // schedule a follow-up tick.  Without this, a message parked
+                // between the drain inside batched_tick and the flag.store(false)
+                // below would be silently dropped — no tick would ever wake up
+                // to process it.
+                flag.store(false, Ordering::SeqCst);
+
                 if let Some(core_arc) = core_ref.upgrade()
                     && let Ok(mut core) = core_arc.lock()
                 {
                     core.batched_tick();
                 }
-
-                // Clear the scheduled flag AFTER tick completes
-                flag.store(false, Ordering::SeqCst);
             });
+        }
+    }
+}
+
+// Manual Clone: `S` is not stored by value — the Arc and Weak clones
+// are cheap pointer copies that share the underlying allocation.
+impl<S: Storage + Send + 'static> Clone for TokioScheduler<S> {
+    fn clone(&self) -> Self {
+        Self {
+            scheduled: Arc::clone(&self.scheduled),
+            core_ref: Weak::clone(&self.core_ref),
         }
     }
 }
@@ -106,6 +118,7 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
 // ============================================================================
 
 /// SyncSender implementation using a callback.
+#[derive(Clone)]
 pub struct CallbackSyncSender {
     callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
 }
@@ -169,11 +182,17 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Jazz, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
     core: Arc<Mutex<TokioCoreType<S>>>,
+    /// Installed as `RuntimeCore::sync_sender` and retained here so the
+    /// backing callback outlives the core Arc's lifetime.
+    _sync_sender: CallbackSyncSender,
+    /// Cloned handle to the scheduler (shares Arc-based state with the one inside core).
+    /// Stored here so `connect()` can build a `NativeTickNotifier` without locking.
+    scheduler: TokioScheduler<S>,
 }
 
 // Manual Clone impl — only needs Arc::clone, not S: Clone
@@ -181,6 +200,8 @@ impl<S: Storage + Send + 'static> Clone for TokioRuntime<S> {
     fn clone(&self) -> Self {
         Self {
             core: Arc::clone(&self.core),
+            _sync_sender: self._sync_sender.clone(),
+            scheduler: self.scheduler.clone(),
         }
     }
 }
@@ -200,7 +221,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+        // Install the callback as the runtime's fallback outbox sink so
+        // server-side fanout (or any code path without a TransportHandle)
+        // still delivers OutboxEntries.
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
@@ -213,7 +238,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
                 .set_core_ref(Arc::downgrade(&core_arc));
         }
 
-        Self { core: core_arc }
+        // Clone the scheduler AFTER set_core_ref so the clone shares the
+        // Arc<AtomicBool> debounce flag and the Weak core reference.
+        let scheduler_clone = {
+            let core_guard = core_arc.lock().unwrap();
+            (*core_guard.scheduler()).clone()
+        };
+
+        Self {
+            core: core_arc,
+            _sync_sender: sync_sender,
+            scheduler: scheduler_clone,
+        }
     }
 
     /// Persist the current schema to the catalogue for server sync.
@@ -247,6 +283,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().current_permissions_head())
     }
 
+    pub fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().current_permissions())
+    }
+
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.
     pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
@@ -258,38 +299,65 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // =========================================================================
 
     /// Insert a row into a table.
-    pub fn insert_with_write_context(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core.insert(table, values, write_context)?;
-        Ok(result)
-    }
-
-    /// Insert a row into a table.
     pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.insert_with_write_context(table, values, owned.as_ref())
+        self.insert_with_id(table, values, None, session)
     }
 
-    /// Update a row (partial update by column name).
-    pub fn update_with_write_context(
+    /// Insert a row into a table with an optional external row id.
+    pub fn insert_with_id(
         &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        session: Option<&Session>,
+    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+        if object_id.is_some() {
+            return Err(RuntimeError::WriteError(
+                "caller-supplied row ids are not supported on this branch".to_string(),
+            ));
+        }
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.update(object_id, values, write_context)?;
-        Ok(())
+        let owned = session.cloned().map(WriteContext::from_session);
+        let result = core.insert(table, values, owned.as_ref())?;
+        Ok(result)
+    }
+
+    /// Insert a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
+    pub fn insert_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedInsertResult, RuntimeError> {
+        self.insert_persisted_with_id(table, values, None, session, tier)
+    }
+
+    /// Insert a row with an optional external row id and durability tracking.
+    pub fn insert_persisted_with_id(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedInsertResult, RuntimeError> {
+        if object_id.is_some() {
+            return Err(RuntimeError::WriteError(
+                "caller-supplied row ids are not supported on this branch".to_string(),
+            ));
+        }
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let (result, _batch_id, receiver) =
+            core.insert_persisted_with_batch_id(table, values, owned.as_ref(), tier)?;
+        Ok((result, receiver))
     }
 
     /// Update a row (partial update by column name).
@@ -299,19 +367,55 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        self.update_with_write_context(object_id, values, owned.as_ref())
+        core.update(object_id, values, owned.as_ref())?;
+        Ok(())
     }
 
-    /// Delete a row.
-    pub fn delete_with_write_context(
+    /// Create or update a row with a caller-supplied external row id.
+    pub fn upsert_with_id(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+    ) -> Result<(), RuntimeError> {
+        let _ = (table, object_id, values, session);
+        Err(RuntimeError::WriteError(
+            "upsert_with_id is not supported on this branch".to_string(),
+        ))
+    }
+
+    /// Update a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
+    pub fn update_persisted(
         &self,
         object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+        values: Vec<(String, Value)>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.delete(object_id, write_context)?;
-        Ok(())
+        let owned = session.cloned().map(WriteContext::from_session);
+        let receiver = core.update_persisted(object_id, values, owned.as_ref(), tier)?;
+        Ok(receiver)
+    }
+
+    /// Create or update a row and return a receiver that resolves when the
+    /// requested durability tier (or higher) acknowledges.
+    pub fn upsert_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
+        let _ = (table, object_id, values, session, tier);
+        Err(RuntimeError::WriteError(
+            "upsert_persisted_with_id is not supported on this branch".to_string(),
+        ))
     }
 
     /// Delete a row.
@@ -320,84 +424,24 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.delete_with_write_context(object_id, owned.as_ref())
-    }
-
-    /// Insert a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn insert_persisted_with_write_context(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<PersistedWriteResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.insert_persisted_with_batch_id(table, values, write_context, tier)?)
-    }
-
-    /// Insert a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn insert_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        session: Option<&Session>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<PersistedWriteResult, RuntimeError> {
         let owned = session.cloned().map(WriteContext::from_session);
-        self.insert_persisted_with_write_context(table, values, owned.as_ref(), tier)
+        core.delete(object_id, owned.as_ref())?;
+        Ok(())
     }
 
-    /// Update a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn update_persisted_with_write_context(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.update_persisted_with_batch_id(object_id, values, write_context, tier)?)
-    }
-
-    /// Update a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        session: Option<&Session>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.update_persisted_with_write_context(object_id, values, owned.as_ref(), tier)
-    }
-
-    /// Delete a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn delete_persisted_with_write_context(
-        &self,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.delete_persisted_with_batch_id(object_id, write_context, tier)?)
-    }
-
-    /// Delete a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
+    /// Delete a row and return a receiver that resolves when the requested
+    /// durability tier (or higher) acknowledges.
     pub fn delete_persisted(
         &self,
         object_id: ObjectId,
         session: Option<&Session>,
-        tier: crate::sync_manager::DurabilityTier,
-    ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        self.delete_persisted_with_write_context(object_id, owned.as_ref(), tier)
+        let receiver = core.delete_persisted(object_id, owned.as_ref(), tier)?;
+        Ok(receiver)
     }
 
     /// Flush pending operations to storage.
@@ -479,29 +523,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.subscribe(query, callback, session)
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
-    }
-
-    /// Subscribe to a query with explicit durability and propagation options.
-    pub fn subscribe_with_durability_and_propagation<F>(
-        &self,
-        query: Query,
-        callback: F,
-        session: Option<Session>,
-        durability: ReadDurabilityOptions,
-        propagation: QueryPropagation,
-    ) -> Result<SubscriptionHandle, RuntimeError>
-    where
-        F: Fn(SubscriptionDelta) + Send + 'static,
-    {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.subscribe_with_durability_and_propagation(
-            query,
-            callback,
-            session,
-            durability,
-            propagation,
-        )
-        .map_err(|e| RuntimeError::QueryError(e.to_string()))
     }
 
     /// Unsubscribe from a query.
@@ -694,35 +715,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(f(core.storage()))
     }
 
-    /// Load one replayable local batch record by logical batch id.
-    pub fn local_batch_record(
-        &self,
-        batch_id: BatchId,
-    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
-        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.local_batch_record(batch_id)?)
-    }
-
-    /// Scan all replayable local batch records retained by this runtime.
-    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
-        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.local_batch_records()?)
-    }
-
-    /// Acknowledge a replayable rejected batch outcome and prune its local
-    /// replay record.
-    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.acknowledge_rejected_batch(batch_id)?)
-    }
-
-    /// Mark a transactional batch as complete so sync can validate and settle
-    /// it as one unit.
-    pub fn seal_batch(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.seal_batch(batch_id)?)
-    }
-
     /// Run a closure with read access to the SyncManager (for testing/inspection).
     #[cfg(test)]
     pub(crate) fn with_sync_manager<R>(
@@ -754,6 +746,99 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .subscribe_with_schema_context(query, schema_context, session)
             .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
         Ok(result)
+    }
+
+    /// Return a reference to the scheduler stored on this runtime handle.
+    ///
+    /// The returned scheduler shares `Arc`-based state with the one inside
+    /// `RuntimeCore` (same debounce flag, same `Weak` back-reference), so
+    /// calling `schedule_batched_tick()` on it is equivalent to calling it
+    /// from within the locked core.
+    pub fn scheduler(&self) -> &TokioScheduler<S> {
+        &self.scheduler
+    }
+}
+
+// ============================================================================
+// NativeTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the native (Tokio) runtime.
+///
+/// Holds a clone of the `TokioScheduler` and calls
+/// `schedule_batched_tick()` whenever the transport layer needs to wake
+/// up `batched_tick` (on connect, on incoming sync frames, on disconnect).
+#[derive(Clone)]
+pub struct NativeTickNotifier<S: Storage + Send + 'static> {
+    scheduler: TokioScheduler<S>,
+}
+
+impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
+}
+
+// ============================================================================
+// TokioRuntime connect / disconnect (WebSocket transport)
+// ============================================================================
+
+#[cfg(feature = "transport-websocket")]
+impl<S: Storage + Send + 'static> TokioRuntime<S> {
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Creates a `TransportHandle` / `TransportManager` pair, wires the
+    /// handle into `RuntimeCore`, and spawns the manager loop as a Tokio
+    /// task. The manager drives the WebSocket connection, reconnecting on
+    /// failure until the handle is dropped.
+    pub fn connect(&self, url: String, auth: crate::transport_manager::AuthConfig) {
+        let tick = NativeTickNotifier {
+            scheduler: self.scheduler.clone(),
+        };
+        let manager = {
+            let mut core = self.core.lock().unwrap();
+            crate::runtime_core::install_transport::<_, _, crate::ws_stream::NativeWsStream, _>(
+                &mut core, url, auth, tick,
+            )
+        };
+        tokio::spawn(manager.run());
+    }
+
+    /// Disconnect from the Jazz server.
+    ///
+    /// Drops the `TransportHandle` from `RuntimeCore`. The spawned
+    /// `TransportManager` task detects the dropped handle and exits cleanly.
+    pub fn disconnect(&self) {
+        self.core.lock().unwrap().clear_transport();
+    }
+
+    /// Returns `true` once the WebSocket transport has completed at least one
+    /// successful handshake. Useful for callers that need to wait until the
+    /// initial connection is established before proceeding.
+    pub fn transport_ever_connected(&self) -> bool {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.has_ever_connected()))
+            .unwrap_or(false)
+    }
+
+    /// Returns the wire `ClientId` used by the active transport, if any.
+    ///
+    /// Tests use this to register the transport's client identity with a
+    /// `SyncTracer` so server-originated messages resolve to human names.
+    pub fn transport_client_id(&self) -> Option<ClientId> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.client_id))
+    }
+
+    /// Attach a sync-message tracer to this runtime.
+    pub fn set_sync_tracer(&self, tracer: crate::sync_tracer::SyncTracer, name: String) {
+        if let Ok(mut core) = self.core.lock() {
+            core.set_sync_tracer(tracer, name);
+        }
     }
 }
 

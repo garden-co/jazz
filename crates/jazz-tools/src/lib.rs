@@ -1,6 +1,7 @@
 pub mod batch_fate;
 pub mod binding_support;
 pub mod catalogue;
+pub mod commit;
 pub mod digest;
 pub mod identity;
 pub mod metadata;
@@ -29,15 +30,14 @@ pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
 pub use runtime_tokio as jazz_tokio;
 
-#[cfg(feature = "transport")]
 pub mod transport_protocol;
-#[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
+pub mod transport_manager;
+#[cfg(feature = "transport-websocket")]
+pub mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
-mod transport;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;
@@ -46,10 +46,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(feature = "client")]
-pub use client::{ClientReadOptions, JazzClient, PersistedWrite, SessionClient, Transaction};
+pub use client::{JazzClient, SessionClient};
 
-#[cfg(all(feature = "client", feature = "transport"))]
-pub use jazz_transport::ServerEvent;
 #[cfg(feature = "client")]
 pub use object::ObjectId;
 #[cfg(feature = "client")]
@@ -61,8 +59,6 @@ pub use query_manager::types::{
     ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
     Value,
 };
-#[cfg(feature = "client")]
-pub use row_histories::BatchId;
 #[cfg(feature = "client")]
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
@@ -138,9 +134,6 @@ pub enum JazzError {
     #[error("Schema error: {0}")]
     Schema(String),
 
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -149,13 +142,6 @@ pub enum JazzError {
 
     #[error("Channel closed")]
     ChannelClosed,
-
-    #[error("Persisted batch {batch_id} was rejected ({code}): {reason}")]
-    BatchRejected {
-        batch_id: BatchId,
-        code: String,
-        reason: String,
-    },
 }
 
 /// Result type for Jazz operations.

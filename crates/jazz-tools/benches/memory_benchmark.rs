@@ -13,7 +13,7 @@ mod common;
 use std::collections::HashMap;
 
 use common::{
-    BenchRuntime, MemoryBreakdown, QueryManagerMemory, SyncManagerMemory, TrackingAllocator,
+    BenchRuntime, MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator,
     create_runtime, create_session, current_timestamp, document_plaintext_size, format_bytes,
     get_stats, reset_stats, setup_data,
 };
@@ -180,14 +180,16 @@ fn run_memory_benchmark(scale: usize) {
 fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
     let qm = core.schema_manager().query_manager();
 
-    let (catalogue, connections, subscriptions, queues, sm_total) = qm.sync_manager().memory_size();
-
-    let sync_manager = SyncManagerMemory {
-        catalogue,
-        connections,
+    // Keep the legacy ObjectManager-shaped output, but source it from the
+    // current sync-layer state that replaced the old object cache.
+    let (row_objects, index_objects, subscriptions, outbox_inbox, om_total) =
+        qm.sync_manager().memory_size();
+    let object_manager = ObjectManagerMemory {
+        row_objects,
+        index_objects,
         subscriptions,
-        queues,
-        total: sm_total,
+        outbox_inbox,
+        total: om_total,
     };
 
     // Get QueryManager memory breakdown
@@ -200,10 +202,10 @@ fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
         total: qm_total,
     };
 
-    let total = sm_total + qm_total;
+    let total = om_total + qm_total;
 
     MemoryBreakdown {
-        sync_manager,
+        object_manager,
         query_manager,
         total,
     }

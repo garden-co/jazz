@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
+use uuid::Uuid;
 
 use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
 use crate::object::ObjectId;
@@ -18,21 +19,12 @@ use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
-use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerializedOutboxEntry {
-    pub destination_kind: String,
-    pub destination_id: String,
-    pub payload_json: String,
-    pub is_catalogue: bool,
-}
+use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
-    strict_transactions: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,51 +177,7 @@ pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>
 #[serde(untagged)]
 enum WriteContextWire {
     Session(Session),
-    Context(BindingWriteContext),
-}
-
-#[derive(Debug, Deserialize)]
-struct BindingWriteContext {
-    #[serde(default)]
-    session: Option<Session>,
-    #[serde(default)]
-    attribution: Option<String>,
-    #[serde(default, alias = "batchMode")]
-    batch_mode: Option<String>,
-    #[serde(default, alias = "batchId")]
-    batch_id: Option<String>,
-    #[serde(default, alias = "targetBranchName")]
-    target_branch_name: Option<String>,
-}
-
-impl BindingWriteContext {
-    fn into_write_context(self) -> Result<WriteContext, String> {
-        if self.session.is_none()
-            && self.attribution.is_none()
-            && self.batch_mode.is_none()
-            && self.batch_id.is_none()
-            && self.target_branch_name.is_none()
-        {
-            return Err("write context did not contain any recognized fields".to_string());
-        }
-
-        let batch_mode = match self.batch_mode {
-            Some(mode) => Some(parse_batch_mode_input(&mode)?),
-            None => None,
-        };
-        let batch_id = match self.batch_id {
-            Some(batch_id) => Some(parse_batch_id_input(&batch_id)?),
-            None => None,
-        };
-
-        Ok(WriteContext {
-            session: self.session,
-            attribution: self.attribution,
-            batch_mode,
-            batch_id,
-            target_branch_name: self.target_branch_name,
-        })
-    }
+    Context(WriteContext),
 }
 
 pub fn parse_write_context_input(
@@ -238,18 +186,10 @@ pub fn parse_write_context_input(
     match write_context_json {
         Some(json) => match serde_json::from_str::<WriteContextWire>(json) {
             Ok(WriteContextWire::Session(session)) => Ok(Some(WriteContext::from_session(session))),
-            Ok(WriteContextWire::Context(context)) => context.into_write_context().map(Some),
+            Ok(WriteContextWire::Context(context)) => Ok(Some(context)),
             Err(err) => Err(err.to_string()),
         },
         None => Ok(None),
-    }
-}
-
-fn parse_batch_mode_input(raw: &str) -> Result<BatchMode, String> {
-    match raw {
-        "direct" | "Direct" => Ok(BatchMode::Direct),
-        "transactional" | "Transactional" => Ok(BatchMode::Transactional),
-        other => Err(format!("Invalid batch mode: {other}")),
     }
 }
 
@@ -265,18 +205,18 @@ pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
     }
 }
 
+pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
+    batch_id
+        .parse()
+        .map_err(|err: String| format!("Invalid BatchId: {err}"))
+}
+
 pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
         DurabilityTier::Worker => "worker",
         DurabilityTier::EdgeServer => "edge",
         DurabilityTier::GlobalServer => "global",
     }
-}
-
-pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
-    batch_id
-        .parse()
-        .map_err(|err: String| format!("Invalid BatchId: {err}"))
 }
 
 fn serialize_batch_mode(mode: BatchMode) -> &'static str {
@@ -294,12 +234,8 @@ fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
     })
 }
 
-pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
+fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
     match settlement {
-        BatchSettlement::Missing { batch_id } => json!({
-            "kind": "missing",
-            "batchId": batch_id.to_string(),
-        }),
         BatchSettlement::Rejected {
             batch_id,
             code,
@@ -315,7 +251,7 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             confirmed_tier,
             visible_members,
         } => json!({
-            "kind": "durable_direct",
+            "kind": "durableDirect",
             "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
             "visibleMembers": visible_members
@@ -328,13 +264,17 @@ pub fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             confirmed_tier,
             visible_members,
         } => json!({
-            "kind": "accepted_transaction",
+            "kind": "acceptedTransaction",
             "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
             "visibleMembers": visible_members
                 .iter()
                 .map(serialize_visible_batch_member)
                 .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::Missing { batch_id } => json!({
+            "kind": "missing",
+            "batchId": batch_id.to_string(),
         }),
     }
 }
@@ -398,7 +338,7 @@ pub fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
-            strict_transactions: options.strict_transactions.unwrap_or(false),
+            strict_transactions: false,
         },
         propagation,
     ))
@@ -460,24 +400,24 @@ pub fn subscription_delta_to_json(
     serde_json::Value::Array(delta_obj)
 }
 
-pub fn serialize_outbox_entry(message: &OutboxEntry) -> Result<SerializedOutboxEntry, String> {
-    let payload_json = serde_json::to_string(&message.payload).map_err(|err| err.to_string())?;
-    let is_catalogue = message.payload.is_catalogue();
-    let (destination_kind, destination_id) = match message.destination {
-        Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
-        Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
-    };
-
-    Ok(SerializedOutboxEntry {
-        destination_kind,
-        destination_id,
-        payload_json,
-        is_catalogue,
-    })
-}
-
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
+}
+
+pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<ObjectId>, String> {
+    let Some(object_id) = object_id else {
+        return Ok(None);
+    };
+
+    let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
+    if uuid.get_version_num() != 7 {
+        return Err(format!(
+            "Invalid ObjectId: expected UUIDv7, got version {}",
+            uuid.get_version_num()
+        ));
+    }
+
+    Ok(Some(ObjectId::from_uuid(uuid)))
 }
 
 pub fn current_timestamp_ms() -> i64 {
@@ -493,19 +433,15 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
-        query_rows_can_be_schema_aligned, serialize_outbox_entry,
+        parse_read_durability_options, parse_runtime_schema_input,
+        query_rows_can_be_schema_aligned,
     };
-    use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
-    use crate::row_histories::BatchId;
-    use crate::sync_manager::{Destination, OutboxEntry, QueryId, ServerId, SyncPayload};
-    use serde_json::json;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -658,63 +594,5 @@ mod tests {
 
         assert!(!input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));
-    }
-
-    #[test]
-    fn outbox_entries_are_serialized_for_bindings() {
-        let message = OutboxEntry {
-            destination: Destination::Server(ServerId::new()),
-            payload: SyncPayload::QueryUnsubscription {
-                query_id: QueryId(7),
-            },
-        };
-
-        let serialized = serialize_outbox_entry(&message).expect("serialize outbox");
-
-        assert_eq!(serialized.destination_kind, "server");
-        assert!(!serialized.destination_id.is_empty());
-        assert!(!serialized.payload_json.is_empty());
-        assert!(!serialized.is_catalogue);
-    }
-
-    #[test]
-    fn write_context_parser_accepts_binding_batch_fields() {
-        let batch_id = BatchId::new();
-        let parsed = parse_write_context_input(Some(
-            &json!({
-                "session": {
-                    "user_id": "alice",
-                    "claims": {}
-                },
-                "batch_mode": "transactional",
-                "batch_id": batch_id.to_string(),
-            })
-            .to_string(),
-        ))
-        .expect("parse binding write context")
-        .expect("binding write context should exist");
-
-        assert_eq!(
-            parsed.session().map(|session| session.user_id.as_str()),
-            Some("alice")
-        );
-        assert_eq!(parsed.batch_mode(), BatchMode::Transactional);
-        assert_eq!(parsed.batch_id(), Some(batch_id));
-    }
-
-    #[test]
-    fn write_context_parser_preserves_transaction_target_branch_name() {
-        let parsed = parse_write_context_input(Some(
-            &json!({
-                "batch_mode": "transactional",
-                "batch_id": BatchId::new().to_string(),
-                "target_branch_name": "dev-111111111111-main",
-            })
-            .to_string(),
-        ))
-        .expect("parse binding write context")
-        .expect("binding write context should exist");
-
-        assert_eq!(parsed.target_branch_name(), Some("dev-111111111111-main"));
     }
 }

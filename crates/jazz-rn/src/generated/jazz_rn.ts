@@ -32,9 +32,9 @@ import nativeModule, {
   type UniffiForeignFutureCompleteRustBuffer,
   type UniffiForeignFutureResultVoid,
   type UniffiForeignFutureCompleteVoid,
+  type UniffiVTableCallbackInterfaceAuthFailureCallback,
   type UniffiVTableCallbackInterfaceBatchedTickCallback,
   type UniffiVTableCallbackInterfaceSubscriptionCallback,
-  type UniffiVTableCallbackInterfaceSyncMessageCallback,
 } from './jazz_rn-ffi';
 import {
   type FfiConverter,
@@ -130,6 +130,60 @@ export function mintLocalFirstToken(
     )
   );
 }
+
+export interface AuthFailureCallback {
+  /**
+   * Invoked when the Rust transport receives an auth rejection from the server.
+   * `reason` is a human-readable string (e.g. "Unauthorized").
+   */
+  onFailure(reason: string): void;
+}
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+const uniffiCallbackInterfaceAuthFailureCallback: {
+  vtable: UniffiVTableCallbackInterfaceAuthFailureCallback;
+  register: () => void;
+} = {
+  // Create the VTable using a series of closures.
+  // ts automatically converts these into C callback functions.
+  vtable: {
+    onFailure: (uniffiHandle: bigint, reason: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback =
+          FfiConverterTypeAuthFailureCallback.lift(uniffiHandle);
+        return jsCallback.onFailure(FfiConverterString.lift(reason));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower
+      );
+      return uniffiResult;
+    },
+    uniffiFree: (uniffiHandle: UniffiHandle): void => {
+      // AuthFailureCallback: this will throw a stale handle error if the handle isn't found.
+      FfiConverterTypeAuthFailureCallback.drop(uniffiHandle);
+    },
+    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
+      return FfiConverterTypeAuthFailureCallback.clone(uniffiHandle);
+    },
+  },
+  register: () => {
+    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+      uniffiCallbackInterfaceAuthFailureCallback.vtable
+    );
+  },
+};
+
+// FfiConverter protocol for callback interfaces
+const FfiConverterTypeAuthFailureCallback =
+  new FfiConverterCallback<AuthFailureCallback>();
 
 export interface BatchedTickCallback {
   /**
@@ -236,75 +290,6 @@ const uniffiCallbackInterfaceSubscriptionCallback: {
 // FfiConverter protocol for callback interfaces
 const FfiConverterTypeSubscriptionCallback =
   new FfiConverterCallback<SubscriptionCallback>();
-
-export interface SyncMessageCallback {
-  /**
-   * Called by Rust when it has an outbox message to send.
-   */
-  onSyncMessage(
-    destinationKind: string,
-    destinationId: string,
-    payloadJson: string,
-    isCatalogue: boolean
-  ): void;
-}
-
-// Put the implementation in a struct so we don't pollute the top-level namespace
-const uniffiCallbackInterfaceSyncMessageCallback: {
-  vtable: UniffiVTableCallbackInterfaceSyncMessageCallback;
-  register: () => void;
-} = {
-  // Create the VTable using a series of closures.
-  // ts automatically converts these into C callback functions.
-  vtable: {
-    onSyncMessage: (
-      uniffiHandle: bigint,
-      destinationKind: Uint8Array,
-      destinationId: Uint8Array,
-      payloadJson: Uint8Array,
-      isCatalogue: number
-    ) => {
-      const uniffiMakeCall = (): void => {
-        const jsCallback =
-          FfiConverterTypeSyncMessageCallback.lift(uniffiHandle);
-        return jsCallback.onSyncMessage(
-          FfiConverterString.lift(destinationKind),
-          FfiConverterString.lift(destinationId),
-          FfiConverterString.lift(payloadJson),
-          FfiConverterBool.lift(isCatalogue)
-        );
-      };
-      const uniffiResult = UniffiResult.ready<void>();
-      const uniffiHandleSuccess = (obj: any) => {};
-      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
-        UniffiResult.writeError(uniffiResult, code, errBuf);
-      };
-      uniffiTraitInterfaceCall(
-        /*makeCall:*/ uniffiMakeCall,
-        /*handleSuccess:*/ uniffiHandleSuccess,
-        /*handleError:*/ uniffiHandleError,
-        /*lowerString:*/ FfiConverterString.lower
-      );
-      return uniffiResult;
-    },
-    uniffiFree: (uniffiHandle: UniffiHandle): void => {
-      // SyncMessageCallback: this will throw a stale handle error if the handle isn't found.
-      FfiConverterTypeSyncMessageCallback.drop(uniffiHandle);
-    },
-    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
-      return FfiConverterTypeSyncMessageCallback.clone(uniffiHandle);
-    },
-  },
-  register: () => {
-    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_syncmessagecallback(
-      uniffiCallbackInterfaceSyncMessageCallback.vtable
-    );
-  },
-};
-
-// FfiConverter protocol for callback interfaces
-const FfiConverterTypeSyncMessageCallback =
-  new FfiConverterCallback<SyncMessageCallback>();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -708,6 +693,13 @@ export interface RnRuntimeInterface {
    */
   close() /*throws*/ : void;
   /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+   */
+  connect(url: string, authJson: string) /*throws*/ : void;
+  /**
    * Phase 1 of 2-phase subscribe: allocate a handle and store query params.
    */
   createSubscription(
@@ -721,6 +713,10 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined
   ) /*throws*/ : void;
   /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   */
+  disconnect(): void;
+  /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
   executeSubscription(
@@ -729,12 +725,22 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : void;
   flush() /*throws*/ : void;
   getSchemaHash() /*throws*/ : string;
-  insert(table: string, valuesJson: string) /*throws*/ : string;
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ) /*throws*/ : string;
   insertWithSession(
     table: string,
     valuesJson: string,
-    writeContextJson: string | undefined
+    writeContextJson: string | undefined,
+    objectId: string | undefined
   ) /*throws*/ : string;
+  /**
+   * Register a callback that fires when the transport receives an auth
+   * rejection from the server during the WS handshake.
+   */
+  onAuthFailure(callback: AuthFailureCallback) /*throws*/ : void;
   /**
    * Register a JS callback that schedules `batched_tick()` calls.
    */
@@ -745,12 +751,6 @@ export interface RnRuntimeInterface {
   onSyncMessageReceivedFromClient(
     clientId: string,
     messageJson: string
-  ) /*throws*/ : void;
-  /**
-   * Register a JS callback for outbound sync messages.
-   */
-  onSyncMessageToSend(
-    callback: SyncMessageCallback | undefined
   ) /*throws*/ : void;
   /**
    * One-shot query returning a JSON string:
@@ -771,6 +771,10 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : /*u64*/ bigint;
   unsubscribe(handle: /*u64*/ bigint) /*throws*/ : void;
   update(objectId: string, valuesJson: string) /*throws*/ : void;
+  /**
+   * Push updated auth credentials into the live transport.
+   */
+  updateAuth(authJson: string) /*throws*/ : void;
   updateWithSession(
     objectId: string,
     valuesJson: string,
@@ -885,6 +889,29 @@ export class RnRuntime
   }
 
   /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+   */
+  connect(url: string, authJson: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(url),
+          FfiConverterString.lower(authJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
    * Phase 1 of 2-phase subscribe: allocate a handle and store query params.
    */
   createSubscription(
@@ -948,6 +975,21 @@ export class RnRuntime
   }
 
   /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   */
+  disconnect(): void {
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
   executeSubscription(
@@ -1002,7 +1044,11 @@ export class RnRuntime
     );
   }
 
-  insert(table: string, valuesJson: string): string /*throws*/ {
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ): string /*throws*/ {
     return FfiConverterString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1013,6 +1059,7 @@ export class RnRuntime
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(table),
             FfiConverterString.lower(valuesJson),
+            FfiConverterOptionalString.lower(objectId),
             callStatus
           );
         },
@@ -1024,7 +1071,8 @@ export class RnRuntime
   insertWithSession(
     table: string,
     valuesJson: string,
-    writeContextJson: string | undefined
+    writeContextJson: string | undefined,
+    objectId: string | undefined
   ): string /*throws*/ {
     return FfiConverterString.lift(
       uniffiCaller.rustCallWithError(
@@ -1037,11 +1085,32 @@ export class RnRuntime
             FfiConverterString.lower(table),
             FfiConverterString.lower(valuesJson),
             FfiConverterOptionalString.lower(writeContextJson),
+            FfiConverterOptionalString.lower(objectId),
             callStatus
           );
         },
         /*liftString:*/ FfiConverterString.lift
       )
+    );
+  }
+
+  /**
+   * Register a callback that fires when the transport receives an auth
+   * rejection from the server during the WS handshake.
+   */
+  onAuthFailure(callback: AuthFailureCallback): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterTypeAuthFailureCallback.lower(callback),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -1095,27 +1164,6 @@ export class RnRuntime
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterString.lower(clientId),
           FfiConverterString.lower(messageJson),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  /**
-   * Register a JS callback for outbound sync messages.
-   */
-  onSyncMessageToSend(
-    callback: SyncMessageCallback | undefined
-  ): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_to_send(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterOptionalTypeSyncMessageCallback.lower(callback),
           callStatus
         );
       },
@@ -1242,6 +1290,25 @@ export class RnRuntime
     );
   }
 
+  /**
+   * Push updated auth credentials into the live transport.
+   */
+  updateAuth(authJson: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(authJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   updateWithSession(
     objectId: string,
     valuesJson: string,
@@ -1356,11 +1423,6 @@ const FfiConverterOptionalTypeBatchedTickCallback = new FfiConverterOptional(
   FfiConverterTypeBatchedTickCallback
 );
 
-// FfiConverter for SyncMessageCallback | undefined
-const FfiConverterOptionalTypeSyncMessageCallback = new FfiConverterOptional(
-  FfiConverterTypeSyncMessageCallback
-);
-
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
@@ -1442,6 +1504,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect() !==
+    261
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_connect'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription() !==
     20107
   ) {
@@ -1463,6 +1533,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect() !==
+    61004
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_disconnect'
     );
   }
   if (
@@ -1491,7 +1569,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert() !==
-    12677
+    42394
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert'
@@ -1499,10 +1577,18 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session() !==
-    60695
+    313
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure() !==
+    50366
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure'
     );
   }
   if (
@@ -1527,14 +1613,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_to_send() !==
-    58836
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_to_send'
     );
   }
   if (
@@ -1586,6 +1664,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth() !==
+    57633
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_update_auth'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session() !==
     39209
   ) {
@@ -1599,6 +1685,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_constructor_rnruntime_new'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure() !==
+    17333
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure'
     );
   }
   if (
@@ -1617,18 +1711,10 @@ function uniffiEnsureInitialized() {
       'uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update'
     );
   }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message() !==
-    45812
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message'
-    );
-  }
 
+  uniffiCallbackInterfaceAuthFailureCallback.register();
   uniffiCallbackInterfaceBatchedTickCallback.register();
   uniffiCallbackInterfaceSubscriptionCallback.register();
-  uniffiCallbackInterfaceSyncMessageCallback.register();
 }
 
 export default Object.freeze({

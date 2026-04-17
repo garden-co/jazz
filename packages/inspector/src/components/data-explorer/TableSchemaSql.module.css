@@ -2,8 +2,8 @@
   height: 100%;
   background: transparent;
   padding: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
@@ -35,6 +35,35 @@
   text-transform: capitalize;
   font-size: 18px;
   color: #eff3f8;
+}
+
+.sections {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid #232c3a;
+  background: #0f151e;
+}
+
+.sectionHeader {
+  padding: 10px 12px 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: #c4d0df;
 }
 
 .codeBlock {

@@ -1,6 +1,6 @@
 import { BrowserRouter } from "react-router";
 import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "jazz-tools";
+import { fetchSchemaHashes, fetchStoredPermissions, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
 import { DevtoolsProvider } from "./contexts/devtools-context.js";
@@ -34,6 +34,9 @@ export default function App() {
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<string[]>([]);
   const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
+  const [storedPermissions, setStoredPermissions] = useState<Awaited<
+    ReturnType<typeof fetchStoredPermissions>
+  > | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
@@ -73,6 +76,7 @@ export default function App() {
       return null;
     });
     setWasmSchema(null);
+    setStoredPermissions(null);
     writeStoredConfig(nextConfig);
     setStoredConfig(nextConfig);
   };
@@ -87,6 +91,7 @@ export default function App() {
       return null;
     });
     setWasmSchema(null);
+    setStoredPermissions(null);
     setOnboardingStep("form");
     setFormValues(null);
     setSchemaHashes([]);
@@ -101,7 +106,7 @@ export default function App() {
 
     const run = async () => {
       try {
-        const [resolvedClient, { schema }, { hashes }] = await Promise.all([
+        const [resolvedClient, { schema }, { hashes }, permissions] = await Promise.all([
           createJazzClient({
             appId: storedConfig.appId,
             serverUrl: storedConfig.serverUrl,
@@ -109,6 +114,7 @@ export default function App() {
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
+            auth: { localFirstSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" },
             driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
@@ -120,6 +126,10 @@ export default function App() {
             adminSecret: storedConfig.adminSecret,
             pathPrefix: storedConfig.serverPathPrefix,
           }),
+          fetchStoredPermissions(storedConfig.serverUrl, {
+            adminSecret: storedConfig.adminSecret,
+            pathPrefix: storedConfig.serverPathPrefix,
+          }).catch(() => null),
         ]);
 
         if (!active) {
@@ -134,6 +144,7 @@ export default function App() {
           return resolvedClient;
         });
         setWasmSchema(schema);
+        setStoredPermissions(permissions);
         setAvailableSchemaHashes(hashes);
         setError(null);
         setIsSwitchingSchema(false);
@@ -196,7 +207,11 @@ export default function App() {
 
   return (
     <JazzClientProvider client={client}>
-      <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
+      <DevtoolsProvider
+        wasmSchema={wasmSchema}
+        storedPermissions={storedPermissions}
+        runtime="standalone"
+      >
         <StandaloneProvider
           onReset={handleReset}
           schemaHashes={availableSchemaHashes}

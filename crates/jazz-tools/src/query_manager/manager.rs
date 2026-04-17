@@ -524,6 +524,15 @@ impl QueryManager {
         self.authorization_schema_required = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_authorization_state(&self) -> (RowPolicyMode, bool, bool) {
+        (
+            self.row_policy_mode,
+            self.authorization_schema_required,
+            self.authorization_schema.is_some(),
+        )
+    }
+
     /// Add a live schema (one we can read from but don't write to).
     ///
     /// Creates indices for the schema's branch.
@@ -1078,9 +1087,14 @@ impl QueryManager {
                 );
             }
 
-            if !subscription.settled_once && !subscription.query_frontier_complete {
+            if !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
                 // Graph state updated by settle(), but don't deliver until the
-                // initial upstream frontier has been replayed.
+                // initial upstream frontier has been replayed — or until every
+                // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
+                // which means nothing upstream is going to replay.
                 tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
