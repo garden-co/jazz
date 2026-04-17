@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-alpha.29",
+  "version": "2.0.0-alpha.30",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
@@ -18,6 +18,7 @@
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"
   ],
+  "type": "module",
   "main": "pkg/jazz_wasm.js",
   "types": "pkg/jazz_wasm.d.ts",
   "publishConfig": {

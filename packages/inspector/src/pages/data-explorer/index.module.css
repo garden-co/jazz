@@ -16,7 +16,7 @@
 .sidebar {
   height: 100%;
   background: #0f141b;
-  padding: 6px;
+  padding: 0;
   overflow: auto;
 }
 
@@ -56,8 +56,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin: 0 12px 12px;
+  gap: 12px;
+  padding: 12px 12px 8px;
 }
 
 .propagationSwitch {
@@ -75,7 +75,7 @@
 
 .tableList {
   margin: 0;
-  padding: 0 6px;
+  padding: 0 12px 12px;
   list-style: none;
   display: flex;
   flex-direction: column;

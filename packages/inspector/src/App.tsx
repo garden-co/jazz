@@ -22,6 +22,7 @@ interface StoredConfig {
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 
 type OnboardingStep = "form" | "schema" | null;
+type ConnectionFormMode = "connect" | "edit";
 
 export default function App() {
   const [fragmentConfig] = useState<DbConfigFormValues | null>(() => readFragmentConfig());
@@ -29,6 +30,7 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(
     fragmentConfig || !storedConfig ? "form" : null,
   );
+  const [connectionFormMode, setConnectionFormMode] = useState<ConnectionFormMode>("connect");
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<string[]>([]);
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<string[]>([]);
@@ -41,6 +43,7 @@ export default function App() {
   const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
   const handleFormSubmit = (values: DbConfigFormValues, hashes: string[]) => {
+    setConnectionFormMode("connect");
     setFormValues(values);
     setSchemaHashes(hashes);
     setOnboardingStep("schema");
@@ -81,9 +84,28 @@ export default function App() {
     setStoredConfig(nextConfig);
   };
 
+  const handleEdit = () => {
+    if (!storedConfig) return;
+    setConnectionFormMode("edit");
+    setClient((previousClient) => {
+      if (previousClient) {
+        void previousClient.shutdown();
+      }
+      return null;
+    });
+    setWasmSchema(null);
+    setError(null);
+    setFormValues(storedConfigToFormValues(storedConfig));
+    setSchemaHashes([]);
+    setAvailableSchemaHashes([]);
+    setIsSwitchingSchema(false);
+    setOnboardingStep("form");
+  };
+
   const handleReset = () => {
     clearStoredConfig();
     setStoredConfig(null);
+    setConnectionFormMode("connect");
     setClient((previousClient) => {
       if (previousClient) {
         void previousClient.shutdown();
@@ -114,7 +136,6 @@ export default function App() {
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
-            auth: { localFirstSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" },
             driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
@@ -164,9 +185,19 @@ export default function App() {
   }, [storedConfig]);
 
   if (onboardingStep === "form") {
+    const initialValues =
+      connectionFormMode === "edit"
+        ? (formValues ?? (storedConfig ? storedConfigToFormValues(storedConfig) : undefined))
+        : (fragmentConfig ?? undefined);
+
     return (
       <main className={styles.statePage}>
-        <DbConfigForm onSubmit={handleFormSubmit} initialValues={fragmentConfig ?? undefined} />
+        <DbConfigForm
+          onSubmit={handleFormSubmit}
+          initialValues={initialValues}
+          mode={connectionFormMode}
+          onReset={connectionFormMode === "edit" ? handleReset : undefined}
+        />
       </main>
     );
   }
@@ -187,9 +218,14 @@ export default function App() {
           <p role="alert" className={styles.errorText}>
             {error}
           </p>
-          <button type="button" onClick={handleReset} className={styles.actionButton}>
-            Reset connection
-          </button>
+          <div className={styles.actionRow}>
+            <button type="button" onClick={handleEdit} className={styles.actionButton}>
+              Edit connection
+            </button>
+            <button type="button" onClick={handleReset} className={styles.actionButtonSecondary}>
+              Reset connection
+            </button>
+          </div>
         </section>
       </main>
     );
@@ -213,6 +249,7 @@ export default function App() {
         runtime="standalone"
       >
         <StandaloneProvider
+          onEdit={handleEdit}
           onReset={handleReset}
           schemaHashes={availableSchemaHashes}
           selectedSchemaHash={storedConfig?.schemaHash ?? null}
@@ -232,6 +269,17 @@ export default function App() {
       </DevtoolsProvider>
     </JazzClientProvider>
   );
+}
+
+function storedConfigToFormValues(config: StoredConfig): DbConfigFormValues {
+  return {
+    serverUrl: config.serverUrl,
+    appId: config.appId,
+    adminSecret: config.adminSecret,
+    env: config.env,
+    branch: config.branch,
+    serverPathPrefix: config.serverPathPrefix,
+  };
 }
 
 function readStoredConfig(): StoredConfig | null {
