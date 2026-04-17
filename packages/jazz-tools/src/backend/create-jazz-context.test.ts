@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
   }> = [];
   const clients: Array<{
     asBackend: ReturnType<typeof vi.fn>;
+    connectTransport: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
@@ -25,6 +26,7 @@ const mocks = vi.hoisted(() => {
       asBackend: vi.fn(function (this: unknown) {
         return this;
       }),
+      connectTransport: vi.fn(),
       shutdown: vi.fn(async () => undefined),
     };
     clients.push(client);

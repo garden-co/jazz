@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
         let Ok(records) = self.storage.scan_local_batch_records() else {
             return Vec::new();

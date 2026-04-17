@@ -9,26 +9,20 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
-  sendSyncPayload,
-  generateClientId,
   buildEndpointUrl,
   applyUserAuthHeaders,
-  createRuntimeSyncStreamController,
-  createSyncOutboxRouter,
-  isExpectedFetchAbortError,
-  SyncAuthError,
-  type SyncStreamController,
-  type SyncAuth,
   type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
+import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -48,14 +42,25 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues): Row;
-  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
+  insert(table: string, values: InsertValues, object_id?: string | null): Row;
+  insertWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Row;
+  insertDurable(
+    table: string,
+    values: InsertValues,
+    tier: string,
+    object_id?: string | null,
+  ): Promise<Row>;
   insertDurableWithSession?(
     table: string,
     values: InsertValues,
     write_context_json: string | null | undefined,
     tier: string,
+    object_id?: string | null,
   ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): void;
   updateWithSession?(
@@ -78,30 +83,6 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
-  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
-  insertPersistedWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedInsertResult;
-  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
-  updatePersistedWithSession?(
-    object_id: string,
-    values: any,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
-  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
-  deletePersistedWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
-  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
-  loadLocalBatchRecords?(): LocalBatchRecord[];
-  acknowledgeRejectedBatch?(batch_id: string): boolean;
-  sealBatch?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -124,7 +105,8 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
-  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
+  /** Route outbox messages to the transport layer. Required for WASM worker-bridge; no-op for NAPI/RN (Rust owns the transport). */
+  onSyncMessageToSend?(callback: RuntimeSyncOutboxCallback): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
@@ -133,6 +115,31 @@ export interface Runtime {
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
+  /** Connect to a Jazz server over WebSocket (Rust transport). */
+  connect?(url: string, auth_json: string): void;
+  /** Disconnect from the Jazz server and drop the transport handle. */
+  disconnect?(): void;
+  /** Push updated auth credentials into the live Rust transport. */
+  updateAuth?(auth_json: string): void;
+  /** Register a callback invoked when the Rust transport rejects the JWT. */
+  onAuthFailure?(callback: (reason: string) => void): void;
+}
+
+/**
+ * Authentication configuration for connecting to a Jazz server.
+ *
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_manager.rs`.
+ * All fields are optional; supply only the ones relevant to your auth mode.
+ */
+export interface AuthConfig {
+  /** JWT bearer token for user authentication. */
+  jwt_token?: string;
+  /** Backend service secret for server-to-server calls. */
+  backend_secret?: string;
+  /** Admin secret for privileged operations. */
+  admin_secret?: string;
+  /** Opaque session payload forwarded by a backend proxy. */
+  backend_session?: unknown;
 }
 
 /**
@@ -150,7 +157,6 @@ export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
-  strictTransactions?: boolean;
   visibility?: QueryVisibility;
 }
 
@@ -158,7 +164,6 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
-  strictTransactions: boolean;
   visibility: QueryVisibility;
 }
 
@@ -166,44 +171,20 @@ export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
 }
 
-export type BatchMode = "direct" | "transactional";
-
-export interface VisibleBatchMember {
-  objectId: string;
-  branchName: string;
-  batchId: string;
+export interface CreateOptions {
+  id?: string;
 }
 
-export type BatchSettlement =
-  | {
-      kind: "missing";
-      batchId: string;
-    }
-  | {
-      kind: "rejected";
-      batchId: string;
-      code: string;
-      reason: string;
-    }
-  | {
-      kind: "durable_direct";
-      batchId: string;
-      confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
-    }
-  | {
-      kind: "accepted_transaction";
-      batchId: string;
-      confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
-    };
+export interface CreateDurabilityOptions extends WriteDurabilityOptions {
+  id?: string;
+}
 
-export interface LocalBatchRecord {
-  batchId: string;
-  mode: BatchMode;
-  requestedTier: DurabilityTier;
-  sealed: boolean;
-  latestSettlement: BatchSettlement | null;
+export interface UpsertOptions {
+  id: string;
+}
+
+export interface UpsertDurabilityOptions extends WriteDurabilityOptions {
+  id: string;
 }
 
 /**
@@ -217,18 +198,6 @@ export interface Row {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
-  batch_mode?: BatchMode;
-  batch_id?: string;
-  target_branch_name?: string;
-}
-
-interface PersistedInsertResult {
-  batchId: string;
-  row: Row;
-}
-
-interface PersistedMutationResult {
-  batchId: string;
 }
 
 /**
@@ -279,7 +248,6 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
-    strictTransactions: options?.strictTransactions ?? false,
     visibility: options?.visibility ?? "public",
   };
 }
@@ -451,86 +419,19 @@ function getScheduler(): (task: () => void) => void {
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
-  const payload: {
-    propagation?: QueryPropagation;
-    local_updates?: LocalUpdatesMode;
-    strict_transactions?: boolean;
-  } = {};
+  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
   }
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.strictTransactions) {
-    payload.strict_transactions = true;
-  }
 
-  if (!payload.propagation && !payload.local_updates && !payload.strict_transactions) {
+  if (!payload.propagation && !payload.local_updates) {
     return undefined;
   }
 
   return JSON.stringify(payload);
-}
-
-function generateBatchId(): string {
-  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
-  const bytes = new Uint8Array(16);
-
-  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
-    cryptoObj.getRandomValues(bytes);
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-  }
-
-  const timestamp = Date.now();
-  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
-  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
-  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
-  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
-  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
-  bytes[5] = timestamp & 0xff;
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function durabilityTierRank(tier: DurabilityTier): number {
-  switch (tier) {
-    case "worker":
-      return 0;
-    case "edge":
-      return 1;
-    case "global":
-      return 2;
-  }
-}
-
-function settlementSatisfiesTier(
-  settlement: BatchSettlement | null | undefined,
-  tier: DurabilityTier,
-): boolean {
-  if (!settlement) {
-    return false;
-  }
-
-  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
-    return false;
-  }
-
-  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
-}
-
-function rejectionFromSettlement(
-  settlement: BatchSettlement | null | undefined,
-): PersistedWriteRejectedError | null {
-  if (!settlement || settlement.kind !== "rejected") {
-    return null;
-  }
-  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
 }
 
 function readHeader(request: RequestLike, name: string): string | undefined {
@@ -627,253 +528,9 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims };
 }
 
-type BatchWriteContext = {
-  batchMode: BatchMode;
-  batchId: string;
-  targetBranchName: string;
-};
-
-function composeTargetBranchName(schemaContext: {
-  env: string;
-  schema_hash: string;
-  user_branch: string;
-}): string {
-  return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
-}
-
-export class PersistedWrite<T> {
-  constructor(
-    private readonly client: JazzClient,
-    private readonly requestedTier: DurabilityTier,
-    private readonly persistedBatchId: string,
-    private readonly persistedValue: T,
-  ) {}
-
-  batchId(): string {
-    return this.persistedBatchId;
-  }
-
-  value(): T {
-    return this.persistedValue;
-  }
-
-  async wait(): Promise<T> {
-    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
-    return this.persistedValue;
-  }
-}
-
-export class PersistedWriteRejectedError extends Error {
-  readonly name = "PersistedWriteRejectedError";
-
-  constructor(
-    readonly batchId: string,
-    readonly code: string,
-    readonly reason: string,
-  ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
-  }
-}
-
-export class Transaction {
-  private committed = false;
-
-  constructor(
-    private readonly client: JazzClient,
-    private readonly batchContext: BatchWriteContext,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-  ) {}
-
-  private ensureWritable(): void {
-    if (this.committed) {
-      throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
-    }
-  }
-
-  batchId(): string {
-    return this.batchContext.batchId;
-  }
-
-  commit(): string {
-    if (this.committed) {
-      return this.batchId();
-    }
-    const batchId = this.client.sealBatch(this.batchId());
-    this.committed = true;
-    return batchId;
-  }
-
-  create(table: string, values: InsertValues): Row {
-    this.ensureWritable();
-    return this.client.createInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    this.ensureWritable();
-    return this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.ensureWritable();
-    this.client.updateInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  delete(objectId: string): void {
-    this.ensureWritable();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
-}
-
-export class DirectBatch {
-  constructor(
-    private readonly client: JazzClient,
-    private readonly batchContext: BatchWriteContext,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-  ) {}
-
-  batchId(): string {
-    return this.batchContext.batchId;
-  }
-
-  create(table: string, values: InsertValues): Row {
-    return this.client.createInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.client.updateInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  delete(objectId: string): void {
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
+function isObjectAlreadyExistsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
 
 /**
@@ -894,7 +551,7 @@ export class SessionClient {
   /**
    * Create a new row as this session's user.
    */
-  async create(table: string, values: InsertValues): Promise<string> {
+  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -906,6 +563,7 @@ export class SessionClient {
         table,
         values,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.id ? { object_id: options.id } : {}),
       },
       this.session,
     );
@@ -918,12 +576,20 @@ export class SessionClient {
     return result.object_id;
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.client.createPersistedInternal(table, values, this.session, undefined, options);
+  /**
+   * Create or update a row as this session's user using a caller-supplied id.
+   */
+  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
+    try {
+      await this.create(table, values, options);
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.update(options.id, values as Record<string, Value>);
   }
 
   /**
@@ -952,14 +618,6 @@ export class SessionClient {
     }
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.client.updatePersistedInternal(objectId, updates, this.session, undefined, options);
-  }
-
   /**
    * Delete a row as this session's user.
    */
@@ -983,10 +641,6 @@ export class SessionClient {
     }
   }
 
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.client.deletePersistedInternal(objectId, this.session, undefined, options);
-  }
-
   /**
    * Query as this session's user.
    */
@@ -1004,26 +658,6 @@ export class SessionClient {
   ): number {
     return this.client.subscribeInternal(query, callback, this.session, options);
   }
-
-  beginTransaction(): Transaction {
-    return this.client.beginTransactionInternal(this.session);
-  }
-
-  beginDirectBatch(): DirectBatch {
-    return this.client.beginDirectBatchInternal(this.session);
-  }
-
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
-  }
 }
 
 /**
@@ -1031,31 +665,10 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private streamController: SyncStreamController;
-  private serverClientId: string = generateClientId();
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
-  private useBackendSyncAuth = false;
-  private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
-  private syncStarted = false;
-  private remoteSyncConnected: boolean;
-  private pendingRemoteSyncWaiters: Array<{
-    resolve: () => void;
-    reject: (error: Error) => void;
-  }> = [];
-  private readonly pendingBatchWaiters = new Map<
-    string,
-    Array<{
-      tier: DurabilityTier;
-      resolve: () => void;
-      reject: (error: Error) => void;
-    }>
-  >();
-  private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
-  private readonly inFlightServerSyncs = new Set<Promise<void>>();
-  private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
 
   private constructor(
@@ -1064,55 +677,21 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
-    this.runtime = this.wrapRuntime(runtime);
+    this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.onAuthFailure = runtimeOptions?.onAuthFailure;
-    this.remoteSyncConnected = !context.serverUrl;
     this.resolvedSession = resolveClientSessionStateSync({
       appId: context.appId,
       jwtToken: context.jwtToken,
     }).session;
-    this.streamController = createRuntimeSyncStreamController({
-      getRuntime: () => this.runtime,
-      getAuth: () => this.getSyncAuth(),
-      getSchemaHash: () => this.runtime.getSchemaHash(),
-      getClientId: () => this.serverClientId,
-      setClientId: (clientId) => {
-        this.serverClientId = clientId;
-      },
-      onConnected: () => {
-        this.remoteSyncConnected = true;
-        this.resolvePendingRemoteSyncWaiters();
-      },
-      onDisconnected: () => {
-        this.remoteSyncConnected = false;
-      },
-      onAuthFailure: (reason) => {
-        this.remoteSyncConnected = false;
-        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
-        this.onAuthFailure?.(reason);
-      },
-    });
-  }
 
-  private wrapRuntime(runtime: Runtime): Runtime {
-    return new Proxy(runtime, {
-      get: (target, property, receiver) => {
-        const value = Reflect.get(target, property, receiver);
-        if (property === "onSyncMessageReceived" && typeof value === "function") {
-          return (payload: Uint8Array | string, seq?: number | null) => {
-            value.call(target, payload, seq);
-            this.flushPendingBatchWaiters();
-          };
-        }
-        if (typeof value === "function") {
-          return value.bind(target);
-        }
-        return value;
-      },
-    });
+    if (runtimeOptions?.onAuthFailure) {
+      const handler = runtimeOptions.onAuthFailure;
+      this.runtime.onAuthFailure?.((reason: string) => {
+        handler(mapAuthReason(reason));
+      });
+    }
   }
 
   /**
@@ -1145,11 +724,6 @@ export class JazzClient {
       runtimeOptions,
     );
 
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
     return client;
   }
 
@@ -1179,19 +753,7 @@ export class JazzClient {
       runtimeOptions?.useBinaryEncoding ?? false,
     );
 
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -1209,19 +771,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -1268,72 +818,6 @@ export class JazzClient {
     return this.forSession(sessionFromRequest(request));
   }
 
-  beginTransaction(): Transaction {
-    return this.beginTransactionInternal();
-  }
-
-  beginDirectBatch(): DirectBatch {
-    return this.beginDirectBatchInternal();
-  }
-
-  private createBatchContext(batchMode: BatchMode): BatchWriteContext {
-    return {
-      batchMode,
-      batchId: generateBatchId(),
-      targetBranchName: composeTargetBranchName(this.getSchemaContext()),
-    };
-  }
-
-  /**
-   * Start an explicit transactional batch, optionally scoped to a session override.
-   * @internal
-   */
-  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
-    return new Transaction(
-      this,
-      this.createBatchContext("transactional"),
-      this.resolveWriteSession(session, attribution),
-      attribution,
-    );
-  }
-
-  /**
-   * Start an explicit direct batch, optionally scoped to a session override.
-   * @internal
-   */
-  beginDirectBatchInternal(session?: Session, attribution?: string): DirectBatch {
-    return new DirectBatch(
-      this,
-      this.createBatchContext("direct"),
-      this.resolveWriteSession(session, attribution),
-      attribution,
-    );
-  }
-
-  localBatchRecord(batchId: string): LocalBatchRecord | null {
-    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    const records = this.requireBatchRecordMethod("loadLocalBatchRecords")();
-    return [...records].sort((left, right) => left.batchId.localeCompare(right.batchId));
-  }
-
-  acknowledgeRejectedBatch(batchId: string): boolean {
-    const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
-    const acknowledged = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
-    if (acknowledged && rejection) {
-      this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
-    }
-    this.flushPendingBatchWaiters();
-    return acknowledged;
-  }
-
-  sealBatch(batchId: string): string {
-    this.requireBatchRecordMethod("sealBatch")(batchId);
-    return batchId;
-  }
-
   /**
    * Enable backend-scoped sync auth for this client.
    *
@@ -1347,8 +831,6 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("serverUrl required for backend mode");
     }
-    this.useBackendSyncAuth = true;
-    this.streamController.updateAuth();
     return this;
   }
 
@@ -1358,21 +840,24 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken,
     }).session;
-    this.streamController.updateAuth();
-  }
-
-  private getSyncAuth(): SyncAuth {
-    if (this.useBackendSyncAuth) {
-      return {
-        backendSecret: this.context.backendSecret,
-        adminSecret: this.context.adminSecret,
-      };
+    // Push the refreshed credentials into the Rust transport. `updateAuth`
+    // is optional on the Runtime interface because not every binding exposes
+    // it yet; bindings that do will route this to TransportControl::UpdateAuth.
+    // Carry forward admin/backend secrets from context — omitting them here
+    // would deserialise to None on the Rust side and silently erase any
+    // privileged credentials the transport was connected with.
+    const payload: {
+      jwt_token: string | null;
+      admin_secret?: string;
+      backend_secret?: string;
+    } = { jwt_token: jwtToken ?? null };
+    if (this.context.adminSecret) {
+      payload.admin_secret = this.context.adminSecret;
     }
-
-    return {
-      jwtToken: this.context.jwtToken,
-      adminSecret: this.context.adminSecret,
-    };
+    if (this.context.backendSecret) {
+      payload.backend_secret = this.context.backendSecret;
+    }
+    this.runtime.updateAuth?.(JSON.stringify(payload));
   }
 
   private normalizeQueryExecutionOptions(
@@ -1388,15 +873,11 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private encodeWriteContext(
-    session?: Session,
-    attribution?: string,
-    batchContext?: BatchWriteContext,
-  ): string | undefined {
-    if (!session && attribution === undefined && !batchContext) {
+  private encodeWriteContext(session?: Session, attribution?: string): string | undefined {
+    if (!session && attribution === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchContext) {
+    if (attribution === undefined && session) {
       return JSON.stringify(session);
     }
 
@@ -1406,11 +887,6 @@ export class JazzClient {
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
-    }
-    if (batchContext) {
-      payload.batch_mode = batchContext.batchMode;
-      payload.batch_id = batchContext.batchId;
-      payload.target_branch_name = batchContext.targetBranchName;
     }
     return JSON.stringify(payload);
   }
@@ -1434,37 +910,6 @@ export class JazzClient {
       | "updateDurableWithSession"
       | "deleteWithSession"
       | "deleteDurableWithSession"
-    >,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requirePersistedWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "insertPersisted"
-      | "insertPersistedWithSession"
-      | "updatePersisted"
-      | "updatePersistedWithSession"
-      | "deletePersisted"
-      | "deletePersistedWithSession"
-    >,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requireBatchRecordMethod<
-    T extends keyof Pick<
-      Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -1648,8 +1093,15 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues): Row {
-    return this.createInternal(table, values);
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
+    return this.createInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.upsertInternal(table, values, options.id);
   }
 
   /**
@@ -1661,21 +1113,53 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
-    batchContext?: BatchWriteContext,
+    options?: CreateOptions,
   ): Row {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requireSessionWriteMethod("insertWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-          )
-        : this.runtime.insert(table, values);
+      effectiveSession || attribution !== undefined
+        ? options?.id
+          ? this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              options.id,
+            )
+          : this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+            )
+        : options?.id
+          ? this.runtime.insert(table, values, options.id)
+          : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id, optionally scoped to a session.
+   * @internal
+   */
+  upsertInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+  ): void {
+    try {
+      this.createInternal(table, values, session, attribution, { id: objectId });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    this.updateInternal(objectId, values as Record<string, Value>, session, attribution);
   }
 
   /**
@@ -1684,9 +1168,20 @@ export class JazzClient {
   async createDurable(
     table: string,
     values: InsertValues,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     return this.createDurableInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability.
+   */
+  async upsertDurable(
+    table: string,
+    values: InsertValues,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    await this.upsertDurableInternal(table, values, options.id, undefined, undefined, options);
   }
 
   /**
@@ -1698,60 +1193,67 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
-        ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution),
-            tier,
-          )
-        : await this.runtime.insertDurable(table, values, tier);
+        ? options?.id
+          ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              tier,
+              options.id,
+            )
+          : await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution),
+              tier,
+            )
+        : options?.id
+          ? await this.runtime.insertDurable(table, values, tier, options.id)
+          : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
   }
 
-  createPersisted(
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability,
+   * optionally scoped to a session.
+   * @internal
+   */
+  async upsertDurableInternal(
     table: string,
     values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.createPersistedInternal(table, values, undefined, undefined, options);
-  }
-
-  createPersistedInternal(
-    table: string,
-    values: InsertValues,
+    objectId: string,
     session?: Session,
     attribution?: string,
     options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-  ): PersistedWrite<Row> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requirePersistedWriteMethod("insertPersistedWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("insertPersisted")(table, values, tier);
-    return new PersistedWrite(this, tier, result.batchId, {
-      ...result.row,
-      values: this.alignRowValuesToDeclaredSchema(
-        table,
-        result.row.values as Value[],
-        this.getSchema(),
-      ),
-    });
+  ): Promise<void> {
+    try {
+      await this.createDurableInternal(table, values, session, attribution, {
+        ...options,
+        id: objectId,
+      });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.updateDurableInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      options,
+    );
   }
 
   /**
@@ -1775,7 +1277,6 @@ export class JazzClient {
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    await this.waitForRemoteReadAvailability(normalizedOptions.tier);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -1805,14 +1306,13 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
-    batchContext?: BatchWriteContext,
   ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution),
       );
       return;
     }
@@ -1855,36 +1355,6 @@ export class JazzClient {
     await this.runtime.updateDurable(objectId, updates, tier);
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.updatePersistedInternal(objectId, updates, undefined, undefined, options);
-  }
-
-  updatePersistedInternal(
-    objectId: string,
-    updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
-            objectId,
-            updates,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
-  }
-
   /**
    * Delete a row by ID without waiting for durability.
    */
@@ -1896,17 +1366,12 @@ export class JazzClient {
    * Delete a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
-  deleteInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    batchContext?: BatchWriteContext,
-  ): void {
+  deleteInternal(objectId: string, session?: Session, attribution?: string): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined) {
       this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution),
       );
       return;
     }
@@ -1941,30 +1406,6 @@ export class JazzClient {
       return;
     }
     await this.runtime.deleteDurable(objectId, tier);
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.deletePersistedInternal(objectId, undefined, undefined, options);
-  }
-
-  deletePersistedInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
-            objectId,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
@@ -2035,6 +1476,33 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
+  }
+
+  /**
+   * Connect to a Jazz server over WebSocket using the Rust transport layer.
+   *
+   * Accepts an HTTP/HTTPS server URL (e.g. "http://localhost:4000") and
+   * converts it to the corresponding WebSocket `/ws` endpoint URL before
+   * passing it to the underlying Rust runtime's `connect()`.  Already-WS URLs
+   * are passed through unchanged.
+   *
+   * @param url  Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
+   * @param auth Authentication credentials for the connection.
+   */
+  connectTransport(url: string, auth: AuthConfig): void {
+    if (!this.runtime.connect) {
+      throw new Error("Underlying runtime does not support connect()");
+    }
+    this.runtime.connect(httpUrlToWs(url), JSON.stringify(auth));
+  }
+
+  /**
+   * Disconnect from the Jazz server and drop the Rust transport handle.
+   *
+   * No-op if the underlying runtime does not support disconnect().
+   */
+  disconnectTransport(): void {
+    this.runtime.disconnect?.();
   }
 
   /**
@@ -2124,18 +1592,13 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    this.resolvePendingRemoteSyncWaiters();
     if (this.shutdownPromise) {
       return await this.shutdownPromise;
     }
 
     this.shutdownPromise = (async () => {
-      this.shuttingDown = true;
-
-      // Stop accepting new server-bound outbox work before tearing down sync.
-      this.runtime.onSyncMessageToSend(() => undefined);
-      this.streamController.stop();
-      await this.waitForInFlightServerSyncs();
+      // Disconnect Rust-owned transport if present.
+      this.runtime.disconnect?.();
 
       // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
       if (this.runtime.close) {
@@ -2144,170 +1607,6 @@ export class JazzClient {
     })();
 
     return await this.shutdownPromise;
-  }
-
-  private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    this.syncStarted = true;
-    this.runtime.onSyncMessageToSend(
-      createSyncOutboxRouter({
-        logPrefix: "[client] ",
-        retryServerPayloads: true,
-        onServerPayload: (payload, isCatalogue) =>
-          this.sendSyncMessage(payload as string, isCatalogue),
-        onServerPayloadError: (error) => {
-          if (error instanceof SyncAuthError) {
-            this.streamController.notifyAuthFailure(error.reason);
-            return;
-          }
-
-          const isExpectedAbort = isExpectedFetchAbortError(error);
-          if (!isExpectedAbort) {
-            console.error("Sync POST error:", error);
-            this.streamController.notifyTransportFailure();
-          }
-        },
-      }),
-    );
-
-    // Connect to binary stream for incoming messages
-    this.streamController.start(serverUrl, serverPathPrefix);
-  }
-
-  private resolvePendingRemoteSyncWaiters(): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.resolve();
-    }
-  }
-
-  private rejectPendingRemoteSyncWaiters(error: Error): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.reject(error);
-    }
-  }
-
-  private batchWaitOutcome(
-    batchId: string,
-    tier: DurabilityTier,
-  ): { settled: true; error: Error | null } | { settled: false } {
-    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
-    if (acknowledgedRejection) {
-      return { settled: true, error: acknowledgedRejection };
-    }
-
-    const settlement = this.localBatchRecord(batchId)?.latestSettlement;
-    const rejection = rejectionFromSettlement(settlement);
-    if (rejection) {
-      return { settled: true, error: rejection };
-    }
-    if (settlementSatisfiesTier(settlement, tier)) {
-      return { settled: true, error: null };
-    }
-
-    return { settled: false };
-  }
-
-  private flushPendingBatchWaiters(): void {
-    if (this.pendingBatchWaiters.size === 0) {
-      return;
-    }
-
-    for (const [batchId, waiters] of this.pendingBatchWaiters) {
-      const remaining: typeof waiters = [];
-      for (const waiter of waiters) {
-        const outcome = this.batchWaitOutcome(batchId, waiter.tier);
-        if (!outcome.settled) {
-          remaining.push(waiter);
-          continue;
-        }
-        if (outcome.error) {
-          waiter.reject(outcome.error);
-        } else {
-          waiter.resolve();
-        }
-      }
-      if (remaining.length > 0) {
-        this.pendingBatchWaiters.set(batchId, remaining);
-      } else {
-        this.pendingBatchWaiters.delete(batchId);
-      }
-    }
-  }
-
-  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
-    const outcome = this.batchWaitOutcome(batchId, tier);
-    if (outcome.settled) {
-      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
-    }
-
-    return new Promise<void>((resolve, reject) => {
-      const waiters = this.pendingBatchWaiters.get(batchId) ?? [];
-      waiters.push({ tier, resolve, reject });
-      this.pendingBatchWaiters.set(batchId, waiters);
-      this.flushPendingBatchWaiters();
-    });
-  }
-
-  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
-    if (
-      !this.syncStarted ||
-      !this.context.serverUrl ||
-      tier === "worker" ||
-      this.remoteSyncConnected
-    ) {
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      this.pendingRemoteSyncWaiters.push({ resolve, reject });
-    });
-  }
-
-  private async waitForInFlightServerSyncs(): Promise<void> {
-    while (this.inFlightServerSyncs.size > 0) {
-      await Promise.allSettled(this.inFlightServerSyncs);
-    }
-  }
-
-  private trackServerSync(pending: Promise<void>): Promise<void> {
-    let tracked: Promise<void>;
-    tracked = pending.finally(() => {
-      this.inFlightServerSyncs.delete(tracked);
-    });
-    this.inFlightServerSyncs.add(tracked);
-    return tracked;
-  }
-
-  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
-    if (this.shuttingDown) {
-      return Promise.resolve();
-    }
-
-    const serverUrl = this.streamController.getServerUrl();
-    if (!serverUrl) return Promise.resolve();
-
-    return this.trackServerSync(
-      sendSyncPayload(
-        serverUrl,
-        payloadJson,
-        isCatalogue,
-        {
-          ...this.getSyncAuth(),
-          clientId: this.serverClientId,
-          pathPrefix: this.streamController.getPathPrefix(),
-        },
-        "[client] ",
-      ),
-    );
   }
 }
 

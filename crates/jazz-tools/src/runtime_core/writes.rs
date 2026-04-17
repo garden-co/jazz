@@ -8,7 +8,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
 use crate::sync_manager::RowBatchKey;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn ack_watcher_key(
         &self,
         row_id: ObjectId,
@@ -317,6 +317,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         Ok((row_id, row_values))
     }
 
+    /// Compatibility shim for callers that pass an explicit row id.
+    pub fn insert_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertedRow, RuntimeError> {
+        if object_id.is_some() {
+            return Err(RuntimeError::WriteError(
+                "caller-supplied row ids are not supported on this branch".to_string(),
+            ));
+        }
+        self.insert(table, values, write_context)
+    }
+
     /// Update a row (partial update by column name).
     pub fn update(
         &mut self,
@@ -346,6 +362,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())
+    }
+
+    /// Compatibility shim for callers that expect explicit-id upserts.
+    pub fn upsert_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let _ = (table, object_id, values, write_context);
+        Err(RuntimeError::WriteError(
+            "upsert_with_id is not supported on this branch".to_string(),
+        ))
     }
 
     /// Delete a row.
@@ -394,6 +424,23 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let (result, _batch_id, receiver) =
             self.insert_persisted_with_batch_id(table, values, write_context, tier)?;
         Ok((result, receiver))
+    }
+
+    /// Compatibility shim for callers that pass an explicit row id.
+    pub fn insert_persisted_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
+        if object_id.is_some() {
+            return Err(RuntimeError::WriteError(
+                "caller-supplied row ids are not supported on this branch".to_string(),
+            ));
+        }
+        self.insert_persisted(table, values, write_context, tier)
     }
 
     /// Insert a row and return the logical batch id plus a receiver that
@@ -504,6 +551,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let (_batch_id, receiver) =
             self.delete_persisted_with_batch_id(object_id, write_context, tier)?;
         Ok(receiver)
+    }
+
+    /// Compatibility shim for callers that expect explicit-id persisted upserts.
+    pub fn upsert_persisted_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+        let _ = (table, object_id, values, write_context, tier);
+        Err(RuntimeError::WriteError(
+            "upsert_persisted_with_id is not supported on this branch".to_string(),
+        ))
     }
 
     /// Delete a row and return the logical batch id plus a receiver that

@@ -16,8 +16,8 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: Record<string, unknown>): any
-  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
+  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
+  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any): void
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): void
   delete(objectId: string): void
@@ -29,26 +29,15 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  insertDurable(table: string, values: Record<string, unknown>, tier: string): Promise<any>
-  insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string): Promise<any>
-  insertPersisted(table: string, values: Record<string, unknown>, tier: string): any
-  insertPersistedWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string): any
+  insertDurable(table: string, values: Record<string, unknown>, tier: string, objectId?: string | undefined | null): Promise<any>
+  insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string, objectId?: string | undefined | null): Promise<any>
   updateDurable(objectId: string, values: any, tier: string): Promise<void>
   updateDurableWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): Promise<void>
-  updatePersisted(objectId: string, values: any, tier: string): any
-  updatePersistedWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): any
   deleteDurable(objectId: string, tier: string): Promise<void>
   deleteDurableWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): Promise<void>
-  deletePersisted(objectId: string, tier: string): any
-  deletePersistedWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): any
-  loadLocalBatchRecord(batchId: string): any | null
-  loadLocalBatchRecords(): any[]
-  acknowledgeRejectedBatch(batchId: string): boolean
-  sealBatch(batchId: string): void
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
-  onSyncMessageToSend(callback: (...args: any[]) => any): void
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string
@@ -62,6 +51,25 @@ export declare class NapiRuntime {
   static deriveUserId(seedB64: string): string
   static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
   static getPublicKeyBase64url(seedB64: string): string
+  /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore` via `install_transport` (which seeds the catalogue state
+   * hash on the handle), and spawns the manager loop as a Tokio task.
+   */
+  connect(url: string, authJson: string): void
+  /** Disconnect from the Jazz server and drop the transport handle. */
+  disconnect(): void
+  /** Push updated auth credentials into the live transport. */
+  updateAuth(authJson: string): void
+  /**
+   * Register a JS callback that fires when the Rust transport receives an
+   * auth rejection from the server during the WS handshake.
+   *
+   * The callback receives a single string argument: the rejection reason.
+   */
+  onAuthFailure(callback: (reason: string) => void): void
 }
 
 export declare class TestingServer {

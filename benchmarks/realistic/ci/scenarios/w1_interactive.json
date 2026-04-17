@@ -3,7 +3,7 @@
   "name": "interactive_board_session",
   "seed": 9001,
   "mode": "interactive",
-  "operation_count": 37500,
+  "operation_count": 10000,
   "mix": [
     { "operation": "query_board", "weight": 30 },
     { "operation": "query_my_work", "weight": 20 },

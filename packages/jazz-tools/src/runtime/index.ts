@@ -1,14 +1,10 @@
 export {
-  DirectBatch,
-  type BatchMode,
-  type BatchSettlement,
+  type CreateDurabilityOptions,
+  type CreateOptions,
   JazzClient,
-  type LocalBatchRecord,
+  type AuthConfig,
   type LocalUpdatesMode,
-  PersistedWrite,
-  PersistedWriteRejectedError,
   SessionClient,
-  Transaction,
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -19,7 +15,8 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
-  type VisibleBatchMember,
+  type UpsertDurabilityOptions,
+  type UpsertOptions,
   type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";
@@ -27,9 +24,6 @@ export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {
   createDb,
   Db,
-  DbDirectBatch,
-  DbPersistedWrite,
-  DbTransaction,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type QueryBuilder,
@@ -40,9 +34,14 @@ export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
+  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredPermissions,
+  type PublishStoredPermissionsOptions,
+  type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
+  type StoredPermissionsResponse,
 } from "./schema-fetch.js";
 export {
   fetchServerSubscriptions,

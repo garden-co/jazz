@@ -2,7 +2,7 @@
   "id": "R8",
   "name": "many_linked_branches_single_object",
   "seed": 20260308,
-  "branch_count": 1500,
+  "branch_count": 1000,
   "commits_per_branch": 4,
   "merge_fanin": 8,
   "payload_bytes": 128,

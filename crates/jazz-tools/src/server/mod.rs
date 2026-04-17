@@ -10,7 +10,7 @@ use crate::middleware::auth::JwksCache;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, SyncPayload};
+use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
 mod external_identity_store;
@@ -306,6 +306,47 @@ impl ServerState {
     /// Update the client state TTL. Takes effect on the next sweep tick.
     pub async fn set_client_ttl(&self, ttl: Duration) {
         *self.client_ttl.write().await = ttl;
+    }
+
+    /// Process a raw binary payload received from a WebSocket client and push it
+    /// into the runtime sync inbox.
+    ///
+    /// Frames are expected to be `OutboxEntry` JSON (as serialised by
+    /// `TransportManager::run_connected`). If that parse fails we fall back to a
+    /// raw `SyncBatchRequest` shape, which some callers send directly.
+    pub async fn process_ws_client_frame(
+        &self,
+        client_id: ClientId,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        if let Ok(entry) =
+            serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
+        {
+            let inbox = InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            };
+            return self
+                .runtime
+                .push_sync_inbox(inbox)
+                .map_err(|e| e.to_string());
+        }
+
+        match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
+            Ok(batch) => {
+                for p in batch.payloads {
+                    let inbox = InboxEntry {
+                        source: Source::Client(client_id),
+                        payload: p,
+                    };
+                    self.runtime
+                        .push_sync_inbox(inbox)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("invalid ws payload: {e}")),
+        }
     }
 }
 

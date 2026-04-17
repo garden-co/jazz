@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
@@ -19,6 +19,8 @@ use reqwest::Client;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+mod permissions;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -31,6 +33,12 @@ const TEST_JWT_KID: &str = "test-jwks-kid";
 
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
+
+#[allow(unused_imports)]
+pub use permissions::{
+    PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
+    publish_allow_all_permissions, publish_permissions,
+};
 
 struct SyncServerClient {
     http_client: Client,
@@ -82,6 +90,23 @@ impl SyncServerClient {
             .error_for_status()?;
         Ok(())
     }
+}
+
+fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut url = reqwest::Url::parse(server_url)?;
+    let route_prefix = match url.path().trim_end_matches('/') {
+        "" | "/" => String::new(),
+        path => path.to_string(),
+    };
+
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Ok((
+        url.to_string().trim_end_matches('/').to_string(),
+        route_prefix,
+    ))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -341,38 +366,10 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
-fn split_base_url(input: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let parsed = reqwest::Url::parse(input)?;
-
-    let mut origin = parsed.clone();
-    origin.set_path("");
-    origin.set_query(None);
-    origin.set_fragment(None);
-
-    let base_url = origin.as_str().trim_end_matches('/').to_string();
-    let route_prefix = normalize_route_prefix(parsed.path());
-
-    Ok((base_url, route_prefix))
-}
-
-fn normalize_route_prefix(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return String::new();
-    }
-
-    let trimmed = trimmed.trim_end_matches('/');
-    if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
-}
-
 fn build_catalogue_runtime(
     schema_manager: SchemaManager,
     storage: MemoryStorage,
-    connection: Arc<SyncServerClient>,
+    state: Arc<ServerState>,
     client_id: ClientId,
     in_flight_pushes: Arc<AtomicUsize>,
     push_errors: Arc<Mutex<Vec<String>>>,
@@ -384,14 +381,19 @@ fn build_catalogue_runtime(
         } = entry;
         if let Destination::Server(_) = destination {
             in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let connection = connection.clone();
+            let state = state.clone();
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
             tokio::spawn(async move {
-                if let Err(error) = connection.push_sync(payload, client_id).await
-                    && let Ok(mut errors) = push_errors.lock()
-                {
-                    errors.push(error.to_string());
+                let frame = serde_json::to_vec(&jazz_tools::sync_manager::OutboxEntry {
+                    destination: Destination::Server(ServerId::default()),
+                    payload,
+                })
+                .expect("serialize OutboxEntry");
+                if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
+                    if let Ok(mut errors) = push_errors.lock() {
+                        errors.push(error);
+                    }
                 }
                 in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
             });
@@ -406,16 +408,19 @@ async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
 }
 
 pub async fn push_catalogue_in_memory(
-    server_url: &str,
+    state: Arc<ServerState>,
     app_id: AppId,
     env: &str,
     user_branch: &str,
-    admin_secret: &str,
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Arc::new(SyncServerClient::connect(server_url, admin_secret).await?);
     let client_id = ClientId::new();
+    state
+        .runtime
+        .ensure_client_as_admin(client_id)
+        .map_err(|e| format!("register admin client: {e:?}"))?;
+
     let in_flight_pushes = Arc::new(AtomicUsize::new(0));
     let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -431,7 +436,7 @@ pub async fn push_catalogue_in_memory(
         let runtime = build_catalogue_runtime(
             schema_manager,
             MemoryStorage::default(),
-            connection.clone(),
+            state.clone(),
             client_id,
             in_flight_pushes.clone(),
             push_errors.clone(),
@@ -463,7 +468,7 @@ pub async fn push_catalogue_in_memory(
         let runtime = build_catalogue_runtime(
             schema_manager,
             storage,
-            connection.clone(),
+            state.clone(),
             client_id,
             in_flight_pushes.clone(),
             push_errors.clone(),
@@ -564,6 +569,29 @@ where
         }
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_base_url;
+
+    #[test]
+    fn split_base_url_handles_plain_origin() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "");
+    }
+
+    #[test]
+    fn split_base_url_preserves_route_prefix_without_trailing_slash() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337/api/v1/").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "/api/v1");
     }
 }
 

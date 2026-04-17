@@ -80,6 +80,16 @@ export interface UpdateAuthMessage {
   jwtToken?: string;
 }
 
+/** Disconnect the worker's upstream WebSocket transport. */
+export interface DisconnectUpstreamMessage {
+  type: "disconnect-upstream";
+}
+
+/** Reconnect the worker's upstream WebSocket transport (after a disconnect). */
+export interface ReconnectUpstreamMessage {
+  type: "reconnect-upstream";
+}
+
 /** Request graceful shutdown. */
 export interface ShutdownMessage {
   type: "shutdown";
@@ -113,6 +123,8 @@ export type MainToWorkerMessage =
   | PeerSyncToWorkerMessage
   | PeerCloseMessage
   | UpdateAuthMessage
+  | DisconnectUpstreamMessage
+  | ReconnectUpstreamMessage
   | ShutdownMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage

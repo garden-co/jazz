@@ -52,6 +52,13 @@ export class Db extends RuntimeDb {
         },
       );
 
+      if (this.nativeConfig.serverUrl) {
+        client.connectTransport(this.nativeConfig.serverUrl, {
+          jwt_token: this.nativeConfig.jwtToken,
+          admin_secret: this.nativeConfig.adminSecret,
+        });
+      }
+
       this.nativeClients.set(key, client);
     }
 

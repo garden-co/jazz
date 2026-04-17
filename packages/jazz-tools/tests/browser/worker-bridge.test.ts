@@ -26,6 +26,7 @@ import {
   getTestingServerInfo,
   getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
+  type TestingServerInfo,
   unblockTestingServerNetwork,
 } from "./testing-server.js";
 import {
@@ -33,6 +34,11 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -1102,9 +1108,10 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("propagates synced row from client A to client B", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-a-to-b");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken, syncServer);
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
@@ -1123,9 +1130,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("propagates synced row from client B to client A", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-b-to-a");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken, syncServer);
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
@@ -1144,9 +1152,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken);
+    const { appId, serverUrl, adminSecret } = syncServer;
+    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -1207,9 +1216,15 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the first fresh edge query completes without needing a second client recreate
    */
   it("replays a fresh edge query once upstream attaches after init", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("edge-late-attach");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { serverUrl } = await getTestingServerInfo();
-    const dbWriter = await createSyncedDb(ctx, "edge-late-attach-writer", sharedLocalAuthToken);
+    const { serverUrl } = syncServer;
+    const dbWriter = await createSyncedDb(
+      ctx,
+      "edge-late-attach-writer",
+      sharedLocalAuthToken,
+      syncServer,
+    );
     const writerProbe = attachWorkerMessageProbe(dbWriter);
     let probeProbe: WorkerMessageProbe | null = null;
 
@@ -1239,7 +1254,12 @@ describe("Worker Bridge with OPFS", () => {
       await blockTestingServerNetwork(serverUrl);
       await sleep(250);
 
-      const dbProbe = await createSyncedDb(ctx, "edge-late-attach-probe", sharedLocalAuthToken);
+      const dbProbe = await createSyncedDb(
+        ctx,
+        "edge-late-attach-probe",
+        sharedLocalAuthToken,
+        syncServer,
+      );
       probeProbe = attachWorkerMessageProbe(dbProbe);
       const probeRowsPromise = waitForTodos(
         dbProbe,
@@ -1254,7 +1274,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer", db: dbWriter, probe: writerProbe },
-            { name: "probe", db: dbProbe, probe: probeProbe },
+            { name: "probe", db: dbProbe, probe: probeProbe ?? undefined },
           ],
         ),
       );
@@ -1280,9 +1300,10 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the earlier offline worker write also promotes to B + fresh edge client
    */
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
+    const { appId, serverUrl, adminSecret } = syncServer;
+    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
     const dbAProbe = attachWorkerMessageProbe(dbA);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
@@ -1311,6 +1332,10 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await blockTestingServerNetwork(serverUrl);
+    // Disconnect the WS transport so the block takes effect immediately.
+    // Playwright route blocking only intercepts new connections; the existing
+    // WebSocket must be closed explicitly for the offline simulation to hold.
+    (dbA as any).workerBridge?.disconnectUpstream?.();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
@@ -1338,6 +1363,8 @@ describe("Worker Bridge with OPFS", () => {
     ).rejects.toThrow();
 
     await unblockTestingServerNetwork(serverUrl);
+    // Re-establish the worker's upstream WebSocket now that the network is live again.
+    (dbA as any).workerBridge?.reconnectUpstream?.();
     await sleep(250);
 
     (dbA as any).sendLifecycleHint?.("freeze");
@@ -1376,7 +1403,12 @@ describe("Worker Bridge with OPFS", () => {
 
     let dbProbeTrace: WorkerMessageProbe | null = null;
     try {
-      const dbProbe = await createSyncedDb(ctx, "sync-offline-probe", sharedLocalAuthToken);
+      const dbProbe = await createSyncedDb(
+        ctx,
+        "sync-offline-probe",
+        sharedLocalAuthToken,
+        syncServer,
+      );
       dbProbeTrace = attachWorkerMessageProbe(dbProbe);
       const rowsOnProbe = await waitForTodos(
         dbProbe,
@@ -1391,7 +1423,7 @@ describe("Worker Bridge with OPFS", () => {
           serverUrl,
           [
             { name: "writer-a", db: dbA, probe: dbAProbe },
-            { name: "probe", db: dbProbe, probe: dbProbeTrace },
+            { name: "probe", db: dbProbe, probe: dbProbeTrace ?? undefined },
           ],
         ),
       );
@@ -1453,9 +1485,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("local-only subscriptions do not receive rows from sync server", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-local-only");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken, syncServer);
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
@@ -1642,6 +1675,43 @@ async function waitForTodos(
   tier?: "worker" | "edge",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishSyncServerSchemaAndPermissions(scope: string): Promise<TestingServerInfo> {
+  const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { serverUrl, adminSecret } = testingServer;
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    adminSecret,
+    schema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  await publishStoredPermissions(serverUrl, {
+    adminSecret,
+    schemaHash,
+    permissions: {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+      projects: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+    },
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
+
+  return testingServer;
 }
 
 function hasRestoredCatalogueState(state: DebugSchemaState): boolean {

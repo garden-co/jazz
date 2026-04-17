@@ -363,6 +363,12 @@ impl SyncManager {
         }
     }
 
+    pub fn add_pending_server(&mut self, _server_id: ServerId) {}
+
+    pub fn has_servers_or_pending_servers(&self) -> bool {
+        !self.servers.is_empty()
+    }
+
     pub fn request_batch_settlements_from_server(
         &mut self,
         server_id: ServerId,
