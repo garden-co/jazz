@@ -8,3 +8,9 @@ export { getDb, getSession, getJazzContext, type JazzContext } from "./context.s
 export { QuerySubscription } from "./use-all.svelte.js";
 export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
+export {
+  BrowserAuthSecretStore,
+  generateAuthSecret,
+  type AuthSecretStore,
+  type BrowserAuthSecretStoreOptions,
+} from "../runtime/auth-secret-store.js";
