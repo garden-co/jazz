@@ -210,8 +210,8 @@ fn make_context(
         data_dir,
         storage: ClientStorage::Persistent,
         jwt_token: Some(jwt_token),
-        backend_secret: Some(BACKEND_SECRET.to_string()),
-        admin_secret: Some(ADMIN_SECRET.to_string()),
+        backend_secret: None,
+        admin_secret: None,
         sync_tracer: None,
     }
 }

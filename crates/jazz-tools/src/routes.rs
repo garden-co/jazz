@@ -1155,15 +1155,14 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerStat
 /// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
 /// the old `/sync` + `/events` handlers.
 enum WsClientSetup {
-    Admin,
     Backend,
     Session(crate::query_manager::session::Session),
 }
 
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
-/// Priority matches the old HTTP handler pair:
-/// 1. `admin_secret` valid → `WsClientSetup::Admin` (full catalogue access)
+/// Priority is:
+/// 1. `admin_secret` valid → `WsClientSetup::Backend`
 /// 2. `backend_secret` present + no session header → `WsClientSetup::Backend`
 /// 3. Otherwise → `extract_session` → `WsClientSetup::Session`
 ///
@@ -1178,6 +1177,14 @@ async fn authenticate_ws_handshake(
 
     let auth = &handshake.auth;
 
+    // `admin_secret` is an explicit request to run this WS transport as the
+    // backend. Validate it first and short-circuit all user-scoped auth.
+    if let Some(admin_secret) = auth.admin_secret.as_deref() {
+        validate_admin_secret(Some(admin_secret), &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Backend);
+    }
+
     // Build a synthetic HeaderMap from the handshake auth fields.
     let mut headers = HeaderMap::new();
 
@@ -1191,11 +1198,6 @@ async fn authenticate_ws_handshake(
             .map_err(|e| format!("invalid backend_secret header value: {e}"))?;
         headers.insert("X-Jazz-Backend-Secret", value);
     }
-    if let Some(admin) = &auth.admin_secret {
-        let value = HeaderValue::from_str(admin)
-            .map_err(|e| format!("invalid admin_secret header value: {e}"))?;
-        headers.insert("X-Jazz-Admin-Secret", value);
-    }
     if let Some(session_val) = &auth.backend_session {
         let json = serde_json::to_string(session_val)
             .map_err(|e| format!("failed to serialise backend_session: {e}"))?;
@@ -1207,23 +1209,9 @@ async fn authenticate_ws_handshake(
 
     let has_jwt = headers.get(axum::http::header::AUTHORIZATION).is_some();
     let has_session_header = headers.get("X-Jazz-Session").is_some();
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|v| v.to_str().ok());
-
-    // 1. Admin secret — only when no user-scoped credential (JWT or session) is
-    //    present.  Browser workers send both admin_secret and jwt_token; the JWT
-    //    must win so the connection carries a session and row-level policies are
-    //    applied correctly.  Pure admin/tooling clients that have no JWT still
-    //    get full Admin access.
-    if admin_secret.is_some() && !has_jwt && !has_session_header {
-        validate_admin_secret(admin_secret, &state.auth_config)
-            .map_err(|(_, msg)| msg.to_string())?;
-        return Ok(WsClientSetup::Admin);
-    }
 
     // 2. Backend secret — only when no user-scoped JWT is present.  Clients
     //    that carry both a backend_secret and a jwt_token (e.g. test helpers
@@ -1248,15 +1236,6 @@ async fn authenticate_ws_handshake(
         .await
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?
     };
-
-    // 4. Fallback: admin secret when JWT auth produced no session (e.g. JWT is
-    //    absent but admin_secret was provided alongside a session header for
-    //    backend impersonation with elevated access).
-    if session.is_none() && admin_secret.is_some() {
-        validate_admin_secret(admin_secret, &state.auth_config)
-            .map_err(|(_, msg)| msg.to_string())?;
-        return Ok(WsClientSetup::Admin);
-    }
 
     let session =
         session.ok_or_else(|| "Session required. Provide JWT or backend secret.".to_string())?;
@@ -1325,7 +1304,6 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     };
     let role = match &setup {
-        WsClientSetup::Admin => "admin",
         WsClientSetup::Backend => "backend",
         WsClientSetup::Session(_) => "session",
     };
@@ -1345,9 +1323,6 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
 
     // 5. Ensure the client state in the runtime.
     match setup {
-        WsClientSetup::Admin => {
-            let _ = state.runtime.ensure_client_as_admin(client_id);
-        }
         WsClientSetup::Backend => {
             let _ = state.runtime.ensure_client_as_backend(client_id);
         }
