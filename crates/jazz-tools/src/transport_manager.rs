@@ -3,6 +3,7 @@
 //! TransportHandle is held by RuntimeCore (replaces SyncSender).
 //! TransportManager owns the live WebSocket connection and reconnects on failure.
 
+use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
 use futures::channel::mpsc;
 
@@ -61,11 +62,15 @@ pub struct TransportHandle {
     pub inbound_rx: mpsc::UnboundedReceiver<TransportInbound>,
     pub ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub control_tx: mpsc::UnboundedSender<TransportControl>,
-    /// Client's current catalogue state hash. The TransportManager reads
-    /// this at each handshake attempt and includes it in `AuthHandshake`
-    /// so the server can dispatch `ConnectionSchemaDiagnostics` when the
-    /// client is on a stale schema. Shared with the manager via `Arc`.
+    /// Client's current catalogue-state digest. The TransportManager reads
+    /// this at each handshake attempt so reconnects can tell the server
+    /// whether catalogue replay is necessary. Shared with the manager via
+    /// `Arc`.
     pub(crate) catalogue_state_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Client's declared structural schema hash. Sent separately from the
+    /// catalogue-state digest so the server can emit schema diagnostics
+    /// against a real schema hash.
+    pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl TransportHandle {
@@ -102,6 +107,23 @@ impl TransportHandle {
     #[cfg(test)]
     pub fn catalogue_state_hash_for_test(&self) -> Option<String> {
         self.catalogue_state_hash
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Update the declared schema hash sent in subsequent auth handshakes.
+    pub fn set_declared_schema_hash(&self, hash: Option<String>) {
+        if let Ok(mut slot) = self.declared_schema_hash.lock() {
+            *slot = hash;
+        }
+    }
+
+    /// Test-only accessor: returns the current declared schema hash stored in
+    /// this handle.
+    #[cfg(test)]
+    pub fn declared_schema_hash_for_test(&self) -> Option<String> {
+        self.declared_schema_hash
             .lock()
             .ok()
             .and_then(|g| g.clone())
@@ -143,6 +165,44 @@ pub struct AuthHandshake {
     pub client_id: String,
     pub auth: AuthConfig,
     pub catalogue_state_hash: Option<String>,
+    pub declared_schema_hash: Option<String>,
+}
+
+impl AuthHandshake {
+    pub fn declared_schema_hash(&self) -> Option<SchemaHash> {
+        self.declared_schema_hash
+            .as_deref()
+            .and_then(SchemaHash::from_hex)
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use crate::query_manager::types::SchemaHash;
+
+    #[test]
+    fn auth_handshake_uses_declared_schema_hash_not_catalogue_state_hash() {
+        let declared_hash = SchemaHash::from_bytes([7; 32]);
+        let catalogue_hash = "ab".repeat(32);
+        let handshake = AuthHandshake {
+            client_id: "client-1".to_string(),
+            auth: AuthConfig::default(),
+            catalogue_state_hash: Some(catalogue_hash.clone()),
+            declared_schema_hash: Some(declared_hash.to_string()),
+        };
+
+        assert_eq!(handshake.declared_schema_hash(), Some(declared_hash));
+
+        let handshake_without_declared_hash = AuthHandshake {
+            client_id: "client-1".to_string(),
+            auth: AuthConfig::default(),
+            catalogue_state_hash: Some(catalogue_hash),
+            declared_schema_hash: None,
+        };
+
+        assert_eq!(handshake_without_declared_hash.declared_schema_hash(), None);
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -201,6 +261,9 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     /// Shared with `TransportHandle::catalogue_state_hash`. Read at each
     /// handshake attempt so reconnects can reflect catalogue changes.
     catalogue_state_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared with `TransportHandle::declared_schema_hash`. Read at each
+    /// handshake attempt so the server sees the client's structural schema.
+    declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     _stream: std::marker::PhantomData<W>,
 }
 
@@ -216,6 +279,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     let (control_tx, control_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let catalogue_state_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let declared_schema_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let handle = TransportHandle {
         server_id,
         client_id,
@@ -224,6 +288,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         ever_connected: ever_connected.clone(),
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
+        declared_schema_hash: declared_schema_hash.clone(),
     };
     let manager = TransportManager {
         server_id,
@@ -237,6 +302,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         ever_connected,
         control_rx,
         catalogue_state_hash,
+        declared_schema_hash,
         _stream: std::marker::PhantomData,
     };
     (handle, manager)
@@ -279,10 +345,15 @@ pub(crate) enum HandshakeResult {
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
     /// Build the length-prefixed handshake frame from the current client identity, auth,
-    /// and the latest catalogue state hash known to the caller.
+    /// and the latest catalogue + declared schema hashes known to the caller.
     fn build_handshake_frame(&self) -> Vec<u8> {
         let catalogue_state_hash = self
             .catalogue_state_hash
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        let declared_schema_hash = self
+            .declared_schema_hash
             .lock()
             .ok()
             .and_then(|g| g.clone());
@@ -290,6 +361,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             client_id: self.client_id.to_string(),
             auth: self.auth.clone(),
             catalogue_state_hash,
+            declared_schema_hash,
         };
         let payload =
             serde_json::to_vec(&handshake).expect("AuthHandshake serialisation infallible");

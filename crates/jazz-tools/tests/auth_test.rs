@@ -112,6 +112,7 @@ async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<Connected
         client_id: ClientId::new().to_string(),
         auth,
         catalogue_state_hash: None,
+        declared_schema_hash: None,
     };
     let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
