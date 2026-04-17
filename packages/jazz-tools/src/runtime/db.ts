@@ -48,7 +48,6 @@ import { normalizeBuiltQuery } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
-  resolveRuntimeConfigWasmUrl,
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
@@ -655,6 +654,18 @@ export class Db {
       throw new Error("Worker bridge is only available for driver.type='persistent'");
     }
 
+    // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
+    // fallback WASM URL for non-bundled contexts where wasmModule.default() may fail.
+    const runtimeSources = this.config.runtimeSources;
+    let fallbackWasmUrl: string | undefined;
+    if (!runtimeSources?.workerUrl && !runtimeSources?.baseUrl && !runtimeSources?.wasmUrl) {
+      const locationHref = typeof location !== "undefined" ? location.href : undefined;
+      if (!resolveRuntimeConfigSyncInitInput(runtimeSources)) {
+        fallbackWasmUrl =
+          resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources) ?? undefined;
+      }
+    }
+
     return {
       schemaJson,
       appId: this.config.appId,
@@ -666,6 +677,7 @@ export class Db {
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
       runtimeSources: this.config.runtimeSources,
+      fallbackWasmUrl,
       logLevel: this.config.logLevel,
     };
   }
@@ -1028,19 +1040,27 @@ export class Db {
   }
 
   private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
-    const locationHref = typeof location !== "undefined" ? location.href : undefined;
-    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
-    const wasmUrl = syncInitInput
-      ? null
-      : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
-    const workerUrl = appendWorkerRuntimeWasmUrl(
-      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
-      wasmUrl,
-    );
+    let worker: Worker;
 
-    const worker = new Worker(workerUrl, {
-      type: "module",
-    });
+    if (runtimeSources?.workerUrl || runtimeSources?.baseUrl) {
+      // Explicit worker location — use dynamic URL resolution.
+      const locationHref = typeof location !== "undefined" ? location.href : undefined;
+      const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
+      const wasmUrl = syncInitInput
+        ? null
+        : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
+      const workerUrl = appendWorkerRuntimeWasmUrl(
+        resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
+        wasmUrl,
+      );
+      worker = new Worker(workerUrl, { type: "module" });
+    } else {
+      // Static URL pattern — bundlers (Turbopack, webpack, Vite) detect this
+      // and automatically bundle the worker script + its WASM dependency.
+      worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
+        type: "module",
+      });
+    }
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
