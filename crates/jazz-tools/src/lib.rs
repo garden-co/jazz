@@ -90,8 +90,8 @@ pub struct AppContext {
     /// Backend secret for session impersonation.
     /// Enables `for_session()` to act as any user.
     pub backend_secret: Option<String>,
-    /// Admin secret for schema/policy sync.
-    /// Required to sync catalogue objects.
+    /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
+    /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
 
     /// Optional sync message tracer for test observability.

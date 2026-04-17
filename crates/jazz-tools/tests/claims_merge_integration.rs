@@ -70,6 +70,7 @@ async fn ephemeral_claims_merged_into_session() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("rooms", READY_TIMEOUT)
         .connect()
         .await;

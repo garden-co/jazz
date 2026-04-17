@@ -9,18 +9,23 @@
 
 mod test_server;
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures::SinkExt as _;
+use jazz_tools::catalogue::CatalogueEntry;
+use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::sync_manager::ClientId;
+use jazz_tools::schema_manager::encoding::encode_schema;
+use jazz_tools::sync_manager::{ClientId, SyncError, SyncPayload};
 use jazz_tools::transport_manager::{AuthConfig, AuthHandshake, ConnectedResponse};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 use test_server::TestServer;
 
@@ -98,11 +103,12 @@ fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     Some(&data[4..4 + len])
 }
 
-/// Perform a WS handshake against `ws://host/ws` with the given auth config.
-///
-/// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` if the
-/// server sends an error frame or closes the connection unexpectedly.
-async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<ConnectedResponse, String> {
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+async fn ws_handshake_open(
+    server: &TestServer,
+    auth: AuthConfig,
+) -> Result<(WsStream, ConnectedResponse), String> {
     let ws_url = format!("ws://127.0.0.1:{}/ws", server.port);
     let (mut ws, _) = connect_async(&ws_url)
         .await
@@ -122,25 +128,77 @@ async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<Connected
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            // Try to parse as ConnectedResponse first, then as ServerEvent::Error.
             if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
-                return Ok(connected);
+                Ok((ws, connected))
+            } else {
+                let msg = serde_json::from_slice::<serde_json::Value>(inner)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "auth rejected".to_string());
+                Err(msg)
             }
-            // Must be an error frame.
-            let msg = serde_json::from_slice::<serde_json::Value>(inner)
-                .ok()
-                .and_then(|v| {
-                    v.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "auth rejected".to_string());
-            Err(msg)
         }
         Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
         Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
         Some(Err(e)) => Err(format!("ws recv error: {e}")),
     }
+}
+
+async fn ws_send_sync_payload(ws: &mut WsStream, payload: SyncPayload) -> Result<(), String> {
+    let batch = jazz_tools::transport_protocol::SyncBatchRequest {
+        client_id: ClientId::new(),
+        payloads: vec![payload],
+    };
+    let bytes = serde_json::to_vec(&batch).expect("serialize SyncBatchRequest");
+    ws.send(Message::Binary(frame_encode(&bytes).into()))
+        .await
+        .map_err(|e| format!("ws send sync payload failed: {e}"))
+}
+
+async fn ws_recv_server_event(
+    ws: &mut WsStream,
+) -> Result<jazz_tools::transport_protocol::ServerEvent, String> {
+    use futures::StreamExt as _;
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+        .await
+        .map_err(|_| "timed out waiting for server event".to_string())?;
+
+    match message {
+        Some(Ok(Message::Binary(bytes))) => {
+            let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
+            serde_json::from_slice(inner).map_err(|e| format!("invalid server event: {e}"))
+        }
+        Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
+        Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
+        Some(Err(e)) => Err(format!("ws recv error: {e}")),
+    }
+}
+
+async fn ws_wait_for_sync_error(ws: &mut WsStream) -> Result<SyncError, String> {
+    for _ in 0..8 {
+        let event = ws_recv_server_event(ws).await?;
+        if let jazz_tools::transport_protocol::ServerEvent::SyncUpdate { payload, .. } = event
+            && let SyncPayload::Error(error) = *payload
+        {
+            return Ok(error);
+        }
+    }
+
+    Err("expected SyncUpdate error event".to_string())
+}
+
+/// Perform a WS handshake against `ws://host/ws` with the given auth config.
+///
+/// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` if the
+/// server sends an error frame or closes the connection unexpectedly.
+async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<ConnectedResponse, String> {
+    let (_ws, response) = ws_handshake_open(server, auth).await?;
+    Ok(response)
 }
 
 /// Build AuthConfig with a JWT token.
@@ -156,6 +214,14 @@ fn backend_auth(secret: &str, session: &Session) -> AuthConfig {
     AuthConfig {
         backend_secret: Some(secret.to_string()),
         backend_session: Some(serde_json::to_value(session).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// Build AuthConfig with an admin secret.
+fn admin_auth(secret: &str) -> AuthConfig {
+    AuthConfig {
+        admin_secret: Some(secret.to_string()),
         ..Default::default()
     }
 }
@@ -312,6 +378,108 @@ mod integration_tests {
             result.is_ok(),
             "Backend auth should take priority over JWT; got: {result:?}"
         );
+    }
+
+    /// Admin-secret-authenticated handshakes should connect successfully.
+    #[tokio::test]
+    async fn test_admin_secret_ws_handshake() {
+        let server = TestServer::start().await;
+
+        let result = ws_handshake(&server, admin_auth(ADMIN_SECRET)).await;
+        assert!(
+            result.is_ok(),
+            "admin secret should allow WS handshake; got: {result:?}"
+        );
+    }
+
+    /// Valid admin secret should connect even when a bearer token is invalid.
+    #[tokio::test]
+    async fn test_admin_secret_short_circuits_invalid_jwt_on_ws_handshake() {
+        let server = TestServer::start().await;
+
+        let auth = AuthConfig {
+            jwt_token: Some("invalid-token".to_string()),
+            admin_secret: Some(ADMIN_SECRET.to_string()),
+            ..Default::default()
+        };
+        let result = ws_handshake(&server, auth).await;
+        assert!(
+            result.is_ok(),
+            "valid admin secret should win over an invalid JWT on WS handshake; got: {result:?}"
+        );
+    }
+
+    /// Invalid admin secret must reject the handshake even if the JWT is valid.
+    #[tokio::test]
+    async fn test_invalid_admin_secret_rejects_valid_jwt_on_ws_handshake() {
+        let server = TestServer::start().await;
+        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+
+        let auth = AuthConfig {
+            jwt_token: Some(token),
+            admin_secret: Some("wrong-admin-secret".to_string()),
+            ..Default::default()
+        };
+        let result = ws_handshake(&server, auth).await;
+        assert!(
+            result.is_err(),
+            "invalid admin secret should reject the handshake even when JWT is valid"
+        );
+    }
+
+    /// A WS connection authenticated with admin secret should behave like a strict
+    /// backend client and reject structural schema catalogue sync.
+    #[tokio::test]
+    async fn test_admin_secret_ws_connection_rejects_structural_schema_catalogue_sync() {
+        let server = TestServer::start().await;
+        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+        let auth = AuthConfig {
+            jwt_token: Some(token),
+            admin_secret: Some(ADMIN_SECRET.to_string()),
+            ..Default::default()
+        };
+        let (mut ws, _connected) = ws_handshake_open(&server, auth)
+            .await
+            .expect("handshake with admin secret");
+
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let object_id = schema_hash.to_object_id();
+        let entry = CatalogueEntry {
+            object_id,
+            metadata: HashMap::from([
+                (
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                ),
+                (
+                    MetadataKey::AppId.to_string(),
+                    "00000000-0000-0000-0000-000000000001".to_string(),
+                ),
+                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+            ]),
+            content: encode_schema(&schema),
+        };
+
+        ws_send_sync_payload(&mut ws, SyncPayload::CatalogueEntryUpdated { entry })
+            .await
+            .expect("send structural schema catalogue payload");
+
+        let error = ws_wait_for_sync_error(&mut ws)
+            .await
+            .expect("receive server response for structural schema sync");
+        assert_eq!(
+            error,
+            SyncError::CatalogueWriteDenied {
+                object_id,
+                branch_name: jazz_tools::object::BranchName::new("main"),
+            },
+            "admin-secret-authenticated WS clients should be treated as strict backend clients"
+        );
+
+        let _ = ws.close(None).await;
     }
 
     // ========================================================================
