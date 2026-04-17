@@ -420,6 +420,9 @@ pub struct QueryManager {
     /// into the catalogue for this manager.
     pub(super) catalogued_storage_namespaces: HashSet<usize>,
 
+    /// Application id for catalogue schema persistence, when available.
+    pub(super) catalogue_app_id: Option<String>,
+
     /// Per-schema, per-table write metadata cached to avoid cloning policy
     /// trees and descriptors on every hot write.
     pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
@@ -507,8 +510,14 @@ impl QueryManager {
             known_schemas: Arc::new(HashMap::new()),
             pending_catalogue_schema_hashes: HashSet::new(),
             catalogued_storage_namespaces: HashSet::new(),
+            catalogue_app_id: None,
             write_table_cache: HashMap::new(),
         }
+    }
+
+    pub fn set_catalogue_app_id(&mut self, app_id: impl Into<String>) {
+        self.catalogue_app_id = Some(app_id.into());
+        self.catalogued_storage_namespaces.clear();
     }
 
     /// Set the current schema (the one this client writes to).
@@ -729,15 +738,21 @@ impl QueryManager {
                 continue;
             };
             let object_id = schema_hash.to_object_id();
+            let mut metadata = storage
+                .load_catalogue_entry(object_id)?
+                .map(|entry| entry.metadata)
+                .unwrap_or_default();
+            metadata.insert(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            );
+            metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
+            if let Some(app_id) = &self.catalogue_app_id {
+                metadata.insert(MetadataKey::AppId.to_string(), app_id.clone());
+            }
             storage.upsert_catalogue_entry(&CatalogueEntry {
                 object_id,
-                metadata: HashMap::from([
-                    (
-                        MetadataKey::Type.to_string(),
-                        ObjectType::CatalogueSchema.to_string(),
-                    ),
-                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-                ]),
+                metadata,
                 content: encode_schema(schema),
             })?;
             self.pending_catalogue_schema_hashes.remove(&schema_hash);

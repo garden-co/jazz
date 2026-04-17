@@ -177,6 +177,7 @@ impl SchemaManager {
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
+        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
         query_manager.set_current_schema_with_policy_mode(
             schema.clone(),
             env,
@@ -221,7 +222,8 @@ impl SchemaManager {
     /// Queries are executed with explicit `QuerySchemaContext` rather than
     /// using implicit current schema context.
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
-        let query_manager = QueryManager::new(sync_manager);
+        let mut query_manager = QueryManager::new(sync_manager);
+        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
         Self {
             context: SchemaContext::empty(),
             query_manager,
@@ -1621,6 +1623,84 @@ impl SchemaManager {
     ) -> Result<InsertResult, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.insert_with_write_context(storage, table, values, owned.as_ref())
+    }
+
+    fn validate_external_upsert_object_id(object_id: ObjectId) -> Result<(), QueryError> {
+        if object_id.uuid().get_version_num() != 7 {
+            return Err(QueryError::EncodingError(format!(
+                "external upsert id must be UUIDv7, got version {} for {}",
+                object_id.uuid().get_version_num(),
+                object_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Create or update a row with a caller-supplied UUIDv7.
+    ///
+    /// If a visible row already exists for `object_id`, only the supplied
+    /// columns are updated. Otherwise a new row is inserted with that id.
+    pub fn upsert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
+        Self::validate_external_upsert_object_id(object_id)?;
+        let _ = self.ensure_current_schema_persisted(storage);
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        if let Some(existing_table) = write_context
+            .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+            .and_then(WriteContext::batch_id)
+            .and_then(|batch_id| {
+                self.query_manager
+                    .load_latest_transactional_staged_row_on_branch(
+                        storage,
+                        object_id,
+                        &target_branch,
+                        batch_id,
+                    )
+                    .map(|(table, _row)| table)
+            })
+            .or_else(|| {
+                self.query_manager
+                    .load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                    .map(|(table, ..)| table)
+            })
+        {
+            if existing_table != table {
+                return Err(QueryError::EncodingError(format!(
+                    "object {object_id} already exists in table {existing_table}, cannot upsert into {table}"
+                )));
+            }
+
+            let updates = values.into_iter().collect::<Vec<_>>();
+            return self.update_with_write_context(storage, object_id, &updates, write_context);
+        }
+
+        let inserted = self.insert_with_write_context_and_id(
+            storage,
+            table,
+            values,
+            Some(object_id),
+            write_context,
+        )?;
+        Ok(inserted.batch_id)
     }
 
     /// Update a row using current-schema column names, performing copy-on-write

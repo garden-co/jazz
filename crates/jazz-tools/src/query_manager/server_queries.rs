@@ -787,7 +787,6 @@ impl QueryManager {
             } else {
                 result_scope
             };
-
             // Set scope in SyncManager (triggers initial sync)
             self.sync_manager.set_client_query_scope_with_storage(
                 storage_ref,
