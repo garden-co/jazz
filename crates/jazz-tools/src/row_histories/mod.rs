@@ -1592,13 +1592,42 @@ pub fn apply_row_batch<H: Storage>(
         _ => &[],
     };
     let visible_changed = previous_visible != current_visible;
-    io.apply_row_mutation(
-        &table,
-        std::slice::from_ref(&row),
-        visible_entries,
-        index_mutations,
-    )
-    .map_err(RowHistoryError::StorageError)?;
+    let can_encode_visible_with_row_context = visible_entries.len() == 1
+        && visible_entries[0].current_row.row_id == row.row_id
+        && visible_entries[0].current_row.branch == row.branch
+        && visible_entries[0].current_row.batch_id() == row.batch_id();
+
+    if visible_entries.is_empty() || can_encode_visible_with_row_context {
+        let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
+            .map_err(RowHistoryError::StorageError)?;
+        let encoded_history = crate::storage::encode_history_row_bytes_with_context(&context, &row)
+            .map_err(RowHistoryError::StorageError)?;
+        let encoded_visible = if let Some(entry) = visible_entries.first() {
+            vec![
+                crate::storage::encode_visible_row_bytes_with_context(&context, entry)
+                    .map_err(RowHistoryError::StorageError)?,
+            ]
+        } else {
+            Vec::new()
+        };
+        <H as Storage>::apply_encoded_row_mutation(
+            io,
+            &table,
+            std::slice::from_ref(&encoded_history),
+            &encoded_visible,
+            index_mutations,
+        )
+        .map_err(RowHistoryError::StorageError)?;
+    } else {
+        <H as Storage>::apply_row_mutation(
+            io,
+            &table,
+            std::slice::from_ref(&row),
+            visible_entries,
+            index_mutations,
+        )
+        .map_err(RowHistoryError::StorageError)?;
+    }
 
     if matches!(row.state, RowState::StagingPending) {
         supersede_older_staging_rows_for_batch(io, &table, object_id, branch_name, row.batch_id)?;

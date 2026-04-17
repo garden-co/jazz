@@ -167,15 +167,7 @@ impl BatchSettlement {
                 ));
             }
         };
-        let batch_id = match batch_id {
-            Value::Bytea(bytes) => {
-                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
-                    format!("expected batch id to be 16 bytes, got {}", bytes.len())
-                })?;
-                BatchId(bytes)
-            }
-            other => return Err(format!("expected batch id bytes, got {other:?}")),
-        };
+        let batch_id = decode_batch_id_value(batch_id, "expected batch id to be 16 bytes")?;
 
         match kind {
             "missing" => Ok(Self::Missing { batch_id }),
@@ -433,15 +425,7 @@ impl LocalBatchRecord {
             return Err("unexpected local batch record shape".to_string());
         };
 
-        let batch_id = match batch_id {
-            Value::Bytea(bytes) => {
-                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
-                    format!("decode batch id: expected 16 bytes, got {}", bytes.len())
-                })?;
-                BatchId(bytes)
-            }
-            other => return Err(format!("expected batch id bytes, got {other:?}")),
-        };
+        let batch_id = decode_batch_id_value(batch_id, "decode batch id")?;
         let mode = match mode {
             Value::Text(raw) => BatchMode::parse(raw)?,
             other => return Err(format!("expected batch mode text, got {other:?}")),
@@ -672,18 +656,7 @@ impl SealedBatchSubmission {
             return Err("unexpected sealed batch submission shape".to_string());
         };
 
-        let batch_id = match batch_id {
-            Value::Bytea(bytes) => {
-                let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
-                    format!(
-                        "decode sealed batch submission batch id: expected 16 bytes, got {}",
-                        bytes.len()
-                    )
-                })?;
-                BatchId(bytes)
-            }
-            other => return Err(format!("expected batch id bytes, got {other:?}")),
-        };
+        let batch_id = decode_batch_id_value(batch_id, "decode sealed batch submission batch id")?;
         let target_branch_name = match target_branch_name {
             Value::Text(raw) => BranchName::new(raw),
             other => return Err(format!("expected target branch text, got {other:?}")),
@@ -826,6 +799,20 @@ fn durability_tier_from_str(raw: &str) -> Result<DurabilityTier, String> {
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         other => Err(format!("unknown durability tier '{other}'")),
+    }
+}
+
+fn decode_batch_id_value(value: &Value, context: &str) -> Result<BatchId, String> {
+    match value {
+        Value::BatchId(bytes) => Ok(BatchId(*bytes)),
+        Value::Bytea(bytes) => {
+            let bytes: [u8; 16] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| format!("{context}: expected 16 bytes, got {}", bytes.len()))?;
+            Ok(BatchId(bytes))
+        }
+        other => Err(format!("expected batch id bytes, got {other:?}")),
     }
 }
 

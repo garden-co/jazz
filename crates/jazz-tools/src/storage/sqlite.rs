@@ -6,11 +6,13 @@
 //! Per-operation SAVEPOINTs nested inside that transaction provide rollback
 //! semantics for individual operations. Targets React Native / mobile.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use super::{
-    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, Storage,
+    StorageError, VisibleRowBytes, key_codec,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -28,6 +30,8 @@ struct SqliteInner {
     path: PathBuf,
     /// Whether an explicit `BEGIN` transaction is currently open.
     write_tx_open: bool,
+    ensured_raw_table_headers: HashSet<String>,
+    visible_row_table_locators: HashMap<(String, ObjectId), super::ExactRowTableLocator>,
 }
 
 impl SqliteInner {
@@ -96,6 +100,8 @@ impl SqliteStorage {
                 conn,
                 path: path.to_path_buf(),
                 write_tx_open: false,
+                ensured_raw_table_headers: HashSet::new(),
+                visible_row_table_locators: HashMap::new(),
             })),
         })
     }
@@ -388,6 +394,234 @@ impl Storage for SqliteStorage {
                 upsert_visible_region_row_bytes_core(table, rows, |key, bytes| {
                     Self::set(&inner.conn, key, bytes)
                 })
+            })
+        })
+    }
+
+    fn delete_visible_region_row(
+        &mut self,
+        _table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            let locator = inner
+                .visible_row_table_locators
+                .remove(&(branch.to_string(), row_id));
+            Self::with_savepoint(&inner.conn, || {
+                let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
+                if let Some(locator) = locator.as_ref() {
+                    raw_table_delete_core(locator.row_raw_table.as_str(), &key, |storage_key| {
+                        Self::delete(&inner.conn, storage_key)
+                    })?;
+                }
+                raw_table_delete_core(
+                    super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                    &super::visible_row_table_locator_key(branch, row_id),
+                    |storage_key| Self::delete(&inner.conn, storage_key),
+                )
+            })
+        })?;
+        Ok(())
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                let mut seen_row_raw_tables = std::collections::HashSet::new();
+                for row in encoded_history_rows {
+                    if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                        && inner
+                            .ensured_raw_table_headers
+                            .insert(row.row_raw_table.clone())
+                    {
+                        let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                            &row.row_raw_table_id,
+                            &row.user_descriptor,
+                        ))?;
+                        raw_table_put_core(
+                            super::RAW_TABLE_HEADER_TABLE,
+                            row.row_raw_table.as_str(),
+                            &header,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                    }
+                }
+                for row in encoded_visible_rows {
+                    if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                        && inner
+                            .ensured_raw_table_headers
+                            .insert(row.row_raw_table.clone())
+                    {
+                        let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                            &row.row_raw_table_id,
+                            &row.user_descriptor,
+                        ))?;
+                        raw_table_put_core(
+                            super::RAW_TABLE_HEADER_TABLE,
+                            row.row_raw_table.as_str(),
+                            &header,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                    }
+                }
+                if encoded_history_rows
+                    .iter()
+                    .any(|row| row.needs_exact_locator)
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE.to_string())
+                {
+                    let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                        super::STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
+                        1,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                        &header,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+                if encoded_visible_rows
+                    .iter()
+                    .any(|row| row.needs_exact_locator)
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(super::VISIBLE_ROW_TABLE_LOCATOR_TABLE.to_string())
+                {
+                    let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                        super::STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
+                        1,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                        &header,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+
+                let borrowed_history_rows = encoded_history_rows
+                    .iter()
+                    .map(|row| HistoryRowBytes {
+                        row_raw_table: row.row_raw_table.as_str(),
+                        branch: row.branch.as_str(),
+                        row_id: row.row_id,
+                        batch_id: row.batch_id,
+                        bytes: &row.bytes,
+                    })
+                    .collect::<Vec<_>>();
+                append_history_region_row_bytes_core(
+                    table,
+                    &borrowed_history_rows,
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )?;
+                for row in encoded_history_rows {
+                    if !row.needs_exact_locator {
+                        continue;
+                    }
+                    let locator =
+                        super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                            row_raw_table: row.row_raw_table.clone().into(),
+                            table_name: row.row_raw_table_id.table_name.clone(),
+                            schema_hash: row.row_raw_table_id.schema_hash,
+                        })?;
+                    raw_table_put_core(
+                        super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                        &super::history_row_batch_table_locator_key(
+                            row.row_id,
+                            row.branch.as_str(),
+                            row.batch_id,
+                        ),
+                        &locator,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+
+                let borrowed_visible_rows = encoded_visible_rows
+                    .iter()
+                    .map(|row| VisibleRowBytes {
+                        row_raw_table: row.row_raw_table.as_str(),
+                        branch: row.branch.as_str(),
+                        row_id: row.row_id,
+                        bytes: &row.bytes,
+                    })
+                    .collect::<Vec<_>>();
+                upsert_visible_region_row_bytes_core(
+                    table,
+                    &borrowed_visible_rows,
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )?;
+                for row in encoded_visible_rows {
+                    if !row.needs_exact_locator {
+                        continue;
+                    }
+                    let locator = super::ExactRowTableLocator {
+                        row_raw_table: row.row_raw_table.clone().into(),
+                        table_name: row.row_raw_table_id.table_name.clone(),
+                        schema_hash: row.row_raw_table_id.schema_hash,
+                    };
+                    let cache_key = (row.branch.clone(), row.row_id);
+                    if inner.visible_row_table_locators.get(&cache_key) != Some(&locator) {
+                        let locator_bytes = super::encode_exact_row_table_locator(&locator)?;
+                        raw_table_put_core(
+                            super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                            &super::visible_row_table_locator_key(row.branch.as_str(), row.row_id),
+                            &locator_bytes,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                        inner.visible_row_table_locators.insert(cache_key, locator);
+                    }
+                }
+
+                for mutation in index_mutations {
+                    match mutation {
+                        IndexMutation::Insert {
+                            table,
+                            column,
+                            branch,
+                            value,
+                            row_id,
+                        } => {
+                            let raw_table = key_codec::index_raw_table(table, column, branch);
+                            let key =
+                                key_codec::index_entry_key(table, column, branch, value, *row_id)?;
+                            raw_table_put_core(&raw_table, &key, &[0x01], |storage_key, bytes| {
+                                Self::set(&inner.conn, storage_key, bytes)
+                            })?;
+                        }
+                        IndexMutation::Remove {
+                            table,
+                            column,
+                            branch,
+                            value,
+                            row_id,
+                        } => {
+                            let key = match key_codec::index_entry_key(
+                                table, column, branch, value, *row_id,
+                            ) {
+                                Ok(key) => key,
+                                Err(StorageError::IndexKeyTooLarge { .. }) => continue,
+                                Err(error) => return Err(error),
+                            };
+                            let raw_table = key_codec::index_raw_table(table, column, branch);
+                            raw_table_delete_core(&raw_table, &key, |storage_key| {
+                                Self::delete(&inner.conn, storage_key)
+                            })?;
+                        }
+                    }
+                }
+
+                Ok(())
             })
         })
     }
