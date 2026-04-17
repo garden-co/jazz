@@ -234,6 +234,71 @@ impl SyncManager {
         self.load_current_batch_settlement_from_storage(storage, row_id, &branch_name, &row_locator)
     }
 
+    fn settlement_for_row_batch_state_change<H: Storage>(
+        &self,
+        storage: &H,
+        row_id: ObjectId,
+        branch_name: BranchName,
+        batch_id: BatchId,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Option<BatchSettlement> {
+        self.replayable_visible_batch_settlement(storage, row_id, branch_name)
+            .map(|settlement| match (settlement, confirmed_tier) {
+                (
+                    BatchSettlement::DurableDirect {
+                        batch_id,
+                        confirmed_tier: existing_tier,
+                        visible_members,
+                    },
+                    Some(incoming_tier),
+                ) if incoming_tier > existing_tier => BatchSettlement::DurableDirect {
+                    batch_id,
+                    confirmed_tier: incoming_tier,
+                    visible_members,
+                },
+                (
+                    BatchSettlement::AcceptedTransaction {
+                        batch_id,
+                        confirmed_tier: existing_tier,
+                        visible_members,
+                    },
+                    Some(incoming_tier),
+                ) if incoming_tier > existing_tier => BatchSettlement::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier: incoming_tier,
+                    visible_members,
+                },
+                (settlement, _) => settlement,
+            })
+            .or_else(|| {
+                let confirmed_tier = confirmed_tier?;
+                let record = storage.load_local_batch_record(batch_id).ok().flatten()?;
+                let visible_members = record
+                    .members
+                    .iter()
+                    .map(|member| VisibleBatchMember {
+                        object_id: member.object_id,
+                        branch_name: member.branch_name,
+                        batch_id,
+                    })
+                    .collect::<Vec<_>>();
+                match record.mode {
+                    crate::batch_fate::BatchMode::Direct => Some(BatchSettlement::DurableDirect {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members,
+                    }),
+                    crate::batch_fate::BatchMode::Transactional => {
+                        Some(BatchSettlement::AcceptedTransaction {
+                            batch_id,
+                            confirmed_tier,
+                            visible_members,
+                        })
+                    }
+                }
+            })
+    }
+
     fn respond_to_batch_settlement_request<H: Storage>(
         &mut self,
         storage: &H,
@@ -751,8 +816,13 @@ impl SyncManager {
                 if let Some(clients) = self.row_batch_interest.get(&key) {
                     interested.extend(clients);
                 }
-                let settlement =
-                    self.replayable_visible_batch_settlement(storage, row_id, branch_name);
+                let settlement = self.settlement_for_row_batch_state_change(
+                    storage,
+                    row_id,
+                    branch_name,
+                    batch_id,
+                    confirmed_tier,
+                );
                 if let Some(settlement) = settlement.clone() {
                     self.persist_authoritative_batch_settlement(storage, &settlement);
                     self.pending_batch_settlements.push(settlement);
@@ -1136,8 +1206,13 @@ impl SyncManager {
                     interested.extend(clients);
                 }
                 interested.remove(&client_id);
-                let settlement =
-                    self.replayable_visible_batch_settlement(storage, *row_id, *branch_name);
+                let settlement = self.settlement_for_row_batch_state_change(
+                    storage,
+                    *row_id,
+                    *branch_name,
+                    *batch_id,
+                    *confirmed_tier,
+                );
                 if let Some(settlement) = settlement.clone() {
                     self.persist_authoritative_batch_settlement(storage, &settlement);
                     self.pending_batch_settlements.push(settlement);

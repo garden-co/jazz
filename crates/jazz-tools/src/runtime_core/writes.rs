@@ -200,6 +200,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return Ok(locator.schema_hash);
         }
 
+        if let Some(origin_schema_hash) = self
+            .storage
+            .load_row_locator(row_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            .and_then(|locator| locator.origin_schema_hash)
+        {
+            return Ok(origin_schema_hash);
+        }
+
         Err(RuntimeError::WriteError(format!(
             "missing schema hash for local batch member branch {branch_name} batch {batch_id:?}"
         )))

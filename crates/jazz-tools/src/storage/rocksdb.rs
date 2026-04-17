@@ -5,6 +5,7 @@
 //! pattern as FjallStorage, delegating all logic to `storage_core` callbacks.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rocksdb::{
@@ -22,11 +23,13 @@ use super::{
     },
 };
 use crate::object::ObjectId;
-use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
+use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 struct RocksDBInner {
     db: TransactionDB,
+    ensured_raw_table_headers: HashSet<String>,
+    visible_row_table_locators: HashMap<(String, ObjectId), super::ExactRowTableLocator>,
 }
 
 pub struct RocksDBStorage {
@@ -52,7 +55,11 @@ impl RocksDBStorage {
             .map_err(|e| StorageError::IoError(format!("rocksdb open: {e}")))?;
 
         Ok(Self {
-            inner: RefCell::new(Some(RocksDBInner { db })),
+            inner: RefCell::new(Some(RocksDBInner {
+                db,
+                ensured_raw_table_headers: HashSet::new(),
+                visible_row_table_locators: HashMap::new(),
+            })),
         })
     }
 
@@ -63,6 +70,17 @@ impl RocksDBStorage {
         let inner = self.inner.borrow();
         let inner = inner
             .as_ref()
+            .ok_or_else(|| StorageError::IoError("rocksdb storage already closed".to_string()))?;
+        f(inner)
+    }
+
+    fn with_inner_mut<T>(
+        &self,
+        f: impl FnOnce(&mut RocksDBInner) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let mut inner = self.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
             .ok_or_else(|| StorageError::IoError("rocksdb storage already closed".to_string()))?;
         f(inner)
     }
@@ -385,22 +403,48 @@ impl Storage for RocksDBStorage {
         })
     }
 
-    fn apply_row_mutation(
+    fn delete_visible_region_row(
+        &mut self,
+        _table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            let locator = inner
+                .visible_row_table_locators
+                .remove(&(branch.to_string(), row_id));
+            let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
+            if let Some(locator) = locator.as_ref() {
+                raw_table_delete_core(locator.row_raw_table.as_str(), &key, |storage_key| {
+                    Self::delete_on_txn_cell(&txn, storage_key)
+                })?;
+            }
+            raw_table_delete_core(
+                super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                &super::visible_row_table_locator_key(branch, row_id),
+                |storage_key| Self::delete_on_txn_cell(&txn, storage_key),
+            )?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn apply_encoded_row_mutation(
         &mut self,
         table: &str,
-        history_rows: &[StoredRowBatch],
-        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[super::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[super::OwnedVisibleRowBytes],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
-        let encoded_history_rows =
-            super::encode_history_row_bytes_for_storage(self, table, history_rows)?;
-        let encoded_visible_rows =
-            super::encode_visible_row_bytes_for_storage(self, table, visible_entries)?;
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
             let txn = RefCell::new(inner.db.transaction());
             let mut seen_row_raw_tables = std::collections::HashSet::new();
-            for row in &encoded_history_rows {
-                if seen_row_raw_tables.insert(row.row_raw_table.clone()) {
+            for row in encoded_history_rows {
+                if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(row.row_raw_table.clone())
+                {
                     let header = super::encode_raw_table_header(&super::row_raw_table_header(
                         &row.row_raw_table_id,
                         &row.user_descriptor,
@@ -413,8 +457,12 @@ impl Storage for RocksDBStorage {
                     )?;
                 }
             }
-            for row in &encoded_visible_rows {
-                if seen_row_raw_tables.insert(row.row_raw_table.clone()) {
+            for row in encoded_visible_rows {
+                if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(row.row_raw_table.clone())
+                {
                     let header = super::encode_raw_table_header(&super::row_raw_table_header(
                         &row.row_raw_table_id,
                         &row.user_descriptor,
@@ -427,7 +475,13 @@ impl Storage for RocksDBStorage {
                     )?;
                 }
             }
-            if !encoded_history_rows.is_empty() {
+            if encoded_history_rows
+                .iter()
+                .any(|row| row.needs_exact_locator)
+                && inner
+                    .ensured_raw_table_headers
+                    .insert(super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE.to_string())
+            {
                 let header = super::encode_raw_table_header(&super::RawTableHeader::system(
                     super::STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
                     1,
@@ -439,7 +493,13 @@ impl Storage for RocksDBStorage {
                     |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
                 )?;
             }
-            if !encoded_visible_rows.is_empty() {
+            if encoded_visible_rows
+                .iter()
+                .any(|row| row.needs_exact_locator)
+                && inner
+                    .ensured_raw_table_headers
+                    .insert(super::VISIBLE_ROW_TABLE_LOCATOR_TABLE.to_string())
+            {
                 let header = super::encode_raw_table_header(&super::RawTableHeader::system(
                     super::STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
                     1,
@@ -464,7 +524,10 @@ impl Storage for RocksDBStorage {
             append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
-            for row in &encoded_history_rows {
+            for row in encoded_history_rows {
+                if !row.needs_exact_locator {
+                    continue;
+                }
                 let locator =
                     super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
                         row_raw_table: row.row_raw_table.clone().into(),
@@ -494,19 +557,26 @@ impl Storage for RocksDBStorage {
             upsert_visible_region_row_bytes_core(table, &borrowed_visible_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
-            for row in &encoded_visible_rows {
-                let locator =
-                    super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
-                        row_raw_table: row.row_raw_table.clone().into(),
-                        table_name: row.row_raw_table_id.table_name.clone(),
-                        schema_hash: row.row_raw_table_id.schema_hash,
-                    })?;
-                raw_table_put_core(
-                    super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
-                    &super::visible_row_table_locator_key(row.branch.as_str(), row.row_id),
-                    &locator,
-                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
-                )?;
+            for row in encoded_visible_rows {
+                if !row.needs_exact_locator {
+                    continue;
+                }
+                let locator = super::ExactRowTableLocator {
+                    row_raw_table: row.row_raw_table.clone().into(),
+                    table_name: row.row_raw_table_id.table_name.clone(),
+                    schema_hash: row.row_raw_table_id.schema_hash,
+                };
+                let cache_key = (row.branch.clone(), row.row_id);
+                if inner.visible_row_table_locators.get(&cache_key) != Some(&locator) {
+                    let locator_bytes = super::encode_exact_row_table_locator(&locator)?;
+                    raw_table_put_core(
+                        super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                        &super::visible_row_table_locator_key(row.branch.as_str(), row.row_id),
+                        &locator_bytes,
+                        |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                    )?;
+                    inner.visible_row_table_locators.insert(cache_key, locator);
+                }
             }
             Self::apply_index_mutations_on_txn(&txn, index_mutations)?;
             Self::commit_txn(txn.into_inner())
