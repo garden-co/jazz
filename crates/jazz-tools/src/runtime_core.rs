@@ -474,6 +474,11 @@ where
     );
     let (handle, manager) = crate::transport_manager::create::<W, T>(url, auth, tick);
     handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
+    handle.set_declared_schema_hash(
+        core.schema_manager()
+            .has_current_schema()
+            .then(|| core.schema_manager().current_hash().to_string()),
+    );
     core.schema_manager
         .query_manager_mut()
         .sync_manager_mut()
