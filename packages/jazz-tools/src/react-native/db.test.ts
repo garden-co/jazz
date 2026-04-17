@@ -259,10 +259,14 @@ describe("react-native Db", () => {
     });
     db.exposeGetClient(makeSchema("todos"));
 
-    expect(stub.connectTransport).toHaveBeenCalledWith("https://example.test", {
-      jwt_token: "jwt-x",
-      admin_secret: "admin-y",
-    });
+    expect(stub.connectTransport).toHaveBeenCalledWith(
+      "https://example.test",
+      {
+        jwt_token: "jwt-x",
+        admin_secret: "admin-y",
+      },
+      "/apps/rn-app",
+    );
   });
 
   it("RNDB-U09 does not call connectTransport when serverUrl is absent", () => {
