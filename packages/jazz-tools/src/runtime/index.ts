@@ -5,6 +5,7 @@ export {
   JazzClient,
   type LocalBatchRecord,
   type LocalUpdatesMode,
+  type MutationErrorEvent,
   PersistedWrite,
   PersistedWriteRejectedError,
   SessionClient,
