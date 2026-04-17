@@ -216,6 +216,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // 1. Drain inbound transport events.
         // Collect into a Vec first to avoid holding &mut self.transport while
         // calling &mut self methods (remove_server, add_server_with_catalogue_state_hash, etc.).
+        // Track whether any event mutated server/pending-server state so we can
+        // trigger a re-settle — held initial subscriptions reading
+        // `has_servers_or_pending_servers` only release on the next `process()`.
+        let mut released_server_hold = false;
         {
             let events: Vec<crate::transport_manager::TransportInbound> = {
                 let mut buf = Vec::new();
@@ -257,6 +261,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     }
                     crate::transport_manager::TransportInbound::Disconnected => {
                         self.remove_server(server_id);
+                        released_server_hold = true;
                     }
                     crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                         debug!(%reason, "transport connect failed; releasing pending-server hold");
@@ -264,15 +269,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                             .query_manager_mut()
                             .sync_manager_mut()
                             .remove_pending_server(server_id);
+                        released_server_hold = true;
                     }
                     crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                         self.remove_server(server_id);
+                        released_server_hold = true;
                         if let Some(ref cb) = self.auth_failure_callback {
                             cb(reason);
                         }
                     }
                 }
             }
+        }
+
+        // If an inbound event dropped the last (pending) server, re-run settle
+        // so held initial subscriptions deliver against local state.
+        // `handle_sync_messages` below only calls `immediate_tick` when parked
+        // messages were applied — in the offline-failure path there are none.
+        if released_server_hold {
+            self.immediate_tick();
         }
 
         // 2. Send all outgoing sync messages — only when a sink is present.
@@ -496,6 +511,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         server_id: ServerId,
         event: crate::transport_manager::TransportInbound,
     ) {
+        let mut released_server_hold = false;
         match event {
             crate::transport_manager::TransportInbound::Connected {
                 catalogue_state_hash,
@@ -519,6 +535,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
+                released_server_hold = true;
             }
             crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                 debug!(%reason, "transport connect failed; releasing pending-server hold");
@@ -526,13 +543,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .query_manager_mut()
                     .sync_manager_mut()
                     .remove_pending_server(server_id);
+                released_server_hold = true;
             }
             crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                 self.remove_server(server_id);
+                released_server_hold = true;
                 if let Some(ref cb) = self.auth_failure_callback {
                     cb(reason);
                 }
             }
+        }
+        if released_server_hold {
+            self.immediate_tick();
         }
     }
 }

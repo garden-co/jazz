@@ -1052,13 +1052,19 @@ mod install_transport_tests {
     }
 
     /// Guards the fix for CI expo-e2e failing when the WS transport never
-    /// completes: pending_servers must time out so initial subscriptions
-    /// don't hold the first delivery forever.
+    /// completes: after the pending-server timeout elapses and any subsequent
+    /// tick runs, a held initial subscription must actually deliver against
+    /// local state — not just flip an internal flag.
     #[test]
     fn pending_server_frontier_releases_after_timeout() {
         use crate::sync_manager::PENDING_SERVER_TIMEOUT;
 
         let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
 
         let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
             &mut core,
@@ -1067,32 +1073,52 @@ mod install_transport_tests {
             NopTick,
         );
 
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
         assert!(
-            core.schema_manager()
-                .query_manager()
-                .sync_manager()
-                .has_servers_or_pending_servers(),
-            "pending_servers must be active immediately after install_transport"
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
         );
 
         std::thread::sleep(PENDING_SERVER_TIMEOUT + std::time::Duration::from_millis(100));
 
-        assert!(
-            !core
-                .schema_manager()
-                .query_manager()
-                .sync_manager()
-                .has_servers_or_pending_servers(),
-            "pending_servers must time out so local subscriptions can deliver"
-        );
+        // The timeout is a passive check; something must drive a settle after
+        // the deadline. In production any ambient activity does this; here we
+        // trigger an explicit tick.
+        core.immediate_tick();
+
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after timeout release, got {other:?}"),
+        }
     }
 
     /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
-    /// before the timeout), draining the event must release the pending-server
-    /// hold immediately so the user doesn't pay the timeout on cold-start.
+    /// before the timeout), draining the event must release the held initial
+    /// subscription *and* deliver its first batch against local state. Flipping
+    /// the pending-server flag is not enough on its own — release also has to
+    /// re-run `process()` so `settle()` observes the state change.
     #[test]
-    fn connect_failed_event_releases_pending_server_immediately() {
+    fn connect_failed_event_releases_and_delivers_held_subscription() {
         let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
 
         let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
             &mut core,
@@ -1103,12 +1129,21 @@ mod install_transport_tests {
 
         let server_id = core.transport.as_ref().unwrap().server_id;
 
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
         assert!(
-            core.schema_manager()
-                .query_manager()
-                .sync_manager()
-                .has_servers_or_pending_servers(),
-            "pending_servers must be active immediately after install_transport"
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
         );
 
         core.handle_transport_inbound_for_test(
@@ -1118,14 +1153,13 @@ mod install_transport_tests {
             },
         );
 
-        assert!(
-            !core
-                .schema_manager()
-                .query_manager()
-                .sync_manager()
-                .has_servers_or_pending_servers(),
-            "ConnectFailed must release pending_servers without waiting for the timeout"
-        );
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after ConnectFailed release, got {other:?}"),
+        }
     }
 }
 
