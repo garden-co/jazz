@@ -1,7 +1,6 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
-import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export type JazzRnErrorTag =
   | "InvalidJson"
@@ -21,6 +20,10 @@ export interface JazzRnRuntimeBinding {
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
+  connect(url: string, authJson: string): void;
+  disconnect(): void;
+  updateAuth(authJson: string): void;
+  onAuthFailure(callback: { onFailure(reason: string): void }): void;
   delete_(objectId: string): void;
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
@@ -41,18 +44,6 @@ export interface JazzRnRuntimeBinding {
   ): void;
   onSyncMessageReceived(messageJson: string, seq?: number | null): void;
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
-  onSyncMessageToSend(
-    callback:
-      | {
-          onSyncMessage(
-            destinationKind: OutboxDestinationKind,
-            destinationId: string,
-            payloadJson: string,
-            isCatalogue: boolean,
-          ): void;
-        }
-      | undefined,
-  ): void;
   query(queryJson: string, sessionJson: string | undefined, tier: string | undefined): string;
   removeServer(): void;
   setClientRole(clientId: string, role: string): void;
@@ -163,26 +154,6 @@ function createErrorWithCause(message: string, cause: unknown): Error {
       writable: true,
     });
     return fallback;
-  }
-}
-
-function assertSyncMessageArgs(
-  destinationKind: unknown,
-  destinationId: unknown,
-  payloadJson: unknown,
-  isCatalogue: unknown,
-): asserts destinationKind is OutboxDestinationKind {
-  if (destinationKind !== "server" && destinationKind !== "client") {
-    throw new Error("Invalid RN sync callback destination kind");
-  }
-  if (typeof destinationId !== "string") {
-    throw new Error("Invalid RN sync callback destination id");
-  }
-  if (typeof payloadJson !== "string") {
-    throw new Error("Invalid RN sync callback payload");
-  }
-  if (typeof isCatalogue !== "boolean") {
-    throw new Error("Invalid RN sync callback catalogue flag");
   }
 }
 
@@ -442,19 +413,34 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.binding.onSyncMessageReceived(message_json, seq);
   }
 
-  onSyncMessageToSend(callback: Function): void {
-    this.binding.onSyncMessageToSend({
-      onSyncMessage: (
-        destinationKind: OutboxDestinationKind,
-        destinationId: string,
-        payloadJson: string,
-        isCatalogue: boolean,
-      ) => {
+  onSyncMessageToSend(_callback: Function): void {
+    // Server sync is handled by the Rust-owned WebSocket transport (runtime.connect()).
+    // The outbox callback is no longer wired through UniFFI for RN.
+  }
+
+  connect(url: string, authJson: string): void {
+    if (this.closed) return;
+    this.binding.connect(url, authJson);
+  }
+
+  disconnect(): void {
+    if (this.closed) return;
+    this.binding.disconnect();
+  }
+
+  updateAuth(authJson: string): void {
+    if (this.closed) return;
+    this.binding.updateAuth(authJson);
+  }
+
+  onAuthFailure(callback: (reason: string) => void): void {
+    if (this.closed) return;
+    this.binding.onAuthFailure({
+      onFailure: (reason: string) => {
         try {
-          assertSyncMessageArgs(destinationKind, destinationId, payloadJson, isCatalogue);
-          callback(destinationKind, destinationId, payloadJson, isCatalogue);
+          callback(reason);
         } catch (error) {
-          swallowCallbackError("sync message", error);
+          swallowCallbackError("onAuthFailure", error);
         }
       },
     });
@@ -494,7 +480,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.binding.onSyncMessageToSend(undefined);
     this.binding.onBatchedTickNeeded(undefined);
     this.handleMap.clear();
     try {

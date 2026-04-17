@@ -25,7 +25,7 @@ pub(super) struct PendingSubscription {
     pub propagation: QueryPropagation,
 }
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn allocate_subscription_handle(&mut self) -> SubscriptionHandle {
         let handle = SubscriptionHandle(self.next_subscription_handle);
         self.next_subscription_handle += 1;

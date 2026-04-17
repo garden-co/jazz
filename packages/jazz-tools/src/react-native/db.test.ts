@@ -33,10 +33,12 @@ function makeSchema(tableName: string): WasmSchema {
 function makeClientStub() {
   const shutdown = vi.fn(async () => undefined);
   const updateAuthToken = vi.fn();
+  const connectTransport = vi.fn();
   return {
-    client: { shutdown, updateAuthToken } as unknown as JazzClient,
+    client: { shutdown, updateAuthToken, connectTransport } as unknown as JazzClient,
     shutdown,
     updateAuthToken,
+    connectTransport,
   };
 }
 
@@ -240,5 +242,38 @@ describe("react-native Db", () => {
 
     expect(clientA.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(clientB.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
+  });
+
+  it("RNDB-U08 calls connectTransport when serverUrl is configured", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const stub = makeClientStub();
+    createJazzRnRuntimeMock.mockReturnValue({ id: "runtime" } as never);
+    connectWithRuntimeSpy.mockReturnValue(stub.client);
+
+    const db = new TestDb({
+      appId: "rn-app",
+      serverUrl: "https://example.test",
+      serverPathPrefix: "/apps/rn-app",
+      jwtToken: "jwt-x",
+      adminSecret: "admin-y",
+    });
+    db.exposeGetClient(makeSchema("todos"));
+
+    expect(stub.connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+    });
+  });
+
+  it("RNDB-U09 does not call connectTransport when serverUrl is absent", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const stub = makeClientStub();
+    createJazzRnRuntimeMock.mockReturnValue({ id: "runtime" } as never);
+    connectWithRuntimeSpy.mockReturnValue(stub.client);
+
+    const db = new TestDb({ appId: "rn-app" });
+    db.exposeGetClient(makeSchema("todos"));
+
+    expect(stub.connectTransport).not.toHaveBeenCalled();
   });
 });

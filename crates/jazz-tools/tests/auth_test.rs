@@ -3,26 +3,24 @@
 //! Authentication integration tests for the Jazz server.
 //!
 //! Tests the three auth mechanisms:
-//! 1. JWT authentication (frontend)
-//! 2. Backend session impersonation
-//! 3. Admin authentication for catalogue sync
+//! 1. JWT authentication (frontend) — via WS handshake
+//! 2. Backend session impersonation — via WS handshake
+//! 3. Admin authentication — via HTTP admin endpoints
 
 mod test_server;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use jazz_tools::commit::CommitId;
-use jazz_tools::jazz_transport::SyncBatchRequest;
-use jazz_tools::metadata::RowProvenance;
-use jazz_tools::object::ObjectId;
+use futures::SinkExt as _;
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::row_histories::{RowState, StoredRowVersion};
-use jazz_tools::sync_manager::{ClientId, SyncPayload};
+use jazz_tools::sync_manager::ClientId;
+use jazz_tools::transport_manager::{AuthConfig, AuthHandshake, ConnectedResponse};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use test_server::TestServer;
 
@@ -80,28 +78,91 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-/// Create a valid sync batch request body (SyncBatchRequest).
-fn sync_body() -> String {
-    let object_id_text = "01234567-89ab-cdef-0123-456789abcdef";
-    let row = StoredRowVersion::new(
-        ObjectId::from_uuid(uuid::Uuid::parse_str(object_id_text).expect("parse test object id")),
-        "main",
-        Vec::<CommitId>::new(),
-        b"alice".to_vec(),
-        RowProvenance::for_insert(object_id_text.to_string(), 1_000),
-        Default::default(),
-        RowState::VisibleDirect,
-        None,
-    );
-    let request = SyncBatchRequest {
-        client_id: ClientId::new(),
-        payloads: vec![SyncPayload::RowVersionCreated {
-            metadata: None,
-            row,
-        }],
-    };
+/// Encode a 4-byte big-endian length-prefixed frame.
+fn frame_encode(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + payload.len());
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
 
-    serde_json::to_string(&request).expect("serialize typed sync batch request")
+/// Decode a 4-byte big-endian length-prefixed frame.
+fn frame_decode(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 4 {
+        return None;
+    }
+    let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+    if data.len() < 4 + len {
+        return None;
+    }
+    Some(&data[4..4 + len])
+}
+
+/// Perform a WS handshake against `ws://host/ws` with the given auth config.
+///
+/// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` if the
+/// server sends an error frame or closes the connection unexpectedly.
+async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<ConnectedResponse, String> {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let (mut ws, _) = connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("ws connect failed: {e}"))?;
+
+    let handshake = AuthHandshake {
+        client_id: ClientId::new().to_string(),
+        auth,
+        catalogue_state_hash: None,
+    };
+    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
+    ws.send(Message::Binary(frame_encode(&payload).into()))
+        .await
+        .map_err(|e| format!("ws send failed: {e}"))?;
+
+    use futures::StreamExt as _;
+    match ws.next().await {
+        Some(Ok(Message::Binary(bytes))) => {
+            let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
+            // Try to parse as ConnectedResponse first, then as ServerEvent::Error.
+            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
+                return Ok(connected);
+            }
+            // Must be an error frame.
+            let msg = serde_json::from_slice::<serde_json::Value>(inner)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "auth rejected".to_string());
+            Err(msg)
+        }
+        Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
+        Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
+        Some(Err(e)) => Err(format!("ws recv error: {e}")),
+    }
+}
+
+/// Build AuthConfig with a JWT token.
+fn jwt_auth(token: &str) -> AuthConfig {
+    AuthConfig {
+        jwt_token: Some(token.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Build AuthConfig with backend secret + session.
+fn backend_auth(secret: &str, session: &Session) -> AuthConfig {
+    AuthConfig {
+        backend_secret: Some(secret.to_string()),
+        backend_session: Some(serde_json::to_value(session).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// Build empty AuthConfig (no credentials).
+fn no_auth() -> AuthConfig {
+    AuthConfig::default()
 }
 
 // ============================================================================
@@ -143,19 +204,15 @@ mod unit_tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use std::collections::HashMap;
 
-    use jazz_tools::metadata::{MetadataKey, ObjectType};
     use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
-    use jazz_tools::schema_manager::encode_schema;
     use serde_json::Value;
-    use uuid::Uuid;
 
     const JWT_SECRET: &str = "test-jwt-secret-for-integration";
     const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
     const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 
-    fn client() -> Client {
+    fn http_client() -> Client {
         Client::new()
     }
 
@@ -164,7 +221,7 @@ mod integration_tests {
     async fn test_health_no_auth() {
         let server = TestServer::start().await;
 
-        let resp = client()
+        let resp = http_client()
             .get(format!("{}/health", server.base_url()))
             .send()
             .await
@@ -173,290 +230,88 @@ mod integration_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Test JWT authentication on sync endpoint.
+    /// JWT authentication succeeds on WS handshake.
     #[tokio::test]
-    async fn test_jwt_auth_sync() {
+    async fn test_jwt_auth_ws_handshake() {
         let server = TestServer::start().await;
         let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        // Auth should pass (not 401) - may get other status if operation fails
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Test invalid JWT is rejected.
-    #[tokio::test]
-    async fn test_invalid_jwt_rejected() {
-        let server = TestServer::start().await;
-
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", "Bearer invalid-token")
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn test_events_reject_invalid_client_id_with_structured_bad_request() {
-        let server = TestServer::start().await;
-
-        let resp = client()
-            .get(format!("{}/events?client_id=not-a-uuid", server.base_url()))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "Invalid client_id: not-a-uuid");
-        assert_eq!(body["code"], "bad_request");
-    }
-
-    #[tokio::test]
-    async fn test_events_require_session_with_structured_401() {
-        let server = TestServer::start().await;
-
-        let resp = client()
-            .get(format!(
-                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
-                server.base_url()
-            ))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "missing");
-    }
-
-    #[tokio::test]
-    async fn test_events_return_expired_for_expired_jwt() {
-        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
-            "kid-events-expired",
-            "secret-events-expired",
-        )])
-        .await;
-
-        let expired = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 60;
-        let token = make_jwt_with_kid_and_exp(
-            "user-events-expired",
-            "kid-events-expired",
-            "secret-events-expired",
-            expired,
+        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            result.is_ok(),
+            "JWT auth should succeed on WS handshake; got: {result:?}"
         );
-
-        let resp = client()
-            .get(format!(
-                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
-                server.base_url()
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "expired");
     }
 
+    /// Invalid JWT is rejected on WS handshake.
     #[tokio::test]
-    async fn test_events_return_disabled_when_jwt_auth_is_not_configured() {
-        let server = TestServer::start_without_jwks().await;
-        let token = make_jwt("events-user", json!({"role": "member"}), JWT_SECRET);
+    async fn test_invalid_jwt_rejected_on_ws_handshake() {
+        let server = TestServer::start().await;
 
-        let resp = client()
-            .get(format!(
-                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
-                server.base_url()
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "disabled");
+        let result = ws_handshake(&server, jwt_auth("invalid-token")).await;
+        assert!(
+            result.is_err(),
+            "Invalid JWT should be rejected on WS handshake"
+        );
     }
 
-    /// Test backend impersonation with valid secret.
+    /// WS handshake with no credentials is rejected.
+    #[tokio::test]
+    async fn test_ws_handshake_requires_auth() {
+        let server = TestServer::start().await;
+
+        let result = ws_handshake(&server, no_auth()).await;
+        assert!(
+            result.is_err(),
+            "WS handshake without credentials should be rejected"
+        );
+    }
+
+    /// Backend impersonation with valid secret succeeds.
     #[tokio::test]
     async fn test_backend_impersonation_valid() {
         let server = TestServer::start().await;
         let session = Session::new("impersonated-user");
-        let session_b64 = encode_session(&session);
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
-            .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        // Auth should pass (not 401) - may get other status if operation fails
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        let result = ws_handshake(&server, backend_auth(BACKEND_SECRET, &session)).await;
+        assert!(
+            result.is_ok(),
+            "Backend impersonation should succeed with valid secret; got: {result:?}"
+        );
     }
 
-    /// Test backend impersonation with invalid secret.
+    /// Backend impersonation with invalid secret is rejected.
     #[tokio::test]
     async fn test_backend_impersonation_invalid_secret() {
         let server = TestServer::start().await;
         let session = Session::new("impersonated-user");
-        let session_b64 = encode_session(&session);
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("X-Jazz-Backend-Secret", "wrong-secret")
-            .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let result = ws_handshake(&server, backend_auth("wrong-secret", &session)).await;
+        assert!(
+            result.is_err(),
+            "Backend impersonation with wrong secret should be rejected"
+        );
     }
 
-    /// Test session header without backend secret is rejected.
-    #[tokio::test]
-    async fn test_session_without_secret_rejected() {
-        let server = TestServer::start().await;
-        let session = Session::new("impersonated-user");
-        let session_b64 = encode_session(&session);
-
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Test that backend impersonation takes priority over JWT.
+    /// Backend auth takes priority over JWT when both are provided.
     #[tokio::test]
     async fn test_backend_priority_over_jwt() {
         let server = TestServer::start().await;
         let jwt_token = make_jwt("jwt-user", json!({}), JWT_SECRET);
         let session = Session::new("backend-user");
-        let session_b64 = encode_session(&session);
 
-        // Both JWT and backend auth provided - backend should win
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", jwt_token))
-            .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
-            .header("X-Jazz-Session", session_b64)
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        // Auth should pass (not 401) - may get other status if operation fails
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Create a valid catalogue sync body for testing admin auth.
-    fn catalogue_sync_body() -> String {
-        json!({
-            "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "payloads": [{
-                "CatalogueEntryUpdated": {
-                    "entry": {
-                        "object_id": "01234567-89ab-cdef-0123-456789abcdef",
-                        "metadata": {"type": "catalogue_schema"},
-                        "content": []
-                    },
-                }
-            }]
-        })
-        .to_string()
-    }
-
-    /// Test that catalogue sync without admin header returns 401.
-    #[tokio::test]
-    async fn test_catalogue_sync_no_admin() {
-        let server = TestServer::start().await;
-
-        // Send a catalogue schema sync payload without admin header
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Content-Type", "application/json")
-            .body(catalogue_sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Test that catalogue sync with wrong admin header returns 401.
-    #[tokio::test]
-    async fn test_catalogue_sync_wrong_admin() {
-        let server = TestServer::start().await;
-
-        // Send a catalogue schema sync payload with wrong admin header
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("X-Jazz-Admin-Secret", "wrong-admin-secret")
-            .header("Content-Type", "application/json")
-            .body(catalogue_sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    /// Test that catalogue sync with valid admin header returns 200.
-    #[tokio::test]
-    async fn test_catalogue_sync_valid_admin() {
-        let server = TestServer::start().await;
-
-        // Send a catalogue schema sync payload with valid admin header
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-            .header("Content-Type", "application/json")
-            .body(catalogue_sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
+        // Both JWT and backend auth provided — backend should win (no error expected).
+        let auth = AuthConfig {
+            jwt_token: Some(jwt_token),
+            backend_secret: Some(BACKEND_SECRET.to_string()),
+            backend_session: Some(serde_json::to_value(&session).unwrap()),
+            ..Default::default()
+        };
+        let result = ws_handshake(&server, auth).await;
+        assert!(
+            result.is_ok(),
+            "Backend auth should take priority over JWT; got: {result:?}"
+        );
     }
 
     // ========================================================================
@@ -491,7 +346,7 @@ mod integration_tests {
     ///  fetch JWKS ──> cache has kid-old only
     ///  (kid-old)       no match ──> force refresh
     ///                              fetch JWKS (kid-new)
-    ///                              validate ──> 200 OK
+    ///                              validate ──> connected
     /// ```
     #[tokio::test]
     async fn test_unknown_kid_triggers_jwks_refresh_and_succeeds() {
@@ -503,19 +358,10 @@ mod integration_tests {
 
         let token = make_jwt_with_kid("user-rotation", "kid-new", "secret-new");
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_ne!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "JWT with rotated key should succeed after JWKS refresh"
+        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            result.is_ok(),
+            "JWT with rotated key should succeed after JWKS refresh; got: {result:?}"
         );
         assert_eq!(
             server.jwks_hits(),
@@ -524,7 +370,7 @@ mod integration_tests {
         );
     }
 
-    /// A JWT with an invalid signature should remain 401 even after
+    /// A JWT with an invalid signature should remain rejected even after
     /// the server attempts a JWKS refresh.
     #[tokio::test]
     async fn test_bad_signature_stays_unauthorized_after_refresh() {
@@ -536,33 +382,20 @@ mod integration_tests {
 
         let token = make_jwt_with_kid("user-invalid", "kid-sig", "wrong-secret");
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "invalid signature must stay unauthorized after refresh"
+        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            result.is_err(),
+            "invalid signature must stay rejected after refresh"
         );
         assert_eq!(
             server.jwks_hits(),
             2,
             "signature failure should trigger one refresh attempt"
         );
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "invalid");
     }
 
     #[tokio::test]
-    async fn test_expired_jwt_returns_structured_401() {
+    async fn test_expired_jwt_is_rejected() {
         let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
             "kid-expired",
             "secret-expired",
@@ -577,20 +410,8 @@ mod integration_tests {
         let token =
             make_jwt_with_kid_and_exp("user-expired", "kid-expired", "secret-expired", expired);
 
-        let resp = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "unauthenticated");
-        assert_eq!(body["code"], "expired");
+        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(result.is_err(), "expired JWT should be rejected");
     }
 
     /// Consecutive valid requests should use the cached JWKS without refetching.
@@ -604,25 +425,11 @@ mod integration_tests {
 
         let token = make_jwt_with_kid("user-cached", "kid-cached", "secret-cached");
 
-        let first = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(first.is_ok(), "first WS handshake should succeed");
 
-        let second = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_ne!(second.status(), StatusCode::UNAUTHORIZED);
+        let second = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(second.is_ok(), "second WS handshake should succeed");
 
         assert_eq!(
             server.jwks_hits(),
@@ -633,8 +440,7 @@ mod integration_tests {
 
     /// Rapid requests with different unknown kids should not trigger unbounded
     /// JWKS fetches. After the first forced refresh, subsequent unknown-kid
-    /// requests within the cooldown window should reuse the cached keyset
-    /// rather than hammering the IdP endpoint.
+    /// requests within the cooldown window should reuse the cached keyset.
     ///
     /// ```text
     ///  startup    req(kid-0)     req(kid-1)     req(kid-2)
@@ -643,7 +449,7 @@ mod integration_tests {
     ///  fetch(1)   no match →     no match →     no match →
     ///             refresh(2)     cooldown ──>   cooldown ──>
     ///             no match →     use cached     use cached
-    ///             401            401            401
+    ///             reject         reject         reject
     /// ```
     #[tokio::test]
     async fn test_rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
@@ -660,17 +466,8 @@ mod integration_tests {
                 &format!("kid-fabricated-{i}"),
                 "irrelevant-secret",
             );
-
-            let resp = client()
-                .post(format!("{}/sync", server.base_url()))
-                .header("Authorization", format!("Bearer {}", token))
-                .header("Content-Type", "application/json")
-                .body(sync_body())
-                .send()
-                .await
-                .unwrap();
-
-            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let result = ws_handshake(&server, jwt_auth(&token)).await;
+            assert!(result.is_err(), "fabricated kid should be rejected");
         }
 
         // Without cooldown: 1 (startup) + 5 (one forced refresh per request) = 6
@@ -683,8 +480,7 @@ mod integration_tests {
     }
 
     /// When the JWKS endpoint goes down after the cache TTL expires, requests
-    /// with valid JWTs should still succeed using the stale cached keyset
-    /// rather than failing with an auth error.
+    /// with valid JWTs should still succeed using the stale cached keyset.
     ///
     /// ```text
     ///  startup         request OK       TTL expires    endpoint down    request
@@ -708,37 +504,21 @@ mod integration_tests {
 
         let token = make_jwt_with_kid("user-stale", "kid-stale", "secret-stale");
 
-        // First request: cache hit, validates OK.
-        let first = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_ne!(
-            first.status(),
-            StatusCode::UNAUTHORIZED,
-            "first request should succeed with cached JWKS"
+        // First handshake: cache hit, validates OK.
+        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            first.is_ok(),
+            "first WS handshake should succeed with cached JWKS"
         );
 
         // Wait for TTL to expire.
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-        // Second request: TTL expired, fetch fails (empty keys), should serve stale.
-        let second = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_ne!(
-            second.status(),
-            StatusCode::UNAUTHORIZED,
-            "request should succeed with stale JWKS when endpoint is down"
+        // Second handshake: TTL expired, fetch fails (empty keys), should serve stale.
+        let second = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            second.is_ok(),
+            "WS handshake should succeed with stale JWKS when endpoint is down"
         );
     }
 
@@ -759,32 +539,17 @@ mod integration_tests {
 
         let token = make_jwt_with_kid("user-expiry", "kid-expiry", "secret-expiry");
 
-        // First request: cache hit, validates OK.
-        let first = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+        // First handshake: cache hit, validates OK.
+        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(first.is_ok(), "first WS handshake should succeed");
 
         // Wait beyond TTL + max_stale (2s total).
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
-        // Request should now fail — stale keyset is too old to serve.
-        let expired = client()
-            .post(format!("{}/sync", server.base_url()))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .body(sync_body())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            expired.status(),
-            StatusCode::UNAUTHORIZED,
+        // Handshake should now fail — stale keyset is too old.
+        let expired = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            expired.is_err(),
             "stale keyset beyond max_stale should not be served"
         );
     }
@@ -792,7 +557,6 @@ mod integration_tests {
     #[tokio::test]
     async fn test_schema_hash_endpoint_returns_the_pushed_schema() {
         let server = TestServer::start().await;
-        let app_id = "00000000-0000-0000-0000-000000000001";
 
         let schema = SchemaBuilder::new()
             .table(
@@ -803,43 +567,18 @@ mod integration_tests {
             .build();
         let schema_hash = SchemaHash::compute(&schema);
         let expected_hash = schema_hash.to_string();
-        let encoded_schema = encode_schema(&schema);
-        let object_id = schema_hash.to_object_id().to_string();
 
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            MetadataKey::Type.as_str().to_string(),
-            ObjectType::CatalogueSchema.as_str().to_string(),
-        );
-        metadata.insert(MetadataKey::AppId.as_str().to_string(), app_id.to_string());
-        metadata.insert(
-            MetadataKey::SchemaHash.as_str().to_string(),
-            hex::encode(schema_hash.as_bytes()),
-        );
-
-        let sync_payload = json!({
-            "client_id": Uuid::new_v4().to_string(),
-            "payloads": [{
-                "CatalogueEntryUpdated": {
-                    "entry": {
-                        "object_id": object_id,
-                        "metadata": metadata,
-                        "content": encoded_schema
-                    },
-                }
-            }]
-        });
-
-        let sync_response = client()
-            .post(format!("{}/sync", server.base_url()))
+        // Push schema via the typed admin endpoint.
+        let publish_resp = http_client()
+            .post(format!("{}/admin/schemas", server.base_url()))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-            .json(&sync_payload)
+            .json(&json!({ "schema": schema, "permissions": null }))
             .send()
             .await
             .unwrap();
-        assert_eq!(sync_response.status(), StatusCode::OK);
+        assert_eq!(publish_resp.status(), StatusCode::CREATED);
 
-        let hashes_response = client()
+        let hashes_response = http_client()
             .get(format!("{}/schemas", server.base_url()))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
             .send()
@@ -853,7 +592,7 @@ mod integration_tests {
                 .any(|hash| hash.as_str() == Some(expected_hash.as_str()))
         }));
 
-        let schema_response = client()
+        let schema_response = http_client()
             .get(format!("{}/schema/{expected_hash}", server.base_url()))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
             .send()

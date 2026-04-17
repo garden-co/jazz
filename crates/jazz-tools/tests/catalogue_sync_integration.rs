@@ -101,11 +101,10 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
 
     // === Push v2 schema + lens to server through the real sync pipeline ===
     push_catalogue_in_memory(
-        &server.base_url(),
+        server.server_state(),
         server.app_id(),
         "dev",
         "main",
-        server.admin_secret(),
         &[schema_v1(), schema_v2()],
         &[v1_to_v2_lens()],
     )
@@ -174,11 +173,10 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
 
     // Seed the server with both schemas and the v1<->v2 lens before clients connect.
     push_catalogue_in_memory(
-        &server.base_url(),
+        server.server_state(),
         server.app_id(),
         "dev",
         "main",
-        server.admin_secret(),
         &[schema_v1(), schema_v2()],
         &[v1_to_v2_lens()],
     )

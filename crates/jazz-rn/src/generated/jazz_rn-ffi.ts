@@ -60,6 +60,12 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
+    ptr: bigint,
+    url: Uint8Array,
+    authJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
     ptr: bigint,
     queryJson: Uint8Array,
@@ -76,6 +82,10 @@ interface NativeModuleInterface {
     ptr: bigint,
     objectId: Uint8Array,
     writeContextJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
+    ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
@@ -105,6 +115,11 @@ interface NativeModuleInterface {
     writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+    ptr: bigint,
+    callback: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
     ptr: bigint,
     callback: Uint8Array,
@@ -119,11 +134,6 @@ interface NativeModuleInterface {
     ptr: bigint,
     clientId: Uint8Array,
     messageJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_to_send(
-    ptr: bigint,
-    callback: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
@@ -162,6 +172,11 @@ interface NativeModuleInterface {
     valuesJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
+    ptr: bigint,
+    authJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     ptr: bigint,
     objectId: Uint8Array,
@@ -169,14 +184,14 @@ interface NativeModuleInterface {
     writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+    vtable: UniffiVTableCallbackInterfaceAuthFailureCallback
+  ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
     vtable: UniffiVTableCallbackInterfaceBatchedTickCallback
   ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
     vtable: UniffiVTableCallbackInterfaceSubscriptionCallback
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_syncmessagecallback(
-    vtable: UniffiVTableCallbackInterfaceSyncMessageCallback
   ): void;
   ubrn_uniffi_jazz_rn_fn_func_current_timestamp_ms(
     uniffi_out_err: UniffiRustCallStatus
@@ -197,29 +212,32 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_to_send(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_syncmessagecallback_on_sync_message(): number;
   ubrn_ffi_jazz_rn_uniffi_contract_version(): number;
   ubrn_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
     pointer: bigint,
@@ -343,6 +361,10 @@ export type UniffiForeignFutureCompleteVoid = (
   callbackData: bigint,
   result: UniffiForeignFutureResultVoid
 ) => void;
+type UniffiCallbackInterfaceAuthFailureCallbackMethod0 = (
+  uniffiHandle: bigint,
+  reason: Uint8Array
+) => UniffiResult<void>;
 type UniffiCallbackInterfaceBatchedTickCallbackMethod0 = (
   uniffiHandle: bigint
 ) => UniffiResult<void>;
@@ -350,13 +372,11 @@ type UniffiCallbackInterfaceSubscriptionCallbackMethod0 = (
   uniffiHandle: bigint,
   deltaJson: Uint8Array
 ) => UniffiResult<void>;
-type UniffiCallbackInterfaceSyncMessageCallbackMethod0 = (
-  uniffiHandle: bigint,
-  destinationKind: Uint8Array,
-  destinationId: Uint8Array,
-  payloadJson: Uint8Array,
-  isCatalogue: number
-) => UniffiResult<void>;
+export type UniffiVTableCallbackInterfaceAuthFailureCallback = {
+  uniffiFree: UniffiCallbackInterfaceFree;
+  uniffiClone: UniffiCallbackInterfaceClone;
+  onFailure: UniffiCallbackInterfaceAuthFailureCallbackMethod0;
+};
 export type UniffiVTableCallbackInterfaceBatchedTickCallback = {
   uniffiFree: UniffiCallbackInterfaceFree;
   uniffiClone: UniffiCallbackInterfaceClone;
@@ -366,11 +386,6 @@ export type UniffiVTableCallbackInterfaceSubscriptionCallback = {
   uniffiFree: UniffiCallbackInterfaceFree;
   uniffiClone: UniffiCallbackInterfaceClone;
   onUpdate: UniffiCallbackInterfaceSubscriptionCallbackMethod0;
-};
-export type UniffiVTableCallbackInterfaceSyncMessageCallback = {
-  uniffiFree: UniffiCallbackInterfaceFree;
-  uniffiClone: UniffiCallbackInterfaceClone;
-  onSyncMessage: UniffiCallbackInterfaceSyncMessageCallbackMethod0;
 };
 
 // UniffiRustFutureContinuationCallback is generated as part of the component interface's

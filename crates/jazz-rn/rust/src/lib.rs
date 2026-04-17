@@ -17,7 +17,7 @@ use jazz_tools::binding_support::{
     default_read_durability_options as default_binding_read_durability_options,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_external_object_id, parse_query_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -25,13 +25,12 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
-    SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 // ============================================================================
@@ -232,25 +231,20 @@ pub trait BatchedTickCallback: Send + Sync {
 }
 
 #[uniffi::export(callback_interface)]
-pub trait SyncMessageCallback: Send + Sync {
-    /// Called by Rust when it has an outbox message to send.
-    fn on_sync_message(
-        &self,
-        destination_kind: String,
-        destination_id: String,
-        payload_json: String,
-        is_catalogue: bool,
-    );
-}
-
-#[uniffi::export(callback_interface)]
 pub trait SubscriptionCallback: Send + Sync {
     /// Called when a subscription produces an update.
     fn on_update(&self, delta_json: String);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait AuthFailureCallback: Send + Sync {
+    /// Invoked when the Rust transport receives an auth rejection from the server.
+    /// `reason` is a human-readable string (e.g. "Unauthorized").
+    fn on_failure(&self, reason: String);
+}
+
 // ============================================================================
-// RnScheduler + RnSyncSender
+// RnScheduler
 // ============================================================================
 
 #[derive(Clone, Default)]
@@ -296,45 +290,11 @@ impl Scheduler for RnScheduler {
     }
 }
 
-#[derive(Clone, Default)]
-struct RnSyncSender {
-    callback: Arc<Mutex<Option<Box<dyn SyncMessageCallback>>>>,
-}
-
-impl RnSyncSender {
-    fn set_callback(&self, cb: Option<Box<dyn SyncMessageCallback>>) {
-        if let Ok(mut slot) = self.callback.lock() {
-            *slot = cb;
-        }
-    }
-}
-
-impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let Ok(serialized) = serialize_outbox_entry(&message) else {
-            return;
-        };
-
-        if let Ok(guard) = self.callback.lock() {
-            if let Some(cb) = guard.as_ref() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cb.on_sync_message(
-                        serialized.destination_kind,
-                        serialized.destination_id,
-                        serialized.payload_json,
-                        serialized.is_catalogue,
-                    );
-                }));
-            }
-        }
-    }
-}
-
 // ============================================================================
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -397,9 +357,8 @@ impl RnRuntime {
                     ),
                 })?;
             let scheduler = RnScheduler::default();
-            let sync_sender = RnSyncSender::default();
 
-            let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -421,20 +380,6 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             core.scheduler_mut().set_callback(callback);
-            Ok(())
-        })
-    }
-
-    /// Register a JS callback for outbound sync messages.
-    pub fn on_sync_message_to_send(
-        &self,
-        callback: Option<Box<dyn SyncMessageCallback>>,
-    ) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_to_send", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.sync_sender().set_callback(callback);
             Ok(())
         })
     }
@@ -945,6 +890,104 @@ impl RnRuntime {
             core.storage().close().map_err(runtime_err)?;
             Ok(())
         })
+    }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("connect", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            let scheduler = self
+                .core
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .scheduler()
+                .clone();
+            let tick = RnTickNotifier { scheduler };
+            let manager = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                jazz_tools::runtime_core::install_transport::<
+                    _,
+                    _,
+                    jazz_tools::ws_stream::NativeWsStream,
+                    _,
+                >(&mut core, url, auth, tick)
+            };
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                rt.block_on(manager.run());
+            });
+            Ok(())
+        })
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    pub fn disconnect(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            if let Some(handle) = core.transport() {
+                handle.disconnect();
+            }
+            core.clear_transport();
+        }
+    }
+
+    /// Push updated auth credentials into the live transport.
+    pub fn update_auth(&self, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("update_auth", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            if let Ok(core) = self.core.lock() {
+                if let Some(handle) = core.transport() {
+                    handle.update_auth(auth);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Register a callback that fires when the transport receives an auth
+    /// rejection from the server during the WS handshake.
+    pub fn on_auth_failure(
+        &self,
+        callback: Box<dyn AuthFailureCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("on_auth_failure", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.set_auth_failure_callback(move |reason| {
+                callback.on_failure(reason);
+            });
+            Ok(())
+        })
+    }
+}
+
+// ============================================================================
+// RnTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the React Native (UniFFI) runtime.
+///
+/// Holds a clone of `RnScheduler` and calls `schedule_batched_tick()` whenever
+/// the transport layer needs to wake up `batched_tick`.
+struct RnTickNotifier {
+    scheduler: RnScheduler,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
     }
 }
 

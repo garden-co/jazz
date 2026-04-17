@@ -38,7 +38,6 @@ export declare class NapiRuntime {
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
-  onSyncMessageToSend(callback: (...args: any[]) => any): void
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string
@@ -52,6 +51,25 @@ export declare class NapiRuntime {
   static deriveUserId(seedB64: string): string
   static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
   static getPublicKeyBase64url(seedB64: string): string
+  /**
+   * Connect to a Jazz server over WebSocket.
+   *
+   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+   * `RuntimeCore` via `install_transport` (which seeds the catalogue state
+   * hash on the handle), and spawns the manager loop as a Tokio task.
+   */
+  connect(url: string, authJson: string): void
+  /** Disconnect from the Jazz server and drop the transport handle. */
+  disconnect(): void
+  /** Push updated auth credentials into the live transport. */
+  updateAuth(authJson: string): void
+  /**
+   * Register a JS callback that fires when the Rust transport receives an
+   * auth rejection from the server during the WS handshake.
+   *
+   * The callback receives a single string argument: the rejection reason.
+   */
+  onAuthFailure(callback: (reason: string) => void): void
 }
 
 export declare class TestingServer {

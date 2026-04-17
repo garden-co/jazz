@@ -2,6 +2,7 @@ export {
   type CreateDurabilityOptions,
   type CreateOptions,
   JazzClient,
+  type AuthConfig,
   type LocalUpdatesMode,
   SessionClient,
   loadWasmModule,

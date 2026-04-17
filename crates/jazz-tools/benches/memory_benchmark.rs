@@ -184,7 +184,6 @@ fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
     // current sync-layer state that replaced the old object cache.
     let (row_objects, index_objects, subscriptions, outbox_inbox, om_total) =
         qm.sync_manager().memory_size();
-
     let object_manager = ObjectManagerMemory {
         row_objects,
         index_objects,
