@@ -1,7 +1,6 @@
 import * as React from "react";
-import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
+import { JazzProvider, attachDevTools, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { BrowserAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { app } from "../schema.js";
 
@@ -17,7 +16,7 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
     env: "dev",
     userBranch: "main",
     serverUrl,
-    auth: { localFirstSecret: secret },
+    secret,
     ...overrides,
   };
 }
@@ -60,7 +59,8 @@ export function App({ config, fallback }: AppProps = {}) {
 }
 
 function AppInner({ config, fallback }: AppProps) {
-  const secret = React.use(BrowserAuthSecretStore.getOrCreateSecret({ appId }));
+  const auth = useLocalFirstAuth();
+  const secret: string = React.use(auth.getOrCreateSecret());
   const resolvedConfig = defaultConfig(secret, config);
 
   return (

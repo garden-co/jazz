@@ -171,10 +171,10 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       user_id: userId,
       claims: {
-        auth_mode: "local-first",
         subject: userId,
         issuer: "urn:jazz:local-first",
       },
+      authMode: "local-first",
     });
   });
 
@@ -227,10 +227,10 @@ describe("backend request auth", () => {
       user_id: "principal-123",
       claims: {
         role: "editor",
-        auth_mode: "external",
         subject: "user-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
   });
 });

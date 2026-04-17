@@ -19,7 +19,7 @@ use super::manager::{
 };
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
-use super::session::{Session, WriteContext};
+use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
     ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName, Value,
 };
@@ -906,6 +906,16 @@ impl QueryManager {
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: TableName::new(table),
+                operation: Operation::Insert,
+            });
+        }
 
         // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
@@ -1905,6 +1915,17 @@ impl QueryManager {
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: TableName::new(&table),
+                operation: Operation::Update,
+            });
+        }
+
         let current_row = self
             .transactional_staged_row_for_write(
                 storage,
@@ -2152,6 +2173,16 @@ impl QueryManager {
         )?;
         let descriptor = table_write.descriptor.as_ref();
         let using_policy = table_write.delete_using_policy.as_deref();
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: table_name,
+                operation: Operation::Delete,
+            });
+        }
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =

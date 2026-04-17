@@ -14,6 +14,7 @@ export interface ClientSessionState {
 }
 
 export const LOCAL_FIRST_JWT_ISSUER = "urn:jazz:local-first";
+export const ANONYMOUS_JWT_ISSUER = "urn:jazz:anonymous";
 
 export interface JwtPayload {
   sub?: unknown;
@@ -106,16 +107,22 @@ export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.auth_mode = issuer === LOCAL_FIRST_JWT_ISSUER ? "local-first" : "external";
   if (subject) claims.subject = subject;
   if (issuer) claims.issuer = issuer;
-  if (!isRecord(claimsSource) && claimsSource !== undefined) {
-    claims.raw_claims = claimsSource;
+
+  let authMode: Session["authMode"];
+  if (issuer === LOCAL_FIRST_JWT_ISSUER) {
+    authMode = "local-first";
+  } else if (issuer === ANONYMOUS_JWT_ISSUER) {
+    authMode = "anonymous";
+  } else {
+    authMode = "external";
   }
 
   return {
     user_id: principalId,
     claims,
+    authMode,
   };
 }
 

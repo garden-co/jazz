@@ -79,7 +79,8 @@ describe("vue/create-jazz-client unit", () => {
     const config: DbConfig = { appId: "vue-client-unit-1" };
     const session: Session = {
       user_id: "local:test",
-      claims: { auth_mode: "local-first" },
+      claims: {},
+      authMode: "local-first",
     };
     const db = createMockDb(session);
 

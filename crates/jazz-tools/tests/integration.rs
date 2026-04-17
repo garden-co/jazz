@@ -19,7 +19,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 fn mint_test_token(audience: &str) -> String {
     let seed = [42u8; 32];
-    jazz_tools::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+    jazz_tools::identity::mint_jazz_self_signed_token(
+        &seed,
+        jazz_tools::identity::LOCAL_FIRST_ISSUER,
+        audience,
+        3600,
+    )
+    .unwrap()
 }
 
 /// Encode a 4-byte big-endian length-prefixed frame.

@@ -88,12 +88,8 @@ export class Db extends RuntimeDb {
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  if (config.auth) {
-    const jwtToken = jazzRn.jazz_rn.mintLocalFirstToken(
-      config.auth.localFirstSecret,
-      config.appId,
-      BigInt(3600),
-    );
+  if (config.secret) {
+    const jwtToken = jazzRn.jazz_rn.mintLocalFirstToken(config.secret, config.appId, BigInt(3600));
     return new Db({ ...config, jwtToken });
   }
   return new Db(config);

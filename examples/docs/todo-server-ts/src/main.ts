@@ -173,6 +173,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const userDb = context.forSession({
         user_id: req.params.userId,
+        authMode: "external",
         claims: {},
       });
       const todos = await userDb.all(schemaApp.todos, remoteQueryOptions);
