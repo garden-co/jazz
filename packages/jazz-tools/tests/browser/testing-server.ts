@@ -15,7 +15,7 @@ export interface TestingServerNetworkDebugState {
 
 declare module "vitest/internal/browser" {
   interface BrowserCommands {
-    testingServerInfo: () => Promise<TestingServerInfo>;
+    testingServerInfo: (appId?: string) => Promise<TestingServerInfo>;
     testingServerBlockNetwork: (serverUrl: string) => Promise<void>;
     testingServerUnblockNetwork: (serverUrl: string) => Promise<void>;
     testingServerNetworkDebug: (serverUrl: string) => Promise<TestingServerNetworkDebugState>;
@@ -23,8 +23,8 @@ declare module "vitest/internal/browser" {
   }
 }
 
-export function getTestingServerInfo(): Promise<TestingServerInfo> {
-  return commands.testingServerInfo();
+export function getTestingServerInfo(appId?: string): Promise<TestingServerInfo> {
+  return commands.testingServerInfo(appId);
 }
 
 export function blockTestingServerNetwork(serverUrl: string): Promise<void> {

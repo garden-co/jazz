@@ -36,7 +36,9 @@ export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredPermissions,
   type FetchStoredWasmSchemaOptions,
+  type PublishStoredPermissionsOptions,
 } from "./schema-fetch.js";
 export {
   fetchServerSubscriptions,
