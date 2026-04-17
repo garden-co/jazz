@@ -3,9 +3,10 @@ import type { Session } from "./context.js";
 export interface ClientSessionInput {
   appId: string;
   jwtToken?: string;
+  cookieSession?: Session;
 }
 
-export type ClientSessionTransport = "bearer";
+export type ClientSessionTransport = "bearer" | "cookie";
 
 export interface ClientSessionState {
   transport: ClientSessionTransport | null;
@@ -42,25 +43,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function maybeBuffer(): BufferLike | undefined {
   return (globalThis as { Buffer?: BufferLike }).Buffer;
-}
-
-function utf8Encode(value: string): Uint8Array {
-  if (typeof TextEncoder !== "undefined") {
-    return new TextEncoder().encode(value);
-  }
-
-  const encoded = encodeURIComponent(value);
-  const bytes: number[] = [];
-  for (let i = 0; i < encoded.length; i += 1) {
-    const char = encoded[i]!;
-    if (char === "%") {
-      bytes.push(Number.parseInt(encoded.slice(i + 1, i + 3), 16));
-      i += 2;
-    } else {
-      bytes.push(char.charCodeAt(0));
-    }
-  }
-  return Uint8Array.from(bytes);
 }
 
 function base64UrlToBase64(input: string): string {
@@ -154,6 +136,13 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
     return {
       transport: "bearer",
       session: jwtSession,
+    };
+  }
+
+  if (config.cookieSession) {
+    return {
+      transport: "cookie",
+      session: config.cookieSession,
     };
   }
 
