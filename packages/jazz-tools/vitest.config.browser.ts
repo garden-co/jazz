@@ -58,7 +58,7 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
-        testingServerInfo: async () => testingServerInfo(),
+        testingServerInfo: async (_context, appId) => testingServerInfo(appId),
         testingServerBlockNetwork: async ({ context }, serverUrl) =>
           blockTestingServerNetwork(context, serverUrl),
         testingServerUnblockNetwork: async ({ context }, serverUrl) =>

@@ -9,13 +9,18 @@ use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
+use reqwest::Client;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+mod permissions;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -28,6 +33,81 @@ const TEST_JWT_KID: &str = "test-jwks-kid";
 
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
+
+#[allow(unused_imports)]
+pub use permissions::{
+    PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
+    publish_allow_all_permissions, publish_permissions,
+};
+
+struct SyncServerClient {
+    http_client: Client,
+    base_url: String,
+    route_prefix: String,
+    admin_secret: String,
+}
+
+impl SyncServerClient {
+    async fn connect(
+        server_url: &str,
+        admin_secret: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let http_client = Client::new();
+        let (base_url, route_prefix) = split_base_url(server_url)?;
+
+        let health_url = format!("{base_url}/health");
+        http_client
+            .get(health_url)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(Self {
+            http_client,
+            base_url,
+            route_prefix,
+            admin_secret: admin_secret.to_string(),
+        })
+    }
+
+    async fn push_sync(
+        &self,
+        payload: jazz_tools::sync_manager::SyncPayload,
+        client_id: ClientId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let request = SyncBatchRequest {
+            payloads: vec![payload],
+            client_id,
+        };
+        let sync_url = format!("{}{}/sync", self.base_url, self.route_prefix);
+        self.http_client
+            .post(sync_url)
+            .header(CONTENT_TYPE, "application/json")
+            .header("X-Jazz-Admin-Secret", &self.admin_secret)
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
+
+fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut url = reqwest::Url::parse(server_url)?;
+    let route_prefix = match url.path().trim_end_matches('/') {
+        "" | "/" => String::new(),
+        path => path.to_string(),
+    };
+
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Ok((
+        url.to_string().trim_end_matches('/').to_string(),
+        route_prefix,
+    ))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
@@ -489,6 +569,29 @@ where
         }
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_base_url;
+
+    #[test]
+    fn split_base_url_handles_plain_origin() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "");
+    }
+
+    #[test]
+    fn split_base_url_preserves_route_prefix_without_trailing_slash() {
+        let (base_url, route_prefix) =
+            split_base_url("http://127.0.0.1:31337/api/v1/").expect("split base url");
+
+        assert_eq!(base_url, "http://127.0.0.1:31337");
+        assert_eq!(route_prefix, "/api/v1");
     }
 }
 

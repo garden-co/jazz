@@ -42,6 +42,7 @@ async function openTodosTable(page: Page) {
   const tableLink = page.getByRole("link", { name: "View todos data" });
   await expect(tableLink).toBeVisible({ timeout: 5_000 });
   await tableLink.click();
+  await page.getByRole("columnheader", { name: "title" }).click();
 
   await expectTodosTableLoaded(page);
 }
@@ -134,6 +135,10 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"type": "Text"')).toBeVisible();
     await expect(page.getByText('"name": "done"')).toBeVisible();
     await expect(page.getByText('"type": "Boolean"')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "todos permissions" })).toBeVisible();
+    await expect(
+      page.getByText("No published sync-server permissions found for this app."),
+    ).toBeVisible();
   });
 
   test("discards queued inline text edits without persisting them", async ({ page }) => {

@@ -710,18 +710,6 @@ impl QueryManager {
                 deferred.push(sub);
                 continue;
             };
-            if self
-                .authorization_schema_for_context(
-                    &subscription_context.env,
-                    &subscription_context.user_branch,
-                )
-                .is_none()
-                && self.schema.is_empty()
-                && self.authorization_schema_required
-            {
-                deferred.push(sub);
-                continue;
-            }
 
             // Defence in depth: if the subscription has no session (client omitted
             // it), fall back to the connection-level session set during JWT auth

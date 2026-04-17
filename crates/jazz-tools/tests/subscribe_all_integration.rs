@@ -86,15 +86,16 @@ impl ClientPair {
     }
 
     async fn start_inner(tracer: Option<&jazz_tools::sync_tracer::SyncTracer>) -> Self {
+        let schema = subscription_schema();
         let server = if let Some(t) = tracer {
             TestingServer::builder()
+                .with_schema(schema.clone())
                 .with_tracer(t.clone())
                 .start()
                 .await
         } else {
-            TestingServer::start().await
+            TestingServer::start_with_schema(schema.clone()).await
         };
-        let schema = subscription_schema();
         let mut writer_builder = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())
@@ -621,8 +622,8 @@ async fn subscribe_all_supports_condition_filters() {
         insert: TodoSeed,
     }
 
-    let server = TestingServer::start().await;
     let schema = subscription_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

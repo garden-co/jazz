@@ -1,4 +1,9 @@
-import type { ColumnType, Value as WasmValue, WasmSchema } from "../drivers/types.js";
+import type {
+  ColumnType,
+  TablePolicies,
+  Value as WasmValue,
+  WasmSchema,
+} from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
 import { buildEndpointUrl } from "./sync-transport.js";
@@ -142,6 +147,46 @@ export async function fetchPermissionsHead(
   const body = (await response.json()) as { head?: StoredPermissionsHead | null };
   return {
     head: body.head ?? null,
+  };
+}
+
+export interface StoredPermissionsResponse {
+  head: StoredPermissionsHead | null;
+  permissions: Record<string, TablePolicies> | null;
+}
+
+export interface FetchStoredPermissionsOptions {
+  adminSecret: string;
+  pathPrefix?: string;
+}
+
+export async function fetchStoredPermissions(
+  serverUrl: string,
+  options: FetchStoredPermissionsOptions,
+): Promise<StoredPermissionsResponse> {
+  const response = await fetch(
+    buildEndpointUrl(serverUrl, "/admin/permissions", options.pathPrefix),
+    {
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": options.adminSecret,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(`Permissions fetch failed: ${response.status} ${response.statusText}${detail}`);
+  }
+
+  const body = (await response.json()) as {
+    head?: StoredPermissionsHead | null;
+    permissions?: Record<string, TablePolicies> | null;
+  };
+  return {
+    head: body.head ?? null,
+    permissions: body.permissions ?? null,
   };
 }
 

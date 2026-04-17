@@ -725,11 +725,16 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : void;
   flush() /*throws*/ : void;
   getSchemaHash() /*throws*/ : string;
-  insert(table: string, valuesJson: string) /*throws*/ : string;
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ) /*throws*/ : string;
   insertWithSession(
     table: string,
     valuesJson: string,
-    writeContextJson: string | undefined
+    writeContextJson: string | undefined,
+    objectId: string | undefined
   ) /*throws*/ : string;
   /**
    * Register a callback that fires when the transport receives an auth
@@ -1039,7 +1044,11 @@ export class RnRuntime
     );
   }
 
-  insert(table: string, valuesJson: string): string /*throws*/ {
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ): string /*throws*/ {
     return FfiConverterString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1050,6 +1059,7 @@ export class RnRuntime
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(table),
             FfiConverterString.lower(valuesJson),
+            FfiConverterOptionalString.lower(objectId),
             callStatus
           );
         },
@@ -1061,7 +1071,8 @@ export class RnRuntime
   insertWithSession(
     table: string,
     valuesJson: string,
-    writeContextJson: string | undefined
+    writeContextJson: string | undefined,
+    objectId: string | undefined
   ): string /*throws*/ {
     return FfiConverterString.lift(
       uniffiCaller.rustCallWithError(
@@ -1074,6 +1085,7 @@ export class RnRuntime
             FfiConverterString.lower(table),
             FfiConverterString.lower(valuesJson),
             FfiConverterOptionalString.lower(writeContextJson),
+            FfiConverterOptionalString.lower(objectId),
             callStatus
           );
         },
@@ -1557,7 +1569,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert() !==
-    12677
+    42394
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert'
@@ -1565,7 +1577,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session() !==
-    60695
+    313
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session'

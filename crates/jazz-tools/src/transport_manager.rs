@@ -30,6 +30,14 @@ pub enum TransportInbound {
         sequence: Option<u64>,
     },
     Disconnected,
+    /// First connect/handshake attempt after `install_transport` failed before
+    /// the handshake completed (DNS/TCP/TLS error, or handshake network error).
+    /// Consumers use this to release the initial frontier hold so subscriptions
+    /// can deliver local state while the transport keeps retrying in the
+    /// background.
+    ConnectFailed {
+        reason: String,
+    },
     /// Server rejected the auth handshake with an Unauthorized error.
     /// The transport suspends retries and waits for `TransportControl::UpdateAuth`
     /// or `TransportControl::Shutdown` before attempting a new connection.
@@ -168,9 +176,11 @@ impl ReconnectState {
         {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
-        // M-7: WASM / no-tokio: no real sleep is available. Yield one poll cycle to avoid
-        // a tight spin; outer reconnect loop relies on network I/O awaits for real backpressure.
-        #[cfg(any(target_arch = "wasm32", not(feature = "runtime-tokio")))]
+        #[cfg(target_arch = "wasm32")]
+        {
+            gloo_timers::future::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "runtime-tokio")))]
         {
             let _ = delay_ms;
             futures::future::ready(()).await;
@@ -365,7 +375,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(Ok(ws)) => ws,
                 ControlOrPhase::Phase(Err(e)) => {
-                    tracing::warn!("ws connect failed: {e}");
+                    let reason = format!("{e}");
+                    tracing::warn!("ws connect failed: {reason}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason });
+                    self.tick.notify();
                     let backoff_outcome = tokio::select! {
                         biased;
                         ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
@@ -463,6 +478,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason: e });
+                    self.tick.notify();
                     ws.close().await;
                 }
             }
@@ -570,7 +589,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(Ok(ws)) => ws,
                 ControlOrPhase::Phase(Err(e)) => {
-                    tracing::warn!("ws connect failed: {e}");
+                    let reason = format!("{e}");
+                    tracing::warn!("ws connect failed: {reason}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason });
+                    self.tick.notify();
                     let backoff_outcome = futures::select! {
                         ctrl = self.control_rx.next().fuse() => ControlOrPhase::Control(ctrl),
                         _ = self.reconnect.backoff().fuse() => ControlOrPhase::Phase(()),
@@ -664,6 +688,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 }
                 ControlOrPhase::Phase(HandshakeResult::NetworkError(e)) => {
                     tracing::warn!("ws auth handshake failed: {e}");
+                    let _ = self
+                        .inbound_tx
+                        .unbounded_send(TransportInbound::ConnectFailed { reason: e });
+                    self.tick.notify();
                     ws.close().await;
                 }
             }
