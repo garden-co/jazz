@@ -57,6 +57,7 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
             ..Default::default()
         },
         catalogue_state_hash: None,
+        declared_schema_hash: None,
     };
     let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
@@ -309,6 +310,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
             ..Default::default()
         },
         catalogue_state_hash: None,
+        declared_schema_hash: None,
     };
     let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
