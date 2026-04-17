@@ -25,12 +25,13 @@ describe("InspectorLayout", () => {
     cleanup();
   });
 
-  it("shows schema dropdown and reset button when config reset context is available", () => {
-    const onReset = vi.fn();
+  it("shows schema dropdown and edit button when standalone context is available", () => {
+    const onEdit = vi.fn();
     const onSelectSchema = vi.fn();
 
     mockUseStandaloneContext.mockReturnValue({
-      onReset,
+      onEdit,
+      onReset: vi.fn(),
       schemaHashes: ["hash-a", "hash-b"],
       selectedSchemaHash: "hash-a",
       onSelectSchema,
@@ -43,17 +44,41 @@ describe("InspectorLayout", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("button", { name: "Reset connection" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Edit connection" })).not.toBeNull();
     expect(screen.getByRole("combobox")).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-a" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-b" })).not.toBeNull();
     expect(screen.getByRole("link", { name: "Live Query" })).not.toBeNull();
   });
 
+  it("calls edit handler when edit button is clicked", () => {
+    const onEdit = vi.fn();
+
+    mockUseStandaloneContext.mockReturnValue({
+      onEdit,
+      onReset: vi.fn(),
+      schemaHashes: ["hash-a"],
+      selectedSchemaHash: "hash-a",
+      onSelectSchema: vi.fn(),
+      isSwitchingSchema: false,
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer"]}>
+        <InspectorLayout />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
+
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
   it("calls schema selection handler when dropdown value changes", () => {
     const onSelectSchema = vi.fn();
 
     mockUseStandaloneContext.mockReturnValue({
+      onEdit: vi.fn(),
       onReset: vi.fn(),
       schemaHashes: ["hash-a", "hash-b"],
       selectedSchemaHash: "hash-a",
@@ -74,6 +99,7 @@ describe("InspectorLayout", () => {
 
   it("disables schema dropdown while switching or when no schemas are available", () => {
     mockUseStandaloneContext.mockReturnValue({
+      onEdit: vi.fn(),
       onReset: vi.fn(),
       schemaHashes: ["hash-a"],
       selectedSchemaHash: "hash-a",
@@ -90,6 +116,7 @@ describe("InspectorLayout", () => {
     expect(screen.getByRole("combobox").hasAttribute("disabled")).toBe(true);
 
     mockUseStandaloneContext.mockReturnValue({
+      onEdit: vi.fn(),
       onReset: vi.fn(),
       schemaHashes: [],
       selectedSchemaHash: "hash-a",
@@ -115,7 +142,7 @@ describe("InspectorLayout", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole("button", { name: "Reset connection" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit connection" })).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();
   });
 });
