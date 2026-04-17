@@ -234,17 +234,14 @@ const DEFAULT_CI_BROWSER_LIMITS = {
   b1InsertCount: 4096,
   b1UpdateCount: 4096,
   b1DeleteCount: 4096,
-  // Query-heavy browser scenarios are far slower than write-heavy ones on the
-  // current worker-backed runtime, so the CI pass keeps these read/fanout
-  // cases intentionally small enough to fit within the shared 60s budget.
-  b2RequestCount: 64,
-  b3Cycles: 2,
-  b3LargeMultiplier: 4,
-  b4MaxSubscribers: 24,
-  b4Rounds: 4,
-  b5ReadRequests: 24,
-  b5UpdateAttempts: 16,
-  b6UpdateCount: 12000,
+  b2RequestCount: 768,
+  b3Cycles: 12,
+  b3LargeMultiplier: 8,
+  b4MaxSubscribers: 128,
+  b4Rounds: 12,
+  b5ReadRequests: 160,
+  b5UpdateAttempts: 120,
+  b6UpdateCount: 6000,
 } as const;
 type BrowserLimitOverrides = Partial<Record<keyof typeof DEFAULT_CI_BROWSER_LIMITS, number>>;
 

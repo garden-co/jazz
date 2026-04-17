@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 export const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 60;
 export const DEFAULT_NOISE_REPEAT_COUNT = 3;
+export const ACTIVE_SKIP_MIN_OBSERVATIONS = 3;
 
 export const NATIVE_STORAGE_ENGINES = ["rocksdb", "sqlite"];
 
@@ -258,7 +259,11 @@ export function readSkipSet(file) {
 }
 
 export function skipIds(skipSet) {
-  return new Set((skipSet?.entries ?? []).map((entry) => entry.id));
+  return new Set(
+    (skipSet?.entries ?? [])
+      .filter((entry) => Number(entry?.observations ?? 1) >= ACTIVE_SKIP_MIN_OBSERVATIONS)
+      .map((entry) => entry.id),
+  );
 }
 
 export function repeatCountForBenchmark(benchmark, requestedCount = DEFAULT_NOISE_REPEAT_COUNT) {
