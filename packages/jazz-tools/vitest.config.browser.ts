@@ -7,6 +7,7 @@ import { playwright } from "@vitest/browser-playwright";
 import {
   blockTestingServerNetwork,
   debugTestingServerNetwork,
+  isolatedTestingServerInfo,
   testingServerInfo,
   testingServerJwtForUser,
   unblockTestingServerNetwork,
@@ -64,6 +65,7 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         testingServerInfo: async () => testingServerInfo(),
+        isolatedTestingServerInfo: async () => isolatedTestingServerInfo(),
         testingServerBlockNetwork: async ({ context }, serverUrl) =>
           blockTestingServerNetwork(context, serverUrl),
         testingServerUnblockNetwork: async ({ context }, serverUrl) =>
