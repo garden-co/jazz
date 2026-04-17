@@ -18,11 +18,15 @@
 		return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.[name];
 	}
 
-	function getOrCreateSecretSync(): string {
-		const stored = localStorage.getItem('jazz-auth-secret');
+	function secretStorageKey(appId: string): string {
+		return `jazz-auth-secret:${encodeURIComponent(appId)}`;
+	}
+
+	function getOrCreateSecretSync(appId: string): string {
+		const stored = localStorage.getItem(secretStorageKey(appId));
 		if (stored) return stored;
 		const secret = generateAuthSecret();
-		localStorage.setItem('jazz-auth-secret', secret);
+		localStorage.setItem(secretStorageKey(appId), secret);
 		return secret;
 	}
 
@@ -32,7 +36,7 @@
 		const serverUrl = overrides.serverUrl ?? readEnv('PUBLIC_JAZZ_SERVER_URL');
 		if (!appId)
 			throw new Error('Missing appId: add jazzSvelteKit() to vite.config.ts or set PUBLIC_JAZZ_APP_ID');
-		const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync();
+		const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync(appId);
 
 		return {
 			appId,

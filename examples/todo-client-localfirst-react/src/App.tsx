@@ -60,7 +60,7 @@ export function App({ config, fallback }: AppProps = {}) {
 }
 
 function AppInner({ config, fallback }: AppProps) {
-  const secret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
+  const secret = React.use(BrowserAuthSecretStore.getOrCreateSecret({ appId }));
   const resolvedConfig = defaultConfig(secret, config);
 
   return (
