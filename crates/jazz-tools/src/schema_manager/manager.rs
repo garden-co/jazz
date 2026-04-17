@@ -1567,6 +1567,18 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
+    }
+
+    /// Insert with session-based policy checking and an optional caller-supplied row id.
+    pub fn insert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
         let target_schema = self
@@ -1576,11 +1588,12 @@ impl SchemaManager {
         let aligned_values =
             Self::get_insert_values_with_defaults_for_schema(table, &target_schema, values)?;
         self.query_manager
-            .insert_on_branch_with_schema_and_write_context(
+            .insert_on_branch_with_schema_and_write_context_and_id(
                 storage,
                 table,
                 &target_branch,
                 &aligned_values,
+                object_id,
                 &target_schema,
                 write_context,
             )

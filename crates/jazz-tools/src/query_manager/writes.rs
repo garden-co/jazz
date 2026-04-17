@@ -1160,6 +1160,28 @@ impl QueryManager {
         write_schema: &Schema,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_schema_and_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_schema,
+            write_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_on_branch_with_schema_and_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
         let table_schema = write_schema
             .get(&table_name)
@@ -1179,7 +1201,7 @@ impl QueryManager {
 
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 

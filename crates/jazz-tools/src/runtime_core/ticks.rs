@@ -482,6 +482,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn batched_tick(&mut self) {
         let _span = debug_span!("batched_tick", tier = self.tier_label).entered();
 
+        self.handle_transport_messages();
+
         // 1. Send all outgoing sync messages
         let outbox = self
             .schema_manager
@@ -492,7 +494,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             debug!(count = outbox.len(), "flushing outbox");
         }
         for msg in outbox {
-            if let Some(sync_sender) = self.sync_sender.as_ref() {
+            let handled_by_transport = self
+                .transport
+                .as_ref()
+                .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
+            if handled_by_transport {
+                if let Some(handle) = self.transport.as_ref() {
+                    handle.send_outbox(msg);
+                }
+            } else if let Some(sync_sender) = self.sync_sender.as_ref() {
                 sync_sender.send_sync_message(msg);
             }
         }
@@ -512,7 +522,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
         for msg in outbox {
-            if let Some(sync_sender) = self.sync_sender.as_ref() {
+            let handled_by_transport = self
+                .transport
+                .as_ref()
+                .is_some_and(|handle| matches!(msg.destination, crate::sync_manager::Destination::Server(server_id) if server_id == handle.server_id));
+            if handled_by_transport {
+                if let Some(handle) = self.transport.as_ref() {
+                    handle.send_outbox(msg);
+                }
+            } else if let Some(sync_sender) = self.sync_sender.as_ref() {
                 sync_sender.send_sync_message(msg);
             }
         }
@@ -522,6 +540,56 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             let _span = tracing::debug_span!("flush_wal").entered();
             self.storage.flush_wal();
             self.clear_storage_write_pending_flush();
+        }
+    }
+
+    fn handle_transport_messages(&mut self) {
+        let Some(server_id) = self.transport.as_ref().map(|handle| handle.server_id) else {
+            return;
+        };
+
+        let mut inbound = Vec::new();
+        if let Some(handle) = self.transport.as_mut() {
+            while let Some(message) = handle.try_recv_inbound() {
+                inbound.push(message);
+            }
+        }
+
+        for message in inbound {
+            match message {
+                crate::transport_manager::TransportInbound::Connected {
+                    catalogue_state_hash,
+                    next_sync_seq,
+                } => {
+                    if let Some(next_sync_seq) = next_sync_seq {
+                        self.set_next_expected_server_sequence(server_id, next_sync_seq);
+                    }
+                    self.add_server_with_catalogue_state_hash(
+                        server_id,
+                        catalogue_state_hash.as_deref(),
+                    );
+                }
+                crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
+                    if let Some(sequence) = sequence {
+                        self.park_sync_message_with_sequence(*entry, sequence);
+                    } else {
+                        self.park_sync_message(*entry);
+                    }
+                }
+                crate::transport_manager::TransportInbound::Disconnected => {
+                    self.remove_server(server_id);
+                }
+                crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
+                    tracing::warn!(%server_id, %reason, "transport connect failed");
+                }
+                crate::transport_manager::TransportInbound::AuthFailure { reason } => {
+                    tracing::warn!(%server_id, %reason, "transport auth failure");
+                    self.remove_server(server_id);
+                    if let Some(callback) = self.auth_failure_callback.as_ref() {
+                        callback(reason);
+                    }
+                }
+            }
         }
     }
 
