@@ -1075,9 +1075,14 @@ impl QueryManager {
                 );
             }
 
-            if !subscription.settled_once && !subscription.query_frontier_complete {
+            if !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
                 // Graph state updated by settle(), but don't deliver until the
-                // initial upstream frontier has been replayed.
+                // initial upstream frontier has been replayed — or until every
+                // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
+                // which means nothing upstream is going to replay.
                 tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
