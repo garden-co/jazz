@@ -1,107 +1,11 @@
 use super::*;
-use crate::batch_fate::{BatchSettlement, VisibleBatchMember};
+use crate::batch_fate::BatchSettlement;
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{BatchId, HistoryScan, StoredRowBatch};
 use crate::storage::{RowLocator, metadata_from_row_locator};
-use std::collections::HashSet;
 use uuid::Uuid;
 
 impl SyncManager {
-    fn merge_visible_batch_members(
-        authoritative: &[VisibleBatchMember],
-        reconstructed: &[VisibleBatchMember],
-    ) -> Vec<VisibleBatchMember> {
-        let mut merged = authoritative.to_vec();
-        for member in reconstructed {
-            if !merged.iter().any(|existing| existing == member) {
-                merged.push(member.clone());
-            }
-        }
-        merged
-    }
-
-    fn authoritative_members_present_locally(
-        authoritative: &[VisibleBatchMember],
-        reconstructed: &[VisibleBatchMember],
-    ) -> bool {
-        authoritative
-            .iter()
-            .all(|member| reconstructed.iter().any(|candidate| candidate == member))
-    }
-
-    fn merge_authoritative_and_reconstructed_batch_settlement(
-        &self,
-        authoritative: BatchSettlement,
-        reconstructed: BatchSettlement,
-    ) -> BatchSettlement {
-        match (authoritative, reconstructed) {
-            (
-                BatchSettlement::AcceptedTransaction {
-                    batch_id,
-                    confirmed_tier,
-                    visible_members,
-                },
-                BatchSettlement::AcceptedTransaction {
-                    confirmed_tier: reconstructed_tier,
-                    visible_members: reconstructed_members,
-                    ..
-                },
-            ) => {
-                let merged_members =
-                    Self::merge_visible_batch_members(&visible_members, &reconstructed_members);
-                let merged_tier = if Self::authoritative_members_present_locally(
-                    &visible_members,
-                    &reconstructed_members,
-                ) {
-                    reconstructed_tier
-                } else {
-                    confirmed_tier
-                };
-                BatchSettlement::AcceptedTransaction {
-                    batch_id,
-                    confirmed_tier: merged_tier,
-                    visible_members: merged_members,
-                }
-            }
-            (
-                BatchSettlement::DurableDirect {
-                    batch_id,
-                    confirmed_tier,
-                    visible_members,
-                },
-                BatchSettlement::DurableDirect {
-                    confirmed_tier: reconstructed_tier,
-                    visible_members: reconstructed_members,
-                    ..
-                },
-            ) => {
-                let merged_members =
-                    Self::merge_visible_batch_members(&visible_members, &reconstructed_members);
-                let merged_tier = if Self::authoritative_members_present_locally(
-                    &visible_members,
-                    &reconstructed_members,
-                ) {
-                    reconstructed_tier
-                } else {
-                    confirmed_tier
-                };
-                BatchSettlement::DurableDirect {
-                    batch_id,
-                    confirmed_tier: merged_tier,
-                    visible_members: merged_members,
-                }
-            }
-            (authoritative, reconstructed) => {
-                tracing::warn!(
-                    authoritative = ?authoritative,
-                    reconstructed = ?reconstructed,
-                    "batch settlement kind mismatch; preferring reconstructed visible settlement"
-                );
-                reconstructed
-            }
-        }
-    }
-
     pub(super) fn load_current_row_from_storage<H: crate::storage::Storage + ?Sized>(
         &self,
         storage: &H,
@@ -145,35 +49,9 @@ impl SyncManager {
         }
         match row.state {
             crate::row_histories::RowState::VisibleDirect
-            | crate::row_histories::RowState::VisibleTransactional => self
-                .load_batch_settlement_by_batch_id_from_storage(storage, row.batch_id)
-                .or_else(|| {
-                    let confirmed_tier = row.confirmed_tier?;
-                    let visible_members = vec![VisibleBatchMember {
-                        object_id,
-                        branch_name: *branch_name,
-                        batch_id: row.batch_id,
-                    }];
-                    match row.state {
-                        crate::row_histories::RowState::VisibleDirect => {
-                            Some(BatchSettlement::DurableDirect {
-                                batch_id: row.batch_id,
-                                confirmed_tier,
-                                visible_members,
-                            })
-                        }
-                        crate::row_histories::RowState::VisibleTransactional => {
-                            Some(BatchSettlement::AcceptedTransaction {
-                                batch_id: row.batch_id,
-                                confirmed_tier,
-                                visible_members,
-                            })
-                        }
-                        crate::row_histories::RowState::StagingPending
-                        | crate::row_histories::RowState::Superseded
-                        | crate::row_histories::RowState::Rejected => None,
-                    }
-                }),
+            | crate::row_histories::RowState::VisibleTransactional => {
+                self.load_batch_settlement_by_batch_id_from_storage(storage, row.batch_id)
+            }
             crate::row_histories::RowState::StagingPending
             | crate::row_histories::RowState::Superseded
             | crate::row_histories::RowState::Rejected => None,
@@ -187,121 +65,17 @@ impl SyncManager {
         storage: &H,
         batch_id: BatchId,
     ) -> Option<BatchSettlement> {
-        let authoritative = storage
-            .load_authoritative_batch_settlement(batch_id)
+        storage
+            .load_local_batch_record(batch_id)
             .ok()
-            .flatten();
-
-        let row_locators = match storage.scan_row_locators() {
-            Ok(row_locators) => row_locators,
-            Err(_) => return authoritative,
-        };
-        let mut visible_members = Vec::new();
-        let mut batch_kind: Option<crate::row_histories::RowState> = None;
-        let mut confirmed_tier: Option<DurabilityTier> = None;
-
-        for (object_id, row_locator) in row_locators {
-            let Ok(history_rows) =
-                storage.scan_history_row_batches(row_locator.table.as_str(), object_id)
-            else {
-                continue;
-            };
-
-            let branch_names: HashSet<_> = history_rows
-                .into_iter()
-                .filter(|row| row.batch_id == batch_id)
-                .map(|row| BranchName::new(&row.branch))
-                .collect();
-
-            for branch_name in branch_names {
-                let Some(row) = self.load_current_row_from_storage(
-                    storage,
-                    object_id,
-                    &branch_name,
-                    &row_locator,
-                ) else {
-                    continue;
-                };
-                if row.batch_id != batch_id || !row.state.is_visible() {
-                    continue;
-                }
-                if !matches!(
-                    row.state,
-                    crate::row_histories::RowState::VisibleDirect
-                        | crate::row_histories::RowState::VisibleTransactional
-                ) {
-                    continue;
-                }
-
-                if let Some(existing_kind) = batch_kind {
-                    if existing_kind != row.state {
-                        tracing::warn!(
-                            ?batch_id,
-                            object_id = %object_id,
-                            branch = %branch_name,
-                            existing_state = ?existing_kind,
-                            row_state = ?row.state,
-                            "batch has mixed visible states; skipping settlement reconstruction"
-                        );
-                        return None;
-                    }
-                } else {
-                    batch_kind = Some(row.state);
-                }
-
-                let row_tier = row.confirmed_tier?;
-                confirmed_tier = Some(match confirmed_tier {
-                    Some(existing) => existing.min(row_tier),
-                    None => row_tier,
-                });
-                visible_members.push(VisibleBatchMember {
-                    object_id,
-                    branch_name,
-                    batch_id,
-                });
-            }
-        }
-
-        let reconstructed =
-            if let (Some(state), Some(confirmed_tier)) = (batch_kind, confirmed_tier) {
-                if visible_members.is_empty() {
-                    None
-                } else {
-                    match state {
-                        crate::row_histories::RowState::VisibleDirect => {
-                            Some(BatchSettlement::DurableDirect {
-                                batch_id,
-                                confirmed_tier,
-                                visible_members,
-                            })
-                        }
-                        crate::row_histories::RowState::VisibleTransactional => {
-                            Some(BatchSettlement::AcceptedTransaction {
-                                batch_id,
-                                confirmed_tier,
-                                visible_members,
-                            })
-                        }
-                        crate::row_histories::RowState::StagingPending
-                        | crate::row_histories::RowState::Superseded
-                        | crate::row_histories::RowState::Rejected => None,
-                    }
-                }
-            } else {
-                None
-            };
-
-        match (authoritative, reconstructed) {
-            (Some(authoritative), Some(reconstructed)) => {
-                Some(self.merge_authoritative_and_reconstructed_batch_settlement(
-                    authoritative,
-                    reconstructed,
-                ))
-            }
-            (Some(authoritative), None) => Some(authoritative),
-            (None, Some(reconstructed)) => Some(reconstructed),
-            (None, None) => None,
-        }
+            .flatten()
+            .and_then(|record| record.latest_settlement)
+            .or_else(|| {
+                storage
+                    .load_authoritative_batch_settlement(batch_id)
+                    .ok()
+                    .flatten()
+            })
     }
 
     pub(super) fn queue_batch_settlement_to_client(

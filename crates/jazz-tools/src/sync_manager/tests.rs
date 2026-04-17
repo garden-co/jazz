@@ -111,6 +111,43 @@ fn seed_visible_row(
     .unwrap();
 }
 
+fn persist_visible_row_settlement(
+    io: &mut MemoryStorage,
+    row_id: ObjectId,
+    row: &crate::row_histories::StoredRowBatch,
+) {
+    let Some(confirmed_tier) = row.confirmed_tier else {
+        return;
+    };
+    let settlement = match row.state {
+        crate::row_histories::RowState::VisibleDirect => BatchSettlement::DurableDirect {
+            batch_id: row.batch_id,
+            confirmed_tier,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new(&row.branch),
+                batch_id: row.batch_id,
+            }],
+        },
+        crate::row_histories::RowState::VisibleTransactional => {
+            BatchSettlement::AcceptedTransaction {
+                batch_id: row.batch_id,
+                confirmed_tier,
+                visible_members: vec![VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new(&row.branch),
+                    batch_id: row.batch_id,
+                }],
+            }
+        }
+        crate::row_histories::RowState::StagingPending
+        | crate::row_histories::RowState::Superseded
+        | crate::row_histories::RowState::Rejected => return,
+    };
+    io.upsert_authoritative_batch_settlement(&settlement)
+        .unwrap();
+}
+
 struct FailingHistoryPatchStorage {
     inner: MemoryStorage,
     fail_history_load: bool,
@@ -749,6 +786,7 @@ fn initial_query_sync_replays_current_direct_batch_settlement() {
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
 
     set_client_query_scope(
         &mut sm,
@@ -846,6 +884,7 @@ fn initial_query_sync_replays_current_accepted_transaction_settlement() {
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
 
     set_client_query_scope(
         &mut sm,
@@ -889,6 +928,7 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
 
     sm.process_from_client(
         &mut io,
@@ -912,6 +952,36 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
                 batch_id: row.batch_id,
             }],
         }
+    )));
+}
+
+#[test]
+fn batch_settlement_needed_returns_missing_without_persisted_visible_settlement() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    row.confirmed_tier = Some(DurabilityTier::Worker);
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![row.batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if id == client_id && settlement == BatchSettlement::Missing { batch_id: row.batch_id }
     )));
 }
 
@@ -982,12 +1052,14 @@ fn row_batch_state_changed_relays_direct_batch_settlement_to_interested_clients(
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
-    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    row.confirmed_tier = Some(DurabilityTier::Worker);
     let batch_id = row.batch_id;
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
 
     set_client_query_scope(
         &mut sm,
@@ -1037,13 +1109,14 @@ fn row_batch_state_changed_relays_accepted_transaction_settlement_to_interested_
     let row = row_with_state(
         visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
         crate::row_histories::RowState::VisibleTransactional,
-        None,
+        Some(DurabilityTier::Worker),
     );
     let batch_id = row.batch_id;
 
     add_client(&mut sm, &io, client_id);
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
 
     set_client_query_scope(
         &mut sm,

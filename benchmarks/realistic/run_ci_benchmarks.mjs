@@ -732,11 +732,7 @@ function parseBrowserReport(lines) {
 }
 
 function browserReportFile(runId) {
-  return path.resolve(
-    process.cwd(),
-    "packages/jazz-tools/.vitest-browser-bench",
-    `${runId}.json`,
-  );
+  return path.resolve(process.cwd(), "packages/jazz-tools/.vitest-browser-bench", `${runId}.json`);
 }
 
 async function runBrowserBenchmark(benchmark, args) {

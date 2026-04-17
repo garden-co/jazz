@@ -16,7 +16,7 @@ use crate::query_manager::types::{
 };
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
-    compiled_row_layout, decode_array, decode_row, encode_row, project_row_with_layout,
+    compiled_row_layout, decode_row, encode_row, project_row_with_layout,
 };
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
@@ -184,6 +184,11 @@ fn metadata_entry_descriptor() -> &'static RowDescriptor {
             ColumnDescriptor::new("value", ColumnType::Text),
         ])
     })
+}
+
+fn metadata_entry_layout() -> &'static Arc<CompiledRowLayout> {
+    static LAYOUT: OnceLock<Arc<CompiledRowLayout>> = OnceLock::new();
+    LAYOUT.get_or_init(|| compiled_row_layout(metadata_entry_descriptor()))
 }
 
 fn row_state_column_type() -> ColumnType {
@@ -542,45 +547,6 @@ fn metadata_to_value(metadata: &RowMetadata) -> Value {
     )
 }
 
-fn metadata_from_value(value: &Value) -> Result<RowMetadata, EncodingError> {
-    if matches!(value, Value::Null) {
-        return Ok(RowMetadata::default());
-    }
-    let Value::Array(entries) = value else {
-        return Err(malformed(format!("expected metadata array, got {value:?}")));
-    };
-
-    let mut metadata = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let Value::Row { values, .. } = entry else {
-            return Err(malformed(format!(
-                "expected metadata row entry, got {entry:?}"
-            )));
-        };
-        if values.len() != 2 {
-            return Err(malformed(format!(
-                "expected metadata row with 2 fields, got {}",
-                values.len()
-            )));
-        }
-        let Value::Text(key) = &values[0] else {
-            return Err(malformed(format!(
-                "expected metadata key text, got {:?}",
-                values[0]
-            )));
-        };
-        let Value::Text(value) = &values[1] else {
-            return Err(malformed(format!(
-                "expected metadata value text, got {:?}",
-                values[1]
-            )));
-        };
-        metadata.push((key.clone(), value.clone()));
-    }
-
-    Ok(RowMetadata::from_entries(metadata))
-}
-
 fn decode_required_column_bytes<'a>(
     descriptor: &RowDescriptor,
     layout: &CompiledRowLayout,
@@ -681,17 +647,91 @@ fn decode_optional_batch_id_bytes(bytes: Option<&[u8]>) -> Result<Option<BatchId
         .transpose()
 }
 
+fn decode_metadata_entry_row_bytes(bytes: &[u8]) -> Result<(String, String), EncodingError> {
+    if bytes.is_empty() {
+        return Err(malformed("metadata row id flag missing"));
+    }
+    let row_bytes = match bytes[0] {
+        0 => &bytes[1..],
+        1 => {
+            if bytes.len() < 17 {
+                return Err(malformed("metadata row id too short"));
+            }
+            &bytes[17..]
+        }
+        other => {
+            return Err(malformed(format!(
+                "metadata row id flag must be 0 or 1, got {other}"
+            )));
+        }
+    };
+
+    let descriptor = metadata_entry_descriptor();
+    let layout = metadata_entry_layout().as_ref();
+    let key = decode_text_bytes(
+        decode_required_column_bytes(descriptor, layout, row_bytes, 0, "metadata key")?,
+        "metadata key",
+    )?;
+    let value = decode_text_bytes(
+        decode_required_column_bytes(descriptor, layout, row_bytes, 1, "metadata value")?,
+        "metadata value",
+    )?;
+    Ok((key, value))
+}
+
+fn decode_metadata_entries_array_bytes(
+    bytes: &[u8],
+) -> Result<Vec<(String, String)>, EncodingError> {
+    if bytes.len() < 4 {
+        return Err(malformed("metadata array too short for count"));
+    }
+
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let offset_table_start = 4;
+    let offset_table_size = (count - 1) * 4;
+    let data_start = offset_table_start + offset_table_size;
+    if data_start > bytes.len() {
+        return Err(malformed("metadata array offset table truncated"));
+    }
+
+    let mut entries = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = if index == 0 {
+            data_start
+        } else {
+            let offset_pos = offset_table_start + (index - 1) * 4;
+            u32::from_le_bytes(bytes[offset_pos..offset_pos + 4].try_into().unwrap()) as usize
+                + data_start
+        };
+        let end = if index + 1 < count {
+            let offset_pos = offset_table_start + index * 4;
+            u32::from_le_bytes(bytes[offset_pos..offset_pos + 4].try_into().unwrap()) as usize
+                + data_start
+        } else {
+            bytes.len()
+        };
+
+        if end > bytes.len() || start > end {
+            return Err(malformed("metadata array element bounds invalid"));
+        }
+
+        entries.push(decode_metadata_entry_row_bytes(&bytes[start..end])?);
+    }
+
+    Ok(entries)
+}
+
 fn decode_metadata_bytes(bytes: Option<&[u8]>) -> Result<RowMetadata, EncodingError> {
     let Some(bytes) = bytes else {
         return Ok(RowMetadata::default());
     };
-    let entries = decode_array(
-        bytes,
-        &ColumnType::Row {
-            columns: Box::new(metadata_entry_descriptor().clone()),
-        },
-    )?;
-    metadata_from_value(&Value::Array(entries))
+    Ok(RowMetadata::from_entries(
+        decode_metadata_entries_array_bytes(bytes)?,
+    ))
 }
 
 fn project_user_row_data_from_physical(
@@ -2040,6 +2080,41 @@ mod tests {
             physical_values[physical_descriptor.column_index("done").unwrap()],
             Value::Boolean(false)
         );
+    }
+
+    #[test]
+    fn flat_history_row_binary_roundtrips_nonempty_metadata() {
+        let user_descriptor = user_descriptor();
+        let row = StoredRowBatch::new(
+            ObjectId::from_uuid(Uuid::from_u128(44)),
+            "main",
+            vec![BatchId([3; 16])],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("Ship".into()), Value::Boolean(true)],
+            )
+            .expect("encode user row"),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::from([
+                ("source".to_string(), "worker".to_string()),
+                ("kind".to_string(), "task".to_string()),
+            ]),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
+        let decoded = decode_flat_history_row(
+            &user_descriptor,
+            row.row_id,
+            row.branch.as_str(),
+            row.batch_id(),
+            &encoded,
+        )
+        .expect("decode flat history row");
+
+        assert_eq!(decoded.metadata, row.metadata);
     }
 
     #[test]
