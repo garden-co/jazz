@@ -142,7 +142,8 @@ async function ensureWorkerWasmInitialized(
   try {
     await runWithRootRelativeFetchSupport(() => wasmModule.default());
   } catch (error) {
-    const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error) ?? msg?.fallbackWasmUrl ?? null;
+    const absoluteWasmUrl =
+      resolveAbsoluteWasmUrlFromInitError(error) ?? msg?.fallbackWasmUrl ?? null;
     if (!absoluteWasmUrl) {
       throw error;
     }
