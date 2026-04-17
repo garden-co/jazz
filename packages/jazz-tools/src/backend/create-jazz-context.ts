@@ -175,11 +175,15 @@ export class JazzContext {
 
     // Wire Rust-owned WebSocket transport when a server URL is configured.
     if (this.config.serverUrl) {
-      this.clientInstance.connectTransport(this.config.serverUrl, {
-        backend_secret: this.config.backendSecret,
-        admin_secret: this.config.adminSecret,
-        jwt_token: this.config.jwtToken,
-      });
+      this.clientInstance.connectTransport(
+        this.config.serverUrl,
+        {
+          backend_secret: this.config.backendSecret,
+          admin_secret: this.config.adminSecret,
+          jwt_token: this.config.jwtToken,
+        },
+        this.config.serverPathPrefix,
+      );
     }
 
     return this.clientInstance;
