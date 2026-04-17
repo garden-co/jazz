@@ -149,6 +149,13 @@ export interface PushMigrationOptions extends MigrationCommandOptions {
   toHash: string;
 }
 
+export interface DeployOptions {
+  serverUrl: string;
+  adminSecret: string;
+  schemaDir: string;
+  migrationsDir: string;
+}
+
 const SHORT_SCHEMA_HASH_LENGTH = 12;
 
 function getFlagValue(args: string[], flag: string): string | undefined {
@@ -649,7 +656,7 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
 } {
   if (!compiled.permissions || !compiled.permissionsFile) {
     throw new Error(
-      "No permissions.ts found for this app. Create permissions.ts before using permissions commands.",
+      "No permissions found for this app. Create a permissions.ts file before using permissions commands.",
     );
   }
 
@@ -1764,11 +1771,22 @@ if (isMainModule()) {
       console.error(err.message);
       process.exit(1);
     });
+  } else if (command === "deploy") {
+    const options = resolveMigrationOptions(process.argv.slice(3));
+    deploy({
+      ...requireMigrationServerOptions(options),
+      schemaDir: options.schemaDir ?? process.cwd(),
+      migrationsDir: options.migrationsDir,
+    }).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
   } else {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
     console.log("  validate              Validate root schema.ts and optional permissions.ts");
     console.log("  schema export         Print the compiled structural schema as JSON");
+    console.log("  deploy                Publish the current schema.ts and permissions.ts");
     console.log("  permissions status    Show the current server permissions head for this app");
     console.log(
       "  permissions push      Publish the current permissions.ts with head-parent checks",
