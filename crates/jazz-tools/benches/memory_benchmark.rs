@@ -180,13 +180,14 @@ fn run_memory_benchmark(scale: usize) {
 fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
     let qm = core.schema_manager().query_manager();
 
-    // ObjectManager was merged into SyncManager; outbox/inbox sizes approximate the overhead.
-    let outbox_inbox = qm.sync_manager().outbox().len() * 64; // ~64 B per OutboxEntry
-    let om_total = outbox_inbox;
+    // Keep the legacy ObjectManager-shaped output, but source it from the
+    // current sync-layer state that replaced the old object cache.
+    let (row_objects, index_objects, subscriptions, outbox_inbox, om_total) =
+        qm.sync_manager().memory_size();
     let object_manager = ObjectManagerMemory {
-        row_objects: 0,
-        index_objects: 0,
-        subscriptions: 0,
+        row_objects,
+        index_objects,
+        subscriptions,
         outbox_inbox,
         total: om_total,
     };
