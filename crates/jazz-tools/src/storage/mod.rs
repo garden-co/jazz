@@ -1014,7 +1014,17 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
                 "raw table header mismatch for {raw_table}"
             )))
         }
-        None => storage.upsert_raw_table_header(raw_table, expected_header),
+        None => {
+            if !storage
+                .raw_table_scan_prefix_keys(raw_table, "")?
+                .is_empty()
+            {
+                return Err(StorageError::IoError(format!(
+                    "missing raw table header for non-empty table {raw_table}"
+                )));
+            }
+            storage.upsert_raw_table_header(raw_table, expected_header)
+        }
     }
 }
 
@@ -7439,6 +7449,32 @@ mod tests {
         assert!(
             err.to_string().contains("storage_format_version mismatch"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn nonempty_headerless_raw_table_is_rejected_instead_of_backfilled() {
+        let mut storage = MemoryStorage::new();
+        storage
+            .raw_table_put("legacy_users", "alice", b"hello")
+            .expect("seed legacy row without header");
+
+        let err = ensure_raw_table_header(
+            &mut storage,
+            "legacy_users",
+            &RawTableHeader::system(STORAGE_KIND_CATALOGUE, CATALOGUE_STORAGE_FORMAT_V1),
+        )
+        .expect_err("non-empty headerless raw table should fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("missing raw table header for non-empty table legacy_users"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            storage.load_raw_table_header("legacy_users").unwrap(),
+            None,
+            "legacy raw table should not be relabeled in place"
         );
     }
 

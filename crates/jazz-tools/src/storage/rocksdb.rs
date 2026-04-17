@@ -39,6 +39,17 @@ pub struct RocksDBStorage {
 }
 
 impl RocksDBStorage {
+    fn store_has_any_rows(db: &TransactionDB) -> Result<bool, StorageError> {
+        let mut iter = db.iterator(IteratorMode::Start);
+        match iter.next() {
+            Some(Ok(_)) => Ok(true),
+            Some(Err(e)) => Err(StorageError::IoError(format!(
+                "rocksdb inspect store contents: {e}"
+            ))),
+            None => Ok(false),
+        }
+    }
+
     fn ensure_store_manifest(db: &TransactionDB) -> Result<(), StorageError> {
         let expected = super::expected_store_manifest(super::ROCKSDB_STORE_KIND);
         match db
@@ -50,6 +61,11 @@ impl RocksDBStorage {
                 super::validate_store_manifest(&actual, &expected)
             }
             None => {
+                if Self::store_has_any_rows(db)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty rocksdb store".to_string(),
+                    ));
+                }
                 let bytes = super::encode_store_manifest(&expected)?;
                 db.put(super::STORE_MANIFEST_KEY.as_bytes(), bytes)
                     .map_err(|e| {
@@ -792,6 +808,30 @@ mod tests {
         };
         assert!(
             err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("legacy.rocksdb");
+        let db = TransactionDB::<rocksdb::SingleThreaded>::open(
+            &Options::default(),
+            &TransactionDBOptions::default(),
+            &db_path,
+        )
+        .unwrap();
+        db.put(b"raw:legacy:alice", b"hello").unwrap();
+        drop(db);
+
+        let err = match RocksDBStorage::open(&db_path, 8 * 1024 * 1024) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty rocksdb store"),
             "unexpected error: {err}"
         );
     }
