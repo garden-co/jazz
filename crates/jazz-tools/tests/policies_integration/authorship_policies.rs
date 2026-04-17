@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
-use jazz_tools::jazz_transport::{SyncBatchRequest, SyncBatchResponse};
+use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::TestingServer;
 use jazz_tools::storage::MemoryStorage;
@@ -63,12 +63,7 @@ async fn create_note_with_backend_attribution(
         "main",
     )
     .expect("build backend attributed schema manager");
-    let mut runtime = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut runtime = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
     let client_id = ClientId::new();
     runtime.add_server(ServerId::default());
 
@@ -83,8 +78,10 @@ async fn create_note_with_backend_attribution(
     runtime.batched_tick();
 
     let payloads = runtime
-        .sync_sender()
-        .take()
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox()
         .into_iter()
         .filter_map(|entry| match entry.destination {
             Destination::Server(_) => Some(entry.payload),
@@ -96,25 +93,23 @@ async fn create_note_with_backend_attribution(
         "backend attributed insert should enqueue sync payloads"
     );
 
-    let response = reqwest::Client::new()
-        .post(format!("{}/sync", server.base_url()))
-        .header("X-Jazz-Backend-Secret", server.backend_secret())
-        .json(&SyncBatchRequest {
-            payloads,
-            client_id,
-        })
-        .send()
-        .await
-        .expect("push backend attributed sync batch")
-        .error_for_status()
-        .expect("backend attributed sync batch should succeed")
-        .json::<SyncBatchResponse>()
-        .await
-        .expect("decode backend attributed sync response");
+    let batch = SyncBatchRequest {
+        payloads,
+        client_id,
+    };
+    let frame_payload = serde_json::to_vec(&batch).expect("serialize SyncBatchRequest");
+    let state = server.server_state();
+    // Ensure the client is registered as a backend client before processing.
+    state
+        .runtime
+        .ensure_client_as_backend(client_id)
+        .expect("register backend client");
+    let result = state
+        .process_ws_client_frame(client_id, &frame_payload)
+        .await;
     assert!(
-        response.results.iter().all(|result| result.ok),
-        "backend attributed sync payloads should all apply: {:?}",
-        response.results
+        result.is_ok(),
+        "backend attributed sync payloads should all apply: {result:?}"
     );
 
     note_id

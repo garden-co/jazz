@@ -1,7 +1,7 @@
 //! Tokio runtime adapter for Jazz.
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
-//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
+//! `RuntimeCore<S, TokioScheduler<S>>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
@@ -37,7 +37,7 @@ use crate::sync_manager::{
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 type PersistedWriteAck = futures::channel::oneshot::Receiver<()>;
 type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteAck);
 
@@ -82,16 +82,31 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
             let flag = self.scheduled.clone();
 
             tokio::spawn(async move {
-                // Call batched_tick on the core
+                // Clear the debounce flag BEFORE running batched_tick so that
+                // messages arriving while the tick executes can successfully
+                // schedule a follow-up tick.  Without this, a message parked
+                // between the drain inside batched_tick and the flag.store(false)
+                // below would be silently dropped — no tick would ever wake up
+                // to process it.
+                flag.store(false, Ordering::SeqCst);
+
                 if let Some(core_arc) = core_ref.upgrade()
                     && let Ok(mut core) = core_arc.lock()
                 {
                     core.batched_tick();
                 }
-
-                // Clear the scheduled flag AFTER tick completes
-                flag.store(false, Ordering::SeqCst);
             });
+        }
+    }
+}
+
+// Manual Clone: `S` is not stored by value — the Arc and Weak clones
+// are cheap pointer copies that share the underlying allocation.
+impl<S: Storage + Send + 'static> Clone for TokioScheduler<S> {
+    fn clone(&self) -> Self {
+        Self {
+            scheduled: Arc::clone(&self.scheduled),
+            core_ref: Weak::clone(&self.core_ref),
         }
     }
 }
@@ -101,6 +116,7 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
 // ============================================================================
 
 /// SyncSender implementation using a callback.
+#[derive(Clone)]
 pub struct CallbackSyncSender {
     callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
 }
@@ -164,11 +180,17 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Jazz, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 pub struct TokioRuntime<S: Storage + Send + 'static> {
     core: Arc<Mutex<TokioCoreType<S>>>,
+    /// Installed as `RuntimeCore::sync_sender` and retained here so the
+    /// backing callback outlives the core Arc's lifetime.
+    _sync_sender: CallbackSyncSender,
+    /// Cloned handle to the scheduler (shares Arc-based state with the one inside core).
+    /// Stored here so `connect()` can build a `NativeTickNotifier` without locking.
+    scheduler: TokioScheduler<S>,
 }
 
 // Manual Clone impl — only needs Arc::clone, not S: Clone
@@ -176,6 +198,8 @@ impl<S: Storage + Send + 'static> Clone for TokioRuntime<S> {
     fn clone(&self) -> Self {
         Self {
             core: Arc::clone(&self.core),
+            _sync_sender: self._sync_sender.clone(),
+            scheduler: self.scheduler.clone(),
         }
     }
 }
@@ -195,7 +219,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+        // Install the callback as the runtime's fallback outbox sink so
+        // server-side fanout (or any code path without a TransportHandle)
+        // still delivers OutboxEntries.
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
@@ -208,7 +236,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
                 .set_core_ref(Arc::downgrade(&core_arc));
         }
 
-        Self { core: core_arc }
+        // Clone the scheduler AFTER set_core_ref so the clone shares the
+        // Arc<AtomicBool> debounce flag and the Weak core reference.
+        let scheduler_clone = {
+            let core_guard = core_arc.lock().unwrap();
+            (*core_guard.scheduler()).clone()
+        };
+
+        Self {
+            core: core_arc,
+            _sync_sender: sync_sender,
+            scheduler: scheduler_clone,
+        }
     }
 
     /// Persist the current schema to the catalogue for server sync.
@@ -691,6 +730,99 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .subscribe_with_schema_context(query, schema_context, session)
             .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
         Ok(result)
+    }
+
+    /// Return a reference to the scheduler stored on this runtime handle.
+    ///
+    /// The returned scheduler shares `Arc`-based state with the one inside
+    /// `RuntimeCore` (same debounce flag, same `Weak` back-reference), so
+    /// calling `schedule_batched_tick()` on it is equivalent to calling it
+    /// from within the locked core.
+    pub fn scheduler(&self) -> &TokioScheduler<S> {
+        &self.scheduler
+    }
+}
+
+// ============================================================================
+// NativeTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the native (Tokio) runtime.
+///
+/// Holds a clone of the `TokioScheduler` and calls
+/// `schedule_batched_tick()` whenever the transport layer needs to wake
+/// up `batched_tick` (on connect, on incoming sync frames, on disconnect).
+#[derive(Clone)]
+pub struct NativeTickNotifier<S: Storage + Send + 'static> {
+    scheduler: TokioScheduler<S>,
+}
+
+impl<S: Storage + Send + 'static> crate::transport_manager::TickNotifier for NativeTickNotifier<S> {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
+}
+
+// ============================================================================
+// TokioRuntime connect / disconnect (WebSocket transport)
+// ============================================================================
+
+#[cfg(feature = "transport-websocket")]
+impl<S: Storage + Send + 'static> TokioRuntime<S> {
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Creates a `TransportHandle` / `TransportManager` pair, wires the
+    /// handle into `RuntimeCore`, and spawns the manager loop as a Tokio
+    /// task. The manager drives the WebSocket connection, reconnecting on
+    /// failure until the handle is dropped.
+    pub fn connect(&self, url: String, auth: crate::transport_manager::AuthConfig) {
+        let tick = NativeTickNotifier {
+            scheduler: self.scheduler.clone(),
+        };
+        let manager = {
+            let mut core = self.core.lock().unwrap();
+            crate::runtime_core::install_transport::<_, _, crate::ws_stream::NativeWsStream, _>(
+                &mut core, url, auth, tick,
+            )
+        };
+        tokio::spawn(manager.run());
+    }
+
+    /// Disconnect from the Jazz server.
+    ///
+    /// Drops the `TransportHandle` from `RuntimeCore`. The spawned
+    /// `TransportManager` task detects the dropped handle and exits cleanly.
+    pub fn disconnect(&self) {
+        self.core.lock().unwrap().clear_transport();
+    }
+
+    /// Returns `true` once the WebSocket transport has completed at least one
+    /// successful handshake. Useful for callers that need to wait until the
+    /// initial connection is established before proceeding.
+    pub fn transport_ever_connected(&self) -> bool {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.has_ever_connected()))
+            .unwrap_or(false)
+    }
+
+    /// Returns the wire `ClientId` used by the active transport, if any.
+    ///
+    /// Tests use this to register the transport's client identity with a
+    /// `SyncTracer` so server-originated messages resolve to human names.
+    pub fn transport_client_id(&self) -> Option<ClientId> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.client_id))
+    }
+
+    /// Attach a sync-message tracer to this runtime.
+    pub fn set_sync_tracer(&self, tracer: crate::sync_tracer::SyncTracer, name: String) {
+        if let Ok(mut core) = self.core.lock() {
+            core.set_sync_tracer(tracer, name);
+        }
     }
 }
 

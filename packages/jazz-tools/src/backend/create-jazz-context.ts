@@ -172,6 +172,16 @@ export class JazzContext {
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
+
+    // Wire Rust-owned WebSocket transport when a server URL is configured.
+    if (this.config.serverUrl) {
+      this.clientInstance.connectTransport(this.config.serverUrl, {
+        backend_secret: this.config.backendSecret,
+        admin_secret: this.config.adminSecret,
+        jwt_token: this.config.jwtToken,
+      });
+    }
+
     return this.clientInstance;
   }
 

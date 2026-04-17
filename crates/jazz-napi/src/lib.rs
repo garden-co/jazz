@@ -8,8 +8,8 @@
 //! - `SqliteStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
-//! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
+//! - Server sync uses the Rust-owned WebSocket transport via `connect()`
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -28,7 +28,7 @@ use jazz_tools::binding_support::{
     parse_external_object_id, parse_query_input,
     parse_read_durability_options as parse_binding_read_durability_options,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -38,7 +38,6 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
@@ -48,7 +47,7 @@ use jazz_tools::server::{
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
@@ -251,7 +250,7 @@ fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,59 +329,6 @@ impl Scheduler for NapiScheduler {
     }
 }
 
-// ============================================================================
-// NapiSyncSender
-// ============================================================================
-
-/// Arguments for the sync message callback
-/// (destinationKind, destinationId, payloadJson, isCatalogue)
-type SyncCallbackParams = (String, String, String, bool);
-
-pub struct NapiSyncSender {
-    callback: Arc<Mutex<Option<ThreadsafeFunction<SyncCallbackParams>>>>,
-}
-
-impl NapiSyncSender {
-    fn new() -> Self {
-        Self {
-            callback: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn set_callback(&self, tsfn: ThreadsafeFunction<SyncCallbackParams>) {
-        if let Ok(mut cb) = self.callback.lock() {
-            *cb = Some(tsfn);
-        }
-    }
-}
-
-impl SyncSender for NapiSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let cb = match self.callback.lock() {
-            Ok(cb) => cb,
-            Err(_) => return,
-        };
-        let tsfn = match cb.as_ref() {
-            Some(tsfn) => tsfn,
-            None => return,
-        };
-        let serialized = match serialize_outbox_entry(&message) {
-            Ok(serialized) => serialized,
-            Err(_) => return,
-        };
-
-        tsfn.call(
-            Ok((
-                serialized.destination_kind,
-                serialized.destination_id,
-                serialized.payload_json,
-                serialized.is_catalogue,
-            )),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
-    }
-}
-
 fn build_napi_runtime(
     env: Env,
     schema_json: String,
@@ -424,10 +370,9 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
-    let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let core = RuntimeCore::new(schema_manager, storage, scheduler);
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -1124,21 +1069,6 @@ impl NapiRuntime {
         Ok(())
     }
 
-    #[napi(js_name = "onSyncMessageToSend")]
-    pub fn on_sync_message_to_send(
-        &self,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] callback: ThreadsafeFunction<
-            SyncCallbackParams,
-        >,
-    ) -> napi::Result<()> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.sync_sender().set_callback(callback);
-        Ok(())
-    }
-
     #[napi(js_name = "addServer")]
     pub fn add_server(
         &self,
@@ -1300,6 +1230,123 @@ impl NapiRuntime {
         let seed = napi_decode_seed(&seed_b64)?;
         let verifying_key = identity::derive_verifying_key(&seed);
         Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+    }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore` via `install_transport` (which seeds the catalogue state
+    /// hash on the handle), and spawns the manager loop as a Tokio task.
+    #[napi]
+    pub fn connect(&self, url: String, auth_json: String) -> napi::Result<()> {
+        let auth: jazz_tools::transport_manager::AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let tick = NapiTickNotifier {
+            core: Arc::clone(&self.core),
+        };
+        let manager = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            jazz_tools::runtime_core::install_transport::<
+                _,
+                _,
+                jazz_tools::ws_stream::NativeWsStream,
+                _,
+            >(&mut core, url, auth, tick)
+        };
+        // Spawn the TransportManager loop. If we're inside an active Tokio
+        // runtime (typical: Node.js with napi-rs bootstrapping one), use it.
+        // Otherwise (e.g. Next.js SSG build workers that load the addon
+        // without a runtime) fall back to a dedicated runtime on a background
+        // thread so `tokio::spawn` never panics.
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt_handle) => {
+                rt_handle.spawn(manager.run());
+            }
+            Err(_) => {
+                std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            eprintln!("jazz-napi: failed to build fallback tokio runtime: {e}");
+                            return;
+                        }
+                    };
+                    rt.block_on(manager.run());
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    #[napi]
+    pub fn disconnect(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            if let Some(handle) = core.transport() {
+                handle.disconnect();
+            }
+            core.clear_transport();
+        }
+    }
+
+    /// Push updated auth credentials into the live transport.
+    #[napi]
+    pub fn update_auth(&self, auth_json: String) -> napi::Result<()> {
+        let auth: jazz_tools::transport_manager::AuthConfig = serde_json::from_str(&auth_json)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if let Ok(core) = self.core.lock()
+            && let Some(handle) = core.transport()
+        {
+            handle.update_auth(auth);
+        }
+        Ok(())
+    }
+
+    /// Register a JS callback that fires when the Rust transport receives an
+    /// auth rejection from the server during the WS handshake.
+    ///
+    /// The callback receives a single string argument: the rejection reason.
+    #[napi(ts_args_type = "callback: (reason: string) => void")]
+    pub fn on_auth_failure(
+        &self,
+        // CalleeHandled=false: JS callback receives (reason) not (error, reason).
+        callback: ThreadsafeFunction<String, (), String, napi::Status, false, false, 0>,
+    ) -> napi::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.set_auth_failure_callback(move |reason| {
+            callback.call(reason, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        Ok(())
+    }
+}
+
+// ============================================================================
+// NapiTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the NAPI (Node.js) runtime.
+///
+/// Holds a weak-upgradeable reference to `RuntimeCore` and schedules a
+/// `batched_tick` on the Node.js event loop whenever the transport layer
+/// needs to wake up.
+struct NapiTickNotifier {
+    core: Arc<Mutex<NapiCoreType>>,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for NapiTickNotifier {
+    fn notify(&self) {
+        if let Ok(core) = self.core.lock() {
+            core.scheduler().schedule_batched_tick();
+        }
     }
 }
 

@@ -9,7 +9,7 @@
 //!
 //! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
-//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
+//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback (worker-bridge only; server sync via `connect()`)
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
 
 use std::cell::RefCell;
@@ -292,7 +292,7 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler>;
 
 // ============================================================================
 // WasmScheduler
@@ -302,6 +302,7 @@ type WasmCoreType = RuntimeCore<Box<dyn Storage>, WasmScheduler, JsSyncSender>;
 ///
 /// Uses `wasm_bindgen_futures::spawn_local` to schedule a batched tick.
 /// Debounced: only one task is scheduled at a time.
+#[derive(Clone)]
 pub struct WasmScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Rc<RefCell<bool>>,
@@ -366,36 +367,53 @@ impl Scheduler for WasmScheduler {
 // JsSyncSender
 // ============================================================================
 
-/// SyncSender implementation bridging to a JS callback.
+/// Bridges outbound sync messages from the Rust runtime to a JS callback.
 ///
-/// The callback is set lazily via `on_sync_message_to_send()`.
-pub struct JsSyncSender {
+/// This sender is intentionally kept for the **worker-bridge path only**:
+/// the worker WASM runtime routes `"client"`-destination outbox messages
+/// back to the main thread via postMessage. Server-bound messages go through
+/// the Rust-owned WebSocket transport (`WasmRuntime::connect`) instead; any
+/// `"server"` destination that arrives here is silently dropped by the JS
+/// callback registered in `jazz-worker.ts`.
+struct JsSyncSenderInner {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
 }
 
+#[derive(Clone)]
+pub struct JsSyncSender {
+    inner: Rc<JsSyncSenderInner>,
+}
+
+// SAFETY: WASM is single-threaded; the JS callback never crosses threads.
+// `Send` is required only because `RuntimeCore::sync_sender` is typed
+// `Box<dyn SyncSender + Send>` for the multi-threaded Tokio backend.
+unsafe impl Send for JsSyncSender {}
+
 impl JsSyncSender {
     fn new(use_binary_encoding: bool) -> Self {
         Self {
-            callback: RefCell::new(None),
-            use_binary_encoding,
+            inner: Rc::new(JsSyncSenderInner {
+                callback: RefCell::new(None),
+                use_binary_encoding,
+            }),
         }
     }
 
     fn set_callback(&self, callback: Function) {
-        *self.callback.borrow_mut() = Some(callback);
+        *self.inner.callback.borrow_mut() = Some(callback);
     }
 }
 
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        if let Some(ref callback) = *self.callback.borrow() {
+        if let Some(ref callback) = *self.inner.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
             let (destination_kind, destination_id) = match message.destination {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
-            if self.use_binary_encoding || destination_kind == "client" {
+            if self.inner.use_binary_encoding || destination_kind == "client" {
                 if let Ok(payload_bytes) = message.payload.to_bytes() {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
                     let _ = callback.call4(
@@ -432,6 +450,12 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    /// JS callback holder for outbound sync messages (worker-bridge path only).
+    ///
+    /// `on_sync_message_to_send` installs the JS-side callback here. The worker
+    /// WASM runtime uses it to forward `"client"`-destination outbox messages to
+    /// the main thread via postMessage. Server sync goes through `connect()`.
+    sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
     tier_label: &'static str,
@@ -512,8 +536,11 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        // Install the JS-callback sender so `batched_tick` drains outbox
+        // entries to the worker bridge (no transport handle here).
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -531,6 +558,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            sync_sender,
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
@@ -643,7 +671,7 @@ impl WasmRuntime {
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core.borrow().sync_sender().set_callback(callback);
+        self.sync_sender.set_callback(callback);
     }
 
     // =========================================================================
@@ -1436,8 +1464,11 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new(use_binary_encoding);
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
+        // Install the JS-callback sender so `batched_tick` drains outbox
+        // entries to the worker bridge (no transport handle here).
+        core.set_sync_sender(Box::new(sync_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -1455,6 +1486,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            sync_sender,
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
@@ -1497,5 +1529,93 @@ impl WasmRuntime {
         let seed = decode_seed(seed_b64)?;
         let verifying_key = identity::derive_verifying_key(&seed);
         Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
+    }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop via `spawn_local`.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JsValue> {
+        let auth: jazz_tools::transport_manager::AuthConfig =
+            serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let scheduler = self.core.borrow().scheduler().clone();
+        let tick = WasmTickNotifier { scheduler };
+        let manager = {
+            let mut core = self.core.borrow_mut();
+            jazz_tools::runtime_core::install_transport::<_, _, crate::ws_stream::WasmWsStream, _>(
+                &mut core, url, auth, tick,
+            )
+        };
+        wasm_bindgen_futures::spawn_local(manager.run());
+        Ok(())
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn disconnect(&self) {
+        let mut core = self.core.borrow_mut();
+        // Signal the manager to shut down before dropping the handle.
+        if let Some(handle) = core.transport() {
+            handle.disconnect();
+        }
+        // Drop the borrow before mutably clearing.
+        core.clear_transport();
+    }
+
+    /// Push updated auth credentials into the live transport.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = "updateAuth")]
+    pub fn update_auth(&self, auth_json: String) -> Result<(), JsValue> {
+        let auth: jazz_tools::transport_manager::AuthConfig =
+            serde_json::from_str(&auth_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let core = self.core.borrow();
+        if let Some(handle) = core.transport() {
+            handle.update_auth(auth);
+        }
+        Ok(())
+    }
+
+    /// Register a JS callback that fires when the Rust transport receives an
+    /// auth failure (Unauthorized) from the server during the WS handshake.
+    ///
+    /// The callback receives a single string argument: a human-readable reason.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = "onAuthFailure")]
+    pub fn on_auth_failure(&self, callback: Function) {
+        // WASM is single-threaded; wrapping Function in a Send marker is safe here.
+        struct SendFunction(Function);
+        // SAFETY: WASM runs on a single thread; no concurrent access is possible.
+        unsafe impl Send for SendFunction {}
+
+        let send_fn = SendFunction(callback);
+        self.core
+            .borrow_mut()
+            .set_auth_failure_callback(move |reason| {
+                let reason_js = JsValue::from_str(&reason);
+                let _ = send_fn.0.call1(&JsValue::NULL, &reason_js);
+            });
+    }
+}
+
+// ============================================================================
+// WasmTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the WASM runtime.
+///
+/// Holds a clone of `WasmScheduler` and calls `schedule_batched_tick()`
+/// whenever the transport layer needs to wake up `batched_tick`.
+#[cfg(target_arch = "wasm32")]
+struct WasmTickNotifier {
+    scheduler: WasmScheduler,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl jazz_tools::transport_manager::TickNotifier for WasmTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
     }
 }

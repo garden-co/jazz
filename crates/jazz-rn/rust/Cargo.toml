@@ -10,7 +10,9 @@ uniffi = "0.30.0"
 thiserror = "1.0.64"
 jazz_tools = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
   "sqlite",
+  "transport-websocket",
 ] }
+tokio = { version = "1", features = ["rt"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v7"] }
 blake3 = "1.8.2"

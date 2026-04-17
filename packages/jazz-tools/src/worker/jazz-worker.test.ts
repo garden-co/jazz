@@ -1,104 +1,119 @@
 /**
- * Tests for server-payload batching in the Jazz worker.
+ * Unit tests for jazz-worker URL normalization and auth-merge helpers.
  *
- * RED: ServerPayloadBatcher does not exist yet — these tests fail at import
- * time until server-payload-batcher.ts is created and the class exported.
+ * These tests target the exported pure helpers `composeConnectUrl` and
+ * `mergeAuth`, which encapsulate the two behaviours that T22 validates:
  *
- * The batcher is the piece that sits between the WASM outbox callback and
- * sendSyncPayloadBatch. It accumulates server-bound payloads within a
- * microtask boundary and flushes them as a single batch.
+ *   1. serverUrl + serverPathPrefix → correct WebSocket URL via httpUrlToWs
+ *   2. update-auth merges / clears jwt_token while preserving other fields
+ *
+ * The helpers are pure functions — no WASM, no worker globals needed.
+ * We must still stub `self` and `jazz-wasm` because jazz-worker.ts installs
+ * `self.onmessage` and calls `startup()` at module top level.
  */
 
-import { describe, expect, it, vi } from "vitest";
-import { ServerPayloadBatcher } from "./server-payload-batcher.js";
+import { describe, it, expect, vi } from "vitest";
 
-const playerPayload = (seq: number) =>
-  JSON.stringify({
-    ObjectUpdated: { object_id: `player-obj`, branch_name: "main", seq },
+// ── Stub the worker global `self` before the module is loaded ────────────────
+// jazz-worker.ts does `self.onmessage = ...` at module scope.
+// Node doesn't have a worker `self`; provide a minimal stand-in.
+vi.hoisted(() => {
+  const fakeSelf = {
+    onmessage: null as null | ((e: MessageEvent) => void),
+    postMessage: vi.fn(),
+    close: vi.fn(),
+    location: { origin: "http://localhost", href: "http://localhost/worker.js" },
+  };
+  (globalThis as Record<string, unknown>).self = fakeSelf;
+});
+
+// ── Stub jazz-wasm so startup() doesn't reject ───────────────────────────────
+vi.mock("jazz-wasm", () => ({
+  default: vi.fn().mockResolvedValue(undefined),
+  initSync: vi.fn(),
+}));
+
+import {
+  composeConnectUrl,
+  mergeAuth,
+  performUpstreamConnect,
+  handleUpdateAuth,
+} from "./jazz-worker.js";
+import type { WorkerToMainMessage } from "./worker-protocol.js";
+
+describe("worker URL + auth wiring", () => {
+  it("normalizes serverUrl with serverPathPrefix via httpUrlToWs", () => {
+    const wsUrl = composeConnectUrl("http://localhost:4000", "/apps/xyz");
+    expect(wsUrl).toBe("ws://localhost:4000/apps/xyz/ws");
   });
 
-describe("ServerPayloadBatcher", () => {
-  it("batches 60 synchronous enqueues into a single sendBatch call after a microtask", async () => {
-    // alice's game loop fires db.update 60 times in one tick — the batcher
-    // must collapse them into exactly 1 HTTP POST
-    //
-    //  tick N:  enqueue×60 ──► [pending queue]
-    //             microtask ──► sendBatch([p0…p59])   ← 1 call, not 60
+  it("merges new jwtToken into cached auth on update-auth", () => {
+    // Simulate state after init: admin_secret cached, initial jwt_token set.
+    const afterInit = mergeAuth({ admin_secret: "s" }, "initial");
+    expect(afterInit).toEqual({ admin_secret: "s", jwt_token: "initial" });
 
-    const sendBatch = vi.fn().mockResolvedValue(undefined);
-    const batcher = new ServerPayloadBatcher(sendBatch);
-
-    for (let i = 0; i < 60; i++) {
-      batcher.enqueue(playerPayload(i));
-    }
-
-    // Nothing flushed synchronously
-    expect(sendBatch).not.toHaveBeenCalled();
-
-    await Promise.resolve(); // yield to microtask queue
-
-    expect(sendBatch).toHaveBeenCalledTimes(1);
-    expect(sendBatch.mock.calls[0]![0]).toHaveLength(60);
+    // Simulate update-auth arriving with a refreshed token.
+    const afterUpdate = mergeAuth(afterInit, "refreshed");
+    expect(afterUpdate.jwt_token).toBe("refreshed");
+    expect(afterUpdate.admin_secret).toBe("s");
   });
 
-  it("preserves payload order in the flushed batch", async () => {
-    // bob's collected flag transitions false→true→false in one tick;
-    // all three writes must reach the server in that exact order
-    //
-    //  enqueue(false) → enqueue(true) → enqueue(false)
-    //  flush → sendBatch([false, true, false])  ← order preserved
+  it("clears jwt_token when update-auth arrives without one", () => {
+    // State after init with a token.
+    const afterInit = mergeAuth({ admin_secret: "s" }, "initial");
 
-    const received: string[][] = [];
-    const batcher = new ServerPayloadBatcher(async (payloads) => {
-      received.push([...payloads]);
+    // update-auth with no jwtToken → token must be removed.
+    const afterUpdate = mergeAuth(afterInit, undefined);
+    expect(afterUpdate.jwt_token).toBeUndefined();
+    expect(afterUpdate.admin_secret).toBe("s");
+  });
+});
+
+describe("worker update-auth error propagation", () => {
+  it("posts auth-failed with reason=invalid when runtime.updateAuth throws", () => {
+    const posted: any[] = [];
+    const runtime = {
+      updateAuth: vi.fn(() => {
+        throw new Error("boom");
+      }),
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    handleUpdateAuth(runtime, '{"jwt_token":"new.jwt"}', (msg) => posted.push(msg));
+
+    const authFailed = posted.find((m) => m.type === "auth-failed");
+    expect(authFailed).toBeDefined();
+    expect(authFailed.reason).toBe("invalid");
+    errorSpy.mockRestore();
+  });
+});
+
+describe("performUpstreamConnect", () => {
+  it("posts upstream-connected after runtime.connect succeeds", () => {
+    const connect = vi.fn();
+    const posted: WorkerToMainMessage[] = [];
+
+    performUpstreamConnect(
+      { connect },
+      (msg) => posted.push(msg),
+      "ws://example/ws",
+      '{"jwt_token":"x"}',
+    );
+
+    expect(connect).toHaveBeenCalledWith("ws://example/ws", '{"jwt_token":"x"}');
+    expect(posted).toEqual([{ type: "upstream-connected" }]);
+  });
+
+  it("posts upstream-disconnected when runtime.connect throws", () => {
+    const connect = vi.fn(() => {
+      throw new Error("ws handshake failed");
     });
+    const posted: WorkerToMainMessage[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const p1 = playerPayload(1);
-    const p2 = playerPayload(2);
-    const p3 = playerPayload(3);
-    batcher.enqueue(p1);
-    batcher.enqueue(p2);
-    batcher.enqueue(p3);
+    performUpstreamConnect({ connect }, (msg) => posted.push(msg), "ws://example/ws", "{}");
 
-    await Promise.resolve();
-
-    expect(received).toHaveLength(1);
-    expect(received[0]).toEqual([p1, p2, p3]);
-  });
-
-  it("second wave of enqueues after flush produces a separate batch", async () => {
-    // two separate ticks must produce two separate POSTs — payloads from
-    // tick N must not bleed into tick N+1's batch
-    //
-    //  tick N:  enqueue×2 → flush → sendBatch([p1, p2])
-    //  tick N+1: enqueue×1 → flush → sendBatch([p3])
-
-    const sendBatch = vi.fn().mockResolvedValue(undefined);
-    const batcher = new ServerPayloadBatcher(sendBatch);
-
-    batcher.enqueue(playerPayload(1));
-    batcher.enqueue(playerPayload(2));
-
-    await Promise.resolve();
-
-    expect(sendBatch).toHaveBeenCalledTimes(1);
-    expect(sendBatch.mock.calls[0]![0]).toHaveLength(2);
-
-    batcher.enqueue(playerPayload(3));
-
-    await Promise.resolve();
-
-    expect(sendBatch).toHaveBeenCalledTimes(2);
-    expect(sendBatch.mock.calls[1]![0]).toHaveLength(1);
-  });
-
-  it("does not flush when queue is empty", async () => {
-    const sendBatch = vi.fn().mockResolvedValue(undefined);
-    const _batcher = new ServerPayloadBatcher(sendBatch);
-
-    // enqueue then drain immediately (simulates a flush with nothing pending)
-    await Promise.resolve();
-
-    expect(sendBatch).not.toHaveBeenCalled();
+    expect(posted).toEqual([{ type: "upstream-disconnected" }]);
+    errorSpy.mockRestore();
   });
 });

@@ -182,7 +182,7 @@ export function StressTest() {
           description: generateDescription(i),
           owner_id: sessionUserId,
           // Assign ~70% of todos to a project
-          project_id: i % 10 < 7 ? projectIds[i % projectIds.length] : undefined,
+          projectId: i % 10 < 7 ? projectIds[i % projectIds.length] : undefined,
         });
         inserted++;
       }
