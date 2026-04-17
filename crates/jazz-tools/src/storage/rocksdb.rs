@@ -33,10 +33,31 @@ struct RocksDBInner {
 }
 
 pub struct RocksDBStorage {
+    cache_namespace: usize,
     inner: RefCell<Option<RocksDBInner>>,
 }
 
 impl RocksDBStorage {
+    fn ensure_store_manifest(db: &TransactionDB) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::ROCKSDB_STORE_KIND);
+        match db
+            .get(super::STORE_MANIFEST_KEY.as_bytes())
+            .map_err(|e| StorageError::IoError(format!("rocksdb read store manifest: {e}")))?
+        {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                let bytes = super::encode_store_manifest(&expected)?;
+                db.put(super::STORE_MANIFEST_KEY.as_bytes(), bytes)
+                    .map_err(|e| {
+                        StorageError::IoError(format!("rocksdb write store manifest: {e}"))
+                    })
+            }
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
@@ -53,8 +74,10 @@ impl RocksDBStorage {
         let txdb_opts = TransactionDBOptions::default();
         let db = TransactionDB::open(&opts, &txdb_opts, path.as_ref())
             .map_err(|e| StorageError::IoError(format!("rocksdb open: {e}")))?;
+        Self::ensure_store_manifest(&db)?;
 
         Ok(Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             inner: RefCell::new(Some(RocksDBInner {
                 db,
                 ensured_raw_table_headers: HashSet::new(),
@@ -282,6 +305,10 @@ impl RocksDBStorage {
 }
 
 impl Storage for RocksDBStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
@@ -710,6 +737,38 @@ mod tests {
         storage.close().unwrap();
         let reopened = RocksDBStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         reopened.close().unwrap();
+    }
+
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.rocksdb");
+        let storage = RocksDBStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        storage.close().unwrap();
+
+        let db = TransactionDB::<rocksdb::SingleThreaded>::open(
+            &Options::default(),
+            &TransactionDBOptions::default(),
+            &db_path,
+        )
+        .unwrap();
+        let bad_manifest = super::super::StoreManifest {
+            store_kind: super::super::ROCKSDB_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        let bytes = super::super::encode_store_manifest(&bad_manifest).unwrap();
+        db.put(super::super::STORE_MANIFEST_KEY.as_bytes(), bytes)
+            .unwrap();
+        drop(db);
+
+        let err = match RocksDBStorage::open(&db_path, 8 * 1024 * 1024) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     mod rocksdb_conformance {

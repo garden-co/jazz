@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use rusqlite::OptionalExtension;
+
 use super::{
     HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, Storage,
     StorageError, VisibleRowBytes, key_codec,
@@ -59,10 +61,39 @@ impl SqliteInner {
 }
 
 pub struct SqliteStorage {
+    cache_namespace: usize,
     inner: Mutex<Option<SqliteInner>>,
 }
 
 impl SqliteStorage {
+    fn ensure_store_manifest(conn: &rusqlite::Connection) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::SQLITE_STORE_KIND);
+        let existing = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::IoError(format!("sqlite read store manifest: {e}")))?;
+
+        match existing {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                let bytes = super::encode_store_manifest(&expected)?;
+                conn.execute(
+                    "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+                    rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+                )
+                .map_err(|e| StorageError::IoError(format!("sqlite write store manifest: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     /// Compute the lexicographic successor of `prefix` for use as an
     /// exclusive upper bound. Same logic as RocksDB's `prefix_upper_bound`.
     fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -94,8 +125,10 @@ impl SqliteStorage {
              ) WITHOUT ROWID;",
         )
         .map_err(|e| StorageError::IoError(format!("sqlite init: {e}")))?;
+        Self::ensure_store_manifest(&conn)?;
 
         Ok(Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             inner: Mutex::new(Some(SqliteInner {
                 conn,
                 path: path.to_path_buf(),
@@ -288,6 +321,10 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
@@ -816,6 +853,35 @@ mod tests {
     fn storage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<SqliteStorage>();
+    }
+
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let storage = SqliteStorage::open(&path).unwrap();
+        storage.close().unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let bad_manifest = super::super::StoreManifest {
+            store_kind: super::super::SQLITE_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        let bytes = super::super::encode_store_manifest(&bad_manifest).unwrap();
+        conn.execute(
+            "UPDATE kv SET value = ?2 WHERE key = ?1",
+            rusqlite::params![super::super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+        )
+        .unwrap();
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     mod sqlite_conformance {

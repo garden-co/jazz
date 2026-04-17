@@ -59,6 +59,7 @@ impl SyncManager {
                     %error,
                     "failed to persist rejected transactional batch settlement"
                 );
+                return;
             }
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(check.client_id),
