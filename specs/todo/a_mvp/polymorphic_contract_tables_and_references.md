@@ -227,7 +227,7 @@ await db.all(app.entities.asVariant("post").where({ title: { contains: "Jazz" } 
 await db.all(app.comments.hopTo("target").asVariant("image"));
 ```
 
-#### Uniform `kind + variant` shape
+#### Full discriminated-union shape
 
 Contract handles also gain:
 
@@ -235,8 +235,9 @@ Contract handles also gain:
 app.entities.includeVariant();
 ```
 
-This keeps the top-level contract shape uniform while exposing the concrete
-payload under one fixed key:
+This widens the contract query from “contract columns only” to the full
+contract-plus-variant row shape, flattened at the top level and typed as a
+discriminated union:
 
 ```ts
 type EntityWithVariant =
@@ -245,24 +246,31 @@ type EntityWithVariant =
       kind: "post";
       ownerId: string;
       createdAt: Date;
-      variant: {
-        title: string;
-        body: string;
-      };
+      title: string;
+      body: string;
     }
   | {
       id: string;
       kind: "image";
       ownerId: string;
       createdAt: Date;
-      variant: {
-        url: string;
-        alt?: string | null;
-      };
+      url: string;
+      alt?: string | null;
     };
 ```
 
-This is the MVP answer to “homogeneous polymorphic rows”.
+So TypeScript narrowing works directly on the returned row:
+
+```ts
+const entity = await db.one(app.entities.includeVariant().where({ id }));
+
+if (entity?.kind === "post") {
+  entity.title;
+}
+```
+
+This is the MVP answer to “load the full concrete row while preserving one
+logical contract handle”.
 
 #### Includes and reverse relations
 
@@ -347,8 +355,8 @@ MVP rule:
 - querying a narrowed variant must satisfy both the contract policy and the
   variant table policy
 - querying the plain contract must satisfy the contract policy
-- materializing variant payload via `includeVariant()` or a variant include must
-  additionally satisfy the concrete variant table policy for the chosen row
+- materializing full variant columns via `includeVariant()` or a variant include
+  must additionally satisfy the concrete variant table policy for the chosen row
 
 This keeps authorization table-first while preserving the idea that a contract
 row alone is not the full object.
@@ -420,6 +428,9 @@ Changes:
 
 - contract handles expose common columns + union `kind`
 - variant handles expose merged contract + variant rows
+- `includeVariant()` returns a top-level discriminated union of merged
+  contract-plus-variant rows rather than nesting variant fields under one
+  property
 - add `asVariant(tag)` and `includeVariant()`
 - synthesize inherited contract relations onto variant handles
 
@@ -496,8 +507,10 @@ Changes:
 - `include({ target: true })` against a contract ref returns contract columns
   only
 - `includeVariant()` expands to hidden singular includes for each declared
-  variant and then collapses them to one `variant` payload in the row
-  transformer
+  variant and then flattens the matching variant columns onto the top-level row
+  in the row transformer
+- the runtime output type for `includeVariant()` is therefore a discriminated
+  union keyed by `kind`, not `{ kind, variant: ... }`
 - because current relation IR does not have a `Union` node, MVP should compile
   polymorphic payload hydration through existing include/subquery machinery
 
@@ -555,8 +568,8 @@ This is the main migration advantage of the contract model over ref-side
 - schema declares contracts and variants explicitly
 - refs remain ordinary single-target refs to contracts
 - variant inserts/updates/deletes are coordinated by the runtime
-- contract queries can stay cheap, narrow to one variant, or materialize a
-  uniform `kind + variant` payload
+- contract queries can stay cheap, narrow to one variant, or materialize a full
+  top-level discriminated union row
 - migration lenses only need to reason about target-side discriminator and
   variant layout, not per-ref table identifiers
 
