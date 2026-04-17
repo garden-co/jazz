@@ -1,5 +1,6 @@
-import type { InsertValues, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
+import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 export type JazzRnErrorTag =
   | "InvalidJson"
@@ -27,11 +28,12 @@ export interface JazzRnRuntimeBinding {
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
   getSchemaHash(): string;
-  insert(table: string, valuesJson: string): string;
+  insert(table: string, valuesJson: string, objectId: string | undefined): string;
   insertWithSession?(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
+    objectId: string | undefined,
   ): string;
   onBatchedTickNeeded(
     callback:
@@ -189,21 +191,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  insert(table: string, values: InsertValues): Row {
+  insert(table: string, values: InsertValues, object_id?: string | null): Row {
     try {
-      const rowJson = this.binding.insert(table, JSON.stringify(values));
-      return JSON.parse(rowJson) as Row;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
-    try {
-      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+      const rowJson = this.binding.insert(
         table,
-        JSON.stringify(values),
-        write_context_json ?? undefined,
+        encodeFFIRecordToJson(values),
+        object_id ?? undefined,
       );
       return JSON.parse(rowJson) as Row;
     } catch (error) {
@@ -211,20 +204,43 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: any): void {
+  insertWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Row {
     try {
-      this.binding.update(object_id, JSON.stringify(values));
+      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+        table,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+        object_id ?? undefined,
+      );
+      return JSON.parse(rowJson) as Row;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  update(object_id: string, values: Record<string, Value>): void {
+    try {
+      this.binding.update(object_id, encodeFFIRecordToJson(values));
     } catch (error) {
       if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  updateWithSession(object_id: string, values: any, write_context_json?: string | null): void {
+  updateWithSession(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): void {
     try {
       this.requireWriteContextMethod("updateWithSession")(
         object_id,
-        JSON.stringify(values),
+        encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
     } catch (error) {
@@ -355,7 +371,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve(row);
   }
 
-  updateDurable(object_id: string, values: any, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
@@ -364,7 +380,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   updateDurableWithSession(
     object_id: string,
-    values: any,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void> {

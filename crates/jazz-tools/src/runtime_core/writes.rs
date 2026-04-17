@@ -12,10 +12,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<InsertedRow, RuntimeError> {
+        self.insert_with_id(table, values, None, write_context)
+    }
+
+    /// Insert a row into a table with an optional external row id.
+    pub fn insert_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertedRow, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         let result = self
             .schema_manager
-            .insert_with_write_context(&mut self.storage, table, values, write_context)
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
@@ -35,6 +52,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let _span = debug_span!("update", %object_id).entered();
         self.schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
+    }
+
+    /// Create or update a row with a caller-supplied external row id.
+    pub fn upsert_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let _span = debug_span!("upsert", table, %object_id).entered();
+        self.schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         self.mark_storage_write_pending_flush();
@@ -71,9 +112,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
+        self.insert_persisted_with_id(table, values, None, write_context, tier)
+    }
+
+    /// Insert a row with an optional external row id and durability tracking.
+    pub fn insert_persisted_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
-            .insert_with_write_context(&mut self.storage, table, values, write_context)
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_version_id = result.row_version_id;
@@ -113,6 +172,48 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let version_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_version_key =
+            RowVersionKey::new(object_id, self.schema_manager.branch_name(), version_id);
+
+        let (sender, receiver) = oneshot::channel();
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(());
+        } else {
+            self.ack_watchers
+                .entry(row_version_key)
+                .or_default()
+                .push((tier, sender));
+        }
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(receiver)
+    }
+
+    /// Create or update a row and wait for durability at the requested tier.
+    pub fn upsert_persisted_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+        let version_id = self
+            .schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_version_key =
             RowVersionKey::new(object_id, self.schema_manager.branch_name(), version_id);

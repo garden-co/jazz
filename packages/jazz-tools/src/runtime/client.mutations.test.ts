@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
+  const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const insertDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
@@ -19,7 +20,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
   const runtimeBase: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insert: (table: string, values: Record<string, unknown>) => {
+      insertCalls.push([table, values]);
+      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
+    },
     insertWithSession: (
       table: string,
       values: Record<string, unknown>,
@@ -107,6 +111,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 
   return {
     client: new JazzClientCtor(runtime, context, "edge"),
+    insertCalls,
     insertWithSessionCalls,
     insertDurableWithSessionCalls,
     updateCalls,
@@ -121,6 +126,41 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 }
 
 describe("JazzClient mutation durability split", () => {
+  it("keeps Bytea mutations as Uint8Array at the runtime boundary", () => {
+    const { client, insertCalls, updateCalls } = makeClient();
+    const payload = new Uint8Array([1, 2, 3]);
+    const insertValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
+    const updateValues = {
+      payload: { type: "Bytea" as const, value: payload },
+    };
+
+    client.create("todos", insertValues);
+    client.update("row-1", updateValues);
+
+    expect(insertCalls).toHaveLength(1);
+    expect(updateCalls).toHaveLength(1);
+    expect(insertCalls[0]?.[1]).toBe(insertValues);
+    expect(updateCalls[0]?.[1]).toBe(updateValues);
+
+    const insertPayload = insertCalls[0]?.[1].payload as
+      | { type: "Bytea"; value: Uint8Array }
+      | undefined;
+    const updatePayload = updateCalls[0]?.[1].payload as
+      | { type: "Bytea"; value: Uint8Array }
+      | undefined;
+
+    expect(insertPayload?.type).toBe("Bytea");
+    expect(updatePayload?.type).toBe("Bytea");
+    expect(insertPayload?.value).toBeInstanceOf(Uint8Array);
+    expect(updatePayload?.value).toBeInstanceOf(Uint8Array);
+    expect(insertPayload?.value).toBe(payload);
+    expect(updatePayload?.value).toBe(payload);
+    expect(Array.from(insertPayload?.value ?? [])).toEqual([1, 2, 3]);
+    expect(Array.from(updatePayload?.value ?? [])).toEqual([1, 2, 3]);
+  });
+
   it("rethrows synchronous runtime mutation errors", () => {
     const insertError = new Error("Insert failed: indexed value too large");
     const updateError = new Error("Update failed: indexed value too large");
@@ -196,6 +236,60 @@ describe("JazzClient mutation durability split", () => {
     expect(updateDurableWithSessionCalls).toEqual([["row-1", updates, attributedContext, "edge"]]);
     expect(deleteWithSessionCalls).toEqual([["row-1", attributedContext]]);
     expect(deleteDurableWithSessionCalls).toEqual([["row-1", attributedContext, "global"]]);
+  });
+
+  it("forwards caller-supplied create ids to runtime insert methods", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insert = vi.fn(
+      (table: string, values: Record<string, unknown>, objectId?: string | null) => {
+        return { id: objectId ?? "generated-id", values: [] };
+      },
+    );
+    const insertDurable = vi.fn(
+      async (
+        table: string,
+        values: Record<string, unknown>,
+        tier: string,
+        objectId?: string | null,
+      ) => {
+        return { id: objectId ?? "generated-id", values: [] };
+      },
+    );
+    const { client } = makeClient({ insert, insertDurable });
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+
+    const created = client.create("todos", insertValues, { id: externalId });
+    const createdDurable = await client.createDurable("todos", insertValues, { id: externalId });
+
+    expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", insertValues, "edge", externalId);
+    expect(created.id).toBe(externalId);
+    expect(createdDurable.id).toBe(externalId);
+  });
+
+  it("falls back to update when upsert sees an existing object id", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insert = vi.fn(() => {
+      throw insertError;
+    });
+    const insertDurable = vi.fn(async () => {
+      throw insertError;
+    });
+    const update = vi.fn();
+    const updateDurable = vi.fn(async () => {});
+    const { client } = makeClient({ insert, insertDurable, update, updateDurable });
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+
+    expect(client.upsert("todos", values, { id: externalId })).toBeUndefined();
+    await expect(
+      client.upsertDurable("todos", values, { id: externalId }),
+    ).resolves.toBeUndefined();
+
+    expect(insert).toHaveBeenCalledWith("todos", values, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", values, "edge", externalId);
+    expect(update).toHaveBeenCalledWith(externalId, values);
+    expect(updateDurable).toHaveBeenCalledWith(externalId, values, "edge");
   });
 
   it("encodes session and attribution together when both are provided", () => {

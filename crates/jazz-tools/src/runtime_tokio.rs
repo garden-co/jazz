@@ -298,9 +298,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+        self.insert_with_id(table, values, None, session)
+    }
+
+    /// Insert a row into a table with an optional external row id.
+    pub fn insert_with_id(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        session: Option<&Session>,
+    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result = core.insert(table, values, owned.as_ref())?;
+        let result = core.insert_with_id(table, values, object_id, owned.as_ref())?;
         Ok(result)
     }
 
@@ -313,9 +324,22 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<PersistedInsertResult, RuntimeError> {
+        self.insert_persisted_with_id(table, values, None, session, tier)
+    }
+
+    /// Insert a row with an optional external row id and durability tracking.
+    pub fn insert_persisted_with_id(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result = core.insert_persisted(table, values, owned.as_ref(), tier)?;
+        let result =
+            core.insert_persisted_with_id(table, values, object_id, owned.as_ref(), tier)?;
         Ok(result)
     }
 
@@ -332,6 +356,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Create or update a row with a caller-supplied external row id.
+    pub fn upsert_with_id(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.upsert_with_id(table, object_id, values, owned.as_ref())?;
+        Ok(())
+    }
+
     /// Update a row and return a receiver that resolves when the requested
     /// durability tier (or higher) acknowledges.
     pub fn update_persisted(
@@ -344,6 +382,23 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
         let receiver = core.update_persisted(object_id, values, owned.as_ref(), tier)?;
+        Ok(receiver)
+    }
+
+    /// Create or update a row and return a receiver that resolves when the
+    /// requested durability tier (or higher) acknowledges.
+    pub fn upsert_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+        tier: DurabilityTier,
+    ) -> Result<PersistedWriteAck, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let receiver =
+            core.upsert_persisted_with_id(table, object_id, values, owned.as_ref(), tier)?;
         Ok(receiver)
     }
 

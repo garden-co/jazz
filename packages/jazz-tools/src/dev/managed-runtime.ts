@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
@@ -62,11 +62,16 @@ async function persistAppIdToEnv(envPath: string, envKey: string, appId: string)
   }
   if (content.includes(`${envKey}=`)) return;
   const line = `${envKey}=${appId}\n`;
+  await mkdir(join(envPath, ".."), { recursive: true });
   await writeFile(envPath, content ? content + line : line);
 }
 
 export interface InitializeOptions extends JazzPluginOptions {
   backendSecret?: string;
+  /** Directory in which to persist the generated app ID to a .env file. Defaults to schemaDir. */
+  envDir?: string;
+  /** Called when a schema watch push fails after initialisation. Use this to forward errors to e.g. Vite's HMR overlay. */
+  onSchemaError?: (error: Error) => void;
 }
 
 export class ManagedDevRuntime {
@@ -156,7 +161,7 @@ export class ManagedDevRuntime {
     this.initPromise = (async () => {
       const serverOpt = options.server ?? true;
       const schemaDir = requestedConfig.schemaDir;
-      const envPath = join(schemaDir, ".env");
+      const envPath = join(options.envDir ?? schemaDir, ".env");
       let serverUrl: string;
       let adminSecret: string;
       let appId: string;
@@ -247,6 +252,7 @@ export class ManagedDevRuntime {
           },
           onError: (error) => {
             console.error(`${LOG_PREFIX} schema push failed:`, error.message);
+            options.onSchemaError?.(error);
           },
         });
 
