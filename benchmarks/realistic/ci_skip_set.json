@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-17T05:11:22.887Z",
+  "updated_at": "2026-04-17T06:08:46.100Z",
   "entries": [
     {
       "id": "browser:b6",
@@ -79,8 +79,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-17T05:04:12.350Z",
-      "observations": 2
+      "last_observed_at": "2026-04-17T06:01:33.301Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:rocksdb:r5_permission_recursive",
@@ -149,8 +149,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:36:17.190Z",
-      "last_observed_at": "2026-04-17T05:10:53.250Z",
-      "observations": 2
+      "last_observed_at": "2026-04-17T06:08:15.046Z",
+      "observations": 3
     },
     {
       "id": "native:rocksdb:w1_interactive",
