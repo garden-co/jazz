@@ -18,6 +18,7 @@
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"
   ],
+  "type": "module",
   "main": "pkg/jazz_wasm.js",
   "types": "pkg/jazz_wasm.d.ts",
   "publishConfig": {
