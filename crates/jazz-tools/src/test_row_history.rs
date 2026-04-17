@@ -50,15 +50,11 @@ pub fn create_test_row_with_id<H: Storage>(
     metadata: Option<HashMap<String, String>>,
 ) -> ObjectId {
     let metadata = metadata.unwrap_or_default();
-    if let Some(row_locator) = row_locator_from_metadata(&metadata) {
-        storage
-            .put_row_locator(object_id, Some(&row_locator))
-            .expect("test row locator should persist");
-    } else {
-        storage
-            .put_metadata(object_id, metadata)
-            .expect("test row metadata should persist");
-    }
+    let row_locator = row_locator_from_metadata(&metadata)
+        .expect("test rows should provide row-locator metadata");
+    storage
+        .put_row_locator(object_id, Some(&row_locator))
+        .expect("test row locator should persist");
     object_id
 }
 
@@ -67,15 +63,11 @@ pub fn put_test_row_metadata<H: Storage>(
     object_id: ObjectId,
     metadata: HashMap<String, String>,
 ) {
-    if let Some(row_locator) = row_locator_from_metadata(&metadata) {
-        storage
-            .put_row_locator(object_id, Some(&row_locator))
-            .expect("test row locator should persist");
-    } else {
-        storage
-            .put_metadata(object_id, metadata)
-            .expect("test row metadata should persist");
-    }
+    let row_locator = row_locator_from_metadata(&metadata)
+        .expect("test rows should provide row-locator metadata");
+    storage
+        .put_row_locator(object_id, Some(&row_locator))
+        .expect("test row locator should persist");
 }
 
 pub fn apply_test_row_batch<H: Storage>(
@@ -101,16 +93,6 @@ pub fn load_test_row_metadata<H: Storage>(
         .load_row_locator(object_id)
         .expect("test row locator lookup should succeed")
         .map(|locator| metadata_from_row_locator(&locator))
-        .or_else(|| {
-            storage
-                .load_metadata(object_id)
-                .expect("test metadata lookup should succeed")
-                .and_then(|metadata| {
-                    row_locator_from_metadata(&metadata)
-                        .map(|locator| metadata_from_row_locator(&locator))
-                        .or(Some(metadata))
-                })
-        })
 }
 
 pub fn load_test_row_tip_ids<H: Storage>(

@@ -1,7 +1,9 @@
+import { commands } from "vitest/browser";
 import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
+import { loadWasmModule } from "../../src/runtime/client.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
@@ -18,6 +20,7 @@ import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot
 
 declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
+declare const __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: string;
 
 type PersistenceTier = "worker" | "edge" | "core";
 
@@ -225,20 +228,49 @@ interface ScenarioResult {
 
 const TARGET_TIMING_WINDOW_MS = 40;
 const MAX_BATCHED_TIMING_REPEATS = 64;
-const CI_BROWSER_LIMITS = {
+const DEFAULT_CI_BROWSER_LIMITS = {
   w1OperationCount: 1200,
   w4Cycles: 25,
   b1InsertCount: 4096,
   b1UpdateCount: 4096,
   b1DeleteCount: 4096,
-  b2RequestCount: 768,
-  b3Cycles: 12,
-  b3LargeMultiplier: 8,
-  b4MaxSubscribers: 128,
-  b4Rounds: 12,
-  b5ReadRequests: 160,
-  b5UpdateAttempts: 120,
+  // Query-heavy browser scenarios are far slower than write-heavy ones on the
+  // current worker-backed runtime, so the CI pass keeps these read/fanout
+  // cases intentionally small enough to fit within the shared 60s budget.
+  b2RequestCount: 64,
+  b3Cycles: 2,
+  b3LargeMultiplier: 4,
+  b4MaxSubscribers: 24,
+  b4Rounds: 4,
+  b5ReadRequests: 24,
+  b5UpdateAttempts: 16,
   b6UpdateCount: 12000,
+} as const;
+type BrowserLimitOverrides = Partial<Record<keyof typeof DEFAULT_CI_BROWSER_LIMITS, number>>;
+
+function resolveBrowserLimitOverrides(): BrowserLimitOverrides {
+  const raw = (__JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__ ?? "").trim();
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const overrides: BrowserLimitOverrides = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!(key in DEFAULT_CI_BROWSER_LIMITS)) continue;
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      overrides[key as keyof typeof DEFAULT_CI_BROWSER_LIMITS] = Math.max(1, Math.floor(value));
+    }
+    return overrides;
+  } catch {
+    return {};
+  }
+}
+
+const CI_BROWSER_LIMITS = {
+  ...DEFAULT_CI_BROWSER_LIMITS,
+  ...resolveBrowserLimitOverrides(),
 } as const;
 
 const schema = (schemaJson as { tables: WasmSchema }).tables;
@@ -1233,6 +1265,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
       progressLog(`B4 fanout subscribers=${subscriberCount}`);
       const unsubscribeFns: Array<() => void> = [];
       const seenAt = new Array<number>(subscriberCount).fill(0);
+      const ready = new Array<boolean>(subscriberCount).fill(false);
       let targetPriority = -1;
 
       try {
@@ -1240,6 +1273,7 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
           const unsubscribe = writer.subscribeAll(
             query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
             (delta) => {
+              ready[i] = true;
               const row = delta.all[0];
               if (!row) return;
               if (row.priority === targetPriority && seenAt[i] === 0) {
@@ -1249,6 +1283,10 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
           );
           unsubscribeFns.push(unsubscribe);
         }
+
+        await waitForCondition(`fanout subscribe ready n=${subscriberCount}`, timeoutMs, () =>
+          ready.every(Boolean),
+        );
 
         // Warmup update confirms all subscribers are active before measured rounds.
         targetPriority = 9_000 + subscriberCount;
@@ -1708,12 +1746,13 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   let unsubscribeAllowed: (() => void) | null = null;
   let unsubscribeAllowedFolders: (() => void) | null = null;
   let unsubscribeDenied: (() => void) | null = null;
+  let unsubscribeDeniedFolders: (() => void) | null = null;
 
   try {
-    const seedLocalSecret = `${dbPrefix}-b5-seed-secret`;
-    const allowedLocalSecret = `${dbPrefix}-b5-allowed-secret`;
-    const deniedLocalSecret = `${dbPrefix}-b5-denied-secret`;
-    const intermediateLocalSecret = `${dbPrefix}-b5-intermediate-secret`;
+    const seedLocalSecret = generateAuthSecret();
+    const allowedLocalSecret = generateAuthSecret();
+    const deniedLocalSecret = generateAuthSecret();
+    const intermediateLocalSecret = generateAuthSecret();
     const wasmModule = await loadWasmModule();
     const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
     const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
@@ -1810,6 +1849,14 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       (delta) => {
         initialDeniedVisible = delta.all;
         warmDeniedVisible = delta.all.length;
+      },
+      undefined,
+      deniedSession,
+    );
+    unsubscribeDeniedFolders = deniedDb.subscribeAll(
+      foldersQuery,
+      () => {
+        // Keep recursive folder visibility materialized for the denied client too.
       },
       undefined,
       deniedSession,
@@ -2010,6 +2057,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     if (unsubscribeAllowed) unsubscribeAllowed();
     if (unsubscribeAllowedFolders) unsubscribeAllowedFolders();
     if (unsubscribeDenied) unsubscribeDenied();
+    if (unsubscribeDeniedFolders) unsubscribeDeniedFolders();
     if (seedDb) await seedDb.shutdown();
     if (allowedDb) await allowedDb.shutdown();
     if (deniedDb) await deniedDb.shutdown();
@@ -2082,6 +2130,384 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
 }
 
 describe("realistic browser benchmark harness", () => {
+  it("delivers an initial scoped snapshot for a seeded server-backed project board query", async () => {
+    const cfg = scaledProfile(profile);
+    const appId = await benchmarkAppId("b4-subscribe-repro");
+    const dbName = uniqueDbName("b4-subscribe-repro");
+    let db: Db | null = null;
+
+    try {
+      db = await createServerDb(appId, dbName, "realistic-b4-subscribe-repro");
+      const state = await seedDataset(db, cfg);
+      const targetTaskId = state.taskIds[0];
+      const received: TaskRow[][] = [];
+
+      const unsubscribe = db.subscribeAll(
+        query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
+        (delta) => {
+          received.push([...delta.all]);
+        },
+      );
+
+      try {
+        await waitForCondition(
+          "seeded project-board row appears in initial scoped subscription snapshot",
+          8_000,
+          () =>
+            received.some(
+              (rows) =>
+                rows.length === 1 &&
+                rows[0]?.id === targetTaskId &&
+                typeof rows[0]?.title === "string",
+            ),
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      const last = received[received.length - 1];
+      expect(last).toHaveLength(1);
+      expect(last[0].id).toBe(targetTaskId);
+    } finally {
+      if (db) await db.shutdown();
+    }
+  }, 60_000);
+
+  it("delivers an initial scoped snapshot after a local update on a seeded server-backed row", async () => {
+    const cfg = scaledProfile(profile);
+    const appId = await benchmarkAppId("b4-subscribe-after-update");
+    const dbName = uniqueDbName("b4-subscribe-after-update");
+    let db: Db | null = null;
+
+    try {
+      db = await createServerDb(appId, dbName, "realistic-b4-subscribe-after-update");
+      const state = await seedDataset(db, cfg);
+      const targetTaskId = state.taskIds[0];
+      db.update(tasksTable, targetTaskId, {
+        priority: 0,
+        updated_at: nowMicros(),
+      });
+
+      const received: TaskRow[][] = [];
+      const unsubscribe = db.subscribeAll(
+        query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
+        (delta) => {
+          received.push([...delta.all]);
+        },
+      );
+
+      try {
+        await waitForCondition(
+          "locally updated seeded row appears in initial scoped subscription snapshot",
+          8_000,
+          () =>
+            received.some(
+              (rows) =>
+                rows.length === 1 && rows[0]?.id === targetTaskId && rows[0]?.priority === 0,
+            ),
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      const last = received[received.length - 1];
+      expect(last).toHaveLength(1);
+      expect(last[0].id).toBe(targetTaskId);
+      expect(last[0].priority).toBe(0);
+    } finally {
+      if (db) await db.shutdown();
+    }
+  }, 60_000);
+
+  it("profiles repeated query_my_work reads on a seeded server-backed dataset", async () => {
+    const cfg = scaledProfile(profile);
+    const appId = await benchmarkAppId("b2-query-my-work-profile");
+    const dbName = uniqueDbName("b2-query-my-work-profile");
+    let db: Db | null = null;
+
+    try {
+      db = await createServerDb(appId, dbName, "realistic-b2-query-my-work-profile");
+      const state = await seedDataset(db, cfg);
+      const assignee = state.users[0];
+      const workQuery = query<TaskRow>(
+        "tasks",
+        [
+          { column: "assignee_id", op: "eq", value: assignee },
+          { column: "status", op: "eq", value: "in_progress" },
+        ],
+        [["updated_at", "desc"]],
+        200,
+      );
+
+      const anyDb = db as any;
+      const client = anyDb.getClient(schema);
+      const runtime = client.getRuntime();
+      const phases: Array<{ phase: string; ms: number }> = [];
+
+      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
+      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalEnsureQueryReady(...args);
+        } finally {
+          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+        }
+      };
+
+      const originalWaitForRemoteReadAvailability =
+        client.waitForRemoteReadAvailability.bind(client);
+      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalWaitForRemoteReadAvailability(...args);
+        } finally {
+          phases.push({
+            phase: "client.waitForRemoteReadAvailability",
+            ms: performance.now() - startedAt,
+          });
+        }
+      };
+
+      const originalQueryInternal = client.queryInternal.bind(client);
+      client.queryInternal = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalQueryInternal(...args);
+        } finally {
+          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
+        }
+      };
+
+      const originalRuntimeQuery = runtime.query.bind(runtime);
+      runtime.query = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalRuntimeQuery(...args);
+        } finally {
+          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
+        }
+      };
+
+      const startedAt = performance.now();
+      const rows = await db.all(workQuery);
+      const totalMs = performance.now() - startedAt;
+      await commands.writeRealisticBrowserReport("profile-query-my-work", {
+        runner: "jazz-ts-browser-opfs-profile",
+        generated_at: new Date().toISOString(),
+        profile: cfg.id,
+        scenarios: [
+          {
+            scenario_id: "PROFILE_QUERY_MY_WORK",
+            scenario_name: "query_my_work_single_run",
+            profile_id: cfg.id,
+            topology: "single_hop_browser",
+            total_operations: 1,
+            wall_time_ms: totalMs,
+            throughput_ops_per_sec: 1000 / Math.max(1, totalMs),
+            operation_summaries: {},
+            extra: {
+              row_count: rows.length,
+              phases,
+            },
+          },
+        ],
+      });
+
+      expect(Array.isArray(rows)).toBe(true);
+    } finally {
+      if (db) await db.shutdown();
+    }
+  }, 180_000);
+
+  it("profiles one recursive permission read on a warmed server-backed dataset", async () => {
+    const cfg = scaledProfile(profile);
+    const appId = await benchmarkAppId("b5-permission-read-profile");
+    const dbPrefix = uniqueDbName("b5-permission-read-profile");
+    const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
+    let seedDb: Db | null = null;
+    let allowedDb: Db | null = null;
+    let deniedDb: Db | null = null;
+    let unsubscribeAllowed: (() => void) | null = null;
+    let unsubscribeDenied: (() => void) | null = null;
+
+    try {
+      const seedLocalSecret = generateAuthSecret();
+      const allowedLocalSecret = generateAuthSecret();
+      const deniedLocalSecret = generateAuthSecret();
+      const intermediateLocalSecret = generateAuthSecret();
+      const wasmModule = await loadWasmModule();
+      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
+      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+
+      seedDb = await createServerDb(
+        appId,
+        `${dbPrefix}-seed`,
+        "realistic-b5-permission-read-seed",
+        {},
+        { includeJwt: false, localFirstSecret: seedLocalSecret },
+      );
+      await seedPermissionDataset(seedDb, b5, permissionSchema, {
+        allowedOwnerId: allowedPrincipalId,
+        deniedOwnerId: deniedPrincipalId,
+        intermediateOwnerId: intermediatePrincipalId,
+      });
+
+      allowedDb = await createServerDb(
+        appId,
+        `${dbPrefix}-allowed`,
+        "realistic-b5-permission-read-allowed",
+        {},
+        {
+          includeAdminSecret: false,
+          includeJwt: false,
+          localFirstSecret: allowedLocalSecret,
+        },
+      );
+      deniedDb = await createServerDb(
+        appId,
+        `${dbPrefix}-denied`,
+        "realistic-b5-permission-read-denied",
+        {},
+        {
+          includeAdminSecret: false,
+          includeJwt: false,
+          localFirstSecret: deniedLocalSecret,
+        },
+      );
+
+      const allowedSession = {
+        user_id: allowedPrincipalId,
+        claims: { auth_mode: "local-first" },
+      };
+      const deniedSession = {
+        user_id: deniedPrincipalId,
+        claims: { auth_mode: "local-first" },
+      };
+      const visibleDocumentsQuery = query<PermissionDocumentRow>(
+        "documents",
+        [],
+        [["updated_at", "desc"]],
+        1000,
+        permissionSchema,
+      );
+
+      let warmAllowedVisible = 0;
+      let warmDeniedVisible = 0;
+      unsubscribeAllowed = allowedDb.subscribeAll(
+        visibleDocumentsQuery,
+        (delta) => {
+          warmAllowedVisible = delta.all.length;
+        },
+        undefined,
+        allowedSession,
+      );
+      unsubscribeDenied = deniedDb.subscribeAll(
+        visibleDocumentsQuery,
+        (delta) => {
+          warmDeniedVisible = delta.all.length;
+        },
+        undefined,
+        deniedSession,
+      );
+
+      const warmupDeadline = performance.now() + 30_000;
+      while (performance.now() < warmupDeadline) {
+        if (warmAllowedVisible > 0 && warmDeniedVisible > 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(warmAllowedVisible).toBeGreaterThan(0);
+      expect(warmDeniedVisible).toBeGreaterThan(0);
+
+      const anyDb = allowedDb as any;
+      const client = anyDb.getClient(permissionSchema);
+      const runtime = client.getRuntime();
+      const phases: Array<{ phase: string; ms: number }> = [];
+
+      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
+      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalEnsureQueryReady(...args);
+        } finally {
+          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+        }
+      };
+
+      const originalWaitForRemoteReadAvailability =
+        client.waitForRemoteReadAvailability.bind(client);
+      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalWaitForRemoteReadAvailability(...args);
+        } finally {
+          phases.push({
+            phase: "client.waitForRemoteReadAvailability",
+            ms: performance.now() - startedAt,
+          });
+        }
+      };
+
+      const originalQueryInternal = client.queryInternal.bind(client);
+      client.queryInternal = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalQueryInternal(...args);
+        } finally {
+          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
+        }
+      };
+
+      const originalRuntimeQuery = runtime.query.bind(runtime);
+      runtime.query = async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await originalRuntimeQuery(...args);
+        } finally {
+          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
+        }
+      };
+
+      const startedAt = performance.now();
+      const rows = await allowedDb.all(visibleDocumentsQuery);
+      const totalMs = performance.now() - startedAt;
+
+      await commands.writeRealisticBrowserReport("profile-permission-read", {
+        runner: "jazz-ts-browser-opfs-profile",
+        generated_at: new Date().toISOString(),
+        profile: cfg.id,
+        scenarios: [
+          {
+            scenario_id: "PROFILE_PERMISSION_READ",
+            scenario_name: "permission_read_single_run",
+            profile_id: cfg.id,
+            topology: "single_hop_browser",
+            total_operations: 1,
+            wall_time_ms: totalMs,
+            throughput_ops_per_sec: 1000 / Math.max(1, totalMs),
+            operation_summaries: {},
+            extra: {
+              row_count: rows.length,
+              warm_allowed_visible: warmAllowedVisible,
+              warm_denied_visible: warmDeniedVisible,
+              phases,
+            },
+          },
+        ],
+      });
+
+      expect(rows.length).toBeGreaterThan(0);
+    } finally {
+      if (unsubscribeAllowed) unsubscribeAllowed();
+      if (unsubscribeDenied) unsubscribeDenied();
+      if (seedDb) await seedDb.shutdown();
+      if (allowedDb) await allowedDb.shutdown();
+      if (deniedDb) await deniedDb.shutdown();
+    }
+  }, 180_000);
+
   it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
@@ -2135,6 +2561,8 @@ describe("realistic browser benchmark harness", () => {
         profile: cfg.id,
         scenarios: scenarioResults,
       };
+
+      await commands.writeRealisticBrowserReport(browserRunId, report);
 
       // Keeping output machine-readable makes it easy to pipe into trend tooling.
       // eslint-disable-next-line no-console

@@ -125,14 +125,11 @@ impl SyncManager {
         object_id: ObjectId,
         metadata: HashMap<String, String>,
     ) {
-        let existing_metadata = storage.load_metadata(object_id).ok().flatten();
         let existing_row_locator = storage.load_row_locator(object_id).ok().flatten();
-        if existing_metadata.is_none() && existing_row_locator.is_none() {
-            if let Some(row_locator) = crate::storage::row_locator_from_metadata(&metadata) {
-                let _ = storage.put_row_locator(object_id, Some(&row_locator));
-            } else {
-                let _ = storage.put_metadata(object_id, metadata.clone());
-            }
+        if existing_row_locator.is_none()
+            && let Some(row_locator) = crate::storage::row_locator_from_metadata(&metadata)
+        {
+            let _ = storage.put_row_locator(object_id, Some(&row_locator));
         }
     }
 
@@ -151,7 +148,6 @@ impl SyncManager {
             .ok()
             .flatten()
             .map(|locator| metadata_from_row_locator(&locator))
-            .or_else(|| storage.load_metadata(row.row_id).ok().flatten())
     }
 
     fn apply_row_updated<H: Storage>(

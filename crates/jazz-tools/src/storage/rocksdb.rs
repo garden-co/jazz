@@ -400,26 +400,28 @@ impl Storage for RocksDBStorage {
             let txn = RefCell::new(inner.db.transaction());
             let mut seen_row_raw_tables = std::collections::HashSet::new();
             for row in &encoded_history_rows {
-                if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                if seen_row_raw_tables.insert(row.row_raw_table.clone()) {
                     let header = super::encode_raw_table_header(&super::row_raw_table_header(
                         &row.row_raw_table_id,
+                        &row.user_descriptor,
                     ))?;
                     raw_table_put_core(
                         super::RAW_TABLE_HEADER_TABLE,
-                        &row.row_raw_table_id.raw_table_name(),
+                        row.row_raw_table.as_str(),
                         &header,
                         |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
                     )?;
                 }
             }
             for row in &encoded_visible_rows {
-                if seen_row_raw_tables.insert(row.row_raw_table_id.raw_table_name()) {
+                if seen_row_raw_tables.insert(row.row_raw_table.clone()) {
                     let header = super::encode_raw_table_header(&super::row_raw_table_header(
                         &row.row_raw_table_id,
+                        &row.user_descriptor,
                     ))?;
                     raw_table_put_core(
                         super::RAW_TABLE_HEADER_TABLE,
-                        &row.row_raw_table_id.raw_table_name(),
+                        row.row_raw_table.as_str(),
                         &header,
                         |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
                     )?;
@@ -465,6 +467,7 @@ impl Storage for RocksDBStorage {
             for row in &encoded_history_rows {
                 let locator =
                     super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                        row_raw_table: row.row_raw_table.clone().into(),
                         table_name: row.row_raw_table_id.table_name.clone(),
                         schema_hash: row.row_raw_table_id.schema_hash,
                     })?;
@@ -494,6 +497,7 @@ impl Storage for RocksDBStorage {
             for row in &encoded_visible_rows {
                 let locator =
                     super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                        row_raw_table: row.row_raw_table.clone().into(),
                         table_name: row.row_raw_table_id.table_name.clone(),
                         schema_hash: row.row_raw_table_id.schema_hash,
                     })?;

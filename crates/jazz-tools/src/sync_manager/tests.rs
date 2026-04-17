@@ -2264,7 +2264,14 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
     let newer = visible_row(row_id, "main", vec![older.batch_id()], 2_000, b"newer");
 
     seed_users_schema(&mut io);
-    io.put_metadata(row_id, row_metadata("users")).unwrap();
+    io.put_row_locator(
+        row_id,
+        Some(
+            &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                .expect("row metadata should produce a row locator"),
+        ),
+    )
+    .unwrap();
     io.append_history_region_rows("users", &[older.clone(), newer.clone()])
         .unwrap();
     io.upsert_visible_region_rows(

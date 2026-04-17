@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
@@ -91,6 +93,80 @@ impl std::fmt::Display for EncodingError {
 
 impl std::error::Error for EncodingError {}
 
+#[derive(Debug, Clone)]
+struct CompiledColumnLayout {
+    fixed_offset: Option<usize>,
+    fixed_total_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    variable_index: Option<usize>,
+    nullable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledRowLayout {
+    columns: Vec<CompiledColumnLayout>,
+    fixed_section_size: usize,
+    variable_column_count: usize,
+}
+
+fn compiled_row_layout_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<CompiledRowLayout>>> {
+    static CACHE: OnceLock<Mutex<HashMap<[u8; 32], Arc<CompiledRowLayout>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
+    let mut columns = Vec::with_capacity(descriptor.columns.len());
+    let mut fixed_offset = 0usize;
+    let mut variable_index = 0usize;
+
+    for column in &descriptor.columns {
+        if let Some(fixed_value_size) = column.column_type.fixed_size() {
+            let fixed_total_size = fixed_value_size + usize::from(column.nullable);
+            columns.push(CompiledColumnLayout {
+                fixed_offset: Some(fixed_offset),
+                fixed_total_size: Some(fixed_total_size),
+                fixed_value_size: Some(fixed_value_size),
+                variable_index: None,
+                nullable: column.nullable,
+            });
+            fixed_offset += fixed_total_size;
+        } else {
+            columns.push(CompiledColumnLayout {
+                fixed_offset: None,
+                fixed_total_size: None,
+                fixed_value_size: None,
+                variable_index: Some(variable_index),
+                nullable: column.nullable,
+            });
+            variable_index += 1;
+        }
+    }
+
+    CompiledRowLayout {
+        columns,
+        fixed_section_size: fixed_offset,
+        variable_column_count: variable_index,
+    }
+}
+
+pub fn compiled_row_layout(descriptor: &RowDescriptor) -> Arc<CompiledRowLayout> {
+    let key = descriptor.content_hash();
+    let cache = compiled_row_layout_cache();
+    {
+        let guard = cache.lock().expect("compiled row layout cache poisoned");
+        if let Some(compiled) = guard.get(&key) {
+            return compiled.clone();
+        }
+    }
+
+    let compiled = Arc::new(compile_row_layout(descriptor));
+    cache
+        .lock()
+        .expect("compiled row layout cache poisoned")
+        .insert(key, compiled.clone());
+    compiled
+}
+
 /// Binary row format:
 ///
 /// ```text
@@ -175,6 +251,10 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
         ColumnType::Boolean => matches!(value, Value::Boolean(_)),
         ColumnType::Timestamp => matches!(value, Value::Timestamp(_)),
         ColumnType::Uuid => matches!(value, Value::Uuid(_)),
+        ColumnType::BatchId => {
+            matches!(value, Value::BatchId(_))
+                || matches!(value, Value::Bytea(bytes) if bytes.len() == 16)
+        }
         ColumnType::Text => matches!(value, Value::Text(_)),
         ColumnType::Bytea => matches!(value, Value::Bytea(_)),
         ColumnType::Json { schema: _ } => matches!(value, Value::Text(_)),
@@ -225,6 +305,7 @@ fn validate_value_size(
     column: &str,
 ) -> Result<(), EncodingError> {
     match (value, column_type) {
+        (Value::BatchId(_), ColumnType::BatchId) => Ok(()),
         (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
         (
             Value::Array(values),
@@ -277,6 +358,11 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Boolean(b) => buf.push(if *b { 1 } else { 0 }),
         Value::Timestamp(t) => buf.extend_from_slice(&t.to_le_bytes()),
         Value::Uuid(id) => buf.extend_from_slice(id.uuid().as_bytes()),
+        Value::BatchId(bytes) => buf.extend_from_slice(bytes),
+        Value::Bytea(bytes) if matches!(col.column_type, ColumnType::BatchId) => {
+            debug_assert_eq!(bytes.len(), 16, "validated batch ids must be 16 bytes");
+            buf.extend_from_slice(bytes);
+        }
         Value::Null => {
             // Should not reach here for non-nullable (validated above)
             let size = col.column_type.fixed_size().unwrap();
@@ -326,10 +412,16 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
 
 /// Decode a binary row to Value slice.
 pub fn decode_row(descriptor: &RowDescriptor, data: &[u8]) -> Result<Vec<Value>, EncodingError> {
+    let layout = compiled_row_layout(descriptor);
     let mut values = Vec::with_capacity(descriptor.columns.len());
 
     for i in 0..descriptor.columns.len() {
-        values.push(decode_column(descriptor, data, i)?);
+        values.push(decode_column_with_layout(
+            descriptor,
+            layout.as_ref(),
+            data,
+            i,
+        )?);
     }
 
     Ok(values)
@@ -432,6 +524,14 @@ fn decode_non_null_value(
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
+        ColumnType::BatchId => {
+            if data.len() < 16 {
+                return Err(EncodingError::MalformedData {
+                    message: context.too_short_message("batch_id"),
+                });
+            }
+            Ok(Value::BatchId(data[..16].try_into().unwrap()))
+        }
         ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
         ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
         ColumnType::Enum { variants } => decode_text_value(data, Some(variants)),
@@ -475,6 +575,16 @@ pub fn decode_column(
     data: &[u8],
     col_index: usize,
 ) -> Result<Value, EncodingError> {
+    let layout = compiled_row_layout(descriptor);
+    decode_column_with_layout(descriptor, layout.as_ref(), data, col_index)
+}
+
+fn decode_column_with_layout(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &[u8],
+    col_index: usize,
+) -> Result<Value, EncodingError> {
     if col_index >= descriptor.columns.len() {
         return Err(EncodingError::ColumnIndexOutOfBounds {
             index: col_index,
@@ -485,7 +595,7 @@ pub fn decode_column(
     let col = &descriptor.columns[col_index];
 
     // Get the byte slice for this column
-    let (bytes, is_null) = column_bytes_internal(descriptor, data, col_index)?;
+    let (bytes, is_null) = column_bytes_internal_with_layout(descriptor, layout, data, col_index)?;
 
     if is_null {
         return Ok(Value::Null);
@@ -502,69 +612,83 @@ fn column_bytes_internal<'a>(
     data: &'a [u8],
     col_index: usize,
 ) -> Result<(&'a [u8], bool), EncodingError> {
-    let col = &descriptor.columns[col_index];
+    if col_index >= descriptor.columns.len() {
+        return Err(EncodingError::ColumnIndexOutOfBounds {
+            index: col_index,
+            max: descriptor.columns.len().saturating_sub(1),
+        });
+    }
+    let layout = compiled_row_layout(descriptor);
+    column_bytes_internal_with_layout(descriptor, layout.as_ref(), data, col_index)
+}
 
-    if col.column_type.is_variable() {
-        // Variable-length column
-        variable_column_bytes(descriptor, data, col_index)
+fn column_bytes_internal_with_layout<'a>(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &'a [u8],
+    col_index: usize,
+) -> Result<(&'a [u8], bool), EncodingError> {
+    let column_layout = &layout.columns[col_index];
+    if column_layout.variable_index.is_some() {
+        variable_column_bytes(descriptor, layout, data, col_index)
     } else {
-        // Fixed-size column
-        fixed_column_bytes(descriptor, data, col_index)
+        fixed_column_bytes(descriptor, layout, data, col_index)
     }
 }
 
 /// Get byte slice for a fixed-size column.
 fn fixed_column_bytes<'a>(
     descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
     data: &'a [u8],
     col_index: usize,
 ) -> Result<(&'a [u8], bool), EncodingError> {
-    let mut offset = 0;
+    let col = &descriptor.columns[col_index];
+    let column_layout = &layout.columns[col_index];
+    let offset = column_layout
+        .fixed_offset
+        .ok_or(EncodingError::ColumnIndexOutOfBounds {
+            index: col_index,
+            max: descriptor.columns.len().saturating_sub(1),
+        })?;
+    let total_size =
+        column_layout
+            .fixed_total_size
+            .ok_or(EncodingError::ColumnIndexOutOfBounds {
+                index: col_index,
+                max: descriptor.columns.len().saturating_sub(1),
+            })?;
+    let value_size =
+        column_layout
+            .fixed_value_size
+            .ok_or(EncodingError::ColumnIndexOutOfBounds {
+                index: col_index,
+                max: descriptor.columns.len().saturating_sub(1),
+            })?;
 
-    for (i, col) in descriptor.columns.iter().enumerate() {
-        if col.column_type.is_variable() {
-            continue; // Skip variable columns in fixed section
-        }
-
-        let nullable_prefix = if col.nullable { 1 } else { 0 };
-        let value_size = col.column_type.fixed_size().unwrap();
-        let total_size = nullable_prefix + value_size;
-
-        if i == col_index {
-            if offset + total_size > data.len() {
-                return Err(EncodingError::MalformedData {
-                    message: format!("data too short for column {}", col.name),
-                });
-            }
-
-            if col.nullable {
-                let is_null = data[offset] == 0;
-                return Ok((&data[offset + 1..offset + total_size], is_null));
-            } else {
-                return Ok((&data[offset..offset + value_size], false));
-            }
-        }
-
-        offset += total_size;
+    if offset + total_size > data.len() {
+        return Err(EncodingError::MalformedData {
+            message: format!("data too short for column {}", col.name),
+        });
     }
 
-    Err(EncodingError::ColumnIndexOutOfBounds {
-        index: col_index,
-        max: descriptor.columns.len().saturating_sub(1),
-    })
+    if column_layout.nullable {
+        let is_null = data[offset] == 0;
+        Ok((&data[offset + 1..offset + total_size], is_null))
+    } else {
+        Ok((&data[offset..offset + value_size], false))
+    }
 }
 
 /// Get byte slice for a variable-length column.
 fn variable_column_bytes<'a>(
     descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
     data: &'a [u8],
     col_index: usize,
 ) -> Result<(&'a [u8], bool), EncodingError> {
-    // Calculate fixed section size
-    let fixed_size = calculate_fixed_section_size(descriptor);
-
-    // Calculate offset table size (var_count - 1 entries, each 4 bytes)
-    let var_count = descriptor.variable_column_count();
+    let fixed_size = layout.fixed_section_size;
+    let var_count = layout.variable_column_count;
     let offset_table_size = if var_count > 1 {
         (var_count - 1) * 4
     } else {
@@ -585,15 +709,13 @@ fn variable_column_bytes<'a>(
     }
 
     // Find which variable column index this is
-    let mut var_index = 0;
-    for (i, col) in descriptor.columns.iter().enumerate() {
-        if col.column_type.is_variable() {
-            if i == col_index {
-                break;
-            }
-            var_index += 1;
-        }
-    }
+    let var_index =
+        layout.columns[col_index]
+            .variable_index
+            .ok_or(EncodingError::ColumnIndexOutOfBounds {
+                index: col_index,
+                max: descriptor.columns.len().saturating_sub(1),
+            })?;
 
     // Get start offset for this variable column
     let start_offset = if var_index == 0 {
@@ -645,10 +767,9 @@ fn variable_column_bytes<'a>(
             message: "variable column end overflowed".into(),
         })?;
 
-    let col = &descriptor.columns[col_index];
     let bytes = &data[start..end];
 
-    if col.nullable {
+    if layout.columns[col_index].nullable {
         if bytes.is_empty() {
             return Err(EncodingError::MalformedData {
                 message: "nullable variable column has no null marker".into(),
@@ -661,20 +782,6 @@ fn variable_column_bytes<'a>(
     }
 }
 
-/// Calculate the size of the fixed section in bytes.
-fn calculate_fixed_section_size(descriptor: &RowDescriptor) -> usize {
-    let mut size = 0;
-    for col in &descriptor.columns {
-        if let Some(fixed_size) = col.column_type.fixed_size() {
-            size += fixed_size;
-            if col.nullable {
-                size += 1; // null marker
-            }
-        }
-    }
-    size
-}
-
 /// Get byte slice for a column (public API).
 /// Returns None if the column is null.
 pub fn column_bytes<'a>(
@@ -684,6 +791,29 @@ pub fn column_bytes<'a>(
 ) -> Result<Option<&'a [u8]>, EncodingError> {
     let (bytes, is_null) = column_bytes_internal(descriptor, data, col_index)?;
     if is_null { Ok(None) } else { Ok(Some(bytes)) }
+}
+
+/// Get byte slice for a column using a precompiled layout.
+/// Returns None if the column is null.
+pub fn column_bytes_with_layout<'a>(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &'a [u8],
+    col_index: usize,
+) -> Result<Option<&'a [u8]>, EncodingError> {
+    let (bytes, is_null) = column_bytes_internal_with_layout(descriptor, layout, data, col_index)?;
+    if is_null { Ok(None) } else { Ok(Some(bytes)) }
+}
+
+/// Check if a column is null using a precompiled layout.
+pub fn column_is_null_with_layout(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &[u8],
+    col_index: usize,
+) -> Result<bool, EncodingError> {
+    let (_, is_null) = column_bytes_internal_with_layout(descriptor, layout, data, col_index)?;
+    Ok(is_null)
 }
 
 /// Compare column values in binary form (for filtering, sorting).
@@ -738,6 +868,7 @@ pub fn compare_column(
             // Compare as bytes (UUIDs have natural byte ordering)
             Ok(bytes1.cmp(bytes2))
         }
+        ColumnType::BatchId => Ok(bytes1.cmp(bytes2)),
         ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
             column: col.name_str().to_string(),
             column_type: col.column_type.clone(),
@@ -796,6 +927,7 @@ pub fn compare_column_to_value(
             let t2 = u64::from_le_bytes(value[..8].try_into().unwrap());
             Ok(t1.cmp(&t2))
         }
+        ColumnType::BatchId => Ok(bytes.cmp(value)),
         ColumnType::Bytea => Err(EncodingError::UnsupportedComparison {
             column: col.name_str().to_string(),
             column_type: col.column_type.clone(),
@@ -846,6 +978,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
         Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
+        Value::BatchId(bytes) => bytes.to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
@@ -1150,6 +1283,89 @@ pub fn project_row(
     Ok(result)
 }
 
+/// Project columns from a source row to create a new row using a precompiled
+/// source layout.
+pub fn project_row_with_layout(
+    src_descriptor: &RowDescriptor,
+    src_layout: &CompiledRowLayout,
+    src_data: &[u8],
+    dst_descriptor: &RowDescriptor,
+    column_mapping: &[(usize, usize)],
+) -> Result<Vec<u8>, EncodingError> {
+    let mut dst_to_src: Vec<Option<usize>> = vec![None; dst_descriptor.columns.len()];
+    for &(src_col, dst_col) in column_mapping {
+        dst_to_src[dst_col] = Some(src_col);
+    }
+
+    let mut fixed_data = Vec::new();
+    let mut var_data = Vec::new();
+    let mut var_offsets: Vec<u32> = Vec::new();
+
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if dst_col_desc.column_type.is_variable() {
+            continue;
+        }
+
+        let value_size = dst_col_desc.column_type.fixed_size().unwrap();
+
+        if let Some(src_col) = dst_to_src[dst_col] {
+            let (bytes, is_null) =
+                column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col)?;
+
+            if dst_col_desc.nullable {
+                if is_null {
+                    fixed_data.push(0);
+                    fixed_data.extend(std::iter::repeat_n(0, value_size));
+                } else {
+                    fixed_data.push(1);
+                    fixed_data.extend_from_slice(bytes);
+                }
+            } else {
+                fixed_data.extend_from_slice(bytes);
+            }
+        } else if dst_col_desc.nullable {
+            fixed_data.push(0);
+            fixed_data.extend(std::iter::repeat_n(0, value_size));
+        } else {
+            fixed_data.extend(std::iter::repeat_n(0, value_size));
+        }
+    }
+
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if !dst_col_desc.column_type.is_variable() {
+            continue;
+        }
+
+        var_offsets.push(var_data.len() as u32);
+
+        if let Some(src_col) = dst_to_src[dst_col] {
+            let (bytes, is_null) =
+                column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col)?;
+
+            if dst_col_desc.nullable {
+                if is_null {
+                    var_data.push(0);
+                } else {
+                    var_data.push(1);
+                    var_data.extend_from_slice(bytes);
+                }
+            } else {
+                var_data.extend_from_slice(bytes);
+            }
+        } else if dst_col_desc.nullable {
+            var_data.push(0);
+        }
+    }
+
+    let mut result = fixed_data;
+    for offset in var_offsets.iter().skip(1) {
+        result.extend_from_slice(&offset.to_le_bytes());
+    }
+    result.extend(var_data);
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1419,30 @@ mod tests {
         let encoded2 = encode_row(&descriptor, &values2).unwrap();
         let decoded2 = decode_row(&descriptor, &encoded2).unwrap();
         assert_eq!(values2, decoded2);
+    }
+
+    #[test]
+    fn encode_decode_fixed_batch_id_column() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("batch_id", ColumnType::BatchId)]);
+        let values = vec![Value::BatchId([0xAB; 16])];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        assert_eq!(encoded.len(), 16);
+
+        let decoded = decode_row(&descriptor, &encoded).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn encode_fixed_batch_id_column_accepts_legacy_bytea_value() {
+        let descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("batch_id", ColumnType::BatchId)]);
+        let values = vec![Value::Bytea(vec![0xCD; 16])];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        assert_eq!(encoded.len(), 16);
+        assert_eq!(encoded, vec![0xCD; 16]);
     }
 
     #[test]

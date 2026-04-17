@@ -471,24 +471,22 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_object_roundtrip() {
+    fn opfs_btree_row_locator_roundtrip() {
         let mut storage = test_storage();
 
         let id = ObjectId::new();
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            crate::metadata::MetadataKey::Table.to_string(),
-            "users".to_string(),
-        );
-        metadata.insert("app".to_string(), "test".to_string());
+        let locator = crate::storage::RowLocator {
+            table: "users".into(),
+            origin_schema_hash: Some(users_schema_hash()),
+        };
 
-        storage.put_metadata(id, metadata.clone()).unwrap();
+        storage.put_row_locator(id, Some(&locator)).unwrap();
 
-        let loaded = storage.load_metadata(id).unwrap();
-        assert_eq!(loaded, Some(metadata));
+        let loaded = storage.load_row_locator(id).unwrap();
+        assert_eq!(loaded, Some(locator));
 
         let other = ObjectId::new();
-        assert_eq!(storage.load_metadata(other).unwrap(), None);
+        assert_eq!(storage.load_row_locator(other).unwrap(), None);
     }
 
     #[test]
@@ -669,20 +667,15 @@ mod tests {
 
         let id = ObjectId::new();
         let row = make_row_batch(id, "main", 12345, "persistent data");
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            crate::metadata::MetadataKey::Table.to_string(),
-            "users".to_string(),
-        );
-        metadata.insert(
-            crate::metadata::MetadataKey::OriginSchemaHash.to_string(),
-            users_schema_hash().to_string(),
-        );
+        let locator = crate::storage::RowLocator {
+            table: "users".into(),
+            origin_schema_hash: Some(users_schema_hash()),
+        };
 
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
             seed_users_schema(&mut storage);
-            storage.put_metadata(id, metadata.clone()).unwrap();
+            storage.put_row_locator(id, Some(&locator)).unwrap();
             storage
                 .append_history_region_rows("users", std::slice::from_ref(&row))
                 .unwrap();
@@ -712,8 +705,8 @@ mod tests {
         {
             let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
 
-            let loaded_meta = storage.load_metadata(id).unwrap();
-            assert_eq!(loaded_meta, Some(metadata));
+            let loaded_locator = storage.load_row_locator(id).unwrap();
+            assert_eq!(loaded_locator, Some(locator));
             assert_eq!(
                 storage
                     .load_visible_region_row("users", "main", id)
