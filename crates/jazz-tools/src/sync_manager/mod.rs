@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Use web_time::Instant so this compiles on wasm32-unknown-unknown; std's
+// Instant panics in browsers. Duration has no platform dependency.
+use web_time::Instant;
 
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
