@@ -1,6 +1,8 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { useStandaloneContext } from "./contexts/standalone-context.js";
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 
@@ -12,7 +14,7 @@ const devtoolsProviderMock = vi.fn();
 
 vi.mock("jazz-tools/react", () => ({
   createJazzClient: (...args: unknown[]) => createJazzClientMock(...args),
-  JazzClientProvider: ({ children }: { children: React.ReactNode }) => children,
+  JazzClientProvider: ({ children }: { children: ReactNode }) => children,
 }));
 
 vi.mock("jazz-tools", () => ({
@@ -21,16 +23,12 @@ vi.mock("jazz-tools", () => ({
   fetchStoredWasmSchema: (...args: unknown[]) => fetchStoredWasmSchemaMock(...args),
 }));
 
-vi.mock("./contexts/standalone-context.js", () => ({
-  StandaloneProvider: ({ children }: { children: React.ReactNode }) => children,
-}));
-
 vi.mock("./contexts/devtools-context.js", () => ({
   DevtoolsProvider: ({
     children,
     ...props
   }: {
-    children: React.ReactNode;
+    children: ReactNode;
     storedPermissions?: unknown;
     runtime: string;
     wasmSchema: unknown;
@@ -41,7 +39,18 @@ vi.mock("./contexts/devtools-context.js", () => ({
 }));
 
 vi.mock("./routes.js", () => ({
-  InspectorRoutes: () => <div>Inspector ready</div>,
+  InspectorRoutes: function MockInspectorRoutes() {
+    const standaloneContext = useStandaloneContext();
+
+    return (
+      <>
+        <div>Inspector ready</div>
+        <button type="button" onClick={standaloneContext?.onEdit}>
+          Open edit
+        </button>
+      </>
+    );
+  },
 }));
 
 describe("App", () => {
@@ -53,9 +62,21 @@ describe("App", () => {
     fetchStoredPermissionsMock.mockReset();
     fetchStoredWasmSchemaMock.mockReset();
     devtoolsProviderMock.mockReset();
+
+    createJazzClientMock.mockResolvedValue({
+      shutdown: vi.fn(),
+    });
+    fetchStoredWasmSchemaMock.mockResolvedValue({
+      schema: {},
+    });
+    fetchSchemaHashesMock.mockResolvedValue({
+      hashes: ["hash-a", "hash-b"],
+    });
+    fetchStoredPermissionsMock.mockResolvedValue(null);
   });
 
   afterEach(() => {
+    localStorage.clear();
     cleanup();
   });
 
@@ -100,5 +121,40 @@ describe("App", () => {
         }),
       );
     });
+  });
+
+  it("lets you edit a stored connection and reset from the edit page", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        serverUrl: "http://localhost:19879",
+        appId: "test-app-id",
+        adminSecret: "admin-secret",
+        env: "dev",
+        branch: "main",
+        schemaHash: "hash-b",
+        serverPathPrefix: "/apps/test-app-id",
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Open edit" })).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open edit" }));
+
+    expect(await screen.findByRole("heading", { name: "Edit connection" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "test-app-id");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "admin-secret");
+    expect(screen.getByLabelText(/Path prefix/i)).toHaveProperty("value", "/apps/test-app-id");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset connection" }));
+
+    expect(await screen.findByRole("heading", { name: "Connect to Jazz server" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "");
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 });
