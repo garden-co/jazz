@@ -22,11 +22,19 @@ export interface JazzPluginOptions {
 
 const LOG_PREFIX = "[jazz]";
 
-interface ViteDevServer {
+// Minimal subset of Vite's ViteDevServer — redeclared here to keep this
+// module zero-dep on Vite's public types. Exported for sibling plugins
+// (./sveltekit.ts) to share, so the shape is maintained in one place.
+export interface ViteDevServer {
   config: {
     root: string;
     command: string;
     env?: Record<string, string>;
+    server?: {
+      port?: number;
+      host?: string | boolean;
+      https?: unknown;
+    };
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
   ws: {

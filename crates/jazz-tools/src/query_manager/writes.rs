@@ -14,7 +14,7 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
+use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{Session, WriteContext};
 use super::types::{
@@ -51,6 +51,36 @@ pub struct RowBranchDelete<'a> {
 }
 
 impl QueryManager {
+    fn resolve_insert_object_id<H: Storage>(
+        &self,
+        storage: &H,
+        external_object_id: Option<ObjectId>,
+    ) -> Result<ObjectId, QueryError> {
+        if let Some(object_id) = external_object_id {
+            if object_id.uuid().get_version_num() != 7 {
+                return Err(QueryError::EncodingError(format!(
+                    "external create id must be UUIDv7, got version {} for {}",
+                    object_id.uuid().get_version_num(),
+                    object_id
+                )));
+            }
+
+            if storage
+                .load_row_locator(object_id)
+                .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
+                .is_some()
+            {
+                return Err(QueryError::EncodingError(format!(
+                    "object already exists: {object_id}"
+                )));
+            }
+
+            return Ok(object_id);
+        }
+
+        Ok(ObjectId::new())
+    }
+
     fn resolve_write_author(write_context: Option<&WriteContext>) -> String {
         write_context
             .map(|write_context| write_context.author_principal().to_string())
@@ -602,6 +632,17 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
+    }
+
+    pub fn insert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
         let table_name = TableName::new(table);
         let table_schema = self
@@ -629,7 +670,7 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
@@ -674,8 +715,9 @@ impl QueryManager {
                         operation: Operation::Insert,
                     });
                 }
-                if let Some(policy) = insert_policy
-                    && !self.evaluate_policy_for_content_with_context(
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
                         &policy,
                         &data,
@@ -684,12 +726,15 @@ impl QueryManager {
                         session,
                         table,
                         self.current_branch().as_str(),
-                    )
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
                 }
             }
         }
@@ -770,6 +815,25 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_context,
+        )
+    }
+
+    pub fn insert_on_branch_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -791,7 +855,7 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
@@ -836,8 +900,9 @@ impl QueryManager {
                         operation: Operation::Insert,
                     });
                 }
-                if let Some(policy) = insert_policy
-                    && !self.evaluate_policy_for_content_with_context(
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
                         storage,
                         &policy,
                         &data,
@@ -846,12 +911,15 @@ impl QueryManager {
                         session,
                         table,
                         branch,
-                    )
-                {
-                    return Err(QueryError::PolicyDenied {
-                        table: table_name,
-                        operation: Operation::Insert,
-                    });
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
                 }
             }
         }
@@ -1038,39 +1106,6 @@ impl QueryManager {
         )
     }
 
-    /// Evaluate a policy expression against encoded row content using full policy context.
-    ///
-    /// This uses the same simple/complex split as server-side permission checks:
-    /// - Evaluate simple predicates directly from row bytes.
-    /// - Materialize and settle policy graphs for complex clauses.
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate_policy_for_content_with_context<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        policy: &crate::query_manager::policy::PolicyExpr,
-        content: &[u8],
-        provenance: &RowProvenance,
-        descriptor: &RowDescriptor,
-        session: &Session,
-        table: &str,
-        branch: &str,
-    ) -> bool {
-        let mut visited = HashSet::new();
-        self.evaluate_policy_for_content_with_context_inner(
-            storage,
-            policy,
-            content,
-            provenance,
-            descriptor,
-            session,
-            table,
-            branch,
-            None,
-            0,
-            &mut visited,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn evaluate_policy_for_content_with_context_for_row<H: Storage>(
         &mut self,
@@ -1119,7 +1154,9 @@ impl QueryManager {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
-        let simple_result = evaluate_simple_parts(policy, content, provenance, descriptor, session);
+        let simple_result = evaluate_simple_parts_with_row_id(
+            policy, content, provenance, descriptor, session, row_id,
+        );
         if !simple_result.passed {
             return false;
         }

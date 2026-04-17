@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.27",
+  "version": "2.0.0-alpha.29",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -59,6 +59,10 @@
       "types": "./dist/dev/expo.d.ts",
       "default": "./dist/dev/expo.js"
     },
+    "./dev/sveltekit": {
+      "types": "./dist/dev/sveltekit.d.ts",
+      "default": "./dist/dev/sveltekit.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",
@@ -79,6 +83,14 @@
       "react-native": "./dist/expo/auth-secret-store.js",
       "default": "./dist/expo/auth-secret-store.js"
     },
+    "./passphrase": {
+      "types": "./dist/passphrase.d.ts",
+      "default": "./dist/passphrase.js"
+    },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -98,6 +110,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
     "jazz-rn": "workspace:*",

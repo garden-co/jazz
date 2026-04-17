@@ -224,13 +224,26 @@ function schemaRootCandidates(appRoot: string): SchemaRootCandidate[] {
       rootDir: join(appRoot, "src"),
       schemaFile: join(appRoot, "src", "schema.ts"),
     },
+    {
+      rootDir: join(appRoot, "src", "lib"),
+      schemaFile: join(appRoot, "src", "lib", "schema.ts"),
+    },
   ];
 }
 
 function resolveSchemaRootCandidate(appRoot: string): SchemaRootCandidate | null {
-  return (
-    schemaRootCandidates(appRoot).find((candidate) => existsSync(candidate.schemaFile)) ?? null
+  const matches = schemaRootCandidates(appRoot).filter((candidate) =>
+    existsSync(candidate.schemaFile),
   );
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    throw new Error(
+      `Ambiguous schema location: found ${matches
+        .map((m) => m.schemaFile)
+        .join(" and ")}. Delete all but one so the schema root is unambiguous.`,
+    );
+  }
+  return matches[0];
 }
 
 function describeExpectedSchemaFiles(schemaDir: string): string {

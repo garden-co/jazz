@@ -4,7 +4,7 @@
 		JazzSvelteProvider,
 	} from 'jazz-tools/svelte';
 	import type { DbConfig } from 'jazz-tools';
-	import { BrowserAuthSecretStore, generateAuthSecret } from 'jazz-tools';
+	import { generateAuthSecret } from 'jazz-tools';
 	import { Toaster } from 'svelte-sonner';
 	import TodoList from './TodoList.svelte';
 
@@ -14,9 +14,8 @@
 
 	let { config: configOverrides = {} }: Props = $props();
 
-	function readEnvAppId(): string | undefined {
-		return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-			?.JAZZ_APP_ID;
+	function readEnv(name: string): string | undefined {
+		return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.[name];
 	}
 
 	function getOrCreateSecretSync(): string {
@@ -29,7 +28,10 @@
 
 	// #region context-setup-svelte
 	function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-		const appId = overrides.appId ?? readEnvAppId() ?? '019d4349-2408-7275-9b65-ac87f62b7aa2';
+		const appId = overrides.appId ?? readEnv('PUBLIC_JAZZ_APP_ID');
+		const serverUrl = overrides.serverUrl ?? readEnv('PUBLIC_JAZZ_SERVER_URL');
+		if (!appId)
+			throw new Error('Missing appId: add jazzSvelteKit() to vite.config.ts or set PUBLIC_JAZZ_APP_ID');
 		const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync();
 
 		return {
@@ -37,13 +39,14 @@
 			env: 'dev',
 			userBranch: 'main',
 			auth: { localFirstSecret: secret },
+			...(serverUrl ? { serverUrl } : {}),
 			...overrides,
 		};
 	}
 	// #endregion context-setup-svelte
 
-	const config = defaultConfig(configOverrides);
-	const client = createJazzClient(config);
+	const config = $derived(defaultConfig(configOverrides));
+	const client = $derived(createJazzClient(config));
 </script>
 
 <JazzSvelteProvider {client}>

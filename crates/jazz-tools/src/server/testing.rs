@@ -35,6 +35,7 @@ pub struct TestingServerBuilder {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+    auth_clock: Option<crate::middleware::auth::AuthClock>,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
@@ -113,6 +114,11 @@ impl TestingServerBuilder {
         self
     }
 
+    pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
+        self.auth_clock = Some(clock.into());
+        self
+    }
+
     pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
@@ -168,6 +174,7 @@ pub struct TestingServer {
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
     embedded_jwks_server: Option<TestingJwksServer>,
+    auth_clock: crate::middleware::auth::AuthClock,
 }
 
 impl TestingServer {
@@ -199,6 +206,7 @@ impl TestingServer {
             admin_secret,
             backend_secret,
             jwks_url,
+            auth_clock,
             sync_tracer,
         } = builder;
 
@@ -219,12 +227,14 @@ impl TestingServer {
 
         let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
         let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
+        let auth_clock = auth_clock.unwrap_or_default();
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
             allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
+            clock: auth_clock.clone(),
         };
 
         let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
@@ -264,6 +274,7 @@ impl TestingServer {
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
             embedded_jwks_server,
+            auth_clock,
         }
     }
 
@@ -276,10 +287,14 @@ impl TestingServer {
     }
 
     pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
+        Self::jwt_for_user_with_claims_at(sub, claims, SystemTime::now())
+    }
+
+    fn jwt_for_user_with_claims_at(sub: &str, claims: JsonValue, now: SystemTime) -> String {
         let claims = JwtClaims {
             sub: sub.to_string(),
             claims,
-            exp: SystemTime::now()
+            exp: now
                 .duration_since(UNIX_EPOCH)
                 .expect("clock drift")
                 .as_secs()
@@ -380,6 +395,7 @@ impl TestingServer {
             .expect("lock test client data dirs")
             .push(client_data_dir);
 
+        let jwt_token = self.jwt_for_user_for_server_clock(user_id.as_ref());
         AppContext {
             app_id: self.app_id,
             client_id: None,
@@ -387,7 +403,7 @@ impl TestingServer {
             server_url: self.base_url(),
             data_dir,
             storage: crate::ClientStorage::Memory,
-            jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
+            jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret.clone()),
             admin_secret: Some(self.admin_secret.clone()),
             sync_tracer: None,
@@ -401,6 +417,11 @@ impl TestingServer {
 
     pub async fn shutdown(mut self) {
         self.hosted.shutdown().await;
+    }
+
+    fn jwt_for_user_for_server_clock(&self, sub: &str) -> String {
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        Self::jwt_for_user_with_claims_at(sub, json!({"role": "user"}), now)
     }
 }
 

@@ -25,7 +25,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
+    parse_external_object_id, parse_query_input,
+    parse_read_durability_options as parse_binding_read_durability_options,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
@@ -51,6 +52,81 @@ use jazz_tools::sync_manager::{
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", content = "value")]
+enum FfiValue {
+    Integer(i32),
+    BigInt(i64),
+    Double(f64),
+    Boolean(bool),
+    Text(String),
+    Timestamp(u64),
+    Uuid(ObjectId),
+    Bytea(#[serde(with = "serde_bytes")] Vec<u8>),
+    Array(Vec<FfiValue>),
+    Row(FfiRow),
+    Null,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FfiRow {
+    #[serde(default)]
+    id: Option<ObjectId>,
+    values: Vec<FfiValue>,
+}
+
+impl From<FfiValue> for Value {
+    fn from(value: FfiValue) -> Self {
+        match value {
+            FfiValue::Integer(value) => Value::Integer(value),
+            FfiValue::BigInt(value) => Value::BigInt(value),
+            FfiValue::Double(value) => Value::Double(value),
+            FfiValue::Boolean(value) => Value::Boolean(value),
+            FfiValue::Text(value) => Value::Text(value),
+            FfiValue::Timestamp(value) => Value::Timestamp(value),
+            FfiValue::Uuid(value) => Value::Uuid(value),
+            FfiValue::Bytea(value) => Value::Bytea(value),
+            FfiValue::Array(values) => Value::Array(values.into_iter().map(Value::from).collect()),
+            FfiValue::Row(row) => Value::Row {
+                id: row.id,
+                values: row.values.into_iter().map(Value::from).collect(),
+            },
+            FfiValue::Null => Value::Null,
+        }
+    }
+}
+
+pub struct FfiRecordArg(HashMap<String, Value>);
+
+impl TypeName for FfiRecordArg {
+    fn type_name() -> &'static str {
+        "Record<string, unknown>"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+
+impl FromNapiValue for FfiRecordArg {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        napi_val: napi::sys::napi_value,
+    ) -> Result<Self> {
+        let env = Env::from_raw(env);
+        let unknown = unsafe { Unknown::from_napi_value(env.raw(), napi_val)? };
+        let values = env
+            .from_js_value::<HashMap<String, FfiValue>, _>(unknown)
+            .map_err(|error| napi::Error::from_reason(format!("Invalid values: {}", error)))?;
+        Ok(Self(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, Value::from(value)))
+                .collect(),
+        ))
+    }
 }
 
 fn parse_read_durability_options(
@@ -411,17 +487,17 @@ impl NapiRuntime {
     pub fn insert(
         &self,
         table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let js_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, js_values, None)
+            .insert_with_id(&table, values.0, object_id, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -440,19 +516,20 @@ impl NapiRuntime {
     pub fn insert_with_session(
         &self,
         table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let js_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, js_values, write_context.as_ref())
+            .insert_with_id(&table, values.0, object_id, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -471,15 +548,13 @@ impl NapiRuntime {
     pub fn update(
         &self,
         object_id: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
     ) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values);
+        let updates = convert_updates(values.0);
 
         let mut core = self
             .core
@@ -495,7 +570,7 @@ impl NapiRuntime {
     pub fn update_with_session(
         &self,
         object_id: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
     ) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&object_id)
@@ -503,9 +578,7 @@ impl NapiRuntime {
         let oid = ObjectId::from_uuid(uuid);
         let write_context = parse_write_context_json(write_context_json)?;
 
-        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values);
+        let updates = convert_updates(values.0);
 
         let mut core = self
             .core
@@ -739,13 +812,13 @@ impl NapiRuntime {
     pub async fn insert_durable(
         &self,
         table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         tier: String,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
-
-        let js_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -753,7 +826,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, js_values, None, persistence_tier)
+                .insert_persisted_with_id(&table, values.0, object_id, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -775,14 +848,15 @@ impl NapiRuntime {
     pub async fn insert_durable_with_session(
         &self,
         table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
         tier: String,
+        object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
-        let js_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -790,7 +864,13 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, js_values, write_context.as_ref(), persistence_tier)
+                .insert_persisted_with_id(
+                    &table,
+                    values.0,
+                    object_id,
+                    write_context.as_ref(),
+                    persistence_tier,
+                )
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -812,7 +892,7 @@ impl NapiRuntime {
     pub async fn update_durable(
         &self,
         object_id: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         tier: String,
     ) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
@@ -821,9 +901,7 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values);
+        let updates = convert_updates(values.0);
 
         let receiver = {
             let mut core = self
@@ -842,7 +920,7 @@ impl NapiRuntime {
     pub async fn update_durable_with_session(
         &self,
         object_id: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
         tier: String,
     ) -> napi::Result<()> {
@@ -853,9 +931,7 @@ impl NapiRuntime {
         let oid = ObjectId::from_uuid(uuid);
         let write_context = parse_write_context_json(write_context_json)?;
 
-        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let updates = convert_updates(partial_values);
+        let updates = convert_updates(values.0);
 
         let receiver = {
             let mut core = self
@@ -1471,6 +1547,7 @@ impl DevServer {
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
+            ..Default::default()
         };
 
         let in_memory = opts.in_memory.unwrap_or(false);

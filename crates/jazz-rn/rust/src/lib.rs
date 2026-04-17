@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
+use serde::Deserialize;
 
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
     current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_session_input, parse_write_context_input,
+    parse_external_object_id, parse_query_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
@@ -95,12 +96,77 @@ where
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", content = "value")]
+enum FfiJsonValue {
+    Integer(i32),
+    BigInt(i64),
+    Double(f64),
+    Boolean(bool),
+    Text(String),
+    Timestamp(u64),
+    Uuid(ObjectId),
+    Bytea(String),
+    Array(Vec<FfiJsonValue>),
+    Row(FfiJsonRow),
+    Null,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FfiJsonRow {
+    #[serde(default)]
+    id: Option<ObjectId>,
+    values: Vec<FfiJsonValue>,
+}
+
+fn ffi_json_err(message: impl Into<String>) -> JazzRnError {
+    JazzRnError::InvalidJson {
+        message: message.into(),
+    }
+}
+
+fn decode_ffi_json_value(value: FfiJsonValue) -> Result<Value, JazzRnError> {
+    match value {
+        FfiJsonValue::Integer(value) => Ok(Value::Integer(value)),
+        FfiJsonValue::BigInt(value) => Ok(Value::BigInt(value)),
+        FfiJsonValue::Double(value) => Ok(Value::Double(value)),
+        FfiJsonValue::Boolean(value) => Ok(Value::Boolean(value)),
+        FfiJsonValue::Text(value) => Ok(Value::Text(value)),
+        FfiJsonValue::Timestamp(value) => Ok(Value::Timestamp(value)),
+        FfiJsonValue::Uuid(value) => Ok(Value::Uuid(value)),
+        FfiJsonValue::Bytea(value) => hex::decode(value)
+            .map(Value::Bytea)
+            .map_err(|error| ffi_json_err(format!("invalid Bytea hex payload: {error}"))),
+        FfiJsonValue::Array(values) => values
+            .into_iter()
+            .map(decode_ffi_json_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        FfiJsonValue::Row(row) => row
+            .values
+            .into_iter()
+            .map(decode_ffi_json_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| Value::Row { id: row.id, values }),
+        FfiJsonValue::Null => Ok(Value::Null),
+    }
+}
+
+fn decode_ffi_json_record(values_json: &str) -> Result<HashMap<String, Value>, JazzRnError> {
+    let values: HashMap<String, FfiJsonValue> =
+        serde_json::from_str(values_json).map_err(json_err)?;
+    values
+        .into_iter()
+        .map(|(key, value)| decode_ffi_json_value(value).map(|value| (key, value)))
+        .collect()
+}
+
 fn convert_insert_values(values_json: &str) -> Result<HashMap<String, Value>, JazzRnError> {
-    serde_json::from_str(values_json).map_err(json_err)
+    decode_ffi_json_record(values_json)
 }
 
 fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnError> {
-    let partial: HashMap<String, Value> = serde_json::from_str(values_json).map_err(json_err)?;
+    let partial = decode_ffi_json_record(values_json)?;
     Ok(partial.into_iter().collect())
 }
 
@@ -334,14 +400,21 @@ impl RnRuntime {
     // CRUD
     // =========================================================================
 
-    pub fn insert(&self, table: String, values_json: String) -> Result<String, JazzRnError> {
+    pub fn insert(
+        &self,
+        table: String,
+        values_json: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert", || {
             let named_values = convert_insert_values(&values_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             let (id, row_values) = core
-                .insert(&table, named_values, None)
+                .insert_with_id(&table, named_values, object_id, None)
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -364,15 +437,18 @@ impl RnRuntime {
         table: String,
         values_json: String,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert_with_session", || {
             let named_values = convert_insert_values(&values_json)?;
             let write_context = parse_write_context(write_context_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             let (id, row_values) = core
-                .insert(&table, named_values, write_context.as_ref())
+                .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
