@@ -101,9 +101,7 @@ export async function validate(options: BuildOptions): Promise<void> {
   if (compiled.permissionsFile) {
     console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
-    console.log(
-      "Use `jazz-tools permissions status` or `jazz-tools permissions push` for auth publication.",
-    );
+    console.log("Use `jazz-tools permissions status` or `jazz-tools deploy` for auth publication.");
   }
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
     compiled.schema.tables.map((table) => table.name),
@@ -1661,42 +1659,6 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
   console.log(`Next push will require parent bundle ${head.bundleObjectId}.`);
 }
 
-export async function pushPermissions(options: PermissionsCommandOptions): Promise<void> {
-  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
-  const localSchemaHash = await resolveStoredStructuralSchemaHashOrThrow(
-    options.serverUrl,
-    options.adminSecret,
-    compiled.wasmSchema,
-  );
-  const { head: currentHead } = await fetchPermissionsHead(options.serverUrl, {
-    adminSecret: options.adminSecret,
-  });
-  const { head: publishedHead } = await publishStoredPermissions(options.serverUrl, {
-    adminSecret: options.adminSecret,
-    schemaHash: localSchemaHash,
-    permissions: compiled.permissions,
-    expectedParentBundleObjectId: currentHead?.bundleObjectId ?? null,
-  });
-
-  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
-  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
-  console.log(`Resolved structural schema hash ${shortSchemaHash(localSchemaHash)}.`);
-  if (currentHead) {
-    console.log(`Publishing from parent ${describePermissionsHead(currentHead)}.`);
-  } else {
-    console.log("Publishing first permissions head for this app.");
-  }
-
-  const nextHead = publishedHead ?? {
-    schemaHash: localSchemaHash,
-    version: currentHead ? currentHead.version + 1 : 1,
-    parentBundleObjectId: currentHead?.bundleObjectId ?? null,
-    bundleObjectId: currentHead?.bundleObjectId ?? "",
-  };
-  console.log(`Published permissions head ${describePermissionsHead(nextHead)}.`);
-  console.log(PERMISSIONS_LIFECYCLE_NOTE);
-}
-
 export async function deploy(options: DeployOptions): Promise<void> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   console.log(`Loaded current schema from ${compiled.schemaFile}.`);
@@ -1864,11 +1826,7 @@ if (isMainModule()) {
     const task =
       subcommand === "status"
         ? permissionsStatus(options)
-        : subcommand === "push"
-          ? pushPermissions(options)
-          : Promise.reject(
-              new Error("Usage: node dist/cli.js permissions <status|push> [options]"),
-            );
+        : Promise.reject(new Error("Usage: node dist/cli.js permissions status [options]"));
 
     task.catch((err) => {
       console.error(err.message);
@@ -1893,9 +1851,6 @@ if (isMainModule()) {
     console.log("  schema export         Print the compiled structural schema as JSON");
     console.log("  deploy                Publish the current schema.ts and permissions.ts");
     console.log("  permissions status    Show the current server permissions head for this app");
-    console.log(
-      "  permissions push      Publish the current permissions.ts with head-parent checks",
-    );
     console.log(
       "  migrations create     Generate a typed structural migration stub between two schema versions",
     );

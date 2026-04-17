@@ -21,7 +21,6 @@ import {
   exportSchema,
   permissionsStatus,
   pushMigration,
-  pushPermissions,
   validate,
 } from "./cli.js";
 
@@ -1798,136 +1797,6 @@ describe("cli permissions", () => {
       `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
     );
   });
-
-  it("publishes permissions with the current head bundle as the expected parent", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-
-    const schemaHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    const currentHead = {
-      schemaHash,
-      version: 2,
-      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-      bundleObjectId: "22222222-2222-2222-2222-222222222222",
-    };
-
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/schema/${schemaHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
-      }
-
-      if (input.endsWith("/admin/permissions/head")) {
-        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
-      }
-
-      if (input.endsWith("/admin/permissions")) {
-        const body = JSON.parse(String(init?.body));
-        expect(body.schemaHash).toBe(schemaHash);
-        expect(body.expectedParentBundleObjectId).toBe(currentHead.bundleObjectId);
-        expect(Object.keys(body.permissions)).toContain("todos");
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash,
-              version: 3,
-              parentBundleObjectId: currentHead.bundleObjectId,
-              bundleObjectId: "33333333-3333-3333-3333-333333333333",
-            },
-          }),
-          { status: 201 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
-      pushPermissions({
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        schemaDir: root,
-      }),
-    );
-
-    expect(logs).toContain(`Resolved structural schema hash ${schemaHash.slice(0, 12)}.`);
-    expect(logs).toContain(`Publishing from parent v2 on ${schemaHash.slice(0, 12)}.`);
-    expect(logs).toContain(`Published permissions head v3 on ${schemaHash.slice(0, 12)}.`);
-    expect(logs).toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
-  });
-
-  it("publishes permission literals using tagged wire values", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
-    await writeFile(join(root, "permissions.ts"), rootBooleanLiteralPermissionsSchema());
-
-    const schemaHash = "abababababababababababababababababababababababababababababababab";
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
-        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/schema/${schemaHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              { name: "done", column_type: { type: "Boolean" }, nullable: false },
-            ],
-          },
-        });
-      }
-
-      if (input.endsWith("/admin/permissions/head")) {
-        return new Response(JSON.stringify({ head: null }), { status: 200 });
-      }
-
-      if (input.endsWith("/admin/permissions")) {
-        const body = JSON.parse(String(init?.body));
-        expect(body.permissions.todos.select.using).toEqual({
-          type: "Cmp",
-          column: "done",
-          op: "Eq",
-          value: {
-            type: "Literal",
-            value: {
-              type: "Boolean",
-              value: true,
-            },
-          },
-        });
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash,
-              version: 1,
-              parentBundleObjectId: null,
-              bundleObjectId: "99999999-9999-9999-9999-999999999999",
-            },
-          }),
-          { status: 201 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await pushPermissions({
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      schemaDir: root,
-    });
-
-    expect(fetchMock).toHaveBeenCalled();
-  });
 });
 
 describe("cli deploy", () => {
@@ -2683,7 +2552,6 @@ exit 0
     expect(result.stdout).toContain("validate");
     expect(result.stdout).toContain("schema export");
     expect(result.stdout).toContain("deploy");
-    expect(result.stdout).toContain("permissions push");
     expect(result.stdout).toContain("migrations push");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
