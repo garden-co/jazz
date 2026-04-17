@@ -30,6 +30,7 @@ export interface WorkerBridgeOptions {
   jwtToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
+  fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
@@ -176,6 +177,7 @@ export class WorkerBridge {
       jwtToken: options.jwtToken,
       adminSecret: options.adminSecret,
       runtimeSources: options.runtimeSources,
+      fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };

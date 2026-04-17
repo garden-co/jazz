@@ -110,7 +110,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
 
 async function ensureWorkerWasmInitialized(
   wasmModule: any,
-  msg: Pick<InitMessage, "runtimeSources"> | undefined,
+  msg: Pick<InitMessage, "runtimeSources" | "fallbackWasmUrl"> | undefined,
 ): Promise<void> {
   if (wasmInitialized) {
     return;
@@ -142,7 +142,7 @@ async function ensureWorkerWasmInitialized(
   try {
     await runWithRootRelativeFetchSupport(() => wasmModule.default());
   } catch (error) {
-    const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
+    const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error) ?? msg?.fallbackWasmUrl ?? null;
     if (!absoluteWasmUrl) {
       throw error;
     }
