@@ -151,6 +151,8 @@ fn persist_visible_row_settlement(
 struct FailingHistoryPatchStorage {
     inner: MemoryStorage,
     fail_history_load: bool,
+    fail_authoritative_settlement_upsert: bool,
+    fail_sealed_submission_upsert: bool,
 }
 
 impl FailingHistoryPatchStorage {
@@ -158,6 +160,8 @@ impl FailingHistoryPatchStorage {
         Self {
             inner: MemoryStorage::new(),
             fail_history_load: false,
+            fail_authoritative_settlement_upsert: false,
+            fail_sealed_submission_upsert: false,
         }
     }
 
@@ -223,6 +227,32 @@ impl Storage for FailingHistoryPatchStorage {
         }
         self.inner
             .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn upsert_authoritative_batch_settlement(
+        &mut self,
+        settlement: &BatchSettlement,
+    ) -> Result<(), crate::storage::StorageError> {
+        if self.fail_authoritative_settlement_upsert {
+            return Err(crate::storage::StorageError::IoError(format!(
+                "simulated authoritative settlement persist failure for {:?}",
+                settlement.batch_id()
+            )));
+        }
+        self.inner.upsert_authoritative_batch_settlement(settlement)
+    }
+
+    fn upsert_sealed_batch_submission(
+        &mut self,
+        submission: &SealedBatchSubmission,
+    ) -> Result<(), crate::storage::StorageError> {
+        if self.fail_sealed_submission_upsert {
+            return Err(crate::storage::StorageError::IoError(format!(
+                "simulated sealed submission persist failure for {:?}",
+                submission.batch_id
+            )));
+        }
+        self.inner.upsert_sealed_batch_submission(submission)
     }
 }
 
@@ -2238,6 +2268,124 @@ fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
         None,
         "invalid batch digests should be rejected before publication"
     );
+}
+
+#[test]
+fn seal_batch_rejection_stops_when_settlement_persistence_fails() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = FailingHistoryPatchStorage::new();
+    io.fail_authoritative_settlement_upsert = true;
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(io.inner_mut());
+
+    sm.add_client_with_storage(&io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let staged_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let mut submission = sealed_submission(
+        batch_id,
+        "main",
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: staged_row.content_digest(),
+        }],
+        Vec::new(),
+    );
+    submission.batch_digest = crate::digest::Digest32([255; 32]);
+
+    sm.process_from_client(&mut io, client_id, SyncPayload::SealBatch { submission });
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "failed settlement persistence should not publish or reject the batch"
+    );
+    assert!(sm.take_outbox().is_empty());
+}
+
+#[test]
+fn seal_batch_acceptance_stops_when_submission_persistence_fails() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = FailingHistoryPatchStorage::new();
+    io.fail_sealed_submission_upsert = true;
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(io.inner_mut());
+
+    sm.add_client_with_storage(&io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let staged_row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let submission = sealed_submission(
+        batch_id,
+        "main",
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: staged_row.content_digest(),
+        }],
+        Vec::new(),
+    );
+
+    sm.process_from_client(&mut io, client_id, SyncPayload::SealBatch { submission });
+
+    assert_eq!(io.load_sealed_batch_submission(batch_id).unwrap(), None);
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "failed sealed-submission persistence should leave the batch unpublished"
+    );
+    assert!(sm.take_outbox().is_empty());
 }
 
 #[test]

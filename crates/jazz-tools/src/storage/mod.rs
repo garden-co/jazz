@@ -26,6 +26,7 @@ pub use sqlite::SqliteStorage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,9 @@ const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
 const RAW_TABLE_HEADER_TABLE: &str = "__raw_table_header";
 const BRANCH_ORD_REGISTRY_TABLE: &str = "__branch_ord_registry";
 const BRANCH_ORD_REGISTRY_KEY: &str = "registry";
+pub(crate) const STORE_MANIFEST_KEY: &str = "__jazz_store_manifest";
+const STORE_MANIFEST_MAGIC: &[u8; 10] = b"JAZZSTORE1";
+const STORE_FORMAT_V1: i32 = 1;
 const ROW_STORAGE_FORMAT_V1: i32 = 1;
 const ROW_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
 const EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
@@ -133,6 +137,93 @@ const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
 const STORAGE_KIND_CATALOGUE: &str = "catalogue";
+#[cfg(feature = "sqlite")]
+pub(crate) const SQLITE_STORE_KIND: &str = "sqlite";
+#[cfg(feature = "rocksdb")]
+pub(crate) const ROCKSDB_STORE_KIND: &str = "rocksdb";
+pub(crate) const OPFS_BTREE_STORE_KIND: &str = "opfs_btree";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreManifest {
+    pub store_kind: String,
+    pub store_format_version: i32,
+}
+
+pub(crate) fn expected_store_manifest(store_kind: &str) -> StoreManifest {
+    StoreManifest {
+        store_kind: store_kind.to_string(),
+        store_format_version: STORE_FORMAT_V1,
+    }
+}
+
+pub(crate) fn encode_store_manifest(manifest: &StoreManifest) -> Result<Vec<u8>, StorageError> {
+    let kind_bytes = manifest.store_kind.as_bytes();
+    if kind_bytes.len() > u8::MAX as usize {
+        return Err(StorageError::IoError(format!(
+            "store manifest kind too long: {} bytes",
+            kind_bytes.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        STORE_MANIFEST_MAGIC.len() + std::mem::size_of::<i32>() + 1 + kind_bytes.len(),
+    );
+    bytes.extend_from_slice(STORE_MANIFEST_MAGIC);
+    bytes.extend_from_slice(&manifest.store_format_version.to_le_bytes());
+    bytes.push(kind_bytes.len() as u8);
+    bytes.extend_from_slice(kind_bytes);
+    Ok(bytes)
+}
+
+pub(crate) fn decode_store_manifest(bytes: &[u8]) -> Result<StoreManifest, StorageError> {
+    let min_len = STORE_MANIFEST_MAGIC.len() + std::mem::size_of::<i32>() + 1;
+    if bytes.len() < min_len {
+        return Err(StorageError::IoError(
+            "store manifest too short".to_string(),
+        ));
+    }
+    if &bytes[..STORE_MANIFEST_MAGIC.len()] != STORE_MANIFEST_MAGIC {
+        return Err(StorageError::IoError(
+            "store manifest magic mismatch".to_string(),
+        ));
+    }
+    let mut version_bytes = [0u8; 4];
+    version_bytes
+        .copy_from_slice(&bytes[STORE_MANIFEST_MAGIC.len()..STORE_MANIFEST_MAGIC.len() + 4]);
+    let store_format_version = i32::from_le_bytes(version_bytes);
+    let kind_len = bytes[STORE_MANIFEST_MAGIC.len() + 4] as usize;
+    let kind_start = STORE_MANIFEST_MAGIC.len() + 5;
+    let kind_end = kind_start + kind_len;
+    if bytes.len() != kind_end {
+        return Err(StorageError::IoError(
+            "store manifest trailing bytes mismatch".to_string(),
+        ));
+    }
+    let store_kind = String::from_utf8(bytes[kind_start..kind_end].to_vec())
+        .map_err(|err| StorageError::IoError(format!("invalid store manifest kind utf8: {err}")))?;
+    Ok(StoreManifest {
+        store_kind,
+        store_format_version,
+    })
+}
+
+pub(crate) fn validate_store_manifest(
+    actual: &StoreManifest,
+    expected: &StoreManifest,
+) -> Result<(), StorageError> {
+    if actual.store_kind != expected.store_kind {
+        return Err(StorageError::IoError(format!(
+            "store manifest kind mismatch: expected {}, got {}",
+            expected.store_kind, actual.store_kind
+        )));
+    }
+    if actual.store_format_version != expected.store_format_version {
+        return Err(StorageError::IoError(format!(
+            "store manifest version mismatch for {}: expected {}, got {}",
+            expected.store_kind, expected.store_format_version, actual.store_format_version
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawTableHeader {
@@ -373,8 +464,9 @@ fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDes
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn storage_cache_key<H: ?Sized>(storage: &H) -> usize {
-    std::ptr::from_ref(storage).cast::<()>() as usize
+pub(crate) fn next_storage_cache_namespace() -> usize {
+    static NEXT_STORAGE_CACHE_NAMESPACE: AtomicUsize = AtomicUsize::new(1);
+    NEXT_STORAGE_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed)
 }
 
 fn raw_table_header_cache() -> &'static Mutex<HashMap<(usize, String), RawTableHeader>> {
@@ -382,18 +474,18 @@ fn raw_table_header_cache() -> &'static Mutex<HashMap<(usize, String), RawTableH
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_raw_table_header_with_storage<H: ?Sized>(
+fn cached_raw_table_header_with_storage<H: Storage + ?Sized>(
     storage: &H,
     raw_table: &str,
 ) -> Option<RawTableHeader> {
     raw_table_header_cache()
         .lock()
         .expect("raw table header cache poisoned")
-        .get(&(storage_cache_key(storage), raw_table.to_string()))
+        .get(&(storage.storage_cache_namespace(), raw_table.to_string()))
         .cloned()
 }
 
-fn cache_raw_table_header_with_storage<H: ?Sized>(
+fn cache_raw_table_header_with_storage<H: Storage + ?Sized>(
     storage: &H,
     raw_table: &str,
     header: RawTableHeader,
@@ -401,7 +493,10 @@ fn cache_raw_table_header_with_storage<H: ?Sized>(
     raw_table_header_cache()
         .lock()
         .expect("raw table header cache poisoned")
-        .insert((storage_cache_key(storage), raw_table.to_string()), header);
+        .insert(
+            (storage.storage_cache_namespace(), raw_table.to_string()),
+            header,
+        );
 }
 
 fn validated_raw_table_cache() -> &'static Mutex<HashSet<(usize, String)>> {
@@ -409,25 +504,25 @@ fn validated_raw_table_cache() -> &'static Mutex<HashSet<(usize, String)>> {
     CACHE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn raw_table_validated_with_storage<H: ?Sized>(storage: &H, raw_table: &str) -> bool {
+fn raw_table_validated_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) -> bool {
     validated_raw_table_cache()
         .lock()
         .expect("validated raw table cache poisoned")
-        .contains(&(storage_cache_key(storage), raw_table.to_string()))
+        .contains(&(storage.storage_cache_namespace(), raw_table.to_string()))
 }
 
-fn cache_validated_raw_table_with_storage<H: ?Sized>(storage: &H, raw_table: &str) {
+fn cache_validated_raw_table_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) {
     validated_raw_table_cache()
         .lock()
         .expect("validated raw table cache poisoned")
-        .insert((storage_cache_key(storage), raw_table.to_string()));
+        .insert((storage.storage_cache_namespace(), raw_table.to_string()));
 }
 
-fn invalidate_validated_raw_table_with_storage<H: ?Sized>(storage: &H, raw_table: &str) {
+fn invalidate_validated_raw_table_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) {
     validated_raw_table_cache()
         .lock()
         .expect("validated raw table cache poisoned")
-        .remove(&(storage_cache_key(storage), raw_table.to_string()));
+        .remove(&(storage.storage_cache_namespace(), raw_table.to_string()));
 }
 
 fn cached_row_descriptor(raw_table: &str) -> Option<Arc<RowDescriptor>> {
@@ -2491,6 +2586,10 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
 /// No `Send + Sync` bounds. Each thread has its own Storage instance.
 /// Cross-thread communication uses the sync protocol, not shared state.
 pub trait Storage {
+    fn storage_cache_namespace(&self) -> usize {
+        std::ptr::from_ref(self).cast::<()>() as usize
+    }
+
     // ================================================================
     // Logical row locator storage (sync - returns immediately with result)
     // ================================================================
@@ -4544,8 +4643,8 @@ impl TableRowHistories {
 /// - All jazz unit tests
 /// - All jazz integration tests
 /// - Main thread in browser (acts as cache of worker state)
-#[derive(Default)]
 pub struct MemoryStorage {
+    cache_namespace: usize,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     /// Raw table headers already validated/inserted in this storage instance.
@@ -4575,6 +4674,19 @@ impl MemoryStorage {
         ensure_raw_table_header(self, raw_table, expected_header)?;
         self.ensured_raw_table_headers.insert(raw_table.to_string());
         Ok(())
+    }
+}
+
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        Self {
+            cache_namespace: next_storage_cache_namespace(),
+            raw_tables: HashMap::new(),
+            ensured_raw_table_headers: HashSet::new(),
+            row_locators: HashMap::new(),
+            row_histories: HashMap::new(),
+            row_history_bytes: HashMap::new(),
+        }
     }
 }
 
@@ -4686,6 +4798,10 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn apply_prepared_row_mutation(
         &mut self,
         table: &str,
