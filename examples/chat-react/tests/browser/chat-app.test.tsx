@@ -454,6 +454,12 @@ describe("Chat App E2E", () => {
     await act(async () => simulateClick(privateChatButton));
 
     await waitFor(
+      () => hasRenderedMessage(aliceContainer, "This is a private chat."),
+      10000,
+      "Private chat seed message should render for user A",
+    );
+
+    await waitFor(
       () => aliceContainer.querySelector("#messageEditor") !== null,
       10000,
       "Private chat editor should appear for user A",

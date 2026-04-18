@@ -154,6 +154,12 @@ impl QueryManager {
         self.sync_manager.reserve_timestamp()
     }
 
+    fn resolve_update_timestamp(&mut self, write_context: Option<&WriteContext>) -> u64 {
+        write_context
+            .and_then(WriteContext::updated_at)
+            .unwrap_or_else(|| self.reserve_write_timestamp())
+    }
+
     fn row_provenance_for_insert(
         &self,
         write_context: Option<&WriteContext>,
@@ -1902,7 +1908,7 @@ impl QueryManager {
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
         let branch = self.current_branch();
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
         let prepared = self.prepare_update_write(
@@ -1988,7 +1994,7 @@ impl QueryManager {
             old_data_for_policy: _old_data_for_policy,
             old_provenance_for_policy,
         } = write;
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
         let prepared = self.prepare_update_write_for_schema(
@@ -2214,7 +2220,7 @@ impl QueryManager {
         let branch = self.current_branch();
         let parents =
             self.parent_ids_for_write(storage, &table, id, branch.as_str(), write_context);
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
 
@@ -2406,7 +2412,7 @@ impl QueryManager {
                     .filter(|data| !data.is_empty())
             });
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
