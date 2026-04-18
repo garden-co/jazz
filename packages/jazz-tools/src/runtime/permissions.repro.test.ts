@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
@@ -41,6 +41,10 @@ type ReproEnv = {
   context: JazzContext;
   dataRoot: string;
 };
+
+async function settleRuntimeTeardown(delayMs: number = 250): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 function seedScenario(context: JazzContext): void {
   const db = context.db(reproApp);
@@ -116,13 +120,19 @@ async function runCase(
     expect(names).toEqual([...expectedNames].sort());
     return names;
   } finally {
+    env.context.flush();
     await env.context.shutdown();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await settleRuntimeTeardown();
     await rm(env.dataRoot, { recursive: true, force: true });
+    await settleRuntimeTeardown(50);
   }
 }
 
 describe("runtime permission repros for recursive gather and qualified predicates", () => {
+  afterAll(async () => {
+    await settleRuntimeTeardown();
+  });
+
   it("matches the original four runtime repro cases", async () => {
     await runCase(["Alice"], ({ policy, session }) => {
       policy.teams.allowRead.where((team) =>
