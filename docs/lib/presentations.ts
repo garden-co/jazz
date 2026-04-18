@@ -1,7 +1,7 @@
 import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
-import { presentationSlides } from "fumadocs-mdx:collections/server";
+import { presentationSlides } from "../.source/server";
 
 export const presentationsSource = loader({
   baseUrl: "/presentations",
