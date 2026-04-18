@@ -776,6 +776,13 @@ impl SyncManager {
             .collect()
     }
 
+    /// Whether we have received at least one upstream scope snapshot for this query.
+    pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
+        self.remote_query_scopes
+            .keys()
+            .any(|(_, remote_query_id)| *remote_query_id == query_id)
+    }
+
     /// Take pending replayable batch settlements for RuntimeCore to process.
     pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
         std::mem::take(&mut self.pending_batch_settlements)

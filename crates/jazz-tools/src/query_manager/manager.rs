@@ -191,6 +191,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
     /// Whether this subscription uses post-settle auth filtering instead of graph policies.
     pub(crate) uses_explicit_authorization_filtering: bool,
+    /// Whether visible rows must stay aligned to the latest upstream query scope.
+    pub(crate) sync_backed: bool,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
     /// Schema mismatch warnings already emitted for the latest settled state.
@@ -1180,6 +1182,21 @@ impl QueryManager {
                 subscription.graph.current_output_tuples()
             };
 
+            if subscription.sync_backed
+                && subscription.query_frontier_complete
+                && self
+                    .sync_manager
+                    .has_remote_query_scope_snapshot(QueryId(sub_id.0))
+                && (subscription.propagation == QueryPropagation::Full
+                    || !self.sync_manager.has_durability_identity())
+            {
+                visible_tuples = self.filter_synced_query_scope_tuples(
+                    QueryId(sub_id.0),
+                    &subscription.pending_local_row_ids,
+                    visible_tuples,
+                );
+            }
+
             if subscription.strict_transactions {
                 visible_tuples = self.filter_strict_transaction_tuples(
                     storage_ref,
@@ -1223,7 +1240,9 @@ impl QueryManager {
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
                 subscription.has_pending_local_updates = false;
-                subscription.pending_local_row_ids.clear();
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
             } else if !visible_delta.is_empty() {
                 let ordered = build_ordered_delta_with_post_ids(
                     &subscription.current_ordered_ids,
@@ -1247,7 +1266,9 @@ impl QueryManager {
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
                 subscription.has_pending_local_updates = false;
-                subscription.pending_local_row_ids.clear();
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
             }
 
             self.subscriptions.insert(sub_id, subscription);
@@ -2146,6 +2167,27 @@ impl QueryManager {
                         )
                         .and_then(|flattened| flattened.to_single_row())
                 }
+            })
+            .collect()
+    }
+
+    fn filter_synced_query_scope_tuples(
+        &self,
+        query_id: QueryId,
+        pending_local_row_ids: &HashSet<ObjectId>,
+        tuples: Vec<Tuple>,
+    ) -> Vec<Tuple> {
+        let remote_scope = self.sync_manager.remote_query_scope(query_id);
+        tuples
+            .into_iter()
+            .filter(|tuple| {
+                tuple
+                    .id_iter()
+                    .any(|id| pending_local_row_ids.contains(&id))
+                    || tuple
+                        .provenance()
+                        .iter()
+                        .any(|scoped_object| remote_scope.contains(scoped_object))
             })
             .collect()
     }
