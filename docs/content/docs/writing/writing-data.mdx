@@ -8,6 +8,12 @@ reviewedAt: "4059cdef"
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
 
+For TypeScript callers that need a replayable handle instead of awaiting immediately, Jazz also exposes persisted-write helpers and explicit batch builders:
+
+- `insertPersisted`, `updatePersisted`, `deletePersisted` return `DbPersistedWrite`
+- `beginTransaction(...)` returns `DbTransaction`
+- `beginDirectBatch(...)` returns `DbDirectBatch`
+
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
 or `db.createFileFromStream(...)` and store the returned file ID on your own row.
@@ -111,3 +117,56 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
 Need to clear local data during development? See [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)
+
+## Persisted write handles
+
+Use the persisted variants when you want to keep a stable handle to a write after issuing it locally.
+
+```ts
+const pending = db.insertPersisted(app.todos, {
+  title: "Ship review fixes",
+  done: false,
+});
+
+console.log(pending.batchId());
+console.log(pending.localBatchRecord());
+
+try {
+  const row = await pending.wait();
+  console.log(row.id);
+} catch (error) {
+  if (error instanceof PersistedWriteRejectedError) {
+    console.error(error.code, error.reason);
+    pending.acknowledgeRejectedBatch();
+  }
+}
+```
+
+`wait()` resolves when the batch reaches the requested durability tier. If the batch is replayably rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+
+## Explicit batches
+
+Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
+
+```ts
+const tx = db.beginTransaction(app.todos);
+
+tx.insert(app.todos, { title: "Draft copy", done: false });
+tx.update(app.todos, todoId, { done: true });
+
+const batchId = tx.commit();
+console.log(batchId);
+```
+
+Use a direct batch when you want to group several ordinary writes under one batch id without sealing:
+
+```ts
+const batch = db.beginDirectBatch(app.todos);
+
+batch.insert(app.todos, { title: "Grouped direct write", done: false });
+batch.update(app.todos, todoId, { done: true });
+
+console.log(batch.batchId());
+```
+
+Both builders can also issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.

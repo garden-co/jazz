@@ -1,13 +1,20 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{RowState, StoredRowVersion};
+use crate::row_histories::StoredRowBatch;
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashMap;
 
-type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowVersion);
+type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowBatch);
 
 impl SyncManager {
+    fn scope_delivery_row(mut row: StoredRowBatch) -> StoredRowBatch {
+        if row.state.is_visible() {
+            row.parents.clear();
+        }
+        row
+    }
+
     pub(super) fn queue_catalogue_sync_to_server_from_storage<H: Storage>(
         &mut self,
         server_id: ServerId,
@@ -55,15 +62,12 @@ impl SyncManager {
         row_sync: &mut Vec<RowSyncData>,
     ) {
         let metadata = metadata_from_row_locator(row_locator);
-        let Ok(rows) = storage.scan_history_row_versions(row_locator.table.as_str(), object_id)
+        let Ok(rows) = storage.scan_history_row_batches(row_locator.table.as_str(), object_id)
         else {
             return;
         };
 
-        for row in rows
-            .into_iter()
-            .filter(|row| !matches!(row.state, RowState::StagingPending))
-        {
+        for row in rows.into_iter() {
             row_sync.push((object_id, metadata.clone(), row));
         }
     }
@@ -164,7 +168,7 @@ impl SyncManager {
         server_id: ServerId,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -175,7 +179,7 @@ impl SyncManager {
         }
 
         let branch_name = BranchName::new(&row.branch);
-        let version_id = row.version_id();
+        let batch_id = row.batch_id;
 
         let (include_metadata, already_sent) = {
             let Some(server) = self.servers.get(&server_id) else {
@@ -183,14 +187,14 @@ impl SyncManager {
             };
             let include_metadata = !server.sent_metadata.contains(&object_id);
             let already_sent = server
-                .sent_row_versions
+                .sent_batch_ids
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
             (include_metadata, already_sent)
         };
 
-        if already_sent.contains(&version_id) && !include_metadata {
+        if already_sent.contains(&batch_id) && !include_metadata {
             return;
         }
 
@@ -201,14 +205,14 @@ impl SyncManager {
             server.sent_metadata.insert(object_id);
         }
         server
-            .sent_row_versions
+            .sent_batch_ids
             .entry((object_id, branch_name))
             .or_default()
-            .insert(version_id);
+            .insert(batch_id);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::RowVersionCreated {
+            payload: SyncPayload::RowBatchCreated {
                 metadata: include_metadata.then_some(RowMetadata {
                     id: object_id,
                     metadata,
@@ -230,26 +234,19 @@ impl SyncManager {
             return;
         };
         let metadata = metadata_from_row_locator(&row_locator);
-        let Ok(rows) = storage.scan_history_row_versions(row_locator.table.as_str(), object_id)
-        else {
-            return;
-        };
-
-        let mut sent_any = false;
-        for row in rows
-            .into_iter()
-            .filter(|row| row.branch == branch_name.as_str())
-            .filter(|row| !matches!(row.state, RowState::StagingPending))
-        {
-            self.queue_row_to_client(client_id, object_id, metadata.clone(), row, force_resend);
-            sent_any = true;
-        }
-
-        if !sent_any
-            && let Some(row) =
-                self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
+        if let Some(row) =
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
+        }
+
+        if let Some(settlement) = self.load_current_batch_settlement_from_storage(
+            storage,
+            object_id,
+            &branch_name,
+            &row_locator,
+        ) {
+            self.queue_batch_settlement_to_client(client_id, settlement);
         }
     }
 
@@ -258,9 +255,22 @@ impl SyncManager {
         client_id: ClientId,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
         force_resend: bool,
     ) {
+        self.queue_row_to_client_internal(client_id, object_id, metadata, row, force_resend, true);
+    }
+
+    fn queue_row_to_client_internal(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowBatch,
+        force_resend: bool,
+        require_scope: bool,
+    ) {
+        let row = Self::scope_delivery_row(row);
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
@@ -270,7 +280,7 @@ impl SyncManager {
         }
 
         let branch_name = BranchName::new(&row.branch);
-        let version_id = row.version_id();
+        let batch_id = row.batch_id;
 
         let (in_scope, include_metadata, already_sent) = {
             let Some(client) = self.clients.get(&client_id) else {
@@ -279,18 +289,18 @@ impl SyncManager {
             let in_scope = client.is_in_scope(object_id, &branch_name);
             let include_metadata = !client.sent_metadata.contains(&object_id);
             let already_sent = client
-                .sent_row_versions
+                .sent_batch_ids
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
             (in_scope, include_metadata, already_sent)
         };
 
-        if !in_scope {
+        if require_scope && !in_scope {
             return;
         }
 
-        if !force_resend && already_sent.contains(&version_id) && !include_metadata {
+        if !force_resend && already_sent.contains(&batch_id) && !include_metadata {
             return;
         }
 
@@ -301,18 +311,18 @@ impl SyncManager {
             client.sent_metadata.insert(object_id);
         }
         client
-            .sent_row_versions
+            .sent_batch_ids
             .entry((object_id, branch_name))
             .or_default()
-            .insert(version_id);
-        self.row_version_interest
-            .entry(RowVersionKey::new(object_id, branch_name, version_id))
+            .insert(batch_id);
+        self.row_batch_interest
+            .entry(RowBatchKey::new(object_id, branch_name, batch_id))
             .or_default()
             .insert(client_id);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
-            payload: SyncPayload::RowVersionNeeded {
+            payload: SyncPayload::RowBatchNeeded {
                 metadata: include_metadata.then_some(RowMetadata {
                     id: object_id,
                     metadata,
