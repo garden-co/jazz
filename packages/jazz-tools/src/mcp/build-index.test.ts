@@ -411,18 +411,19 @@ describe("buildIndex", () => {
 });
 
 describe("packaged docs index", () => {
-  it("ships current auth docs in docs-index.txt", async () => {
+  it("ships current authentication docs in docs-index.txt", async () => {
     const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
 
-    expect(txt).toContain("===PAGE:auth/local-first-auth===");
-    // <APP_ID> is stripped by the JSX tag stripper (uppercase-initial tag)
-    expect(txt).toContain("jazz-tools server  --allow-local-first-auth");
+    expect(txt).toContain("===PAGE:auth/authentication===");
     expect(txt).toContain(
-      'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
+      'DESCRIPTION:"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
     );
-    expect(txt).toContain(
-      "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
-    );
+    expect(txt).toContain("Jazz has two auth modes: `local-first` and `external`.");
+    expect(txt).toContain('jwtToken: "<provider-jwt>"');
+    expect(txt).toContain("db.updateAuthToken(jwt)");
+    expect(txt).toContain("recreate `JazzProvider` or `Db` with a new auth config");
+    expect(txt).toContain("### Managing JWT changes on a live client");
+    expect(txt).toContain("### Reacting to expiry and unauthenticated responses");
 
     expect(txt).not.toContain("allowSelfSigned");
     expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");

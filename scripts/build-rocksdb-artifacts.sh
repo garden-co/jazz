@@ -8,6 +8,8 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/rocksdb}"
 LLVM_AR="${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar}"
 LLVM_RANLIB="${LLVM_RANLIB:-/opt/homebrew/opt/llvm/bin/llvm-ranlib}"
+ROCKSDB_FEATURES="${ROCKSDB_FEATURES:-lz4,zstd}"
+ROCKSDB_FEATURE_PROFILE="${ROCKSDB_FEATURE_PROFILE:-all-compression-codecs}"
 
 ALL_TARGETS=(
   aarch64-apple-darwin
@@ -59,7 +61,7 @@ require_command() {
 stage_output() {
   local target="$1"
   local archive_path="$2"
-  local target_output_dir="${OUTPUT_DIR}/${target}"
+  local target_output_dir="${OUTPUT_DIR}/${ROCKSDB_FEATURE_PROFILE}/${target}"
 
   mkdir -p "${target_output_dir}"
   gzip -n -c "${archive_path}" > "${target_output_dir}/librocksdb.a.gz"
@@ -79,7 +81,7 @@ build_and_store() {
       cargo build --manifest-path vendor/librocksdb-sys/Cargo.toml \
       --release \
       --target "${target}" \
-      --features lz4,zstd
+      --features "${ROCKSDB_FEATURES}"
   )
 
   local archive_path
@@ -144,4 +146,4 @@ for target in "${TARGETS[@]}"; do
   esac
 done
 
-echo "built RocksDB archives under ${OUTPUT_DIR} for: ${TARGETS[*]}"
+echo "built RocksDB archives under ${OUTPUT_DIR}/${ROCKSDB_FEATURE_PROFILE} for: ${TARGETS[*]}"

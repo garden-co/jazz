@@ -7,7 +7,9 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/rocksdb}"
 GHCR_REPOSITORY="${GHCR_REPOSITORY:-ghcr.io/garden-co/jazz2-rocksdb-prebuilt}"
-TAG_PREFIX="${TAG_PREFIX:-rocksdb-10.7.5-v1}"
+ROCKSDB_FEATURES="${ROCKSDB_FEATURES:-lz4,zstd}"
+ROCKSDB_FEATURE_PROFILE="${ROCKSDB_FEATURE_PROFILE:-all-compression-codecs}"
+TAG_PREFIX="${TAG_PREFIX:-rocksdb-10.7.5-v1-${ROCKSDB_FEATURE_PROFILE}}"
 ARTIFACT_TYPE="application/vnd.garden-co.jazz.rocksdb.archive.v1+gzip"
 
 ALL_TARGETS=(
@@ -89,7 +91,7 @@ printf '%s' "${GHCR_PASSWORD}" | oras login ghcr.io -u "${GHCR_USERNAME}" --pass
 manifest_entries=()
 
 for target in "${TARGETS[@]}"; do
-  archive_path="${OUTPUT_DIR}/${target}/librocksdb.a.gz"
+  archive_path="${OUTPUT_DIR}/${ROCKSDB_FEATURE_PROFILE}/${target}/librocksdb.a.gz"
   if [[ ! -f "${archive_path}" ]]; then
     echo "missing archive: ${archive_path}" >&2
     exit 1
@@ -101,7 +103,7 @@ for target in "${TARGETS[@]}"; do
     --no-tty \
     --artifact-type "${ARTIFACT_TYPE}" \
     --annotation "org.opencontainers.image.source=https://github.com/garden-co/jazz2" \
-    --annotation "org.opencontainers.image.description=Prebuilt RocksDB archive for ${target}" \
+    --annotation "org.opencontainers.image.description=Prebuilt RocksDB archive for ${target} (${ROCKSDB_FEATURE_PROFILE}: ${ROCKSDB_FEATURES})" \
     --format json \
     "${GHCR_REPOSITORY}:${tag}" \
     "${archive_path}:${ARTIFACT_TYPE}" | jq -r '.digest')"
@@ -109,16 +111,18 @@ for target in "${TARGETS[@]}"; do
   archive_sha256="$(gzip -dc "${archive_path}" | sha256_stdin)"
   blob_sha256="$(sha256_file "${archive_path}")"
 
-  manifest_entries+=("$(jq -n \
+manifest_entries+=("$(jq -n \
     --arg target "${target}" \
+    --arg feature_profile "${ROCKSDB_FEATURE_PROFILE}" \
+    --arg features "${ROCKSDB_FEATURES}" \
     --arg repository "${GHCR_REPOSITORY}" \
     --arg tag "${tag}" \
     --arg manifest_digest "${manifest_digest}" \
     --arg archive_sha256 "${archive_sha256}" \
     --arg blob_sha256 "${blob_sha256}" \
-    '{target: $target, repository: $repository, tag: $tag, manifest_digest: $manifest_digest, archive_sha256: $archive_sha256, blob_sha256: $blob_sha256}')")
+    '{target: $target, feature_profile: $feature_profile, features: $features, repository: $repository, tag: $tag, manifest_digest: $manifest_digest, archive_sha256: $archive_sha256, blob_sha256: $blob_sha256}')")
 done
 
-manifest_path="${OUTPUT_DIR}/manifest.json"
+manifest_path="${OUTPUT_DIR}/${ROCKSDB_FEATURE_PROFILE}/manifest.json"
 printf '%s\n' "${manifest_entries[@]}" | jq -s '.' > "${manifest_path}"
 cat "${manifest_path}"

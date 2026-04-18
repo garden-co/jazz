@@ -318,8 +318,11 @@ impl JoinNode {
         let mut elements = Vec::with_capacity(left.len() + right.len());
         elements.extend(left.iter().cloned());
         elements.extend(right.iter().cloned());
-        let mut combined = Tuple::new(elements).with_provenance(left.provenance().clone());
+        let mut combined = Tuple::new(elements)
+            .with_provenance(left.provenance().clone())
+            .with_batch_provenance(left.batch_provenance().clone());
         combined.merge_provenance(right.provenance());
+        combined.merge_batch_provenance(right.batch_provenance());
         combined
     }
 
@@ -556,7 +559,6 @@ impl JoinNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
 
@@ -609,7 +611,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -628,7 +630,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -639,7 +641,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -654,7 +656,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -669,7 +671,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -680,7 +682,7 @@ mod tests {
         Tuple::new(vec![TupleElement::Row {
             id,
             content: data.into(),
-            version_id: CommitId([0; 32]),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }

@@ -63,4 +63,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: rocksdb-artifact-manifest-${{ matrix.target }}
-          path: dist/rocksdb/manifest.json
+          path: dist/rocksdb/**/manifest.json
