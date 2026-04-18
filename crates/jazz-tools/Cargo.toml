@@ -102,6 +102,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 [dev-dependencies]
 criterion = "0.5"
 insta = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "stream",
