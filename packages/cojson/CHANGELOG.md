@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.18
+
+### Patch Changes
+
+- 12b27e1: Add opt-in experimental clock synchronisation from server pings.
+  - cojson-core-wasm@0.20.18
+  - cojson-core-rn@0.20.18
+  - cojson-core-napi@0.20.18
+
 ## 0.20.17
 
 ### Patch Changes

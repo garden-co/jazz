@@ -2679,22 +2679,22 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.20.17
+        specifier: workspace:0.20.18
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.20.17
+        specifier: workspace:0.20.18
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.20.17
+        specifier: workspace:0.20.18
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.20.17
+        specifier: workspace:0.20.18
         version: link:../jazz-tools
       jazz-webhook:
-        specifier: workspace:0.20.17
+        specifier: workspace:0.20.18
         version: link:../jazz-webhook
       ws:
         specifier: ^8.14.2
@@ -11094,7 +11094,7 @@ packages:
   basic-ftp@5.0.5:
     resolution: {integrity: sha512-4Bcg1P8xhUuqcii/S0Z9wiHIrQVPMermM1any+MX5GeGD7faD3/msQUDGLol9wOcz4/jbg/WJnGqoJF6LiBdtg==}
     engines: {node: '>=10.0.0'}
-    deprecated: Security vulnerability fixed in 5.2.0, please upgrade
+    deprecated: Security vulnerability fixed in 5.2.1, please upgrade
 
   before-after-hook@2.2.3:
     resolution: {integrity: sha512-NzUnlZexiaH/46WDhANlyR2bXRopNg4F/zuSA3OpZnllCUgRaOF2znDioDWrmbNVsuZk6l9pMquQB38cfBZwkQ==}

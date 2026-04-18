@@ -1,5 +1,18 @@
 # jazz-tools
 
+## 0.20.18
+
+### Patch Changes
+
+- ab2e90b: Fix a Better Auth race condition where a slow `/get-session` request returning `null` after a successful sign-in would incorrectly log the user out. The client plugin now tracks an `authGeneration` counter, attaches it to `/get-session` requests via an `x-jazz-auth-generation` header, and ignores stale null responses whose generation no longer matches the current one.
+- 12b27e1: Add opt-in experimental clock synchronisation from server pings.
+- 1c6e9ff: Fix circularity issues when using CoMap `extend()` or `safeExtend()`
+- ab2e90b: Fix `createJazzContext` hanging when an account migration loads a `co.discriminatedUnion()` CoValue whose stored value matches no declared variant. The runtime discriminator now throws a dedicated `SchemaUnionNoMatchingVariantError` that `SubscriptionScope` catches and surfaces as `UNAVAILABLE`, so `load()` settles instead of hanging. Other instantiation errors (e.g. `CoVector` dimension mismatches) still throw loudly.
+- Updated dependencies [12b27e1]
+  - cojson@0.20.18
+  - cojson-transport-ws@0.20.18
+  - cojson-storage-indexeddb@0.20.18
+
 ## 0.20.17
 
 ### Patch Changes
