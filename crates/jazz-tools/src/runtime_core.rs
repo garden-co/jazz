@@ -277,10 +277,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
     /// Watchers for persistence acks: (row, branch, logical write batch, requested_tier) → senders.
-    /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
+    /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Local).
     ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
 
-    /// Label for tracing (e.g. "worker", "edge", "client").
+    /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
 
     /// Optional sync-message tracer used by tests to record outgoing/incoming

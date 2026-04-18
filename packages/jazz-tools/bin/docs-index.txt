@@ -1082,13 +1082,13 @@ Jazz sync runs across three tiers:
 ```mermaid
 graph TD
     G["Global\n(global core)"] --- E1["Edge\n(sync server)"] & E2["Edge\n(sync server)"]
-    E1 --- W1["Worker"] & W2["Worker"]
-    E2 --- W3["Worker"]
+    E1 --- W1["Local"] & W2["Local"]
+    E2 --- W3["Local"]
 ```
 
-**Worker** runs on the client itself, making it the first tier to respond to queries. The worker
-keeps the locally durable copy of subscribed data so it can respond immediately while updates from
-higher tiers stream in.
+**Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
+hosts that local durable copy in OPFS so it can respond immediately while updates from higher tiers
+stream in.
 
 **Edge** is the first server hop after the client. In cloud configurations it is usually a nearby
 node. Edge servers hold the data needed to serve the queries currently flowing through them.
@@ -1101,7 +1101,7 @@ updates eventually spread to every subscribed client.
 Writes flow **upward**:
 
 ```text
-app -> worker -> edge -> global
+app -> local -> edge -> global
 ```
 
 As a write flows through the network, each tier can confirm that it has durably received it. That
@@ -1116,10 +1116,10 @@ them. As a rough guide:
 
 - waiting for the global core is only necessary if you want the strongest cross-region visibility
 - waiting for edge is useful when you want to know data has left the user's device
-- the default worker tier is right for most local-first interactions
+- the default local tier is right for most local-first interactions
 
   Sync happens whenever a node is online. Writes keep propagating upward even if your promise
-  resolves at the worker tier. Reads similarly propagate downward as each tier registers the query
+  resolves at the local tier. Reads similarly propagate downward as each tier registers the query
   with the next one up. If higher tiers have newer rows, they stream down automatically.
 
 ## Consistency model
@@ -1129,7 +1129,7 @@ replicated upward, and contributes to the current visible state for that row.
 
 Because sync is local-first, different tiers can temporarily disagree:
 
-- your worker may already have a newer row version than edge
+- your local tier may already have a newer row version than edge
 - one edge may have data another edge has not fetched yet
 - another client may have its own concurrent local write
 
@@ -2797,7 +2797,7 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 Pass a tier when you need the first result to be authoritative at a specific level&hairsp;—&hairsp;for example, when a user has just navigated to a page and a stale local snapshot would mislead them.
 
-- `"worker"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
+- `"local"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
 - `"edge"`&hairsp;—&hairsp;Wait for the nearest sync server to respond. The default on backends and servers. A good middle ground when you want confirmation that the query has fetched data from the network.
 - `"global"`&hairsp;—&hairsp;Wait for the central server. Use when you need a globally-consistent snapshot, accepting the extra round-trip latency.
 
@@ -3722,8 +3722,8 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 Options:
 
-- `options.tier`: `"worker"` \| `"edge"` \| `"global"`
-- Browser/client default: `"worker"`
+- `options.tier`: `"local"` \| `"edge"` \| `"global"`
+- Browser/client default: `"local"`
 - Backend/server default: `"edge"`
 
 See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
@@ -3734,7 +3734,7 @@ Read durability controls when the **first result** of a query or subscription is
 
 | Option         | Values                               | Default        | What it does                                                                                                                                                                                                                                                                     |
 | -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"worker"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
+| `tier`         | `"local"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
 | `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
 | `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
@@ -4285,7 +4285,7 @@ Jazz separates two durability questions:
 | `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
 | Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
 
-Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different
+Both use the same tier lattice (`local` < `edge` < `global`), but they answer different
 questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
 durable write promise resolves when the requested tier confirms the write.
 
@@ -5347,11 +5347,11 @@ pub async fn clear_nullable_fields(
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
-| `worker` | Persisted to local OPFS             | Browser/client |
+| `local` | Persisted to local OPFS             | Browser/client |
 | `edge`   | Acknowledged by nearest sync server | Backend/server |
 | `global` | Propagated to global core           | —              |
 

@@ -1118,8 +1118,8 @@ export class Db {
           jwtToken: this.config.jwtToken,
           cookieSession: this.config.cookieSession,
           adminSecret: this.config.adminSecret,
-          tier: this.worker ? undefined : "worker",
-          // Keep worker-bridged browser clients on worker durability by default.
+          tier: this.worker ? undefined : "local",
+          // Keep worker-bridged browser clients on local durability by default.
           // For direct (non-worker) clients connected to a server, default to edge.
           defaultDurabilityTier: this.worker
             ? undefined
@@ -1177,7 +1177,7 @@ export class Db {
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
-    if (!options?.tier || options.tier === "worker") {
+    if (!options?.tier || options.tier === "local") {
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();

@@ -50,7 +50,7 @@ describe("TS Insert API", () => {
     const project = await db.insertDurable(
       app.projects,
       { name: "Test Project" },
-      { tier: "worker" },
+      { tier: "local" },
     );
 
     expect(project).toEqual({
@@ -69,7 +69,7 @@ describe("TS Insert API", () => {
         ownerId: owner.id,
         assigneesIds: [],
       },
-      { tier: "worker" },
+      { tier: "local" },
     );
 
     expect(todo).toEqual({

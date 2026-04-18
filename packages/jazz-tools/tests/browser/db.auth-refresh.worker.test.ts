@@ -17,7 +17,7 @@
  * 2. Post-refresh usability (real server via getTestingServerJwtForUser):
  *    creates a Db with an initial valid JWT, writes a row, refreshes the
  *    JWT with a fresh token for the same user, and confirms the Db still
- *    serves worker-tier queries.  Uses global-setup server but does not
+ *    serves local-tier queries.  Uses global-setup server but does not
  *    rely on the auth-rejection → unauthenticated path.
  *
  * Coverage of the full update-auth chain is split across:
@@ -154,7 +154,7 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
 
   it("posts update-auth to the worker when updateAuthToken is called after bridge init", async () => {
     // No serverUrl: pure OPFS Db.  The worker bridge is fully set up but
-    // not waiting on any WS connection, so worker-tier queries resolve as
+    // not waiting on any WS connection, so local-tier queries resolve as
     // soon as the worker processes pending inserts.
     //
     // Both tokens have sub="alice" so applyJwtToken doesn't throw on
@@ -177,12 +177,12 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
     // Trigger lazy bridge init: WorkerBridge is created on first getClient() call.
     db.insert(todos, { title: "bridge-init-trigger", done: false });
 
-    // Wait for the bridge handshake to complete: a worker-tier query resolves
+    // Wait for the bridge handshake to complete: a local-tier query resolves
     // only after the worker has sent "init-ok" and applied the pending insert.
     await withTimeout(
-      db.all(allTodos, { tier: "worker" }),
+      db.all(allTodos, { tier: "local" }),
       15_000,
-      "bridge init: worker-tier query did not resolve",
+      "bridge init: local-tier query did not resolve",
     );
 
     // Bridge is ready.  Start capturing outbound messages to the worker.
@@ -209,8 +209,8 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
     });
   });
 
-  it("Db remains usable for worker-tier queries after updateAuthToken", async () => {
-    // No serverUrl: pure OPFS Db so worker-tier queries resolve locally
+  it("Db remains usable for local-tier queries after updateAuthToken", async () => {
+    // No serverUrl: pure OPFS Db so local-tier queries resolve locally
     // without waiting for a WS connection.  Both tokens carry sub="bob"
     // so the principal-change guard in applyJwtToken does not trigger.
     const initialJwt = makeFakeJwt("bob", { role: "member" });
@@ -229,9 +229,9 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
     db.insert(todos, { title: preMarker, done: false });
 
     const rowsBefore = await withTimeout(
-      db.all(allTodos, { tier: "worker" }),
+      db.all(allTodos, { tier: "local" }),
       15_000,
-      "pre-refresh worker-tier query did not resolve",
+      "pre-refresh local-tier query did not resolve",
     );
     expect(rowsBefore.some((r) => r.title === preMarker)).toBe(true);
 
@@ -242,12 +242,12 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
     const postMarker = `post-refresh-${Date.now()}`;
     db.insert(todos, { title: postMarker, done: true });
 
-    // Both rows must be visible at worker tier — the Db must stay
+    // Both rows must be visible at local tier — the Db must stay
     // operational after auth refresh.
     const rowsAfter = await withTimeout(
-      db.all(allTodos, { tier: "worker" }),
+      db.all(allTodos, { tier: "local" }),
       10_000,
-      "post-refresh worker-tier query did not resolve",
+      "post-refresh local-tier query did not resolve",
     );
     expect(rowsAfter.some((r) => r.title === preMarker)).toBe(true);
     expect(rowsAfter.some((r) => r.title === postMarker)).toBe(true);

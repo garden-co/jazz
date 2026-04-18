@@ -206,7 +206,7 @@ fn row_state_column_type() -> ColumnType {
 fn confirmed_tier_column_type() -> ColumnType {
     ColumnType::Enum {
         variants: vec![
-            "worker".to_string(),
+            "local".to_string(),
             "edge".to_string(),
             "global".to_string(),
         ],
@@ -488,7 +488,7 @@ fn row_state_to_value(state: RowState) -> Value {
 fn durability_tier_to_value(tier: DurabilityTier) -> Value {
     Value::Text(
         match tier {
-            DurabilityTier::Worker => "worker",
+            DurabilityTier::Local => "local",
             DurabilityTier::EdgeServer => "edge",
             DurabilityTier::GlobalServer => "global",
         }
@@ -612,10 +612,10 @@ fn decode_optional_durability_tier_bytes(
 ) -> Result<Option<DurabilityTier>, EncodingError> {
     match bytes {
         None => Ok(None),
-        Some([0]) => Ok(Some(DurabilityTier::Worker)),
+        Some([0]) => Ok(Some(DurabilityTier::Local)),
         Some([1]) => Ok(Some(DurabilityTier::EdgeServer)),
         Some([2]) => Ok(Some(DurabilityTier::GlobalServer)),
-        Some(b"worker") => Ok(Some(DurabilityTier::Worker)),
+        Some(b"local") => Ok(Some(DurabilityTier::Local)),
         Some(b"edge") => Ok(Some(DurabilityTier::EdgeServer)),
         Some(b"global") => Ok(Some(DurabilityTier::GlobalServer)),
         Some(bytes) => Err(malformed(format!(
@@ -1168,7 +1168,7 @@ impl VisibleRowEntry {
     pub fn rebuild(current_row: StoredRowBatch, history_rows: &[StoredRowBatch]) -> Self {
         let current_batch_id = current_row.batch_id();
         let branch_frontier = branch_frontier(history_rows);
-        let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Worker);
+        let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Local);
         let worker_batch_id = worker.filter(|batch_id| *batch_id != current_batch_id);
 
         let edge = latest_visible_version_for_tier(history_rows, DurabilityTier::EdgeServer);
@@ -1197,7 +1197,7 @@ impl VisibleRowEntry {
         }
 
         match tier {
-            DurabilityTier::Worker => self.worker_batch_id,
+            DurabilityTier::Local => self.worker_batch_id,
             DurabilityTier::EdgeServer => self.edge_batch_id,
             DurabilityTier::GlobalServer => self.global_batch_id,
         }
@@ -1367,7 +1367,7 @@ fn visible_entry_after_append<H: Storage>(
         io,
         table,
         appended_row,
-        previous_entry.batch_id_for_tier(DurabilityTier::Worker),
+        previous_entry.batch_id_for_tier(DurabilityTier::Local),
     )?
     .filter(|batch_id| *batch_id != current_batch_id);
     let edge_batch_id = latest_visible_version_after_append(
@@ -1470,7 +1470,7 @@ fn visible_entry_after_tier_upgrade<H: Storage>(
         &entry,
         &current_row,
         patched_row,
-        DurabilityTier::Worker,
+        DurabilityTier::Local,
     )?
     .filter(|batch_id| *batch_id != current_batch_id);
     let edge_batch_id = winner_after_tier_upgrade(
@@ -1827,9 +1827,9 @@ mod tests {
             )
             .expect("encode current row"),
             RowProvenance::for_update(&global.row_provenance(), "bob".to_string(), 30),
-            HashMap::from([("source".to_string(), "worker".to_string())]),
+            HashMap::from([("source".to_string(), "local".to_string())]),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let entry = VisibleRowEntry {
             current_row: current,
@@ -1906,7 +1906,7 @@ mod tests {
             RowProvenance::for_update(&edge.row_provenance(), "alice".to_string(), 30),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let history = vec![global.clone(), edge.clone(), current.clone()];
 
@@ -1917,7 +1917,7 @@ mod tests {
         assert_eq!(entry.edge_batch_id, Some(edge.batch_id()));
         assert_eq!(entry.global_batch_id, Some(global.batch_id()));
         assert_eq!(
-            entry.batch_id_for_tier(DurabilityTier::Worker),
+            entry.batch_id_for_tier(DurabilityTier::Local),
             Some(current.batch_id())
         );
         assert_eq!(
@@ -1932,7 +1932,7 @@ mod tests {
 
     #[test]
     fn visible_row_entry_returns_none_when_no_version_meets_required_tier() {
-        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let current = visible_row(30, Some(DurabilityTier::Local));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
         assert_eq!(entry.branch_frontier, vec![current.batch_id()]);
@@ -1942,7 +1942,7 @@ mod tests {
 
     #[test]
     fn visible_row_entry_preserves_multiple_branch_tips() {
-        let base = visible_row(10, Some(DurabilityTier::Worker));
+        let base = visible_row(10, Some(DurabilityTier::Local));
         let left = StoredRowBatch::new(
             base.row_id,
             "main",
@@ -1951,7 +1951,7 @@ mod tests {
             RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let right = StoredRowBatch::new(
             base.row_id,
@@ -1961,7 +1961,7 @@ mod tests {
             RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         let entry = VisibleRowEntry::rebuild(right.clone(), &[base, left.clone(), right.clone()]);
@@ -2063,7 +2063,7 @@ mod tests {
     #[test]
     fn flat_visible_row_common_case_omits_empty_arrays_and_metadata() {
         let descriptor = user_descriptor();
-        let current = visible_row(10, Some(DurabilityTier::Worker));
+        let current = visible_row(10, Some(DurabilityTier::Local));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
         let encoded =
@@ -2138,11 +2138,11 @@ mod tests {
             .expect("encode user row"),
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::from([
-                ("source".to_string(), "worker".to_string()),
+                ("source".to_string(), "local".to_string()),
                 ("kind".to_string(), "task".to_string()),
             ]),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         let encoded =
@@ -2267,7 +2267,7 @@ mod tests {
             provenance.clone(),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         assert_eq!(

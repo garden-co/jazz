@@ -271,7 +271,7 @@ describe("TableDataGrid", () => {
         done: true,
         owner_id: "owner-c",
       }),
-      { tier: "worker" },
+      { tier: "local" },
     );
   });
 
@@ -319,7 +319,7 @@ describe("TableDataGrid", () => {
           meta: { done: true },
           owner_id: "owner-a",
         }),
-        { tier: "worker" },
+        { tier: "local" },
       );
     });
   });
@@ -364,7 +364,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({
           title: "zeta queued",
         }),
-        { tier: "worker" },
+        { tier: "local" },
       );
     });
 
@@ -392,7 +392,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({
           done: true,
         }),
-        { tier: "worker" },
+        { tier: "local" },
       );
     });
   });
@@ -554,7 +554,7 @@ describe("TableDataGrid", () => {
         done: true,
         meta: null,
       }),
-      { tier: "worker" },
+      { tier: "local" },
     );
   });
 
@@ -586,7 +586,7 @@ describe("TableDataGrid", () => {
       expect(mockDeleteDurable).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
-        { tier: "worker" },
+        { tier: "local" },
       );
     });
   });

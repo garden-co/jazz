@@ -44,7 +44,7 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /** Optional node durability tier identity. */
-  tier?: "worker" | "edge" | "global";
+  tier?: "local" | "edge" | "global";
   /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
   jwksUrl?: string;
   /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */

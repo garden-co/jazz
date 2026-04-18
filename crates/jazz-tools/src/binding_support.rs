@@ -195,11 +195,11 @@ pub fn parse_write_context_input(
 
 pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
     match tier {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
+            "Invalid tier '{}'. Must be 'local', 'edge', or 'global'.",
             tier
         )),
     }
@@ -213,7 +213,7 @@ pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
 
 pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
-        DurabilityTier::Worker => "worker",
+        DurabilityTier::Local => "local",
         DurabilityTier::EdgeServer => "edge",
         DurabilityTier::GlobalServer => "global",
     }
@@ -531,11 +531,11 @@ mod tests {
     #[test]
     fn read_durability_options_default_to_full_and_immediate() {
         let (durability, propagation) =
-            parse_read_durability_options(Some("worker"), None).expect("parse options");
+            parse_read_durability_options(Some("local"), None).expect("parse options");
 
         assert_eq!(
             durability.tier,
-            Some(crate::sync_manager::DurabilityTier::Worker)
+            Some(crate::sync_manager::DurabilityTier::Local)
         );
         assert_eq!(
             durability.local_updates,

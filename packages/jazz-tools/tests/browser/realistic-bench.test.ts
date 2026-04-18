@@ -22,9 +22,9 @@ declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
 declare const __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: string;
 
-type PersistenceTier = "worker" | "edge" | "core";
+type PersistenceTier = "local" | "edge" | "core";
 
-function durabilityOptions(tier: PersistenceTier): { tier: "worker" | "edge" | "global" } {
+function durabilityOptions(tier: PersistenceTier): { tier: "local" | "edge" | "global" } {
   return { tier: tier === "core" ? "global" : tier };
 }
 
@@ -682,7 +682,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
               [["updated_at", "desc"]],
               200,
             ),
-            "worker",
+            "local",
           );
           break;
         }
@@ -698,7 +698,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
               [["updated_at", "desc"]],
               200,
             ),
-            "worker",
+            "local",
           );
           break;
         }
@@ -711,7 +711,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
               [["created_at", "desc"]],
               200,
             ),
-            "worker",
+            "local",
           );
           await db.all(
             query<ActivityRow>(
@@ -720,7 +720,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
               [["created_at", "desc"]],
               200,
             ),
-            "worker",
+            "local",
           );
           break;
         }
@@ -818,7 +818,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
           body: `offline_reconnect_marker_${i}`,
           created_at: nowMicros(),
         },
-        "worker",
+        "local",
       );
     }
     const offlineWriteMs = performance.now() - offlineWriteStart;
@@ -917,7 +917,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
         [["updated_at", "desc"]],
         200,
       ),
-      "worker",
+      "local",
     );
     await db.shutdown();
     db = null;
@@ -934,7 +934,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
           [["updated_at", "desc"]],
           200,
         ),
-        "worker",
+        "local",
       );
       await db.shutdown();
       db = null;
@@ -1586,7 +1586,7 @@ async function seedPermissionDataset(
     deniedOwnerId: string;
     intermediateOwnerId: string;
   },
-  tier: PersistenceTier = "worker",
+  tier: PersistenceTier = "local",
 ): Promise<PermissionSeedState> {
   const folderTable = tableProxy<PermissionFolderRow, Omit<PermissionFolderRow, "id">>(
     "folders",
