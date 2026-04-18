@@ -2,6 +2,7 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use serde_json::json;
@@ -16,33 +17,36 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::{
+    HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
+    RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
-    apply_test_row_version, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
+    apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
     put_test_row_metadata, seeded_memory_storage,
 };
 
 #[derive(Debug, Clone)]
-struct IncomingRowVersion {
-    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+struct IncomingRowBatch {
+    parents: smallvec::SmallVec<[BatchId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: String,
 }
 
-impl IncomingRowVersion {
+impl IncomingRowBatch {
     fn row_provenance(&self) -> RowProvenance {
         RowProvenance::for_insert(self.author.clone(), self.timestamp)
     }
 
-    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowVersion {
+    fn to_row(&self, object_id: ObjectId, branch: &str, state: RowState) -> StoredRowBatch {
         let metadata = row_provenance_metadata(&self.row_provenance(), None)
             .into_iter()
             .collect::<HashMap<_, _>>();
-        StoredRowVersion::new(
+        StoredRowBatch::new(
             object_id,
             branch,
             self.parents.iter().copied().collect::<Vec<_>>(),
@@ -118,6 +122,123 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
+struct CountingCatalogueUpsertsStorage {
+    inner: MemoryStorage,
+    catalogue_upserts: Cell<usize>,
+}
+
+impl CountingCatalogueUpsertsStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            catalogue_upserts: Cell::new(0),
+        }
+    }
+
+    fn catalogue_upserts(&self) -> usize {
+        self.catalogue_upserts.get()
+    }
+}
+
+impl Storage for CountingCatalogueUpsertsStorage {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_raw_table_mutations(mutations)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[OwnedHistoryRowBytes],
+        visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn upsert_catalogue_entry(
+        &mut self,
+        entry: &crate::catalogue::CatalogueEntry,
+    ) -> Result<(), StorageError> {
+        self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+        self.inner.upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: crate::object::ObjectId,
+    ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.inner.load_catalogue_entry(object_id)
+    }
+}
+
 fn get_branch_for_user_branch(qm: &QueryManager, user_branch: &str) -> String {
     ComposedBranchName::new(
         &qm.schema_context().env,
@@ -155,7 +276,7 @@ fn connect_query_manager_upstream(
     qm.add_server_with_storage(storage, server_id, false);
 }
 
-fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowVersion {
+fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> StoredRowBatch {
     let row_locator = storage
         .load_row_locator(row_id)
         .unwrap()
@@ -167,12 +288,12 @@ fn load_visible_row(storage: &MemoryStorage, row_id: ObjectId, branch: &str) -> 
 }
 
 fn stored_row_commit(
-    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    parents: smallvec::SmallVec<[BatchId; 2]>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
-) -> IncomingRowVersion {
-    IncomingRowVersion {
+) -> IncomingRowBatch {
+    IncomingRowBatch {
         parents,
         content,
         timestamp,
@@ -221,16 +342,47 @@ fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_s
             other => panic!("unexpected column {other}"),
         })
         .collect::<Vec<_>>();
-    qm.insert(&mut storage, "users", &values)
+    let inserted = qm
+        .insert(&mut storage, "users", &values)
         .expect("insert should succeed");
 
     let history_bytes = storage
         .scan_history_region_bytes("users", HistoryScan::Branch)
         .expect("history bytes should be readable");
     assert_eq!(history_bytes.len(), 1);
+    assert_eq!(
+        storage
+            .scan_history_row_batches("users", inserted.row_id)
+            .expect("flat history rows should decode with keyed storage context")
+            .len(),
+        history_bytes.len(),
+        "direct QueryManager writes should persist keyed-decodable flat history rows after schema bootstrap"
+    );
+}
+
+#[test]
+fn direct_query_manager_catalogues_known_schemas_only_once_per_storage() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::new();
+
+    let first = vec![Value::Text("Alice".into()), Value::Integer(1)];
+    qm.insert(&mut storage, "users", &first)
+        .expect("first insert should succeed");
+    let first_upserts = storage.catalogue_upserts();
     assert!(
-        crate::row_histories::is_flat_history_row(&history_bytes[0]),
-        "direct QueryManager writes should persist flat history rows after schema bootstrap"
+        first_upserts >= 1,
+        "first insert should catalogue the current schema"
+    );
+
+    let second = vec![Value::Text("Bob".into()), Value::Integer(2)];
+    qm.insert(&mut storage, "users", &second)
+        .expect("second insert should succeed");
+
+    assert_eq!(
+        storage.catalogue_upserts(),
+        first_upserts,
+        "ordinary writes should not recatalogue unchanged schemas on the same storage",
     );
 }
 
@@ -238,11 +390,11 @@ fn add_row_commit(
     storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
-    parents: Vec<crate::commit::CommitId>,
+    parents: Vec<BatchId>,
     content: Vec<u8>,
     timestamp: u64,
     author: impl Into<String>,
-) -> crate::commit::CommitId {
+) -> BatchId {
     let author = author.into();
     let provenance = if parents.is_empty() {
         RowProvenance::for_insert(author.clone(), timestamp)
@@ -254,7 +406,7 @@ fn add_row_commit(
             updated_at: timestamp,
         }
     };
-    let row = StoredRowVersion::new(
+    let row = StoredRowBatch::new(
         object_id,
         branch,
         parents,
@@ -264,9 +416,9 @@ fn add_row_commit(
         RowState::VisibleDirect,
         None,
     );
-    let version_id = row.version_id();
-    apply_test_row_version(storage, object_id, branch, row).unwrap();
-    version_id
+    let batch_id = row.batch_id();
+    apply_test_row_batch(storage, object_id, branch, row).unwrap();
+    batch_id
 }
 
 fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> HashMap<String, String> {
@@ -277,7 +429,7 @@ fn test_row_tip_ids(
     storage: &MemoryStorage,
     row_id: ObjectId,
     branch: impl AsRef<str>,
-) -> Vec<crate::commit::CommitId> {
+) -> Vec<BatchId> {
     load_test_row_tip_ids(storage, row_id, branch.as_ref())
         .expect("row branch tips should be available")
 }
@@ -287,18 +439,18 @@ fn receive_row_commit(
     _storage: &mut MemoryStorage,
     object_id: ObjectId,
     branch: &str,
-    commit: IncomingRowVersion,
-) -> crate::commit::CommitId {
+    commit: IncomingRowBatch,
+) -> BatchId {
     let row = commit.to_row(object_id, branch, RowState::VisibleDirect);
-    let version_id = row.version_id();
+    let batch_id = row.batch_id();
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         },
     });
-    version_id
+    batch_id
 }
 
 use crate::object::ObjectId;
@@ -911,7 +1063,7 @@ fn column_count_mismatch_error() {
 }
 
 #[test]
-fn insert_returns_handle_with_version_id() {
+fn insert_returns_handle_with_batch_id() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -934,8 +1086,8 @@ fn insert_returns_handle_with_version_id() {
     assert_eq!(inserted.1[0], Value::Text("Alice".into()));
     assert_eq!(inserted.1[1], Value::Integer(100));
 
-    // Handle should have a valid row commit ID
-    assert!(handle.row_version_id.0 != [0; 32]);
+    // Handle should have a valid logical batch identity
+    assert!(handle.batch_id.0 != [0; 16]);
 }
 
 #[test]
@@ -1748,7 +1900,7 @@ fn synced_update_is_visible_in_query() {
         )
         .unwrap();
     let row_id = insert_handle.row_id;
-    let first_commit_id = insert_handle.row_version_id;
+    let first_commit_id = insert_handle.batch_id;
 
     // Process to settle the initial insert
     qm.process(&mut storage);
@@ -1785,7 +1937,7 @@ fn synced_update_is_visible_in_query() {
     let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         },
@@ -2052,7 +2204,7 @@ fn synced_update_emits_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_version_id;
+    let first_commit_id = handle.batch_id;
 
     // Subscribe to all users
     let query = qm.query("users").build();
@@ -2085,7 +2237,7 @@ fn synced_update_emits_subscription_delta() {
     let row = update_commit.to_row(row_id, &branch, RowState::VisibleDirect);
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         },
@@ -2283,6 +2435,173 @@ fn update_passes_filter_emits_addition() {
     assert_eq!(updates[0].delta.added[0].id, handle.row_id);
     assert!(updates[0].delta.updated.is_empty());
     assert!(updates[0].delta.removed.is_empty());
+}
+
+#[test]
+fn synced_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(75))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(30)],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
+fn synced_boolean_eq_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("todos"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+            ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
+            ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+        ])
+        .into(),
+    );
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("watch-me".into()),
+                Value::Boolean(false),
+                Value::Null,
+                Value::Null,
+                Value::Array(vec![Value::Text("x".into())]),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("done", ColumnType::Boolean),
+        ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+        ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+        ColumnDescriptor::new(
+            "tags",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+        ),
+        ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[
+            Value::Text("watch-me".into()),
+            Value::Boolean(true),
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![Value::Text("x".into())]),
+            Value::Null,
+        ],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced boolean update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
 }
 
 #[test]
@@ -2494,7 +2813,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     // Push the sync message through SyncManager's inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(server_id),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata: obj_metadata,
@@ -2549,7 +2868,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
         )
         .unwrap();
     let row_id = handle.row_id;
-    let first_commit_id = handle.row_version_id;
+    let first_commit_id = handle.batch_id;
 
     // Subscribe to users
     let query = qm.query("users").build();
@@ -2582,7 +2901,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     // Push the update through SyncManager inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(server_id),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: None, // No metadata needed for existing object
             row,
         },
@@ -2646,7 +2965,7 @@ fn two_peer_sync_insert_reaches_subscription() {
         .unwrap();
     let row_id = handle.row_id;
 
-    // Read the actual row metadata and visible version from storage.
+    // Read the actual row metadata and visible row from storage.
     // This simulates "what would be sent over the wire"
     let branch_name = get_branch(&peer_a);
     let metadata = test_row_metadata(&storage_a, row_id);
@@ -2655,7 +2974,7 @@ fn two_peer_sync_insert_reaches_subscription() {
     // Send to Peer B via SyncManager inbox
     peer_b.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(peer_a_as_server),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(crate::sync_manager::RowMetadata {
                 id: row_id,
                 metadata,
@@ -2900,8 +3219,8 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let delete_row = load_visible_row(&storage, handle.row_id, branch_name.as_str());
 
     assert_eq!(
-        delete_row.version_id(),
-        delete_handle.delete_version_id,
+        delete_row.batch_id(),
+        delete_handle.batch_id,
         "visible row should be the delete version"
     );
     assert_eq!(
@@ -3212,7 +3531,7 @@ fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
 }
 
 #[test]
-fn undelete_syncs_row_version_created_to_server() {
+fn undelete_syncs_row_batch_created_to_server() {
     use crate::sync_manager::{Destination, ServerId, SyncPayload};
 
     let sync_manager = SyncManager::new();
@@ -3249,14 +3568,14 @@ fn undelete_syncs_row_version_created_to_server() {
         .expect("undelete should forward the restored row upstream");
 
     match &forwarded.payload {
-        SyncPayload::RowVersionCreated { row, .. } => {
+        SyncPayload::RowBatchCreated { row, .. } => {
             assert_eq!(row.row_id, handle.row_id);
-            assert_eq!(row.version_id(), undeleted.row_version_id);
+            assert_eq!(row.batch_id(), undeleted.batch_id);
             assert!(!row.is_deleted);
             assert!(!row.is_soft_deleted());
             assert!(!row.is_hard_deleted());
         }
-        other => panic!("undelete should sync as RowVersionCreated, got {other:?}"),
+        other => panic!("undelete should sync as RowBatchCreated, got {other:?}"),
     }
 }
 
@@ -3292,7 +3611,7 @@ fn truncate_soft_deleted_row() {
 }
 
 #[test]
-fn hard_delete_syncs_row_version_created_to_server() {
+fn hard_delete_syncs_row_batch_created_to_server() {
     use crate::sync_manager::{Destination, ServerId, SyncPayload};
 
     let sync_manager = SyncManager::new();
@@ -3320,14 +3639,14 @@ fn hard_delete_syncs_row_version_created_to_server() {
         .expect("hard delete should forward the tombstone upstream");
 
     match &forwarded.payload {
-        SyncPayload::RowVersionCreated { row, .. } => {
+        SyncPayload::RowBatchCreated { row, .. } => {
             assert_eq!(row.row_id, handle.row_id);
-            assert_eq!(row.version_id(), hard_delete.delete_version_id);
+            assert_eq!(row.batch_id(), hard_delete.batch_id);
             assert!(row.is_deleted);
             assert!(row.is_hard_deleted());
             assert_eq!(row.data, Vec::<u8>::new());
         }
-        other => panic!("hard delete should sync as RowVersionCreated, got {other:?}"),
+        other => panic!("hard delete should sync as RowBatchCreated, got {other:?}"),
     }
 }
 
@@ -7317,7 +7636,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     let row_updates: Vec<_> = outbox
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .filter(|entry| matches!(entry.payload, SyncPayload::RowVersionNeeded { .. }))
+        .filter(|entry| matches!(entry.payload, SyncPayload::RowBatchNeeded { .. }))
         .collect();
 
     assert!(
@@ -8035,14 +8354,14 @@ fn server_builds_query_graph_on_subscription() {
 
     server_qm.process(&mut storage);
 
-    // Server should send RowVersionNeeded for matching users (Alice, Charlie)
+    // Server should send RowBatchNeeded for matching users (Alice, Charlie)
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
     let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
         .filter_map(|e| match &e.payload {
-            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
             _ => None,
         })
         .collect();
@@ -8050,7 +8369,7 @@ fn server_builds_query_graph_on_subscription() {
     assert_eq!(
         row_updates.len(),
         2,
-        "Should send 2 RowVersionNeeded messages for matching users"
+        "Should send 2 RowBatchNeeded messages for matching users"
     );
 
     let sent_ids: std::collections::HashSet<_> = row_updates.into_iter().collect();
@@ -8103,7 +8422,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
         .filter_map(|entry| match &entry.payload {
-            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
             _ => None,
         })
         .collect();
@@ -8349,14 +8668,14 @@ fn server_pushes_new_matches() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should send RowVersionNeeded for new matching user
+    // Should send RowBatchNeeded for new matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
     let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
         .filter_map(|e| match &e.payload {
-            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
             _ => None,
         })
         .collect();
@@ -8364,7 +8683,7 @@ fn server_pushes_new_matches() {
     assert_eq!(
         row_updates.len(),
         1,
-        "Should send 1 RowVersionNeeded for new matching user"
+        "Should send 1 RowBatchNeeded for new matching user"
     );
 
     assert_eq!(
@@ -8509,19 +8828,19 @@ fn server_does_not_push_non_matching() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should NOT send RowVersionNeeded for non-matching user
+    // Should NOT send RowBatchNeeded for non-matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
     let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::RowVersionNeeded { .. }))
+        .filter(|e| matches!(e.payload, SyncPayload::RowBatchNeeded { .. }))
         .collect();
 
     assert_eq!(
         row_updates.len(),
         0,
-        "Should NOT send RowVersionNeeded for non-matching user"
+        "Should NOT send RowBatchNeeded for non-matching user"
     );
 }
 
@@ -9049,7 +9368,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     let author = ObjectId::new();
     let base_timestamp = load_visible_row(&storage, handle.row_id, &branch_str).updated_at;
     let commit = stored_row_commit(
-        smallvec![handle.row_version_id],
+        smallvec![handle.batch_id],
         row_data,
         base_timestamp + 1,
         author.to_string(),
@@ -9058,7 +9377,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
 
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(upstream_id),
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: handle.row_id,
                 metadata: [("table".to_string(), "users".to_string())]
@@ -9077,7 +9396,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
         .filter(|e| match &e.payload {
-            SyncPayload::RowVersionNeeded { row, .. } => row.row_id == handle.row_id,
+            SyncPayload::RowBatchNeeded { row, .. } => row.row_id == handle.row_id,
             _ => false,
         })
         .collect();
@@ -9085,7 +9404,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     assert_eq!(
         relayed.len(),
         1,
-        "Mid-tier should relay matching row versions downstream"
+        "Mid-tier should relay matching row batch entries downstream"
     );
 }
 
@@ -10294,12 +10613,12 @@ fn remove_client_cleans_active_policy_checks() {
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
         id: PendingUpdateId(id),
         client_id,
-        payload: SyncPayload::RowVersionCreated {
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(crate::sync_manager::RowMetadata {
                 id: obj_id,
                 metadata: HashMap::from([(MetadataKey::Table.to_string(), "users".to_string())]),
             }),
-            row: StoredRowVersion::new(
+            row: StoredRowBatch::new(
                 obj_id,
                 "main",
                 Vec::new(),

@@ -127,6 +127,7 @@ pub struct SchemaManager {
     /// These are stored without requiring a lens path to current.
     known_schemas: Arc<HashMap<SchemaHash, Schema>>,
     known_schemas_dirty: bool,
+    persisted_current_schema_in_storage: HashSet<(usize, SchemaHash)>,
 }
 
 impl SchemaManager {
@@ -176,6 +177,7 @@ impl SchemaManager {
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
+        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
         query_manager.set_current_schema_with_policy_mode(
             schema.clone(),
             env,
@@ -197,6 +199,7 @@ impl SchemaManager {
             pending_permissions_head: None,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
+            persisted_current_schema_in_storage: HashSet::new(),
         })
     }
 
@@ -220,7 +223,7 @@ impl SchemaManager {
     /// using implicit current schema context.
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
         let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.require_authorization_schema();
+        query_manager.set_catalogue_app_id(app_id.uuid().to_string());
         Self {
             context: SchemaContext::empty(),
             query_manager,
@@ -231,6 +234,7 @@ impl SchemaManager {
             pending_permissions_head: None,
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
+            persisted_current_schema_in_storage: HashSet::new(),
         }
     }
 
@@ -313,14 +317,97 @@ impl SchemaManager {
         &self.context.user_branch
     }
 
-    fn get_insert_values_with_defaults(
+    fn schema_for_hash(&self, schema_hash: SchemaHash) -> Option<&Schema> {
+        if schema_hash == self.context.current_hash {
+            return Some(&self.context.current_schema);
+        }
+        self.context.live_schemas.get(&schema_hash)
+    }
+
+    fn resolve_target_branch(
         &self,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(String, SchemaHash), QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let current_hash = self.context.current_hash;
+        let Some(target_branch_name) = write_context.and_then(WriteContext::target_branch_name)
+        else {
+            return Ok((current_branch, current_hash));
+        };
+
+        let parsed =
+            ComposedBranchName::parse(&BranchName::new(target_branch_name)).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "invalid target_branch_name `{target_branch_name}`"
+                ))
+            })?;
+
+        if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
+            return Err(QueryError::EncodingError(format!(
+                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/{}",
+                self.context.env, self.context.user_branch
+            )));
+        }
+
+        if parsed.schema_hash.short() == current_hash.short() {
+            return Ok((current_branch, current_hash));
+        }
+
+        if let Some(hash) = self
+            .context
+            .live_schemas
+            .keys()
+            .copied()
+            .find(|hash| hash.short() == parsed.schema_hash.short())
+        {
+            let canonical =
+                ComposedBranchName::new(&self.context.env, hash, &self.context.user_branch)
+                    .to_branch_name();
+            return Ok((canonical.as_str().to_string(), hash));
+        }
+
+        Err(QueryError::UnknownSchema(parsed.schema_hash))
+    }
+
+    fn schema_context_for_hash(
+        &self,
+        schema_hash: SchemaHash,
+    ) -> Result<SchemaContext, QueryError> {
+        let target_schema = self
+            .schema_for_hash(schema_hash)
+            .ok_or(QueryError::UnknownSchema(schema_hash))?
+            .clone();
+        let mut temp_context = SchemaContext::new(
+            target_schema.clone(),
+            &self.context.env,
+            &self.context.user_branch,
+        );
+
+        for lens in self.context.lenses.values() {
+            temp_context.register_lens(lens.clone());
+        }
+
+        if self.context.current_hash != schema_hash {
+            temp_context.add_pending_schema(self.context.current_schema.clone());
+        }
+
+        for (hash, schema) in &self.context.live_schemas {
+            if *hash != schema_hash {
+                temp_context.add_pending_schema(schema.clone());
+            }
+        }
+
+        temp_context.try_activate_pending();
+        Ok(temp_context)
+    }
+
+    fn get_insert_values_with_defaults_for_schema(
         table: &str,
+        schema: &Schema,
         mut values_by_column: HashMap<String, Value>,
     ) -> Result<Vec<Value>, QueryError> {
         let table_name = TableName::new(table);
-        let table_schema = self
-            .current_schema()
+        let table_schema = schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
 
@@ -618,6 +705,11 @@ impl SchemaManager {
         }
     }
 
+    pub fn are_schema_hashes_connected(&self, from_hash: SchemaHash, to_hash: SchemaHash) -> bool {
+        self.non_draft_reachable_hashes(from_hash)
+            .contains(&to_hash)
+    }
+
     fn non_draft_reachable_hashes(&self, start_hash: SchemaHash) -> HashSet<SchemaHash> {
         if !self.is_schema_known(&start_hash) {
             return HashSet::new();
@@ -753,11 +845,21 @@ impl SchemaManager {
 
     pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
         let schema_hash = self.context.current_hash;
+        let storage_key = (storage.storage_cache_namespace(), schema_hash);
+        if self
+            .persisted_current_schema_in_storage
+            .contains(&storage_key)
+        {
+            return false;
+        }
         let object_id = schema_hash.to_object_id();
         let metadata = self.schema_metadata(&schema_hash);
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
-        self.persist_catalogue_object_if_changed(storage, object_id, metadata, content)
+        let changed =
+            self.persist_catalogue_object_if_changed(storage, object_id, metadata, content);
+        self.persisted_current_schema_in_storage.insert(storage_key);
+        changed
     }
 
     /// Persist the current schema to the catalogue as an Object.
@@ -1488,6 +1590,7 @@ impl SchemaManager {
         self.insert_with_write_context_and_id(storage, table, values, None, write_context)
     }
 
+    /// Insert with session-based policy checking and an optional caller-supplied row id.
     pub fn insert_with_write_context_and_id<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1497,14 +1600,21 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let aligned_values =
+            Self::get_insert_values_with_defaults_for_schema(table, &target_schema, values)?;
         self.query_manager
-            .insert_on_branch_with_write_context_and_id(
+            .insert_on_branch_with_schema_and_write_context_and_id(
                 storage,
                 table,
-                self.context.branch_name().as_str(),
+                &target_branch,
                 &aligned_values,
                 object_id,
+                &target_schema,
                 write_context,
             )
     }
@@ -1543,14 +1653,40 @@ impl SchemaManager {
         object_id: ObjectId,
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
         Self::validate_external_upsert_object_id(object_id)?;
         let _ = self.ensure_current_schema_persisted(storage);
-        let branches = self.all_branch_strings();
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
 
-        if let Some((existing_table, ..)) = self
-            .query_manager
-            .load_row_for_schema_update(storage, object_id, &branches)
+        if let Some(existing_table) = write_context
+            .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+            .and_then(WriteContext::batch_id)
+            .and_then(|batch_id| {
+                self.query_manager
+                    .load_latest_transactional_staged_row_on_branch(
+                        storage,
+                        object_id,
+                        &target_branch,
+                        batch_id,
+                    )
+                    .map(|(table, _row)| table)
+            })
+            .or_else(|| {
+                self.query_manager
+                    .load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                    .map(|(table, ..)| table)
+            })
         {
             if existing_table != table {
                 return Err(QueryError::EncodingError(format!(
@@ -1558,12 +1694,8 @@ impl SchemaManager {
                 )));
             }
 
-            return self.update_with_write_context(
-                storage,
-                object_id,
-                &values.into_iter().collect::<Vec<_>>(),
-                write_context,
-            );
+            let updates = values.into_iter().collect::<Vec<_>>();
+            return self.update_with_write_context(storage, object_id, &updates, write_context);
         }
 
         let inserted = self.insert_with_write_context_and_id(
@@ -1573,42 +1705,64 @@ impl SchemaManager {
             Some(object_id),
             write_context,
         )?;
-        Ok(inserted.row_version_id)
-    }
-
-    pub fn upsert_with_session<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        table: &str,
-        object_id: ObjectId,
-        values: HashMap<String, Value>,
-        session: Option<&Session>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.upsert_with_write_context_and_id(storage, table, object_id, values, owned.as_ref())
+        Ok(inserted.batch_id)
     }
 
     /// Update a row using current-schema column names, performing copy-on-write
-    /// when the latest visible row version still lives on an older schema branch.
+    /// when the latest visible row batch entry still lives on an older schema branch.
     pub fn update_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
         values: &[(String, Value)],
         write_context: Option<&WriteContext>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            self.query_manager
-                .load_row_for_schema_update(storage, object_id, &branches)
+            write_context
+                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+                .and_then(WriteContext::batch_id)
+                .and_then(|batch_id| {
+                    self.query_manager
+                        .load_latest_transactional_staged_row_on_branch(
+                            storage,
+                            object_id,
+                            &target_branch,
+                            batch_id,
+                        )
+                        .map(|(table, row)| {
+                            (
+                                table,
+                                target_branch.clone(),
+                                row.data.to_vec(),
+                                row.batch_id(),
+                                row.row_provenance(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.query_manager.load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                })
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let table_name = TableName::new(&table);
-        let descriptor = self
-            .context
-            .current_schema
+        let descriptor = target_schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?
             .columns
@@ -1626,30 +1780,24 @@ impl SchemaManager {
             current_values[index] = new_value.clone();
         }
 
-        let commit_id = if source_branch == current_branch {
-            self.query_manager.update_with_write_context(
+        let _ = source_branch;
+        let batch_id = self
+            .query_manager
+            .write_existing_row_on_branch_with_schema_and_write_context(
                 storage,
-                object_id,
-                &current_values,
+                RowBranchWrite {
+                    table: &table,
+                    branch: &target_branch,
+                    id: object_id,
+                    values: &current_values,
+                    old_data_for_policy: &old_current_data,
+                    old_provenance_for_policy: &old_current_provenance,
+                },
+                &target_schema,
                 write_context,
-            )?
-        } else {
-            self.query_manager
-                .write_existing_row_on_branch_with_write_context(
-                    storage,
-                    RowBranchWrite {
-                        table: &table,
-                        branch: &current_branch,
-                        id: object_id,
-                        values: &current_values,
-                        old_data_for_policy: &old_current_data,
-                        old_provenance_for_policy: &old_current_provenance,
-                    },
-                    write_context,
-                )?
-        };
+            )?;
 
-        Ok(commit_id)
+        Ok(batch_id)
     }
 
     pub fn update_with_session<H: Storage>(
@@ -1658,13 +1806,13 @@ impl SchemaManager {
         object_id: ObjectId,
         values: &[(String, Value)],
         session: Option<&Session>,
-    ) -> Result<crate::commit::CommitId, QueryError> {
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_with_write_context(storage, object_id, values, owned.as_ref())
     }
 
     /// Delete a row (soft delete), performing copy-on-write when the latest
-    /// visible row version still lives on an older schema branch.
+    /// visible row batch entry still lives on an older schema branch.
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1672,31 +1820,64 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?
+            .clone();
+        let target_context = self.schema_context_for_hash(target_hash)?;
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            self.query_manager
-                .load_row_for_schema_update(storage, object_id, &branches)
+            write_context
+                .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
+                .and_then(WriteContext::batch_id)
+                .and_then(|batch_id| {
+                    self.query_manager
+                        .load_latest_transactional_staged_row_on_branch(
+                            storage,
+                            object_id,
+                            &target_branch,
+                            batch_id,
+                        )
+                        .map(|(table, row)| {
+                            (
+                                table,
+                                target_branch.clone(),
+                                row.data.to_vec(),
+                                row.batch_id(),
+                                row.row_provenance(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.query_manager.load_row_for_schema_update_in_context(
+                        storage,
+                        object_id,
+                        &branches,
+                        &target_context,
+                    )
+                })
                 .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        if source_branch == current_branch {
-            self.query_manager
-                .delete_with_write_context(storage, object_id, write_context)
-        } else {
-            self.query_manager
-                .delete_existing_row_on_branch_with_write_context(
-                    storage,
-                    RowBranchDelete {
-                        table: &table,
-                        branch: &current_branch,
-                        id: object_id,
-                        old_data_for_policy: &old_current_data,
-                        old_provenance_for_policy: &old_current_provenance,
-                    },
-                    write_context,
-                )
-        }
+        let _ = source_branch;
+        self.query_manager
+            .delete_existing_row_on_branch_with_schema_and_write_context(
+                storage,
+                RowBranchDelete {
+                    table: &table,
+                    branch: &target_branch,
+                    id: object_id,
+                    old_data_for_policy: &old_current_data,
+                    old_provenance_for_policy: &old_current_provenance,
+                },
+                &target_schema,
+                write_context,
+            )
     }
 
     pub fn delete_with_session<H: Storage>(
@@ -1834,8 +2015,8 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, SchemaBuilder, SchemaHash,
-        TableName, TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableName,
+        TablePolicies, TableSchema,
     };
 
     fn test_app_id() -> AppId {
@@ -1887,18 +2068,6 @@ mod tests {
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
         assert_eq!(manager.app_id(), test_app_id());
-    }
-
-    #[test]
-    fn schema_manager_new_server_requires_authorization_schema_from_boot() {
-        let manager = SchemaManager::new_server(SyncManager::new(), test_app_id(), "dev");
-        let (row_policy_mode, authorization_schema_required, has_authorization_schema) =
-            manager.query_manager.debug_authorization_state();
-
-        assert!(!manager.has_current_schema());
-        assert!(matches!(row_policy_mode, RowPolicyMode::Enforcing));
-        assert!(authorization_schema_required);
-        assert!(!has_authorization_schema);
     }
 
     #[test]
@@ -2238,6 +2407,49 @@ mod tests {
             Some(v2_hash)
         );
         assert!(diagnostics.unreachable_schema_hashes.is_empty());
+    }
+
+    #[test]
+    fn schema_hash_connectivity_requires_non_draft_uploaded_lenses() {
+        let v1 = make_schema_v1();
+        let v1_hash = SchemaHash::compute(&v1);
+        let draft_target = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+        let draft_target_hash = SchemaHash::compute(&draft_target);
+        let draft_lens = generate_lens(&v1, &draft_target);
+
+        assert!(draft_lens.is_draft());
+
+        let mut disconnected = SchemaManager::new(
+            SyncManager::new(),
+            draft_target,
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        disconnected.add_known_schema(v1.clone());
+        disconnected.context.register_lens(draft_lens);
+        assert!(!disconnected.are_schema_hashes_connected(v1_hash, draft_target_hash));
+
+        let live_target = make_schema_v2();
+        let live_target_hash = SchemaHash::compute(&live_target);
+        let mut connected = SchemaManager::new(
+            SyncManager::new(),
+            live_target,
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        connected.add_live_schema(v1).unwrap();
+        assert!(connected.are_schema_hashes_connected(v1_hash, live_target_hash));
     }
 
     #[test]

@@ -10,9 +10,10 @@ interface ChatFileProps {
 
 export function ChatFile({ attachment }: ChatFileProps) {
   const db = useDb();
+  const fileReadOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const handleDownload = async () => {
-    const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "worker" });
+    const blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
     downloadBlob(blob, attachment.name);
   };
 

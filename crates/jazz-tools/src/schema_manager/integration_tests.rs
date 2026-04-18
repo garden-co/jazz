@@ -2,26 +2,30 @@
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::HashMap;
 
-    use crate::commit::CommitId;
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::{BranchName, ObjectId};
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::manager::LocalUpdates;
+    use crate::query_manager::manager::{LocalUpdates, QueryError};
+    use crate::query_manager::session::WriteContext;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
-    use crate::row_histories::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowBatch, VisibleRowEntry};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::{MemoryStorage, Storage};
+    use crate::storage::{
+        HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
+        RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+    };
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
-    fn make_commit_id(n: u8) -> CommitId {
-        CommitId([n; 32])
+    fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
+        crate::row_histories::BatchId([n; 16])
     }
 
     fn test_app_id() -> AppId {
@@ -29,24 +33,24 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    struct IncomingRowVersion {
+    struct IncomingRowBatch {
         content: Vec<u8>,
         timestamp: u64,
         author: String,
     }
 
-    impl IncomingRowVersion {
-        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowVersion {
+    impl IncomingRowBatch {
+        fn to_row(&self, object_id: ObjectId, branch: &str) -> StoredRowBatch {
             let metadata = row_provenance_metadata(
                 &RowProvenance::for_insert(self.author.clone(), self.timestamp),
                 None,
             )
             .into_iter()
             .collect::<HashMap<_, _>>();
-            StoredRowVersion::new(
+            StoredRowBatch::new(
                 object_id,
                 branch,
-                Vec::<CommitId>::new(),
+                Vec::<crate::row_histories::BatchId>::new(),
                 self.content.clone(),
                 RowProvenance::for_insert(self.author.clone(), self.timestamp),
                 metadata,
@@ -60,11 +64,137 @@ mod tests {
         content: Vec<u8>,
         timestamp: u64,
         author: impl Into<String>,
-    ) -> IncomingRowVersion {
-        IncomingRowVersion {
+    ) -> IncomingRowBatch {
+        IncomingRowBatch {
             content,
             timestamp,
             author: author.into(),
+        }
+    }
+
+    struct CountingCatalogueUpsertsStorage {
+        inner: MemoryStorage,
+        catalogue_upserts: Cell<usize>,
+    }
+
+    impl CountingCatalogueUpsertsStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                catalogue_upserts: Cell::new(0),
+            }
+        }
+
+        fn catalogue_upserts(&self) -> usize {
+            self.catalogue_upserts.get()
+        }
+    }
+
+    impl Storage for CountingCatalogueUpsertsStorage {
+        fn raw_table_put(
+            &mut self,
+            table: &str,
+            key: &str,
+            value: &[u8],
+        ) -> Result<(), StorageError> {
+            self.inner.raw_table_put(table, key, value)
+        }
+
+        fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+            self.inner.raw_table_delete(table, key)
+        }
+
+        fn apply_raw_table_mutations(
+            &mut self,
+            mutations: &[RawTableMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_raw_table_mutations(mutations)
+        }
+
+        fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.raw_table_get(table, key)
+        }
+
+        fn raw_table_scan_prefix(
+            &self,
+            table: &str,
+            prefix: &str,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_prefix(table, prefix)
+        }
+
+        fn raw_table_scan_range(
+            &self,
+            table: &str,
+            start: Option<&str>,
+            end: Option<&str>,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_range(table, start, end)
+        }
+
+        fn append_history_region_row_bytes(
+            &mut self,
+            table: &str,
+            rows: &[HistoryRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.append_history_region_row_bytes(table, rows)
+        }
+
+        fn upsert_visible_region_row_bytes(
+            &mut self,
+            table: &str,
+            rows: &[VisibleRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.upsert_visible_region_row_bytes(table, rows)
+        }
+
+        fn apply_encoded_row_mutation(
+            &mut self,
+            table: &str,
+            history_rows: &[OwnedHistoryRowBytes],
+            visible_rows: &[OwnedVisibleRowBytes],
+            index_mutations: &[IndexMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_encoded_row_mutation(
+                table,
+                history_rows,
+                visible_rows,
+                index_mutations,
+            )
+        }
+
+        fn apply_prepared_row_mutation(
+            &mut self,
+            table: &str,
+            history_rows: &[StoredRowBatch],
+            visible_entries: &[VisibleRowEntry],
+            encoded_history_rows: &[OwnedHistoryRowBytes],
+            encoded_visible_rows: &[OwnedVisibleRowBytes],
+            index_mutations: &[IndexMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_prepared_row_mutation(
+                table,
+                history_rows,
+                visible_entries,
+                encoded_history_rows,
+                encoded_visible_rows,
+                index_mutations,
+            )
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            entry: &crate::catalogue::CatalogueEntry,
+        ) -> Result<(), StorageError> {
+            self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+            self.inner.upsert_catalogue_entry(entry)
+        }
+
+        fn load_catalogue_entry(
+            &self,
+            object_id: ObjectId,
+        ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+            self.inner.load_catalogue_entry(object_id)
         }
     }
 
@@ -138,6 +268,54 @@ mod tests {
             v2_values[v2_descriptor.column_index("email").unwrap()],
             Value::Null
         ); // Added column with default
+    }
+
+    #[test]
+    fn schema_manager_persists_current_schema_only_once_per_storage() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = CountingCatalogueUpsertsStorage::new();
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("name".to_string(), Value::Text("Alice".into())),
+                ]),
+            )
+            .expect("first insert should succeed");
+        let first_upserts = storage.catalogue_upserts();
+        assert!(
+            first_upserts >= 1,
+            "first insert should persist current schema/catalogue state"
+        );
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("name".to_string(), Value::Text("Bob".into())),
+                ]),
+            )
+            .expect("second insert should succeed");
+
+        assert_eq!(
+            storage.catalogue_upserts(),
+            first_upserts,
+            "schema-aware writes should not reload and repersist the unchanged current schema",
+        );
     }
 
     /// Test column rename through lens.
@@ -380,7 +558,7 @@ mod tests {
         results
     }
 
-    /// Ingest a remote row version on a specific branch through the storage-backed sync path.
+    /// Ingest a remote row batch entry on a specific branch through the storage-backed sync path.
     /// QueryManager picks this up during `process()` via the sync inbox.
     fn ingest_remote_row(
         qm: &mut QueryManager,
@@ -404,7 +582,7 @@ mod tests {
         let row = commit.to_row(object_id, branch);
         qm.sync_manager_mut().push_inbox(InboxEntry {
             source: Source::Server(ServerId::new()),
-            payload: SyncPayload::RowVersionCreated {
+            payload: SyncPayload::RowBatchCreated {
                 metadata: None,
                 row,
             },
@@ -1653,6 +1831,432 @@ mod tests {
         assert!(
             visible_after_delete.is_empty(),
             "soft-deleted row should no longer appear in current-branch people queries"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_uses_frozen_target_branch_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        let inserted = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect("frozen-target insert should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, inserted.row_id);
+        assert!(
+            target_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice@example.com".to_string()))
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(current_branch).build(),
+        );
+        assert!(
+            current_rows.is_empty(),
+            "insert should stay on the frozen target branch rather than drifting to the manager current branch"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_rejects_target_branch_outside_current_family() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = MemoryStorage::new();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name("prod-111111111111-feature");
+
+        let err = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect_err("cross-family target branch should be rejected");
+
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("outside the current schema family")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transactional_insert_uses_frozen_target_branch_renamed_table_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        let inserted = manager
+            .insert_with_write_context(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ]),
+                Some(&write_context),
+            )
+            .expect("frozen-target insert should use the renamed target table schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(v1_branch.clone())
+                .build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, inserted.row_id);
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people").branch(current_branch).build(),
+        );
+        assert!(
+            current_rows.is_empty(),
+            "insert should stay on the frozen renamed-table target branch"
+        );
+    }
+
+    #[test]
+    fn transactional_update_uses_frozen_target_branch_schema() {
+        // current branch: v2 users(id, email_address)
+        //                  |
+        // tx target:       v1 users(id, email)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+        let row_id = ObjectId::new();
+
+        let v2_table = v2.get(&TableName::new("users")).unwrap();
+        let row_data = encode_row(
+            &v2_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v2_hash,
+            row_id,
+            &current_branch,
+            row_data,
+            1_000,
+        );
+        manager.process(&mut storage);
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        manager
+            .update_with_write_context(
+                &mut storage,
+                row_id,
+                &[(
+                    "email".to_string(),
+                    Value::Text("alice+tx@example.com".to_string()),
+                )],
+                Some(&write_context),
+            )
+            .expect("frozen-target update should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(target_rows[0].0, row_id);
+        assert!(
+            target_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice+tx@example.com".to_string()))
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(current_branch).build(),
+        );
+        assert_eq!(current_rows.len(), 1);
+        assert!(
+            current_rows[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice@example.com".to_string())),
+            "frozen-target update should not rewrite the manager current branch"
+        );
+    }
+
+    #[test]
+    fn transactional_delete_uses_frozen_target_branch_schema() {
+        // current branch: v2 users(id, email_address)
+        //                  |
+        // tx target:       v1 users(id, email)
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".to_string(),
+                old_name: "email".to_string(),
+                new_name: "email_address".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+        let row_id = ObjectId::new();
+
+        let v2_table = v2.get(&TableName::new("users")).unwrap();
+        let row_data = encode_row(
+            &v2_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            v2_hash,
+            row_id,
+            &current_branch,
+            row_data,
+            1_000,
+        );
+        manager.process(&mut storage);
+
+        let write_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+            .with_target_branch_name(v1_branch.clone());
+
+        manager
+            .delete(&mut storage, row_id, Some(&write_context))
+            .expect("frozen-target delete should use the target branch schema");
+
+        let target_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        );
+        assert!(
+            target_rows.is_empty(),
+            "frozen-target delete should create the soft delete on the target branch"
+        );
+
+        let current_rows = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("users")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert_eq!(current_rows.len(), 1);
+        assert!(
+            manager
+                .query_manager()
+                .row_is_deleted_on_branch(&storage, "users", &v1_branch, row_id),
+            "target branch should carry the delete marker"
+        );
+        assert!(
+            !manager.query_manager().row_is_deleted_on_branch(
+                &storage,
+                "users",
+                &current_branch,
+                row_id
+            ),
+            "current branch should remain untouched"
         );
     }
 
@@ -2933,10 +3537,10 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_handle.row_id
+                    SyncPayload::RowBatchCreated { row, .. } if row.row_id == row_handle.row_id
                 )
             })
-            .expect("Client A should emit RowVersionCreated for the row");
+            .expect("Client A should emit RowBatchCreated for the row");
 
         client_b
             .query_manager_mut()
@@ -3286,13 +3890,13 @@ mod tests {
         let row_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::RowVersionCreated { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchCreated { row, .. } = &e.payload {
                     row.row_id == doc_id
                 } else {
                     false
                 }
             })
-            .expect("Should have RowVersionCreated for the row in outbox");
+            .expect("Should have RowBatchCreated for the row in outbox");
 
         // Push to server inbox
         server
@@ -3344,7 +3948,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
         let doc_update_for_b = server_outbox.iter().find(|e| {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                && matches!(&e.payload, SyncPayload::RowVersionNeeded { row, .. } if row.row_id == doc_id)
+                && matches!(&e.payload, SyncPayload::RowBatchNeeded { row, .. } if row.row_id == doc_id)
         });
         assert!(
             doc_update_for_b.is_some(),
@@ -3355,7 +3959,7 @@ mod tests {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
                 && matches!(
                     &e.payload,
-                    SyncPayload::RowVersionNeeded { row, .. }
+                    SyncPayload::RowBatchNeeded { row, .. }
                         if row
                             .data
                             .windows("Test Document".len())
@@ -3548,12 +4152,12 @@ mod tests {
         // === Server should send Alice's doc to Client A ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        // Find row-version messages destined for client A
+        // Find row-batch messages destined for client A
         let alice_updates: Vec<_> = server_outbox
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_a_id)
-                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
+                    && matches!(e.payload, SyncPayload::RowBatchNeeded { .. })
             })
             .collect();
 
@@ -3562,7 +4166,7 @@ mod tests {
         let received_ids: Vec<ObjectId> = alice_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                     Some(row.row_id)
                 } else {
                     None
@@ -3618,14 +4222,14 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
+                    && matches!(e.payload, SyncPayload::RowBatchNeeded { .. })
             })
             .collect();
 
         let bob_received_ids: Vec<ObjectId> = bob_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                     Some(row.row_id)
                 } else {
                     None
@@ -3796,7 +4400,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
         let note_sent = server_outbox.iter().any(|e| {
-            if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+            if let SyncPayload::RowBatchNeeded { row, .. } = &e.payload {
                 row.row_id == note_id
             } else {
                 false
@@ -4274,10 +4878,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::Worker),
                 },
@@ -4300,10 +4904,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_b_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::EdgeServer),
                 },
@@ -4616,10 +5220,10 @@ mod tests {
                 .sync_manager_mut()
                 .push_inbox(InboxEntry {
                     source: Source::Server(server_id),
-                    payload: SyncPayload::RowVersionStateChanged {
+                    payload: SyncPayload::RowBatchStateChanged {
                         row_id: row.row_id,
                         branch_name: BranchName::new(&row.branch),
-                        version_id: row.version_id(),
+                        batch_id: row.batch_id,
                         state: None,
                         confirmed_tier: Some(DurabilityTier::Worker),
                     },
@@ -4712,10 +5316,10 @@ mod tests {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_id),
-                payload: SyncPayload::RowVersionStateChanged {
+                payload: SyncPayload::RowBatchStateChanged {
                     row_id: visible_row.row_id,
                     branch_name: BranchName::new(&visible_row.branch),
-                    version_id: visible_row.version_id(),
+                    batch_id: visible_row.batch_id,
                     state: None,
                     confirmed_tier: Some(DurabilityTier::Worker),
                 },
