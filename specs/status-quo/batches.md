@@ -40,6 +40,8 @@ The two modes are:
 - Simple `insert` / `update` / `delete` calls are just one-member direct batches.
 - Explicit direct-batch APIs exist so multiple writes can share one `BatchId`.
 - Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable settlements, and public handles.
+- Visible resolution only merges visible rows. Staged or rejected transactional batches never
+  participate in visible merges.
 
 ## Durable Storage Format
 
@@ -153,6 +155,21 @@ History keeps parents, metadata, and the full delete marker lineage; the visible
 the fields needed for current reads plus tier/frontier pointers. This keeps ordinary queries fast
 without duplicating the full history-row payload.
 
+The common visible-row case stays compact:
+
+- if one visible batch wins the whole row, the payload stores that row directly
+- if all durability tiers agree, the tier preview state collapses into that same shared encoding
+
+When the frontier truly conflicts, the visible reducer materializes one merged visible body for the
+default head and persists compact provenance alongside it:
+
+- a batch-id pool containing only the rows that actually won at least one visible column
+- one packed ordinal vector for the default merged preview when it is synthetic
+- packed tier override ordinal vectors only for tiers whose preview differs from the default one
+
+Lower-tier reads can reconstruct merged previews from that visible-row sidecar without walking the
+entire row history.
+
 ### Batch bookkeeping tables
 
 Replayable batch lifecycle state is stored in three system raw table instances:
@@ -229,7 +246,7 @@ The important design point is that this same struct is used for:
 
 - `current_row: StoredRowBatch`
 - `branch_frontier`
-- optional older visible winners for `worker`, `edge`, and `global`
+- optional older or synthetic preview metadata batch ids for `worker`, `edge`, and `global`
 
 This is the main hot-path query shape. In durable storage, the common visible-row case now keeps
 some fields implicit to save bytes:
@@ -237,6 +254,16 @@ some fields implicit to save bytes:
 - empty `_jazz_parents` encodes as `null`
 - empty `_jazz_metadata` encodes as `null`
 - `_jazz_branch_frontier` encodes as `null` when it is just `[current_batch_id]`
+
+The reducer has two modes:
+
+- linear append fast path: keep using the appended row or previous row directly
+- conflicting frontier merge path: walk to the latest common ancestor, detect changed columns
+  relative to that ancestor, and choose the latest changed tip per column
+
+Merge-on-write follows the same rule. When a new direct write lands on a conflicting frontier, the
+runtime first materializes the merged preview for that frontier, applies the caller's explicit
+column updates on top of it, and writes a new row batch parented by the whole frontier.
 
 ### LocalBatchRecord
 
