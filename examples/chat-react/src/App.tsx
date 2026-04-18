@@ -37,7 +37,7 @@ export function App({ config }: { config?: Partial<DbConfig> } = {}) {
 }
 
 function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: APP_ID }));
   const resolvedConfig = defaultConfig(secret, config);
 
   return (

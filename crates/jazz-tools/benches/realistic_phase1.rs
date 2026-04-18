@@ -22,7 +22,6 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
 use jazz_tools::catalogue::CatalogueEntry;
-use jazz_tools::commit::CommitId;
 use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
@@ -32,16 +31,16 @@ use jazz_tools::query_manager::types::{
     ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TablePolicies, TableSchema, Value,
 };
 use jazz_tools::row_format::encode_row;
-use jazz_tools::row_histories::{RowState, StoredRowVersion, apply_row_version};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, apply_row_batch};
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use jazz_tools::storage::RocksDBStorage;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 use jazz_tools::storage::SqliteStorage;
 use jazz_tools::storage::Storage;
+use jazz_tools::storage::{MemoryStorage, RowLocator};
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
@@ -2830,8 +2829,8 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     .expect("open rocksdb for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -2878,8 +2877,8 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     .expect("open sqlite for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -3488,20 +3487,6 @@ fn many_branches_benchmark_name(
     )
 }
 
-fn many_branches_row_metadata() -> HashMap<String, String> {
-    let schema_hash = many_branches_schema_hash();
-    HashMap::from([
-        (
-            MetadataKey::Table.to_string(),
-            MANY_BRANCHES_TABLE.to_string(),
-        ),
-        (
-            MetadataKey::OriginSchemaHash.to_string(),
-            schema_hash.to_string(),
-        ),
-    ])
-}
-
 fn many_branches_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder(MANY_BRANCHES_TABLE).column("payload", ColumnType::Bytea))
@@ -3553,12 +3538,17 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     let object_id = ObjectId::new();
     let row_descriptor = persist_many_branches_schema(storage);
     storage
-        .put_metadata(object_id, many_branches_row_metadata())
-        .expect("seed many-branches metadata");
+        .put_row_locator(
+            object_id,
+            Some(&RowLocator {
+                table: MANY_BRANCHES_TABLE.into(),
+                origin_schema_hash: Some(many_branches_schema_hash()),
+            }),
+        )
+        .expect("seed many-branches row locator");
     let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
     let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
-    let mut head_ids = Vec::with_capacity(scenario.branch_count);
     let mut used_as_parent = vec![false; scenario.branch_count];
     let mut next_timestamp = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
 
@@ -3570,55 +3560,59 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
         let root_timestamp = next_timestamp;
         next_timestamp += 1;
 
-        let mut head_id = apply_row_version(
+        let mut head_id = BatchId::new();
+        let root_row = StoredRowBatch::new_with_batch_id(
+            head_id,
+            object_id,
+            branch_name.clone(),
+            Vec::new(),
+            many_branches_row_data(&row_descriptor, scenario, branch_idx, 0),
+            RowProvenance::for_insert(author.clone(), root_timestamp),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        );
+        apply_row_batch(
             storage,
             object_id,
             &jazz_tools::object::BranchName::new(&branch_name),
-            StoredRowVersion::new(
-                object_id,
-                branch_name.clone(),
-                Vec::new(),
-                many_branches_row_data(&row_descriptor, scenario, branch_idx, 0),
-                RowProvenance::for_insert(author.clone(), root_timestamp),
-                HashMap::new(),
-                RowState::VisibleDirect,
-                None,
-            ),
+            root_row,
             &[],
         )
-        .expect("seed many-branches root row version")
-        .version_id;
+        .expect("seed many-branches root row version");
 
         for commit_idx in 1..scenario.commits_per_branch {
             let updated_at = next_timestamp;
             next_timestamp += 1;
-            head_id = apply_row_version(
+            let next_batch_id = BatchId::new();
+            let row = StoredRowBatch::new_with_batch_id(
+                next_batch_id,
+                object_id,
+                branch_name.clone(),
+                vec![head_id],
+                many_branches_row_data(&row_descriptor, scenario, branch_idx, commit_idx),
+                RowProvenance {
+                    created_by: author.clone(),
+                    created_at: root_timestamp,
+                    updated_by: author.clone(),
+                    updated_at,
+                },
+                HashMap::new(),
+                RowState::VisibleDirect,
+                None,
+            );
+            apply_row_batch(
                 storage,
                 object_id,
                 &jazz_tools::object::BranchName::new(&branch_name),
-                StoredRowVersion::new(
-                    object_id,
-                    branch_name.clone(),
-                    vec![head_id],
-                    many_branches_row_data(&row_descriptor, scenario, branch_idx, commit_idx),
-                    RowProvenance {
-                        created_by: author.clone(),
-                        created_at: root_timestamp,
-                        updated_by: author.clone(),
-                        updated_at,
-                    },
-                    HashMap::new(),
-                    RowState::VisibleDirect,
-                    None,
-                ),
+                row,
                 &[],
             )
-            .expect("append linear row version in many-branches benchmark")
-            .version_id;
+            .expect("append linear row version in many-branches benchmark");
+            head_id = next_batch_id;
         }
 
         branch_names.push(branch_name);
-        head_ids.push(head_id);
     }
 
     let leaf_branch_names = branch_names
@@ -3718,7 +3712,7 @@ fn scan_leaf_like_branch_heads(
     scan
 }
 
-fn branch_head_checksum(branch_name: &str, head_id: CommitId) -> u64 {
+fn branch_head_checksum(branch_name: &str, head_id: BatchId) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&head_id.0[..8]);
     u64::from_le_bytes(bytes) ^ (branch_name.len() as u64)

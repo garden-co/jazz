@@ -83,6 +83,30 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
+  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
+  insertPersistedWithSession?(
+    table: string,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedInsertResult;
+  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
+  updatePersistedWithSession?(
+    object_id: string,
+    values: any,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedMutationResult;
+  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
+  deletePersistedWithSession?(
+    object_id: string,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): PersistedMutationResult;
+  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
+  loadLocalBatchRecords?(): LocalBatchRecord[];
+  acknowledgeRejectedBatch?(batch_id: string): boolean;
+  sealBatch?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -157,6 +181,7 @@ export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+  strictTransactions?: boolean;
   visibility?: QueryVisibility;
 }
 
@@ -164,6 +189,7 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
+  strictTransactions: boolean;
   visibility: QueryVisibility;
 }
 
@@ -171,21 +197,69 @@ export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
 }
 
-export interface CreateOptions {
+interface TimestampOverrideOptions {
+  updatedAt?: number;
+}
+
+export type BatchMode = "direct" | "transactional";
+
+export interface VisibleBatchMember {
+  objectId: string;
+  branchName: string;
+  batchId: string;
+}
+
+export type BatchSettlement =
+  | {
+      kind: "missing";
+      batchId: string;
+    }
+  | {
+      kind: "rejected";
+      batchId: string;
+      code: string;
+      reason: string;
+    }
+  | {
+      kind: "durable_direct";
+      batchId: string;
+      confirmedTier: DurabilityTier;
+      visibleMembers: VisibleBatchMember[];
+    }
+  | {
+      kind: "accepted_transaction";
+      batchId: string;
+      confirmedTier: DurabilityTier;
+      visibleMembers: VisibleBatchMember[];
+    };
+
+export interface LocalBatchRecord {
+  batchId: string;
+  mode: BatchMode;
+  requestedTier: DurabilityTier;
+  sealed: boolean;
+  latestSettlement: BatchSettlement | null;
+}
+
+export interface CreateOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
-export interface CreateDurabilityOptions extends WriteDurabilityOptions {
+export interface CreateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
   id?: string;
 }
 
-export interface UpsertOptions {
+export interface UpsertOptions extends TimestampOverrideOptions {
   id: string;
 }
 
-export interface UpsertDurabilityOptions extends WriteDurabilityOptions {
+export interface UpsertDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
   id: string;
 }
+
+export interface UpdateOptions extends TimestampOverrideOptions {}
+
+export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
 
 /**
  * Query row result.
@@ -198,6 +272,19 @@ export interface Row {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
+  updated_at?: number;
+  batch_mode?: BatchMode;
+  batch_id?: string;
+  target_branch_name?: string;
+}
+
+interface PersistedInsertResult {
+  batchId: string;
+  row: Row;
+}
+
+interface PersistedMutationResult {
+  batchId: string;
 }
 
 /**
@@ -248,6 +335,7 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
+    strictTransactions: options?.strictTransactions ?? false,
     visibility: options?.visibility ?? "public",
   };
 }
@@ -419,15 +507,22 @@ function getScheduler(): (task: () => void) => void {
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
-  const payload: { propagation?: QueryPropagation; local_updates?: LocalUpdatesMode } = {};
+  const payload: {
+    propagation?: QueryPropagation;
+    local_updates?: LocalUpdatesMode;
+    strict_transactions?: boolean;
+  } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
   }
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
+  if (options.strictTransactions) {
+    payload.strict_transactions = true;
+  }
 
-  if (!payload.propagation && !payload.local_updates) {
+  if (!payload.propagation && !payload.local_updates && !payload.strict_transactions) {
     return undefined;
   }
 
@@ -533,6 +628,327 @@ function isObjectAlreadyExistsError(error: unknown): boolean {
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
 
+type BatchWriteContext = {
+  batchMode: BatchMode;
+  batchId: string;
+  targetBranchName: string;
+};
+
+function composeTargetBranchName(schemaContext: {
+  env: string;
+  schema_hash: string;
+  user_branch: string;
+}): string {
+  return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
+}
+
+function generateBatchId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  const bytes = new Uint8Array(16);
+
+  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  const timestamp = Date.now();
+  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
+  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
+  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
+  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
+  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
+  bytes[5] = timestamp & 0xff;
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeUpdatedAt(updatedAt?: number): number | undefined {
+  if (updatedAt === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(updatedAt) || !Number.isInteger(updatedAt) || updatedAt < 0) {
+    throw new Error("Invalid updatedAt override. Expected a non-negative integer.");
+  }
+  return updatedAt;
+}
+
+function durabilityTierRank(tier: DurabilityTier): number {
+  switch (tier) {
+    case "worker":
+      return 0;
+    case "edge":
+      return 1;
+    case "global":
+      return 2;
+  }
+}
+
+function settlementSatisfiesTier(
+  settlement: BatchSettlement | null | undefined,
+  tier: DurabilityTier,
+): boolean {
+  if (!settlement) {
+    return false;
+  }
+
+  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
+    return false;
+  }
+
+  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
+}
+
+function rejectionFromSettlement(
+  settlement: BatchSettlement | null | undefined,
+): PersistedWriteRejectedError | null {
+  if (!settlement || settlement.kind !== "rejected") {
+    return null;
+  }
+  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
+}
+
+export class PersistedWriteRejectedError extends Error {
+  readonly name = "PersistedWriteRejectedError";
+
+  constructor(
+    readonly batchId: string,
+    readonly code: string,
+    readonly reason: string,
+  ) {
+    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+  }
+}
+
+export class PersistedWrite<T> {
+  constructor(
+    private readonly client: JazzClient,
+    private readonly requestedTier: DurabilityTier,
+    private readonly persistedBatchId: string,
+    private readonly persistedValue: T,
+  ) {}
+
+  batchId(): string {
+    return this.persistedBatchId;
+  }
+
+  value(): T {
+    return this.persistedValue;
+  }
+
+  async wait(): Promise<T> {
+    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
+    return this.persistedValue;
+  }
+}
+
+export class Transaction {
+  private committed = false;
+
+  constructor(
+    private readonly client: JazzClient,
+    private readonly batchContext: BatchWriteContext,
+    private readonly session?: Session,
+    private readonly attribution?: string,
+  ) {}
+
+  private ensureWritable(): void {
+    if (this.committed) {
+      throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    }
+  }
+
+  batchId(): string {
+    return this.batchContext.batchId;
+  }
+
+  commit(): string {
+    if (this.committed) {
+      return this.batchId();
+    }
+    const batchId = this.client.sealBatch(this.batchId());
+    this.committed = true;
+    return batchId;
+  }
+
+  create(table: string, values: InsertValues): Row {
+    this.ensureWritable();
+    return this.client.createInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      undefined,
+      this.batchContext,
+    );
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    this.ensureWritable();
+    return this.client.createPersistedInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.ensureWritable();
+    this.client.updateInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    this.ensureWritable();
+    return this.client.updatePersistedInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  delete(objectId: string): void {
+    this.ensureWritable();
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  }
+
+  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
+    this.ensureWritable();
+    return this.client.deletePersistedInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
+    return this.client.localBatchRecord(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    return this.client.localBatchRecords();
+  }
+
+  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
+    return this.client.acknowledgeRejectedBatch(batchId);
+  }
+}
+
+export class DirectBatch {
+  constructor(
+    private readonly client: JazzClient,
+    private readonly batchContext: BatchWriteContext,
+    private readonly session?: Session,
+    private readonly attribution?: string,
+  ) {}
+
+  batchId(): string {
+    return this.batchContext.batchId;
+  }
+
+  create(table: string, values: InsertValues): Row {
+    return this.client.createInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      undefined,
+      this.batchContext,
+    );
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.client.createPersistedInternal(
+      table,
+      values,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.client.updateInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.updatePersistedInternal(
+      objectId,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  delete(objectId: string): void {
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  }
+
+  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
+    return this.client.deletePersistedInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+  }
+
+  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
+    return this.client.localBatchRecord(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    return this.client.localBatchRecords();
+  }
+
+  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
+    return this.client.acknowledgeRejectedBatch(batchId);
+  }
+}
+
 /**
  * Session-scoped client for backend operations.
  *
@@ -564,6 +980,9 @@ export class SessionClient {
         values,
         schema_context: this.client.getSchemaContext(),
         ...(options?.id ? { object_id: options.id } : {}),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -574,6 +993,14 @@ export class SessionClient {
 
     const result = await response.json();
     return result.object_id;
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.client.createPersistedInternal(table, values, this.session, undefined, options);
   }
 
   /**
@@ -589,13 +1016,19 @@ export class SessionClient {
       }
     }
 
-    await this.update(options.id, values as Record<string, Value>);
+    await this.update(options.id, values as Record<string, Value>, {
+      updatedAt: options.updatedAt,
+    });
   }
 
   /**
    * Update a row as this session's user.
    */
-  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
+  async update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: UpdateOptions,
+  ): Promise<void> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -609,6 +1042,9 @@ export class SessionClient {
         object_id: objectId,
         updates: updateArray,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -616,6 +1052,14 @@ export class SessionClient {
     if (!response.ok) {
       throw new Error(`Update failed: ${response.statusText}`);
     }
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.client.updatePersistedInternal(objectId, updates, this.session, undefined, options);
   }
 
   /**
@@ -641,6 +1085,10 @@ export class SessionClient {
     }
   }
 
+  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
+    return this.client.deletePersistedInternal(objectId, this.session, undefined, options);
+  }
+
   /**
    * Query as this session's user.
    */
@@ -658,6 +1106,26 @@ export class SessionClient {
   ): number {
     return this.client.subscribeInternal(query, callback, this.session, options);
   }
+
+  beginTransaction(): Transaction {
+    return this.client.beginTransactionInternal(this.session);
+  }
+
+  beginDirectBatch(): DirectBatch {
+    return this.client.beginDirectBatchInternal(this.session);
+  }
+
+  localBatchRecord(batchId: string): LocalBatchRecord | null {
+    return this.client.localBatchRecord(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    return this.client.localBatchRecords();
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean {
+    return this.client.acknowledgeRejectedBatch(batchId);
+  }
 }
 
 /**
@@ -669,7 +1137,43 @@ export class JazzClient {
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
+  private readonly pendingBatchWaiters = new Map<
+    string,
+    Array<{
+      tier: DurabilityTier;
+      resolve: () => void;
+      reject: (error: Error) => void;
+    }>
+  >();
+  private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private shutdownPromise: Promise<void> | null = null;
+
+  private resolveSessionFromContext(): Session | null {
+    return resolveClientSessionStateSync({
+      appId: this.context.appId,
+      jwtToken: this.context.jwtToken,
+      cookieSession: this.context.cookieSession,
+    }).session;
+  }
+
+  private buildTransportAuthPayload(): {
+    jwt_token: string | null;
+    admin_secret?: string;
+    backend_secret?: string;
+  } {
+    const payload: {
+      jwt_token: string | null;
+      admin_secret?: string;
+      backend_secret?: string;
+    } = { jwt_token: this.context.jwtToken ?? null };
+    if (this.context.adminSecret) {
+      payload.admin_secret = this.context.adminSecret;
+    }
+    if (this.context.backendSecret) {
+      payload.backend_secret = this.context.backendSecret;
+    }
+    return payload;
+  }
 
   private constructor(
     runtime: Runtime,
@@ -677,14 +1181,11 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
-    this.runtime = runtime;
+    this.runtime = this.wrapRuntime(runtime);
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: context.appId,
-      jwtToken: context.jwtToken,
-    }).session;
+    this.resolvedSession = this.resolveSessionFromContext();
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -692,6 +1193,24 @@ export class JazzClient {
         handler(mapAuthReason(reason));
       });
     }
+  }
+
+  private wrapRuntime(runtime: Runtime): Runtime {
+    return new Proxy(runtime, {
+      get: (target, property, receiver) => {
+        const value = Reflect.get(target, property, receiver);
+        if (property === "onSyncMessageReceived" && typeof value === "function") {
+          return (payload: Uint8Array | string, seq?: number | null) => {
+            value.call(target, payload, seq);
+            this.flushPendingBatchWaiters();
+          };
+        }
+        if (typeof value === "function") {
+          return value.bind(target);
+        }
+        return value;
+      },
+    });
   }
 
   /**
@@ -818,6 +1337,64 @@ export class JazzClient {
     return this.forSession(sessionFromRequest(request));
   }
 
+  beginTransaction(): Transaction {
+    return this.beginTransactionInternal();
+  }
+
+  beginDirectBatch(): DirectBatch {
+    return this.beginDirectBatchInternal();
+  }
+
+  private createBatchContext(batchMode: BatchMode): BatchWriteContext {
+    return {
+      batchMode,
+      batchId: generateBatchId(),
+      targetBranchName: composeTargetBranchName(this.getSchemaContext()),
+    };
+  }
+
+  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+    return new Transaction(
+      this,
+      this.createBatchContext("transactional"),
+      this.resolveWriteSession(session, attribution),
+      attribution,
+    );
+  }
+
+  beginDirectBatchInternal(session?: Session, attribution?: string): DirectBatch {
+    return new DirectBatch(
+      this,
+      this.createBatchContext("direct"),
+      this.resolveWriteSession(session, attribution),
+      attribution,
+    );
+  }
+
+  localBatchRecord(batchId: string): LocalBatchRecord | null {
+    return this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
+  }
+
+  localBatchRecords(): LocalBatchRecord[] {
+    const records = this.requireBatchRecordMethod("loadLocalBatchRecords")();
+    return [...records].sort((left, right) => left.batchId.localeCompare(right.batchId));
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean {
+    const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
+    const acknowledged = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
+    if (acknowledged && rejection) {
+      this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
+    }
+    this.flushPendingBatchWaiters();
+    return acknowledged;
+  }
+
+  sealBatch(batchId: string): string {
+    this.requireBatchRecordMethod("sealBatch")(batchId);
+    return batchId;
+  }
+
   /**
    * Enable backend-scoped sync auth for this client.
    *
@@ -836,28 +1413,20 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: this.context.appId,
-      jwtToken,
-    }).session;
+    this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport. `updateAuth`
     // is optional on the Runtime interface because not every binding exposes
     // it yet; bindings that do will route this to TransportControl::UpdateAuth.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
-    const payload: {
-      jwt_token: string | null;
-      admin_secret?: string;
-      backend_secret?: string;
-    } = { jwt_token: jwtToken ?? null };
-    if (this.context.adminSecret) {
-      payload.admin_secret = this.context.adminSecret;
-    }
-    if (this.context.backendSecret) {
-      payload.backend_secret = this.context.backendSecret;
-    }
-    this.runtime.updateAuth?.(JSON.stringify(payload));
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
+  }
+
+  updateCookieSession(cookieSession?: Session): void {
+    this.context.cookieSession = cookieSession;
+    this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   private normalizeQueryExecutionOptions(
@@ -873,11 +1442,16 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private encodeWriteContext(session?: Session, attribution?: string): string | undefined {
-    if (!session && attribution === undefined) {
+  private encodeWriteContext(
+    session?: Session,
+    attribution?: string,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): string | undefined {
+    if (!session && attribution === undefined && !batchContext && updatedAt === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session) {
+    if (attribution === undefined && session && !batchContext && updatedAt === undefined) {
       return JSON.stringify(session);
     }
 
@@ -887,6 +1461,14 @@ export class JazzClient {
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
+    }
+    if (updatedAt !== undefined) {
+      payload.updated_at = normalizeUpdatedAt(updatedAt);
+    }
+    if (batchContext) {
+      payload.batch_mode = batchContext.batchMode;
+      payload.batch_id = batchContext.batchId;
+      payload.target_branch_name = batchContext.targetBranchName;
     }
     return JSON.stringify(payload);
   }
@@ -910,6 +1492,37 @@ export class JazzClient {
       | "updateDurableWithSession"
       | "deleteWithSession"
       | "deleteDurableWithSession"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
+  private requirePersistedWriteMethod<
+    T extends keyof Pick<
+      Runtime,
+      | "insertPersisted"
+      | "insertPersistedWithSession"
+      | "updatePersisted"
+      | "updatePersistedWithSession"
+      | "deletePersisted"
+      | "deletePersistedWithSession"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
+  private requireBatchRecordMethod<
+    T extends keyof Pick<
+      Runtime,
+      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -1101,7 +1714,7 @@ export class JazzClient {
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
   upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.upsertInternal(table, values, options.id);
+    this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
   }
 
   /**
@@ -1114,21 +1727,35 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     options?: CreateOptions,
+    batchContext?: BatchWriteContext,
   ): Row {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      options?.updatedAt !== undefined
         ? options?.id
           ? this.requireSessionWriteMethod("insertWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options.updatedAt,
+              ),
               options.id,
             )
           : this.requireSessionWriteMethod("insertWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options?.updatedAt,
+              ),
             )
         : options?.id
           ? this.runtime.insert(table, values, options.id)
@@ -1149,9 +1776,13 @@ export class JazzClient {
     objectId: string,
     session?: Session,
     attribution?: string,
+    updatedAt?: number,
   ): void {
     try {
-      this.createInternal(table, values, session, attribution, { id: objectId });
+      this.createInternal(table, values, session, attribution, {
+        id: objectId,
+        updatedAt,
+      });
       return;
     } catch (error) {
       if (!isObjectAlreadyExistsError(error)) {
@@ -1159,7 +1790,14 @@ export class JazzClient {
       }
     }
 
-    this.updateInternal(objectId, values as Record<string, Value>, session, attribution);
+    this.updateInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      undefined,
+      updatedAt,
+    );
   }
 
   /**
@@ -1198,19 +1836,19 @@ export class JazzClient {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined
+      effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
         ? options?.id
           ? await this.requireSessionWriteMethod("insertDurableWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options.updatedAt),
               tier,
               options.id,
             )
           : await this.requireSessionWriteMethod("insertDurableWithSession")(
               table,
               values,
-              this.encodeWriteContext(effectiveSession, attribution),
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
               tier,
             )
         : options?.id
@@ -1220,6 +1858,43 @@ export class JazzClient {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
+  }
+
+  createPersisted(
+    table: string,
+    values: InsertValues,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<Row> {
+    return this.createPersistedInternal(table, values, undefined, undefined, options);
+  }
+
+  createPersistedInternal(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: BatchWriteContext,
+  ): PersistedWrite<Row> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext
+        ? this.requirePersistedWriteMethod("insertPersistedWithSession")(
+            table,
+            values,
+            this.encodeWriteContext(effectiveSession, attribution, batchContext),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("insertPersisted")(table, values, tier);
+    return new PersistedWrite(this, tier, result.batchId, {
+      ...result.row,
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        result.row.values as Value[],
+        this.getSchema(),
+      ),
+    });
   }
 
   /**
@@ -1233,7 +1908,7 @@ export class JazzClient {
     objectId: string,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: UpsertDurabilityOptions,
   ): Promise<void> {
     try {
       await this.createDurableInternal(table, values, session, attribution, {
@@ -1253,6 +1928,7 @@ export class JazzClient {
       session,
       attribution,
       options,
+      options?.updatedAt,
     );
   }
 
@@ -1293,8 +1969,8 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.updateInternal(objectId, updates);
+  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): void {
+    this.updateInternal(objectId, updates, undefined, undefined, undefined, options?.updatedAt);
   }
 
   /**
@@ -1306,13 +1982,15 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
       return;
     }
@@ -1325,9 +2003,16 @@ export class JazzClient {
   async updateDurable(
     objectId: string,
     updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
-    await this.updateDurableInternal(objectId, updates, undefined, undefined, options);
+    await this.updateDurableInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      options,
+      options?.updatedAt,
+    );
   }
 
   /**
@@ -1339,20 +2024,52 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
     }
     await this.runtime.updateDurable(objectId, updates, tier);
+  }
+
+  updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: WriteDurabilityOptions,
+  ): PersistedWrite<void> {
+    return this.updatePersistedInternal(objectId, updates, undefined, undefined, options);
+  }
+
+  updatePersistedInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): PersistedWrite<void> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
+        ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
+            objectId,
+            updates,
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
+    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
@@ -1366,12 +2083,18 @@ export class JazzClient {
    * Delete a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
-  deleteInternal(objectId: string, session?: Session, attribution?: string): void {
+  deleteInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): void {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
       return;
     }
@@ -1394,18 +2117,44 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     options?: WriteDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("deleteDurableWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
     }
     await this.runtime.deleteDurable(objectId, tier);
+  }
+
+  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
+    return this.deletePersistedInternal(objectId, undefined, undefined, options);
+  }
+
+  deletePersistedInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    options?: WriteDurabilityOptions,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): PersistedWrite<void> {
+    const tier = this.resolveWriteTier(options);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const result =
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
+        ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
+            objectId,
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+            tier,
+          )
+        : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
+    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
@@ -1586,6 +2335,68 @@ export class JazzClient {
       method,
       headers,
       body: JSON.stringify(body),
+    });
+  }
+
+  private batchWaitOutcome(
+    batchId: string,
+    tier: DurabilityTier,
+  ): { settled: true; error: Error | null } | { settled: false } {
+    const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
+    if (acknowledgedRejection) {
+      return { settled: true, error: acknowledgedRejection };
+    }
+
+    const settlement = this.localBatchRecord(batchId)?.latestSettlement;
+    const rejection = rejectionFromSettlement(settlement);
+    if (rejection) {
+      return { settled: true, error: rejection };
+    }
+    if (settlementSatisfiesTier(settlement, tier)) {
+      return { settled: true, error: null };
+    }
+
+    return { settled: false };
+  }
+
+  private flushPendingBatchWaiters(): void {
+    if (this.pendingBatchWaiters.size === 0) {
+      return;
+    }
+
+    for (const [batchId, waiters] of this.pendingBatchWaiters) {
+      const remaining: typeof waiters = [];
+      for (const waiter of waiters) {
+        const outcome = this.batchWaitOutcome(batchId, waiter.tier);
+        if (!outcome.settled) {
+          remaining.push(waiter);
+          continue;
+        }
+        if (outcome.error) {
+          waiter.reject(outcome.error);
+        } else {
+          waiter.resolve();
+        }
+      }
+      if (remaining.length > 0) {
+        this.pendingBatchWaiters.set(batchId, remaining);
+      } else {
+        this.pendingBatchWaiters.delete(batchId);
+      }
+    }
+  }
+
+  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    const outcome = this.batchWaitOutcome(batchId, tier);
+    if (outcome.settled) {
+      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.pendingBatchWaiters.get(batchId) ?? [];
+      waiters.push({ tier, resolve, reject });
+      this.pendingBatchWaiters.set(batchId, waiters);
+      this.flushPendingBatchWaiters();
     });
   }
 

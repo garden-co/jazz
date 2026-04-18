@@ -1261,12 +1261,17 @@ async fn health_handler() -> impl IntoResponse {
 /// Clients send an `AuthHandshake` binary frame (4-byte length prefix + JSON),
 /// receive a `ConnectedResponse` frame, then exchange binary frames
 /// bidirectionally until the connection closes.
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerState>>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
 /// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
 /// the old `/sync` + `/events` handlers.
+#[derive(Debug)]
 enum WsClientSetup {
     Backend,
     Session(crate::query_manager::session::Session),
@@ -1283,6 +1288,7 @@ enum WsClientSetup {
 /// `ServerEvent::Error` frame before closing.
 async fn authenticate_ws_handshake(
     handshake: &crate::transport_manager::AuthHandshake,
+    request_headers: &HeaderMap,
     state: &Arc<ServerState>,
 ) -> Result<WsClientSetup, String> {
     use axum::http::HeaderValue;
@@ -1298,8 +1304,13 @@ async fn authenticate_ws_handshake(
         return Ok(WsClientSetup::Backend);
     }
 
-    // Build a synthetic HeaderMap from the handshake auth fields.
-    let mut headers = HeaderMap::new();
+    if request_uses_cookie_auth(handshake, request_headers, &state.auth_config) {
+        validate_ws_cookie_origin(request_headers)?;
+    }
+
+    // Build a synthetic HeaderMap from the handshake auth fields, layered on
+    // top of the original upgrade request so cookie-based auth remains visible.
+    let mut headers = request_headers.clone();
 
     if let Some(jwt) = &auth.jwt_token {
         let value = HeaderValue::from_str(&format!("Bearer {jwt}"))
@@ -1356,6 +1367,80 @@ async fn authenticate_ws_handshake(
     Ok(WsClientSetup::Session(session))
 }
 
+fn request_uses_cookie_auth(
+    handshake: &crate::transport_manager::AuthHandshake,
+    request_headers: &HeaderMap,
+    auth_config: &crate::middleware::AuthConfig,
+) -> bool {
+    let Some(cookie_name) = auth_config.auth_cookie_name.as_deref() else {
+        return false;
+    };
+
+    let has_explicit_auth = handshake.auth.jwt_token.is_some()
+        || handshake.auth.backend_secret.is_some()
+        || handshake.auth.backend_session.is_some()
+        || handshake.auth.admin_secret.is_some()
+        || request_headers
+            .get(axum::http::header::AUTHORIZATION)
+            .is_some()
+        || request_headers.get("X-Jazz-Backend-Secret").is_some()
+        || request_headers.get("X-Jazz-Session").is_some()
+        || request_headers.get("X-Jazz-Admin-Secret").is_some();
+
+    if has_explicit_auth {
+        return false;
+    }
+
+    request_cookie_value(request_headers, cookie_name).is_some()
+}
+
+fn request_cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+
+    cookie_header.split(';').find_map(|segment| {
+        let trimmed = segment.trim();
+        let (candidate_name, candidate_value) = trimmed.split_once('=')?;
+        if candidate_name == name && !candidate_value.is_empty() {
+            Some(candidate_value)
+        } else {
+            None
+        }
+    })
+}
+
+fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+    let host = headers
+        .get("X-Forwarded-Host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Cookie auth requires Host header".to_string())?;
+
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Cookie auth requires Origin header".to_string())?;
+
+    let origin_uri: axum::http::Uri = origin
+        .parse()
+        .map_err(|_| "Cookie auth requires a valid Origin header".to_string())?;
+    let origin_authority = origin_uri
+        .authority()
+        .map(|authority| authority.as_str())
+        .ok_or_else(|| "Cookie auth requires an Origin authority".to_string())?;
+
+    if origin_authority.eq_ignore_ascii_case(host) {
+        Ok(())
+    } else {
+        Err("Cookie auth Origin must match Host".to_string())
+    }
+}
+
 /// Send a `ServerEvent::Error` frame on the socket, best-effort.
 async fn send_ws_error(socket: &mut WebSocket, message: &str) {
     use crate::jazz_transport::ErrorCode;
@@ -1372,7 +1457,11 @@ async fn send_ws_error(socket: &mut WebSocket, message: &str) {
     }
 }
 
-async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
+async fn handle_ws_connection(
+    mut socket: WebSocket,
+    state: Arc<ServerState>,
+    request_headers: HeaderMap,
+) {
     // 1. Read the first binary frame — expected to be AuthHandshake.
     let first = match socket.recv().await {
         Some(Ok(Message::Binary(b))) => b,
@@ -1408,7 +1497,7 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
     };
 
     // 3. Authenticate.
-    let setup = match authenticate_ws_handshake(&handshake, &state).await {
+    let setup = match authenticate_ws_handshake(&handshake, &request_headers, &state).await {
         Ok(s) => s,
         Err(msg) => {
             send_ws_error(&mut socket, &msg).await;
@@ -1661,15 +1750,15 @@ mod tests {
         create_router(state)
     }
 
-    /// A minimal valid `SyncPayload::RowVersionCreated` suitable for embedding
+    /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
     fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
         let row_id =
             ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
-        let row = crate::row_histories::StoredRowVersion::new(
+        let row = crate::row_histories::StoredRowBatch::new(
             row_id,
             "main",
-            Vec::<crate::commit::CommitId>::new(),
+            Vec::<crate::row_histories::BatchId>::new(),
             b"alice".to_vec(),
             crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
             Default::default(),
@@ -1677,7 +1766,7 @@ mod tests {
             None,
         );
 
-        crate::sync_manager::SyncPayload::RowVersionCreated {
+        crate::sync_manager::SyncPayload::RowBatchCreated {
             metadata: None,
             row,
         }
@@ -1823,6 +1912,90 @@ mod tests {
         // handshakes are rejected at the transport layer — covered fully in auth_test.rs
         // integration tests that connect over the wire.
         let _ = (handshake, client_registered);
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_accepts_same_origin_cookie_auth() {
+        let token = mint_test_token("test-app");
+        let auth_config = AuthConfig {
+            backend_secret: Some("test-backend-secret".to_string()),
+            admin_secret: None,
+            allow_local_first_auth: true,
+            jwks_url: None,
+            auth_cookie_name: Some("jazz-auth".to_string()),
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build sync test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
+        request_headers.insert(
+            axum::http::header::ORIGIN,
+            "https://example.test".parse().unwrap(),
+        );
+        request_headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+
+        let setup = authenticate_ws_handshake(&handshake, &request_headers, &state)
+            .await
+            .expect("cookie auth should succeed");
+
+        assert!(matches!(setup, WsClientSetup::Session(_)));
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_rejects_cross_origin_cookie_auth() {
+        let token = mint_test_token("test-app");
+        let auth_config = AuthConfig {
+            backend_secret: Some("test-backend-secret".to_string()),
+            admin_secret: None,
+            allow_local_first_auth: true,
+            jwks_url: None,
+            auth_cookie_name: Some("jazz-auth".to_string()),
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build sync test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
+        request_headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        request_headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+
+        let error = authenticate_ws_handshake(&handshake, &request_headers, &state)
+            .await
+            .expect_err("cross-origin cookie auth should fail");
+
+        assert!(error.to_lowercase().contains("origin"));
     }
 
     #[tokio::test]

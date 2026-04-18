@@ -235,6 +235,11 @@ impl ServerBuilder {
                     SchemaManager::new_server(sync_manager, self.app_id, "prod");
                 rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
                     .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
+                // Dynamic servers fail closed until an explicit permissions head
+                // is available for the active app.
+                schema_manager
+                    .query_manager_mut()
+                    .require_authorization_schema();
                 Ok(schema_manager)
             }
             ServerSchemaMode::Fixed(schema) => {
@@ -450,9 +455,10 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         }
     };
     info!(
-        "Auth configured: local_first={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+        "Auth configured: local_first={}, jwks={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
+        auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         authority_mode

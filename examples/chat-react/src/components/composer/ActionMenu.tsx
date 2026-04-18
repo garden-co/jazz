@@ -22,6 +22,7 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id;
+  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploadMode, setUploadMode] = useState<"image" | "file" | null>(null);
 
@@ -29,15 +30,27 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
 
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
-    const canvas = db.insert(app.canvases, {
-      chatId,
-      createdAt: new Date(),
-    });
-    db.insert(app.messages, {
-      chatId,
-      text: `[Canvas: ${canvas.id}]`,
-      senderId: myProfile.id,
-      createdAt: new Date(),
+    void (async () => {
+      const canvas = await db.insertDurable(
+        app.canvases,
+        {
+          chatId,
+          createdAt: new Date(),
+        },
+        sharedWriteOptions,
+      );
+      await db.insertDurable(
+        app.messages,
+        {
+          chatId,
+          text: `[Canvas: ${canvas.id}]`,
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        },
+        sharedWriteOptions,
+      );
+    })().catch((error) => {
+      console.error("failed to create canvas", error);
     });
   };
 

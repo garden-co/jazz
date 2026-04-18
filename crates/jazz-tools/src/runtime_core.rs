@@ -27,6 +27,7 @@
 //! let results = future.await?;
 //! ```
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -44,10 +45,11 @@ use crate::query_manager::types::{
     OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowVersionKey, ServerId,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowBatchKey, ServerId,
 };
 
 // ============================================================================
@@ -68,6 +70,7 @@ pub trait Scheduler {
 /// by the concrete wrapping type where needed.
 pub trait SyncSender {
     fn send_sync_message(&self, message: OutboxEntry);
+    fn as_any(&self) -> &dyn Any;
 }
 
 // ============================================================================
@@ -109,6 +112,10 @@ impl SyncSender for VecSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         self.messages.lock().unwrap().push(message);
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Handle to a subscription managed by RuntimeCore.
@@ -149,6 +156,17 @@ impl From<QueryError> for RuntimeError {
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.
 pub type InsertedRow = (ObjectId, Vec<Value>);
+
+/// Structured rejection returned by persisted writes when their batch is rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedWriteRejection {
+    pub batch_id: BatchId,
+    pub code: String,
+    pub reason: String,
+}
+
+/// Terminal outcome for a persisted write wait.
+pub type PersistedWriteAck = std::result::Result<(), PersistedWriteRejection>;
 
 /// Future that resolves to query results.
 ///
@@ -258,9 +276,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (row version, requested_tier) → senders.
+    /// Watchers for persistence acks: (row, branch, logical write batch, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<RowVersionKey, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
@@ -512,6 +530,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// the per-connection `ConnectionEventHub` channels.
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
+    }
+
+    #[cfg(test)]
+    pub fn sync_sender(&self) -> &VecSyncSender {
+        self.sync_sender
+            .as_ref()
+            .expect("test runtime must install a VecSyncSender")
+            .as_any()
+            .downcast_ref::<VecSyncSender>()
+            .expect("test runtime sync sender must be VecSyncSender")
     }
 }
 

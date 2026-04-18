@@ -235,6 +235,7 @@ impl TestingServer {
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
             clock: auth_clock.clone(),
+            ..Default::default()
         };
 
         let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);

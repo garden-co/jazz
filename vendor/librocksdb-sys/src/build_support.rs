@@ -22,12 +22,20 @@ pub struct LinkPlan {
     pub artifact: GhcrArtifact,
 }
 
+fn compression_feature_profile(feature_lz4: bool, feature_zstd: bool) -> Option<&'static str> {
+    match (feature_lz4, feature_zstd) {
+        (true, true) => Some("all-compression-codecs"),
+        _ => None,
+    }
+}
+
 pub fn vendored_link_plan(
     cache_root: &Path,
     target: &str,
-    _feature_lz4: bool,
-    _feature_zstd: bool,
+    feature_lz4: bool,
+    feature_zstd: bool,
 ) -> Option<LinkPlan> {
+    let feature_profile = compression_feature_profile(feature_lz4, feature_zstd)?;
     let (stdcpp, manifest_digest, archive_sha256) = match target {
         "aarch64-apple-darwin" => (
             StdCppLib::Cxx,
@@ -53,7 +61,7 @@ pub fn vendored_link_plan(
     };
 
     Some(LinkPlan {
-        lib_dir: cache_dir_for_manifest_digest(cache_root, target, manifest_digest),
+        lib_dir: cache_dir_for_manifest_digest(cache_root, target, manifest_digest, feature_profile),
         libs: vec!["rocksdb"],
         stdcpp,
         artifact: GhcrArtifact {
@@ -69,10 +77,12 @@ pub fn cache_dir_for_manifest_digest(
     cache_root: &Path,
     target: &str,
     manifest_digest: &str,
+    feature_profile: &str,
 ) -> PathBuf {
     cache_root
         .join("rocksdb")
         .join(manifest_digest.replace(':', "-"))
+        .join(feature_profile)
         .join(target)
         .join("lib")
 }
@@ -106,12 +116,34 @@ mod tests {
 
     #[test]
     fn linux_x64_uses_stdcxx() {
-        let plan = vendored_link_plan(Path::new("/tmp/jazz-cache"), "x86_64-unknown-linux-gnu", false, true)
+        let plan = vendored_link_plan(Path::new("/tmp/jazz-cache"), "x86_64-unknown-linux-gnu", true, true)
             .expect("supported target should use vendored archives");
 
         assert_eq!(plan.libs, vec!["rocksdb"]);
         assert_eq!(plan.stdcpp, StdCppLib::StdCxx);
         assert_eq!(plan.artifact.archive_sha256.len(), 64);
+    }
+
+    #[test]
+    fn unsupported_feature_sets_do_not_reuse_vendored_archives() {
+        assert_eq!(
+            vendored_link_plan(
+                Path::new("/tmp/jazz-cache"),
+                "x86_64-unknown-linux-gnu",
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            vendored_link_plan(
+                Path::new("/tmp/jazz-cache"),
+                "x86_64-unknown-linux-gnu",
+                false,
+                true
+            ),
+            None
+        );
     }
 
     #[test]
@@ -133,11 +165,13 @@ mod tests {
             cache_dir_for_manifest_digest(
                 Path::new("/tmp/jazz-cache"),
                 "x86_64-unknown-linux-gnu",
-                "sha256:abcd1234"
+                "sha256:abcd1234",
+                "all-compression-codecs"
             ),
             Path::new("/tmp/jazz-cache")
                 .join("rocksdb")
                 .join("sha256-abcd1234")
+                .join("all-compression-codecs")
                 .join("x86_64-unknown-linux-gnu")
                 .join("lib")
         );
