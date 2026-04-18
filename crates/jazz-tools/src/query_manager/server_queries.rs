@@ -27,6 +27,11 @@ enum WriteSchemaResolution {
     Unresolved,
 }
 
+enum AuthorizedTuplesResult {
+    Ready(Vec<super::types::Tuple>),
+    PermissionsUnavailable,
+}
+
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
     pub batch_id: BatchId,
@@ -430,6 +435,67 @@ impl QueryManager {
         )
     }
 
+    fn authorized_tuples_from_graph_result(
+        &mut self,
+        storage: &dyn Storage,
+        graph: &super::graph::QueryGraph,
+        schema_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+    ) -> AuthorizedTuplesResult {
+        if self.authorization_schema_required && self.authorization_schema.is_none() {
+            return AuthorizedTuplesResult::PermissionsUnavailable;
+        }
+
+        let Some((auth_schema, auth_context)) =
+            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
+        else {
+            if !self.authorization_schema_required {
+                return AuthorizedTuplesResult::Ready(graph.current_output_tuples());
+            }
+            return AuthorizedTuplesResult::PermissionsUnavailable;
+        };
+
+        if !self.row_policy_mode.denies_missing_explicit_policy()
+            && auth_schema
+                .values()
+                .all(|table_schema| table_schema.policies.select.using.is_none())
+        {
+            return AuthorizedTuplesResult::Ready(graph.current_output_tuples());
+        }
+
+        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+
+        AuthorizedTuplesResult::Ready(
+            graph
+                .current_output_tuples()
+                .into_iter()
+                .filter_map(|tuple| {
+                    tuple
+                        .provenance()
+                        .iter()
+                        .copied()
+                        .all(|(object_id, branch_name)| {
+                            *authorization_cache
+                                .entry((object_id, branch_name))
+                                .or_insert_with(|| {
+                                    self.provenance_row_matches_current_select_policy(
+                                        storage,
+                                        object_id,
+                                        branch_name,
+                                        session,
+                                        &auth_schema,
+                                        &auth_context,
+                                        source_branch_schema_map,
+                                    )
+                                })
+                        })
+                        .then_some(tuple)
+                })
+                .collect(),
+        )
+    }
+
     pub(super) fn authorized_tuples_from_graph(
         &mut self,
         storage: &dyn Storage,
@@ -438,71 +504,41 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
     ) -> Vec<super::types::Tuple> {
-        let Some((auth_schema, auth_context)) =
-            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
-        else {
-            if !self.authorization_schema_required {
-                return graph.current_output_tuples();
-            }
-            return Vec::new();
-        };
-
-        if !self.row_policy_mode.denies_missing_explicit_policy()
-            && auth_schema
-                .values()
-                .all(|table_schema| table_schema.policies.select.using.is_none())
-        {
-            return graph.current_output_tuples();
+        match self.authorized_tuples_from_graph_result(
+            storage,
+            graph,
+            schema_context,
+            source_branch_schema_map,
+            session,
+        ) {
+            AuthorizedTuplesResult::Ready(tuples) => tuples,
+            AuthorizedTuplesResult::PermissionsUnavailable => Vec::new(),
         }
-
-        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
-
-        graph
-            .current_output_tuples()
-            .into_iter()
-            .filter_map(|tuple| {
-                tuple
-                    .provenance()
-                    .iter()
-                    .copied()
-                    .all(|(object_id, branch_name)| {
-                        *authorization_cache
-                            .entry((object_id, branch_name))
-                            .or_insert_with(|| {
-                                self.provenance_row_matches_current_select_policy(
-                                    storage,
-                                    object_id,
-                                    branch_name,
-                                    session,
-                                    &auth_schema,
-                                    &auth_context,
-                                    source_branch_schema_map,
-                                )
-                            })
-                    })
-                    .then_some(tuple)
-            })
-            .collect()
     }
 
-    fn authorized_scope_from_graph(
+    fn authorized_scope_from_graph_if_available(
         &mut self,
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
-    ) -> HashSet<(ObjectId, BranchName)> {
-        self.authorized_tuples_from_graph(
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        match self.authorized_tuples_from_graph_result(
             storage,
             graph,
             schema_context,
             source_branch_schema_map,
             session,
-        )
-        .into_iter()
-        .flat_map(|tuple| tuple.provenance().clone().into_iter())
-        .collect()
+        ) {
+            AuthorizedTuplesResult::Ready(tuples) => Some(
+                tuples
+                    .into_iter()
+                    .flat_map(|tuple| tuple.provenance().clone().into_iter())
+                    .collect(),
+            ),
+            AuthorizedTuplesResult::PermissionsUnavailable => None,
+        }
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -605,19 +641,13 @@ impl QueryManager {
             .unwrap_or(false)
     }
 
-    fn scope_with_policy_context_rows<H: Storage + ?Sized>(
+    fn scope_with_policy_context_rows_for_tables<H: Storage + ?Sized>(
         base_scope: &HashSet<(ObjectId, BranchName)>,
-        graph: &super::graph::QueryGraph,
+        policy_tables: &HashSet<TableName>,
         branches: &[String],
         storage: &H,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
-
-        let policy_tables: HashSet<TableName> = graph
-            .policy_filter_tables
-            .iter()
-            .map(|(_, table)| *table)
-            .collect();
         if policy_tables.is_empty() {
             return scope;
         }
@@ -650,6 +680,19 @@ impl QueryManager {
         }
 
         scope
+    }
+
+    fn merged_policy_context_tables(
+        graph: &super::graph::QueryGraph,
+        explicit_tables: &[String],
+    ) -> HashSet<TableName> {
+        let mut policy_tables: HashSet<TableName> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| *table)
+            .collect();
+        policy_tables.extend(explicit_tables.iter().map(TableName::new));
+        policy_tables
     }
 
     /// Process pending query subscriptions from downstream clients.
@@ -770,10 +813,24 @@ impl QueryManager {
 
             // Sync the rows needed for the client to reproduce the current result
             // locally, including any ordered prefix required by pagination.
-            let result_scope = if self.client_bypasses_authorization_filtering(sub.client_id) {
-                graph.sync_scope_object_ids()
+            let policy_context_tables =
+                Self::merged_policy_context_tables(&graph, &sub.policy_context_tables);
+            let scope = if self.client_bypasses_authorization_filtering(sub.client_id) {
+                let result_scope = graph.sync_scope_object_ids();
+                Some(
+                    if sync_policy_context_rows || !policy_context_tables.is_empty() {
+                        Self::scope_with_policy_context_rows_for_tables(
+                            &result_scope,
+                            &policy_context_tables,
+                            &branches,
+                            storage_ref,
+                        )
+                    } else {
+                        result_scope
+                    },
+                )
             } else {
-                self.authorized_scope_from_graph(
+                self.authorized_scope_from_graph_if_available(
                     storage_ref,
                     &graph,
                     &subscription_context,
@@ -781,20 +838,16 @@ impl QueryManager {
                     session_for_policy.as_ref(),
                 )
             };
-            // Trusted clients (Peer/Admin) also need policy context rows.
-            let scope = if sync_policy_context_rows {
-                Self::scope_with_policy_context_rows(&result_scope, &graph, &branches, storage_ref)
-            } else {
-                result_scope
-            };
-            // Set scope in SyncManager (triggers initial sync)
-            self.sync_manager.set_client_query_scope_with_storage(
-                storage_ref,
-                sub.client_id,
-                sub.query_id,
-                scope.clone(),
-                session_for_policy.clone(),
-            );
+            if let Some(scope) = scope.as_ref() {
+                // Set scope in SyncManager (triggers initial sync)
+                self.sync_manager.set_client_query_scope_with_storage(
+                    storage_ref,
+                    sub.client_id,
+                    sub.query_id,
+                    scope.clone(),
+                    session_for_policy.clone(),
+                );
+            }
 
             let settled_tier = self
                 .sync_manager
@@ -810,6 +863,7 @@ impl QueryManager {
                     sub.query.clone(),
                     session_for_policy.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 );
             }
 
@@ -822,7 +876,8 @@ impl QueryManager {
                     schema_context: subscription_context,
                     session: session_for_policy,
                     branches,
-                    last_scope: scope,
+                    policy_context_tables: sub.policy_context_tables,
+                    last_scope: scope.unwrap_or_default(),
                     needs_recompile: false,
                     settled_once: true,
                     propagation: sub.propagation,
@@ -943,29 +998,37 @@ impl QueryManager {
                 }
 
                 // Check if scope changed
-                let result_scope = if self.client_bypasses_authorization_filtering(client_id) {
-                    sub.graph.sync_scope_object_ids()
+                let policy_context_tables =
+                    Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
+                if self.client_bypasses_authorization_filtering(client_id) {
+                    let result_scope = sub.graph.sync_scope_object_ids();
+                    Some(
+                        if self.should_sync_policy_context_rows(client_id)
+                            || !policy_context_tables.is_empty()
+                        {
+                            Self::scope_with_policy_context_rows_for_tables(
+                                &result_scope,
+                                &policy_context_tables,
+                                branches,
+                                storage,
+                            )
+                        } else {
+                            result_scope
+                        },
+                    )
                 } else {
-                    self.authorized_scope_from_graph(
+                    self.authorized_scope_from_graph_if_available(
                         storage,
                         &sub.graph,
                         &sub.schema_context,
                         &branch_schema_map,
                         sub.session.as_ref(),
                     )
-                };
-                if self.should_sync_policy_context_rows(client_id) {
-                    Self::scope_with_policy_context_rows(
-                        &result_scope,
-                        &sub.graph,
-                        branches,
-                        storage,
-                    )
-                } else {
-                    result_scope
                 }
             };
-            if new_scope != sub.last_scope {
+            if let Some(new_scope) = new_scope
+                && new_scope != sub.last_scope
+            {
                 scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
                 sub.last_scope = new_scope;
             }
@@ -1490,12 +1553,14 @@ impl QueryManager {
     }
 
     /// Create policy graphs for complex clauses (INHERITS/EXISTS).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn create_policy_graphs_for_complex_clauses(
         &self,
         clauses: &[ComplexClause],
         content: &[u8],
         descriptor: &RowDescriptor,
         table: &TableName,
+        operation: Operation,
         session: &Session,
         branch: &str,
     ) -> Option<Vec<PolicyGraph>> {
@@ -1573,6 +1638,7 @@ impl QueryManager {
                         session,
                         &self.schema,
                         branch,
+                        operation,
                         self.row_policy_mode,
                     ) {
                         graphs.push(graph);
@@ -1588,6 +1654,7 @@ impl QueryManager {
                         Some(session.clone()),
                         self.row_policy_mode,
                         Some(table),
+                        false,
                     ) {
                         graphs.push(graph);
                     } else {

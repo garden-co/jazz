@@ -189,6 +189,9 @@ pub(crate) struct QuerySubscription {
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
     pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
+    /// Extra tables whose rows must be available locally to evaluate this
+    /// subscription's bundled policy context.
+    pub(crate) policy_context_tables: Vec<String>,
     /// Whether this subscription uses post-settle auth filtering instead of graph policies.
     pub(crate) uses_explicit_authorization_filtering: bool,
     /// Whether visible rows must stay aligned to the latest upstream query scope.
@@ -275,6 +278,9 @@ pub(super) struct ServerQuerySubscription {
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
     pub(super) branches: Vec<String>,
+    /// Extra tables whose rows must be synced so downstream clients can
+    /// reproduce bundled policy context locally.
+    pub(super) policy_context_tables: Vec<String>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -814,8 +820,11 @@ impl QueryManager {
                     compile_row_policy_mode,
                 ) {
                     Ok(new_graph) => {
+                        let policy_context_tables =
+                            Self::policy_context_tables_for_graph(&new_graph);
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.policy_context_tables = policy_context_tables;
                         sub.uses_explicit_authorization_filtering =
                             uses_explicit_authorization_filtering;
                         sub.needs_recompile = false;
@@ -1109,9 +1118,15 @@ impl QueryManager {
                 let branch_schema_map = &self.branch_schema_map;
                 let row_loader =
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                        let durability_tier = if subscription.settled_once
+                        let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
-                            && subscription.pending_local_row_ids.contains(&id)
+                            && !self
+                                .sync_manager
+                                .has_remote_query_scope_snapshot(QueryId(sub_id.0));
+                        let durability_tier = if lacks_authoritative_remote_scope
+                            || (subscription.settled_once
+                                && subscription.local_updates == LocalUpdates::Immediate
+                                && subscription.pending_local_row_ids.contains(&id))
                         {
                             None
                         } else {
@@ -1184,6 +1199,7 @@ impl QueryManager {
 
             if subscription.sync_backed
                 && subscription.query_frontier_complete
+                && subscription.settled_once
                 && self
                     .sync_manager
                     .has_remote_query_scope_snapshot(QueryId(sub_id.0))

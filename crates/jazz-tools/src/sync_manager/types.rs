@@ -288,6 +288,8 @@ pub enum SyncPayload {
         session: Option<Session>,
         #[serde(default)]
         propagation: QueryPropagation,
+        #[serde(default)]
+        policy_context_tables: Vec<String>,
     },
 
     /// Unsubscribe from a query (client to server).
@@ -558,6 +560,7 @@ pub struct PendingQuerySubscription {
     pub query: Query,
     pub session: Option<Session>,
     pub propagation: QueryPropagation,
+    pub policy_context_tables: Vec<String>,
 }
 
 /// A pending query unsubscription that needs cleanup.

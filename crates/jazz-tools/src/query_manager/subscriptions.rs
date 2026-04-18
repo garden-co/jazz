@@ -23,7 +23,26 @@ use super::types::{ComposedBranchName, Schema, SchemaHash};
 #[cfg(test)]
 use crate::object::ObjectId;
 
+type ReplayableQuerySubscription = (
+    QueryId,
+    Query,
+    Option<Session>,
+    QueryPropagation,
+    Vec<String>,
+);
+
 impl QueryManager {
+    pub(crate) fn policy_context_tables_for_graph(graph: &super::graph::QueryGraph) -> Vec<String> {
+        let mut tables: Vec<String> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| table.as_str().to_string())
+            .collect();
+        tables.sort();
+        tables.dedup();
+        tables
+    }
+
     fn should_send_local_subscription_upstream(&self, propagation: QueryPropagation) -> bool {
         propagation == QueryPropagation::Full || !self.sync_manager.has_durability_identity()
     }
@@ -123,6 +142,7 @@ impl QueryManager {
             compile_row_policy_mode,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -153,6 +173,7 @@ impl QueryManager {
                 query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering,
                 sync_backed: false,
                 propagation,
@@ -211,6 +232,7 @@ impl QueryManager {
             crate::query_manager::types::RowPolicyMode::PermissiveLocal,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -232,6 +254,7 @@ impl QueryManager {
                 query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering: false,
                 sync_backed: false,
                 propagation: QueryPropagation::Full,
@@ -333,11 +356,17 @@ impl QueryManager {
         // (e.g. worker OPFS), and will be prevented from forwarding upstream.
         if self.should_send_local_subscription_upstream(propagation) {
             let query_id = QueryId(sub_id.0);
+            let policy_context_tables = self
+                .subscriptions
+                .get(&sub_id)
+                .map(|subscription| subscription.policy_context_tables.clone())
+                .unwrap_or_default();
             self.sync_manager.send_query_subscription_to_servers(
                 query_id,
                 sync_query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
 
@@ -390,7 +419,7 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let local_subs: Vec<ReplayableQuerySubscription> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
@@ -399,11 +428,12 @@ impl QueryManager {
                     self.sync_query_payload_for_upstream(&sub.query),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in local_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in local_subs {
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
@@ -411,11 +441,12 @@ impl QueryManager {
                     query,
                     session,
                     propagation,
+                    policy_context_tables,
                 );
             }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let downstream_subs: Vec<ReplayableQuerySubscription> = self
             .server_subscriptions
             .iter()
             .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
@@ -425,17 +456,19 @@ impl QueryManager {
                     sub.query.clone(),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in downstream_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in downstream_subs {
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
                 query_id,
                 query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
     }

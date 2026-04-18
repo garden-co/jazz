@@ -7898,6 +7898,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
             query: Box::new(query),
             session: Some(session),
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8620,6 +8621,7 @@ fn server_builds_query_graph_on_subscription() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8683,6 +8685,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8769,6 +8772,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
             query: Box::new(invalid_query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8822,6 +8826,7 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
             query: Box::new(valid_query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     server_qm.process(&mut storage);
@@ -8921,6 +8926,7 @@ fn server_pushes_new_matches() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -9020,6 +9026,7 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
                 query: Box::new(query),
                 session: None,
                 propagation,
+                policy_context_tables: vec![],
             },
         });
     }
@@ -9083,6 +9090,7 @@ fn server_does_not_push_non_matching() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -9398,6 +9406,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -9448,6 +9457,7 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -9490,6 +9500,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -9544,6 +9555,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -9620,6 +9632,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -10577,6 +10590,613 @@ fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
 }
 
 #[test]
+fn sync_backed_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            policies: TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        },
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    client
+        .insert(
+            &mut client_io,
+            "documents",
+            &[
+                Value::Text("Alice's doc".into()),
+                Value::Text("alice".into()),
+            ],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::Local),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed session subscriptions should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![
+            Value::Text("Alice's doc".into()),
+            Value::Text("alice".into())
+        ]
+    );
+}
+
+#[test]
+fn sync_backed_exists_rel_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("user_team_edges"),
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("team_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the related-row grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed EXISTS policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn sync_backed_exists_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::query_manager::policy::{CmpOp, OUTER_ROW_SESSION_PREFIX, PolicyValue};
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "user_team_edges".into(),
+                condition: Box::new(PolicyExpr::And(vec![
+                    PolicyExpr::Cmp {
+                        column: "team_id".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "id".into(),
+                        ]),
+                    },
+                    PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                ])),
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the correlated EXISTS grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed EXISTS policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_server_scope_is_empty()
+{
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the joined EXISTS_REL grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed joined EXISTS_REL policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn fail_closed_server_does_not_emit_scope_snapshot_before_permissions_head() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let mut structural_server_schema = Schema::new();
+    structural_server_schema.insert(
+        TableName::new("teams"),
+        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+            "name",
+            ColumnType::Text,
+        )])),
+    );
+    structural_server_schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, structural_server_schema);
+    server.require_authorization_schema();
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    let edge_row = client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    client.clear_local_pending_row_overlay("teams", team_row.row_id);
+    client.clear_local_pending_row_overlay("user_team_edges", edge_row.row_id);
+    client.process(&mut client_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    assert!(
+        !client
+            .sync_manager()
+            .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
+        "server without a published permissions head should not advertise an authoritative remote scope yet"
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed immediate local updates should keep locally visible rows until an authoritative remote scope snapshot exists"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::DurabilityTier;
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let (mut qm, storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut qm, &storage, server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    qm.subscribe_with_sync(
+        qm.query("teams").build(),
+        Some(PolicySession::new("alice")),
+        Some(DurabilityTier::EdgeServer),
+    )
+    .unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .into_iter()
+        .find_map(|entry| match entry.payload {
+            SyncPayload::QuerySubscription {
+                policy_context_tables,
+                ..
+            } => Some(policy_context_tables),
+            _ => None,
+        })
+        .expect("subscription should be forwarded upstream");
+
+    assert!(
+        forwarded.iter().any(|table| table == "user_team_edges"),
+        "EXISTS_REL subscriptions should declare their policy-context tables upstream"
+    );
+}
+
+#[test]
 fn synced_subscription_filters_rows_removed_from_remote_scope() {
     use crate::query_manager::policy::Operation;
     use crate::sync_manager::{ClientId, ServerId};
@@ -10997,6 +11617,7 @@ fn push_query_subscription(
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 }

@@ -66,6 +66,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 let mut visited_inherits = HashSet::new();
                 self.evaluate_expr_with_context(
                     policy,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -186,6 +187,7 @@ impl<'a> PolicyContextEvaluator<'a> {
     fn evaluate_expr_with_context(
         &self,
         expr: &PolicyExpr,
+        operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
         table_name: &str,
@@ -235,14 +237,22 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited_referencing,
             ),
             PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_context(
-                table, condition, row, descriptor, io, row_loader, depth,
+                table, condition, operation, row, descriptor, io, row_loader, depth,
             ),
             PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
-                rel, row, descriptor, table_name, io, row_loader, depth,
+                rel,
+                operation == Operation::Select,
+                row,
+                descriptor,
+                table_name,
+                io,
+                row_loader,
+                depth,
             ),
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
                     e,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -256,6 +266,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             PolicyExpr::Or(exprs) => exprs.iter().any(|e| {
                 self.evaluate_expr_with_context(
                     e,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -268,6 +279,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             }),
             PolicyExpr::Not(inner) => !self.evaluate_expr_with_context(
                 inner,
+                operation,
                 row,
                 descriptor,
                 table_name,
@@ -367,6 +379,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         );
         self.evaluate_expr_with_context(
             parent_policy,
+            operation,
             &parent_row,
             &parent_schema.columns,
             parent_table_name.as_str(),
@@ -383,6 +396,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         &self,
         table: &str,
         condition: &PolicyExpr,
+        operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
@@ -406,6 +420,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.session,
             self.schema,
             self.branch,
+            operation,
             self.row_policy_mode,
         ) {
             Some(g) => g,
@@ -425,6 +440,7 @@ impl<'a> PolicyContextEvaluator<'a> {
     fn evaluate_exists_rel_with_context(
         &self,
         rel: &RelExpr,
+        structural_scans: bool,
         row: &Row,
         descriptor: &RowDescriptor,
         table_name: &str,
@@ -450,6 +466,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             Some(self.session.clone()),
             self.row_policy_mode,
             Some(&current_table),
+            structural_scans,
         ) {
             Some(g) => g,
             None => return false,

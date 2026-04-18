@@ -3295,6 +3295,7 @@ mod tests {
                         query: Box::new(query),
                         session: None,
                         propagation,
+                        policy_context_tables: vec![],
                     },
                 })
                 .unwrap();
