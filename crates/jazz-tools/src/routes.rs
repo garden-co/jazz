@@ -1936,6 +1936,7 @@ mod tests {
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
         let mut request_headers = HeaderMap::new();
         request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
@@ -1977,6 +1978,7 @@ mod tests {
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
         let mut request_headers = HeaderMap::new();
         request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
