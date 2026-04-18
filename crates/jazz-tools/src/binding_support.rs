@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
+use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -15,6 +17,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
@@ -192,20 +195,109 @@ pub fn parse_write_context_input(
 
 pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
     match tier {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
+            "Invalid tier '{}'. Must be 'local', 'edge', or 'global'.",
             tier
         )),
     }
+}
+
+pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
+    batch_id
+        .parse()
+        .map_err(|err: String| format!("Invalid BatchId: {err}"))
+}
+
+pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
+    match tier {
+        DurabilityTier::Local => "local",
+        DurabilityTier::EdgeServer => "edge",
+        DurabilityTier::GlobalServer => "global",
+    }
+}
+
+fn serialize_batch_mode(mode: BatchMode) -> &'static str {
+    match mode {
+        BatchMode::Direct => "direct",
+        BatchMode::Transactional => "transactional",
+    }
+}
+
+fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
+    json!({
+        "objectId": member.object_id.uuid().to_string(),
+        "branchName": member.branch_name.to_string(),
+        "batchId": member.batch_id.to_string(),
+    })
+}
+
+fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
+    match settlement {
+        BatchSettlement::Rejected {
+            batch_id,
+            code,
+            reason,
+        } => json!({
+            "kind": "rejected",
+            "batchId": batch_id.to_string(),
+            "code": code,
+            "reason": reason,
+        }),
+        BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "durableDirect",
+            "batchId": batch_id.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "acceptedTransaction",
+            "batchId": batch_id.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::Missing { batch_id } => json!({
+            "kind": "missing",
+            "batchId": batch_id.to_string(),
+        }),
+    }
+}
+
+pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
+    json!({
+        "batchId": record.batch_id.to_string(),
+        "mode": serialize_batch_mode(record.mode),
+        "requestedTier": serialize_durability_tier(record.requested_tier),
+        "sealed": record.sealed,
+        "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
+    })
+}
+
+pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
+    JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
     ReadDurabilityOptions {
         tier,
         local_updates: LocalUpdates::Immediate,
+        strict_transactions: false,
     }
 }
 
@@ -246,6 +338,7 @@ pub fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
+            strict_transactions: false,
         },
         propagation,
     ))
@@ -438,11 +531,11 @@ mod tests {
     #[test]
     fn read_durability_options_default_to_full_and_immediate() {
         let (durability, propagation) =
-            parse_read_durability_options(Some("worker"), None).expect("parse options");
+            parse_read_durability_options(Some("local"), None).expect("parse options");
 
         assert_eq!(
             durability.tier,
-            Some(crate::sync_manager::DurabilityTier::Worker)
+            Some(crate::sync_manager::DurabilityTier::Local)
         );
         assert_eq!(
             durability.local_updates,

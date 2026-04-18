@@ -107,10 +107,10 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
-    { tier: "worker" },
+    { tier: "local" },
   );
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "worker" });
-  await db.deleteDurable(app.todos, id, { tier: "worker" });
+  await db.updateDurable(app.todos, id, { done: true }, { tier: "local" });
+  await db.deleteDurable(app.todos, id, { tier: "local" });
 }
 // #endregion writing-durability-expo

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { JazzClient } from "./client.js";
+import { JazzClient, resolveDefaultDurabilityTier } from "./client.js";
 import type { AppContext } from "./context.js";
 
 function makeFakeRuntime() {
@@ -112,5 +112,49 @@ describe("JazzClient.updateAuthToken", () => {
       jwt_token: "new.jwt.token",
       backend_secret: "backend-abc",
     });
+  });
+});
+
+describe("JazzClient.updateCookieSession", () => {
+  it("refreshes transport auth without requiring a JS-readable JWT", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "cookie-app",
+      schema: {},
+      serverUrl: "https://example.test",
+      cookieSession: {
+        user_id: "alice",
+        claims: {
+          role: "reader",
+          auth_mode: "external",
+          subject: "alice-subject",
+          issuer: "https://issuer.example",
+        },
+      },
+    });
+
+    client.updateCookieSession({
+      user_id: "alice",
+      claims: {
+        role: "writer",
+        auth_mode: "external",
+        subject: "alice-subject",
+        issuer: "https://issuer.example",
+      },
+    });
+
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+  });
+});
+
+describe("resolveDefaultDurabilityTier", () => {
+  it("uses local as the default offline durability tier", () => {
+    expect(resolveDefaultDurabilityTier({})).toBe("local");
+  });
+
+  it("still prefers edge when a server is configured outside the browser runtime", () => {
+    expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
   });
 });

@@ -81,6 +81,12 @@ export interface AppContext {
   jwtToken?: string;
 
   /**
+   * Mirrored session used for local permission evaluation when auth rides on
+   * an HttpOnly cookie instead of a JS-readable bearer token.
+   */
+  cookieSession?: Session;
+
+  /**
    * Backend secret for session impersonation.
    * Enables `forSession()` to act as any user.
    */
@@ -97,10 +103,10 @@ export interface AppContext {
    * Set for server nodes to enable durability notifications.
    * Clients typically leave this undefined.
    */
-  tier?: "worker" | "edge" | "global" | Array<"worker" | "edge" | "global">;
+  tier?: "local" | "edge" | "global" | Array<"local" | "edge" | "global">;
 
   /**
    * Default durability tier for reads and writes when no explicit tier is provided.
    */
-  defaultDurabilityTier?: "worker" | "edge" | "global";
+  defaultDurabilityTier?: "local" | "edge" | "global";
 }

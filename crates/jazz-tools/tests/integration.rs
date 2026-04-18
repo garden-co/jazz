@@ -5,6 +5,7 @@
 //! These tests spawn the actual `jazz-tools` binary and interact via HTTP
 //! and WebSocket with binary length-prefixed frames.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -90,6 +91,7 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
 struct TestServer {
     process: Child,
     port: u16,
+    bound_port_file: PathBuf,
     #[allow(dead_code)]
     data_dir: TempDir,
     configured_data_dir: PathBuf,
@@ -100,6 +102,7 @@ impl TestServer {
     async fn start(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
         let configured_data_dir = data_dir.path().to_path_buf();
+        let bound_port_file = data_dir.path().join("bound-port");
 
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
@@ -115,6 +118,7 @@ impl TestServer {
                 "--data-dir",
                 configured_data_dir.to_str().unwrap(),
             ])
+            .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -128,6 +132,7 @@ impl TestServer {
         let mut server = Self {
             process,
             port,
+            bound_port_file,
             data_dir,
             configured_data_dir,
         };
@@ -142,6 +147,7 @@ impl TestServer {
     async fn start_in_memory(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
         let configured_data_dir = data_dir.path().join("should-not-exist");
+        let bound_port_file = data_dir.path().join("bound-port");
 
         let app_id = "00000000-0000-0000-0000-000000000001";
         let jazz_binary = Self::find_jazz_binary();
@@ -156,6 +162,7 @@ impl TestServer {
                 configured_data_dir.to_str().unwrap(),
                 "--in-memory",
             ])
+            .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -169,6 +176,7 @@ impl TestServer {
         let mut server = Self {
             process,
             port,
+            bound_port_file,
             data_dir,
             configured_data_dir,
         };
@@ -202,23 +210,64 @@ impl TestServer {
 
     async fn wait_ready(&mut self) {
         let client = Client::new();
-        let url = format!("{}/health", self.base_url());
 
         for i in 0..200 {
+            self.maybe_update_bound_port();
             if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
-                panic!("jazz-tools server exited before becoming ready: {status}");
+                panic!(
+                    "jazz-tools server exited before becoming ready: {status}{}",
+                    self.process_output_summary()
+                );
             }
-            match client.get(&url).send().await {
-                Ok(_) => return,
-                Err(e) => {
-                    if i == 199 {
-                        eprintln!("Last error: {:?}", e);
+            if self.port != 0 {
+                let url = format!("{}/health", self.base_url());
+                match client.get(&url).send().await {
+                    Ok(_) => return,
+                    Err(e) => {
+                        if i == 199 {
+                            eprintln!("Last error: {:?}", e);
+                        }
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("Server failed to become ready within 20 seconds");
+        panic!(
+            "Server failed to become ready within 20 seconds{}",
+            self.process_output_summary()
+        );
+    }
+
+    fn maybe_update_bound_port(&mut self) {
+        let Ok(contents) = std::fs::read_to_string(&self.bound_port_file) else {
+            return;
+        };
+        let Ok(port) = contents.trim().parse::<u16>() else {
+            return;
+        };
+        self.port = port;
+    }
+
+    fn process_output_summary(&mut self) -> String {
+        let stdout = take_pipe_text(&mut self.process.stdout);
+        let stderr = take_pipe_text(&mut self.process.stderr);
+        if stdout.is_empty() && stderr.is_empty() {
+            return String::new();
+        }
+
+        format!(
+            "\nstdout:\n{}\nstderr:\n{}",
+            if stdout.is_empty() {
+                "<empty>"
+            } else {
+                stdout.trim()
+            },
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                stderr.trim()
+            }
+        )
     }
 }
 
@@ -229,16 +278,19 @@ impl Drop for TestServer {
     }
 }
 
-/// Find an available port by binding to port 0.
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
-    listener.local_addr().unwrap().port()
+fn take_pipe_text<T: Read>(pipe: &mut Option<T>) -> String {
+    let Some(mut pipe) = pipe.take() else {
+        return String::new();
+    };
+
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[tokio::test]
 async fn test_server_health_check() {
-    let port = get_free_port();
-    let server = TestServer::start(port).await;
+    let server = TestServer::start(0).await;
 
     let client = Client::new();
     let resp = client
@@ -255,8 +307,7 @@ async fn test_server_health_check() {
 
 #[tokio::test]
 async fn test_server_health_check_in_memory_does_not_create_data_dir() {
-    let port = get_free_port();
-    let server = TestServer::start_in_memory(port).await;
+    let server = TestServer::start_in_memory(0).await;
 
     let client = Client::new();
     let resp = client
@@ -274,8 +325,7 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
 
 #[tokio::test]
 async fn test_ws_connection_receives_connected_response() {
-    let port = get_free_port();
-    let server = TestServer::start(port).await;
+    let server = TestServer::start(0).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
     let resp = tokio::time::timeout(Duration::from_secs(5), ws_handshake(server.port, &token))
@@ -296,8 +346,7 @@ async fn test_ws_connection_receives_connected_response() {
 
 #[tokio::test]
 async fn test_ws_connection_stays_open_after_handshake() {
-    let port = get_free_port();
-    let server = TestServer::start(port).await;
+    let server = TestServer::start(0).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
     let ws_url = format!("ws://127.0.0.1:{}/ws", server.port);
@@ -352,8 +401,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
 
 #[tokio::test]
 async fn test_ws_handshake_returns_valid_connection_id() {
-    let port = get_free_port();
-    let server = TestServer::start(port).await;
+    let server = TestServer::start(0).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
     let resp = tokio::time::timeout(Duration::from_secs(5), ws_handshake(server.port, &token))

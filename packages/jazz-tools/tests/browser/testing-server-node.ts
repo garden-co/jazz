@@ -71,8 +71,9 @@ export async function testingServerInfo(appId?: string): Promise<{
 export async function testingServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
+  appId?: string,
 ): Promise<string> {
-  const { server } = await getOrStartTestingServer();
+  const { server } = await getOrStartTestingServer(appId);
   return server.jwtForUser(userId, claims);
 }
 

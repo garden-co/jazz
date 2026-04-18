@@ -107,12 +107,12 @@ describe("TS Update API", () => {
       assigneesIds: [],
     });
 
-    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
+    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "local" });
     expect(pending).toBeInstanceOf(Promise);
 
     await pending;
 
-    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(updated!.done).toBe(true);
   });
 });

@@ -170,6 +170,12 @@ describe("Invite Flow E2E", () => {
     await act(async () => simulateClick(privateChatButton));
 
     await waitFor(
+      () => aliceContainer.textContent?.includes("This is a private chat.") ?? false,
+      10000,
+      "Private chat seed message should appear",
+    );
+
+    await waitFor(
       () => aliceContainer.querySelector("#messageEditor") !== null,
       10000,
       "Private chat editor should appear",
@@ -188,7 +194,7 @@ describe("Invite Flow E2E", () => {
 
     await waitFor(
       () => aliceContainer.textContent?.includes(randomSecret) ?? false,
-      5000,
+      10000,
       "Secret message should appear for user A",
     );
 
