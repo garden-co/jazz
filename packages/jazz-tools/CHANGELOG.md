@@ -1,5 +1,37 @@
 # jazz-tools
 
+## 2.0.0-alpha.31
+
+### Patch Changes
+
+- ea68566: Isolate browser-local Jazz persistence by default across users and app scopes.
+
+  `createDb()` now derives the default browser persistent namespace from both `appId` and the resolved authenticated principal when no explicit `dbName` is provided, preventing one user from reopening another user's OPFS-backed local cache. `BrowserAuthSecretStore` also now accepts scope hints like `appId`, `userId`, and `sessionId` so browser apps can avoid sharing one global local-first identity secret across unrelated sessions.
+
+- 44b90c0: Fix misleading schema-mismatch recovery guidance during client/server handshakes.
+
+  The transport handshake now sends the client's declared structural schema hash separately from the catalogue-state digest, so server-side connection diagnostics only suggest migrations for real schema hashes that the CLI can resolve.
+
+- 50e46c0: Add HttpOnly cookie auth support to `jazz-tools` with a mirrored browser
+  `cookieSession` for local permission evaluation. Servers can now accept JWT auth
+  from a configured auth cookie, and cookie-backed websocket handshakes are
+  restricted to same-origin requests.
+- fd98d6e: Add coordinated browser logout and storage wipe support so follower tabs can trigger an OPFS reset through the elected leader, stale fallback namespaces are removed, and `db.logout({ wipeData: true })` clears browser state before the next session starts.
+- 09e16b4: Support recursive gather seeds built from composed same-table relations, including hop-based and unioned permission closures.
+- 2e8e918: Cap oversized secondary index keys to a 5 KiB budget so large text values still use the truncate-and-hash encoding without producing OPFS index entries that can overflow B-tree page splits.
+- 05649ae: Add a new `deploy` CLI command to upload the current schema and permissions to the server. Replaces the existing `permissions push` command.
+- 80a0360: Add `updatedAt` overrides to `insert`, `update`, and `upsert` mutation options in `jazz-tools`.
+
+  The same override is available on the durable variants, so callers can stamp `$updatedAt` explicitly on a per-write basis without changing attribution or session scoping.
+
+- 11921e6: Use static `new URL(...)` import for worker when no explicit runtime sources are configured, allowing bundlers (Turbopack, webpack, Vite) to detect and co-bundle the worker script and its WASM dependency automatically.
+
+  Also passes a computed `fallbackWasmUrl` in the worker init message so non-bundled (static HTML) deployments still receive an explicit WASM path as a last resort if `wasmModule.default()` fails.
+
+- Updated dependencies [09e16b4]
+  - jazz-wasm@2.0.0-alpha.31
+  - jazz-rn@2.0.0-alpha.31
+
 ## 2.0.0-alpha.30
 
 ### Patch Changes
