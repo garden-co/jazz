@@ -776,7 +776,7 @@ impl SealedBatchSubmission {
 
 fn durability_tier_to_str(tier: DurabilityTier) -> &'static str {
     match tier {
-        DurabilityTier::Worker => "worker",
+        DurabilityTier::Local => "local",
         DurabilityTier::EdgeServer => "edge",
         DurabilityTier::GlobalServer => "global",
     }
@@ -784,7 +784,7 @@ fn durability_tier_to_str(tier: DurabilityTier) -> &'static str {
 
 fn durability_tier_from_str(raw: &str) -> Result<DurabilityTier, String> {
     match raw {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         other => Err(format!("unknown durability tier '{other}'")),
@@ -909,7 +909,7 @@ fn storage_descriptor() -> RowDescriptor {
             "requested_tier",
             ColumnType::Enum {
                 variants: vec![
-                    "worker".to_string(),
+                    "local".to_string(),
                     "edge".to_string(),
                     "global".to_string(),
                 ],
@@ -986,7 +986,7 @@ fn batch_settlement_storage_descriptor() -> RowDescriptor {
             "confirmed_tier",
             ColumnType::Enum {
                 variants: vec![
-                    "worker".to_string(),
+                    "local".to_string(),
                     "edge".to_string(),
                     "global".to_string(),
                 ],
@@ -1021,7 +1021,7 @@ mod tests {
             true,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Worker,
+                confirmed_tier: DurabilityTier::Local,
                 visible_members: vec![VisibleBatchMember {
                     object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(7)),
                     branch_name: BranchName::new("main"),
@@ -1060,7 +1060,7 @@ mod tests {
 
         record.apply_settlement(BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: Vec::new(),
         });
 
@@ -1082,11 +1082,11 @@ mod tests {
         let mut record = LocalBatchRecord::new(
             batch_id,
             BatchMode::Direct,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
             true,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Worker,
+                confirmed_tier: DurabilityTier::Local,
                 visible_members: vec![VisibleBatchMember {
                     object_id: first_row_id,
                     branch_name: BranchName::new("main"),
@@ -1097,7 +1097,7 @@ mod tests {
 
         record.apply_settlement(BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![VisibleBatchMember {
                 object_id: second_row_id,
                 branch_name: BranchName::new("main"),
@@ -1109,7 +1109,7 @@ mod tests {
             record.latest_settlement,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Worker,
+                confirmed_tier: DurabilityTier::Local,
                 visible_members: vec![
                     VisibleBatchMember {
                         object_id: first_row_id,

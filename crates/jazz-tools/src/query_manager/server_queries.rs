@@ -799,7 +799,7 @@ impl QueryManager {
             let settled_tier = self
                 .sync_manager
                 .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Worker);
+                .unwrap_or(DurabilityTier::Local);
             settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
@@ -938,7 +938,7 @@ impl QueryManager {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
-                        .unwrap_or(DurabilityTier::Worker);
+                        .unwrap_or(DurabilityTier::Local);
                     settled_notifications.push((client_id, query_id, settled_tier));
                 }
 

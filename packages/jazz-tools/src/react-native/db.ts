@@ -21,7 +21,7 @@ export class Db extends RuntimeDb {
     const key = JSON.stringify(schema);
 
     if (!this.nativeClients.has(key)) {
-      const tier = this.nativeConfig.tier ?? "worker";
+      const tier = this.nativeConfig.tier ?? "local";
       const runtime = createJazzRnRuntime({
         schema,
         appId: this.nativeConfig.appId,
@@ -43,7 +43,7 @@ export class Db extends RuntimeDb {
           jwtToken: this.nativeConfig.jwtToken,
           adminSecret: this.nativeConfig.adminSecret,
           tier,
-          defaultDurabilityTier: "worker",
+          defaultDurabilityTier: "local",
         },
         {
           onAuthFailure: (reason) => {

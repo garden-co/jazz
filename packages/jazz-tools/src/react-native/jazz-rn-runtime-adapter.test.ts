@@ -184,16 +184,16 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
 
     await expect(
-      adapter.insertDurableWithSession("todos", {}, writeContextJson, "worker"),
+      adapter.insertDurableWithSession("todos", {}, writeContextJson, "local"),
     ).resolves.toEqual({
       id: "row-1",
       values: [],
     });
     await expect(
-      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
+      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
     ).resolves.toBeUndefined();
     await expect(
-      adapter.deleteDurableWithSession("row-1", writeContextJson, "worker"),
+      adapter.deleteDurableWithSession("row-1", writeContextJson, "local"),
     ).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
   });
@@ -297,21 +297,21 @@ describe("JazzRnRuntimeAdapter", () => {
     });
   });
 
-  it("supports worker-tier persisted mutations and rejects global tiers", async () => {
+  it("supports local-tier persisted mutations and rejects global tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
+    await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
       id: "row-1",
       values: [],
     });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateDurable("row-1", {}, "local")).resolves.toBeUndefined();
+    await expect(adapter.deleteDurable("row-1", "local")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'worker' tier");
+    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {
