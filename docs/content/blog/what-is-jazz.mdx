@@ -16,6 +16,10 @@ I often say that Jazz is obviously good for apps that need offline support or ar
 very real-time in their nature, but that the truth is that almost every app now has a more general
 problem: at its core, it needs data to exist in more than one place at a time.
 
+Our bet is that this is now a database problem. The database has to step up and become a
+distributed source of truth for inherently collaborative data. The rest of this post is really
+an argument for why.
+
 Sync engines are the emerging solution to this, but simple data replication is not enough.
 Wherever you want access to data, you actually also care about permissions and consistency.
 And suddenly schema evolution matters in more places, too. This was usually all managed by a
@@ -33,20 +37,17 @@ that you're combining a bunch of tools. This would make sense if the boundaries 
 systems fell neatly between concerns that define your app, but they don't. Just tracing the
 journey of a single user edit reveals that complexity has skyrocketed from the simple client/server,
 request/response model: it travels through client state, server authorization, database queries,
-cache invalidation, sync fanout, and background jobs
-
-Our conclusion from this is that it's up to the database to step up and take on these new
-responsiblities, becoming a distributed source of truth for inherently collaborative data.
+cache invalidation, sync fanout, and background jobs.
 
 ## Might it be time for Jazz?
 
-If the above resonated, Jazz might already be just what the doctor ordered, but here are a couple
+If the above resonated, Jazz might already be the shape of system you're looking for, but here are a couple
 more symptoms that we've seen in adopters that made them realize they had outgrown request/response
 CRUD and traditional stacks. You, too might be ready for Jazz:
 
 - Are you fighting latency or hiding it with optimistic state everywhere?
 - Is your frontend cache increasingly behaving like a client database (but without database semantics)?
-- Does more than one user, device, or process regularly touche the same records?
+- Does more than one user, device, or process regularly touch the same records?
 - Are you inventing your own domain-specific sync logic?
 - Are you spending real energy on keeping different views of the same data coherent?
 
@@ -63,6 +64,11 @@ the following challenges:
 The short version: Jazz is a local-first relational database. We'll explain all the unique bits in the
 next sections, but let's first unpack the basics.
 
+That means local state is real durable data, not just a cache. It means Jazz keeps the semantics of a
+relational database: tables, relations, queries, mutations, and permissions. And it means that sync,
+auth, consistency, and collaboration are treated as database concerns rather than glue code between
+other systems.
+
 ## Fresh Idea 1: Local-First Data With Tunable Consistency
 
 ## Fresh Idea 2: Row-Level Security With Per-Query Auth
@@ -71,13 +77,13 @@ next sections, but let's first unpack the basics.
 
 ## Fresh Idea 4: Fluid Schema Evolution
 
-## A new cloud for a new database
-
-## Pricing as an enabler
-
 ## The Franken-stack Jazz replaces
 
 ## Why not the other hot new thing?
+
+## A new cloud for a new database
+
+## Pricing as an enabler
 
 ## Who Jazz is for right now
 
