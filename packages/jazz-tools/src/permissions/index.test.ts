@@ -1055,6 +1055,16 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("rejects qualified allowRead.where(...) columns outside relation seeds", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.teams.allowRead.where({
+          "user_team_edges.user_id": session.userId,
+        } as Record<string, unknown>),
+      ]),
+    ).toThrow(/qualified.*where|policy\.exists\(relation\)|gather/i);
+  });
+
   it("compiles policy.exists(relation) to ExistsRel in definePermissions", () => {
     const compiled = definePermissions(app, ({ policy, session }) => {
       const reachableTeams = policy.teams.gather({

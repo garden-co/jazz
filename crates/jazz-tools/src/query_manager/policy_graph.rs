@@ -238,18 +238,29 @@ impl PolicyGraph {
         schema: &Schema,
         branch: &str,
         session: Option<Session>,
-        row_policy_mode: RowPolicyMode,
+        _row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
+        // Relation-backed policy checks must inspect structural rows, not re-run
+        // SELECT policies on the scanned tables, or self-referential permission
+        // closures collapse to false.
+        let compile_schema: Schema = schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies = crate::query_manager::types::TablePolicies::default();
+                (*table_name, structural)
+            })
+            .collect();
         let branches = vec![branch.to_string()];
-        let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
+        let schema_context = SchemaContext::with_defaults(compile_schema.clone(), "main");
         let mut graph = QueryGraph::compile_relation_ir_with_schema_context_and_features(
             rel,
-            schema,
+            &compile_schema,
             &branches,
             session,
             &schema_context,
             RelationCompileFeatures::default(),
-            row_policy_mode,
+            RowPolicyMode::PermissiveLocal,
         )?;
         let output_descriptor = match graph
             .nodes
@@ -497,31 +508,74 @@ mod tests {
     }
 
     #[test]
+    fn test_for_exists_rel_ignores_select_policies_on_relation_tables() {
+        let schema = test_schema();
+        let session = Session::new("user1");
+        let rel = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("documents"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("owner_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("user1".to_string())),
+            },
+        };
+
+        let graph = PolicyGraph::for_exists_rel(
+            &rel,
+            &schema,
+            "main",
+            Some(session),
+            RowPolicyMode::Enforcing,
+        )
+        .expect("exists-rel graph");
+
+        assert!(
+            !graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::PolicyFilter(_))),
+            "exists-rel evaluation should inspect raw relation rows without injecting select-policy filters"
+        );
+    }
+
+    #[test]
     fn test_for_exists_rel_with_gather_post_join_compiles() {
         let mut schema = Schema::new();
         schema.insert(
             TableName::new("teams"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("_id", ColumnType::Uuid),
-                ColumnDescriptor::new("name", ColumnType::Text),
-            ])),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("_id", ColumnType::Uuid),
+                    ColumnDescriptor::new("name", ColumnType::Text),
+                ]),
+                TablePolicies::new().with_select(PolicyExpr::True),
+            ),
         );
         schema.insert(
             TableName::new("team_edges"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("_id", ColumnType::Uuid),
-                ColumnDescriptor::new("child_team", ColumnType::Uuid),
-                ColumnDescriptor::new("parent_team", ColumnType::Uuid),
-            ])),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("_id", ColumnType::Uuid),
+                    ColumnDescriptor::new("child_team", ColumnType::Uuid),
+                    ColumnDescriptor::new("parent_team", ColumnType::Uuid),
+                ]),
+                TablePolicies::new().with_select(PolicyExpr::True),
+            ),
         );
         schema.insert(
             TableName::new("resource_access_edges"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("_id", ColumnType::Uuid),
-                ColumnDescriptor::new("team", ColumnType::Uuid),
-                ColumnDescriptor::new("resource", ColumnType::Text),
-                ColumnDescriptor::new("grant_role", ColumnType::Text),
-            ])),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("_id", ColumnType::Uuid),
+                    ColumnDescriptor::new("team", ColumnType::Uuid),
+                    ColumnDescriptor::new("resource", ColumnType::Text),
+                    ColumnDescriptor::new("grant_role", ColumnType::Text),
+                ]),
+                TablePolicies::new().with_select(PolicyExpr::True),
+            ),
         );
 
         let rel = RelExpr::Project {
@@ -596,8 +650,8 @@ mod tests {
             &rel,
             &schema,
             "main",
-            None,
-            RowPolicyMode::PermissiveLocal,
+            Some(Session::new("user1")),
+            RowPolicyMode::Enforcing,
         );
         assert!(
             graph.is_some(),
@@ -618,6 +672,14 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|ctx| matches!(ctx.node, GraphNode::Join(_)))
+        );
+        assert!(
+            !graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::PolicyFilter(_))),
+            "recursive exists-rel graphs should not inject select-policy filters for relation tables"
         );
     }
 }
