@@ -1263,7 +1263,8 @@ fn load_previous_visible_entry<H: Storage>(
     branch_name: &SharedString,
 ) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
     match io.load_visible_region_entry(table, branch_name.as_str(), object_id) {
-        Ok(entry) => Ok(entry),
+        Ok(Some(entry)) => Ok(Some(entry)),
+        Ok(None) => rebuild_visible_entry_from_history(io, table, object_id, branch_name),
         Err(_) => rebuild_visible_entry_from_history(io, table, object_id, branch_name),
     }
 }

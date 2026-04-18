@@ -173,9 +173,18 @@ impl SyncManager {
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
         let visibility_change =
-            apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[])
-                .ok()
-                .and_then(|applied| applied.visibility_change);
+            match apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[]) {
+                Ok(applied) => applied.visibility_change,
+                Err(err) => {
+                    tracing::warn!(
+                        row_id = %row.row_id,
+                        %branch_name,
+                        ?err,
+                        "failed to apply synced row batch"
+                    );
+                    return None;
+                }
+            };
 
         Some(AppliedRowBatch {
             metadata,
@@ -279,6 +288,13 @@ impl SyncManager {
             .or_else(|| {
                 let confirmed_tier = confirmed_tier?;
                 let record = storage.load_local_batch_record(batch_id).ok().flatten()?;
+                if !record
+                    .members
+                    .iter()
+                    .any(|member| member.object_id == row_id && member.branch_name == branch_name)
+                {
+                    return None;
+                }
                 let visible_members = record
                     .members
                     .iter()
@@ -1343,6 +1359,33 @@ impl SyncManager {
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
                     ) {
+                        let persisted_direct_settlement = self
+                            .my_tiers
+                            .iter()
+                            .copied()
+                            .max()
+                            .and_then(|confirmed_tier| {
+                                let settlement = BatchSettlement::DurableDirect {
+                                    batch_id,
+                                    confirmed_tier,
+                                    visible_members: vec![VisibleBatchMember {
+                                        object_id,
+                                        branch_name,
+                                        batch_id,
+                                    }],
+                                };
+                                self.persist_authoritative_batch_settlement(storage, &settlement)
+                                    .ok()
+                                    .map(|_| settlement)
+                            });
+                        if let Some(settlement) = persisted_direct_settlement {
+                            self.pending_batch_settlements.push(settlement.clone());
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::BatchSettlement { settlement },
+                            });
+                        }
+
                         for tier in self.my_tiers.iter().copied() {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),

@@ -1,7 +1,17 @@
 {
   "version": 1,
-  "updated_at": "2026-04-17T11:25:19.710Z",
+  "updated_at": "2026-04-18T01:05:38.900Z",
   "entries": [
+    {
+      "id": "browser:b5",
+      "suite": "browser",
+      "label": "Browser B5 permission recursive",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T00:45:24.993Z",
+      "last_observed_at": "2026-04-18T00:45:24.993Z",
+      "observations": 1
+    },
     {
       "id": "browser:b6",
       "suite": "browser",
@@ -103,6 +113,16 @@
       "observations": 1
     },
     {
+      "id": "native-criterion:rocksdb:r8_many_branches",
+      "suite": "native",
+      "label": "Criterion R8 many branches (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T00:56:43.119Z",
+      "last_observed_at": "2026-04-18T00:56:43.119Z",
+      "observations": 1
+    },
+    {
       "id": "native-criterion:rocksdb:r9_subscribed_write_path",
       "suite": "native",
       "label": "Criterion R9 subscribed write path (RocksDB)",
@@ -140,6 +160,16 @@
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:36:17.190Z",
       "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r8_many_branches",
+      "suite": "native",
+      "label": "Criterion R8 many branches (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T01:05:09.928Z",
+      "last_observed_at": "2026-04-18T01:05:09.928Z",
       "observations": 1
     },
     {

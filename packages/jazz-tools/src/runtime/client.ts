@@ -160,7 +160,7 @@ export interface AuthConfig {
   jwt_token?: string;
   /** Backend service secret for server-to-server calls. */
   backend_secret?: string;
-  /** Admin secret for privileged operations. */
+  /** Admin secret for privileged sync and `/admin/*` catalogue operations. */
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
@@ -2219,14 +2219,15 @@ export class JazzClient {
    * passing it to the underlying Rust runtime's `connect()`.  Already-WS URLs
    * are passed through unchanged.
    *
-   * @param url  Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
-   * @param auth Authentication credentials for the connection.
+   * @param url        Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
+   * @param auth       Authentication credentials for the connection.
+   * @param pathPrefix Optional path prefix inserted before `/ws` (e.g. `/apps/<id>`).
    */
-  connectTransport(url: string, auth: AuthConfig): void {
+  connectTransport(url: string, auth: AuthConfig, pathPrefix?: string): void {
     if (!this.runtime.connect) {
       throw new Error("Underlying runtime does not support connect()");
     }
-    this.runtime.connect(httpUrlToWs(url), JSON.stringify(auth));
+    this.runtime.connect(httpUrlToWs(url, pathPrefix), JSON.stringify(auth));
   }
 
   /**

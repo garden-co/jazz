@@ -112,6 +112,36 @@ impl Scheduler for CountingScheduler {
 }
 
 impl Storage for RowRegionReadFailingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         if self.fail_row_locator_scans {
             return Err(StorageError::IoError(
@@ -485,6 +515,36 @@ impl Storage for RowRegionReadFailingStorage {
 }
 
 impl Storage for LegacyPersistenceObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -848,6 +908,38 @@ impl Storage for LegacyPersistenceObservingStorage {
 }
 
 impl Storage for RowMutationObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -1406,6 +1498,238 @@ fn create_test_runtime() -> TestCore {
     create_runtime_with_schema(test_schema(), "test-app")
 }
 
+// ---------------------------------------------------------------------------
+// install_transport tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "transport-websocket")]
+mod install_transport_tests {
+    use super::*;
+    use crate::transport_manager::{AuthConfig, StreamAdapter, TickNotifier};
+
+    struct NopTick;
+    impl TickNotifier for NopTick {
+        fn notify(&self) {}
+    }
+
+    struct NopStreamAdapter;
+    impl StreamAdapter for NopStreamAdapter {
+        type Error = &'static str;
+        async fn connect(_url: &str) -> Result<Self, Self::Error> {
+            futures::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+        async fn close(&mut self) {}
+    }
+
+    #[test]
+    #[should_panic(expected = "install_transport called while a transport is already installed")]
+    fn install_transport_panics_if_transport_already_installed() {
+        let mut core = create_test_runtime();
+        // Install once.
+        let _first = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        // Install a second time — must panic via debug_assert.
+        let _second = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+    }
+
+    #[test]
+    fn install_transport_seeds_catalogue_hash_and_declared_schema_hash() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        assert!(
+            core.transport.is_some(),
+            "transport handle should be installed"
+        );
+        let expected_hash = core.schema_manager().catalogue_state_hash();
+        let handle_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .catalogue_state_hash_for_test();
+        let expected_schema_hash = core.schema_manager().current_hash().to_string();
+        let handle_schema_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .declared_schema_hash_for_test();
+        assert_eq!(
+            handle_hash.as_deref(),
+            Some(expected_hash.as_str()),
+            "install_transport must seed the handle's catalogue_state_hash",
+        );
+        assert_eq!(
+            handle_schema_hash.as_deref(),
+            Some(expected_schema_hash.as_str()),
+            "install_transport must seed the handle's declared_schema_hash",
+        );
+    }
+
+    #[test]
+    fn install_transport_holds_initial_remote_query_frontier_while_connecting() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query should stay pending until the transport finishes connecting"
+        );
+    }
+
+    /// Guards the fix for CI expo-e2e failing when the WS transport never
+    /// completes: after the pending-server timeout elapses and any subsequent
+    /// tick runs, a held initial subscription must actually deliver against
+    /// local state — not just flip an internal flag.
+    #[test]
+    fn pending_server_frontier_releases_after_timeout() {
+        use crate::sync_manager::PENDING_SERVER_TIMEOUT;
+
+        let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
+        );
+
+        std::thread::sleep(PENDING_SERVER_TIMEOUT + std::time::Duration::from_millis(100));
+
+        // The timeout is a passive check; something must drive a settle after
+        // the deadline. In production any ambient activity does this; here we
+        // trigger an explicit tick.
+        core.immediate_tick();
+
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after timeout release, got {other:?}"),
+        }
+    }
+
+    /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
+    /// before the timeout), draining the event must release the held initial
+    /// subscription *and* deliver its first batch against local state. Flipping
+    /// the pending-server flag is not enough on its own — release also has to
+    /// re-run `process()` so `settle()` observes the state change.
+    #[test]
+    fn connect_failed_event_releases_and_delivers_held_subscription() {
+        let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let server_id = core.transport.as_ref().unwrap().server_id;
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
+        );
+
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::ConnectFailed {
+                reason: "dns lookup failed".into(),
+            },
+        );
+
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after ConnectFailed release, got {other:?}"),
+        }
+    }
+}
 fn documents_query_by_title(title: &str) -> Query {
     QueryBuilder::new("documents")
         .filter_eq("title", Value::Text(title.into()))
@@ -6709,6 +7033,33 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     assert!(
         permissions_msg.is_none(),
         "persist_schema should not implicitly publish permissions catalogue objects"
+    );
+}
+
+#[test]
+fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+
+    core.batched_tick();
+
+    let outbox = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    assert!(
+        outbox
+            .iter()
+            .any(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id)),
+        "batched_tick without a transport should leave server-bound outbox entries intact"
     );
 }
 

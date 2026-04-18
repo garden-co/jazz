@@ -267,14 +267,13 @@ export async function createSyncedDb(
   testingServer?: TestingServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl, adminSecret } = testingServer ?? (await getTestingServerInfo());
+  const { appId, serverUrl } = testingServer ?? (await getTestingServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
       auth: { localFirstSecret },
-      adminSecret,
     }),
   );
 }

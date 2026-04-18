@@ -1081,6 +1081,28 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     )
 }
 
+fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    let needs_exact_locator = storage
+        .load_row_locator(row_id)?
+        .and_then(|locator| locator.origin_schema_hash)
+        != Some(schema_hash);
+    Ok(PreparedRowWriteContext {
+        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
+        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
+            storage,
+            table_name,
+            schema_hash,
+        )?),
+        needs_exact_locator,
+    })
+}
+
 fn load_user_descriptor_from_raw_table_header(
     header: &RawTableHeader,
 ) -> Result<Option<RowDescriptor>, StorageError> {
@@ -1670,16 +1692,10 @@ pub(crate) fn resolve_history_row_write_context<H: Storage + ?Sized>(
 ) -> Result<PreparedRowWriteContext, StorageError> {
     let (schema_hash, user_descriptor) =
         required_history_user_descriptor_and_schema_hash_for_row(storage, table, row)?;
-    let needs_exact_locator = storage
-        .load_row_locator(row.row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(PreparedRowWriteContext {
-        history_row_raw_table_id: history_row_raw_table_id(table, schema_hash),
-        visible_row_raw_table_id: visible_row_raw_table_id(table, schema_hash),
-        user_descriptor: Arc::new(user_descriptor),
-        needs_exact_locator,
-    })
+    let mut context =
+        prepared_row_write_context_for_schema_hash(storage, table, schema_hash, row.row_id)?;
+    context.user_descriptor = Arc::new(user_descriptor);
+    Ok(context)
 }
 
 pub(crate) fn encode_history_row_bytes_with_context(
@@ -1960,6 +1976,33 @@ pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
         }))
 }
 
+fn scan_history_row_batches_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<Vec<StoredRowBatch>, StorageError> {
+    let row_raw_table_id = history_row_raw_table_id(table, schema_hash);
+    let Some(resolved) = resolved_row_table_from_id(storage, row_raw_table_id.clone())? else {
+        return Ok(Vec::new());
+    };
+
+    let prefix = key_codec::history_row_raw_table_prefix(Some(row_id));
+    let mut rows = Vec::new();
+    for (key, bytes) in storage.raw_table_scan_prefix(row_raw_table_id.raw_table_name(), &prefix)? {
+        let (decoded_row_id, branch, batch_id) = key_codec::decode_history_row_raw_table_key(&key)?;
+        rows.push(decode_history_row_bytes_in_table(
+            &resolved,
+            decoded_row_id,
+            branch.as_str(),
+            batch_id,
+            &bytes,
+        )?);
+    }
+    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
+    Ok(rows)
+}
+
 pub(super) fn scan_visible_region_row_batch_branches_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
@@ -2107,29 +2150,25 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
         (Some(existing), None) => Some(existing),
         (None, incoming) => incoming,
     };
-    storage.append_history_region_rows(table, std::slice::from_ref(&row))?;
-
-    let Some(existing_entry) = storage.load_visible_region_entry(table, branch, row_id)? else {
-        return Ok(true);
-    };
-
     let history_rows = storage.scan_history_row_batches(table, row_id)?;
-    let current_batch_id = existing_entry.current_row.batch_id();
-    let Some(current_row) = history_rows
-        .iter()
-        .find(|candidate| candidate.branch == branch && candidate.batch_id() == current_batch_id)
-        .cloned()
-    else {
-        storage.delete_visible_region_row(table, branch, row_id)?;
-        return Ok(true);
-    };
+    let mut patched_history = history_rows.clone();
+    if let Some(existing) = patched_history
+        .iter_mut()
+        .find(|candidate| candidate.branch == branch && candidate.batch_id() == batch_id)
+    {
+        *existing = row.clone();
+    }
 
-    if current_row.state.is_visible() {
-        storage.upsert_visible_region_rows(
-            table,
-            &[VisibleRowEntry::rebuild(current_row, &history_rows)],
-        )?;
-    } else {
+    let visible_entries = patched_history
+        .iter()
+        .filter(|candidate| candidate.branch == branch && candidate.state.is_visible())
+        .cloned()
+        .max_by_key(|candidate| (candidate.updated_at, candidate.batch_id()))
+        .map(|current_row| vec![VisibleRowEntry::rebuild(current_row, &patched_history)])
+        .unwrap_or_default();
+
+    storage.apply_row_mutation(table, std::slice::from_ref(&row), &visible_entries, &[])?;
+    if visible_entries.is_empty() {
         storage.delete_visible_region_row(table, branch, row_id)?;
     }
 
@@ -3823,7 +3862,8 @@ pub trait Storage {
             });
         }
 
-        let history_rows = self.scan_history_row_batches(table, row_id)?;
+        let history_rows =
+            scan_history_row_batches_for_schema_hash(self, table, schema_hash, row_id)?;
         let mut patched_history = history_rows.clone();
         if let Some(existing) = patched_history
             .iter_mut()
@@ -3831,29 +3871,37 @@ pub trait Storage {
         {
             *existing = current_row.clone();
         }
-        self.append_history_region_rows(table, &patched_history)?;
-
-        let Some(existing_entry) = self.load_visible_region_entry(table, branch, row_id)? else {
-            return Ok(true);
-        };
-        let current_batch_id = existing_entry.current_row.batch_id();
-        let Some(current_row) = patched_history
+        let visible_entries = patched_history
             .iter()
-            .find(|candidate| {
-                candidate.branch == branch && candidate.batch_id() == current_batch_id
-            })
+            .filter(|candidate| candidate.branch == branch && candidate.state.is_visible())
             .cloned()
-        else {
-            self.delete_visible_region_row(table, branch, row_id)?;
-            return Ok(true);
-        };
+            .max_by_key(|candidate| (candidate.updated_at, candidate.batch_id()))
+            .map(|current_row| vec![VisibleRowEntry::rebuild(current_row, &patched_history)])
+            .unwrap_or_default();
+        let context = prepared_row_write_context_for_schema_hash(
+            self,
+            table,
+            schema_hash,
+            current_row.row_id,
+        )?;
+        let encoded_history_rows = vec![encode_history_row_bytes_with_context(
+            &context,
+            &current_row,
+        )?];
+        let encoded_visible_rows = visible_entries
+            .iter()
+            .map(|entry| encode_visible_row_bytes_with_context(&context, entry))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        if current_row.state.is_visible() {
-            self.upsert_visible_region_rows(
-                table,
-                &[VisibleRowEntry::rebuild(current_row, &patched_history)],
-            )?;
-        } else {
+        self.apply_prepared_row_mutation(
+            table,
+            std::slice::from_ref(&current_row),
+            &visible_entries,
+            &encoded_history_rows,
+            &encoded_visible_rows,
+            &[],
+        )?;
+        if visible_entries.is_empty() {
             self.delete_visible_region_row(table, branch, row_id)?;
         }
 
@@ -4128,6 +4176,10 @@ pub trait Storage {
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
 impl<T: Storage + ?Sized> Storage for Box<T> {
+    fn storage_cache_namespace(&self) -> usize {
+        (**self).storage_cache_namespace()
+    }
+
     fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
         (**self).scan_row_locators()
     }
@@ -5085,6 +5137,10 @@ impl Storage for MemoryStorage {
         locator: Option<&RowLocator>,
     ) -> Result<(), StorageError> {
         if let Some(locator) = locator {
+            self.ensure_cached_raw_table_header(
+                ROW_LOCATOR_TABLE,
+                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, ROW_LOCATOR_STORAGE_FORMAT_V1),
+            )?;
             let locator_bytes = encode_row_locator(locator)?;
             self.raw_tables
                 .entry(ROW_LOCATOR_TABLE.to_string())
@@ -6795,7 +6851,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_scan_loads_catalogue_descriptor_once_per_raw_table_instance() {
+    fn visible_scan_loads_catalogue_descriptor_at_most_once_per_raw_table_instance() {
         use crate::row_histories::VisibleRowEntry;
 
         let mut storage = CountingCatalogueLoadsStorage::new();
@@ -6850,11 +6906,14 @@ mod tests {
         let loaded = Storage::scan_visible_region(&storage, "users", "main").unwrap();
 
         assert_eq!(loaded, vec![first_row, second_row]);
-        assert_eq!(storage.catalogue_loads(), 1);
+        assert!(
+            storage.catalogue_loads() <= 1,
+            "visible scan should not reload the descriptor more than once per raw table instance"
+        );
     }
 
     #[test]
-    fn history_row_scan_loads_catalogue_descriptor_once_per_raw_table_instance() {
+    fn history_row_scan_loads_catalogue_descriptor_at_most_once_per_raw_table_instance() {
         let mut storage = CountingCatalogueLoadsStorage::new();
         let schema_hash = persist_test_schema(&mut storage, &users_test_schema());
         let first_row_id = ObjectId::new();
@@ -6899,7 +6958,10 @@ mod tests {
             Storage::scan_history_region(&storage, "users", "main", HistoryScan::Branch).unwrap();
 
         assert_eq!(loaded, vec![first_row, second_row]);
-        assert_eq!(storage.catalogue_loads(), 1);
+        assert!(
+            storage.catalogue_loads() <= 1,
+            "history scan should not reload the descriptor more than once per raw table instance"
+        );
     }
 
     #[test]

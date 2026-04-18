@@ -35,6 +35,16 @@ function simulateClick(el: HTMLElement) {
   el.click();
 }
 
+function findPlusButton(container: HTMLElement): HTMLButtonElement | null {
+  return (
+    container.querySelector<HTMLButtonElement>("button:has(.lucide-plus)") ??
+    ([...container.querySelectorAll("button")].find((button) =>
+      button.querySelector(".lucide-plus"),
+    ) as HTMLButtonElement | undefined) ??
+    null
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -109,9 +119,16 @@ describe("Canvas E2E", () => {
     );
 
     // Open action menu and create a canvas
-    const plusButton =
-      el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    await waitFor(
+      () => {
+        const button = findPlusButton(el);
+        return button !== null && !button.disabled;
+      },
+      10000,
+      "Canvas action button should be enabled",
+    );
+
+    const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
     await act(async () => simulateClick(plusButton as HTMLElement));
 
@@ -205,13 +222,20 @@ describe("Canvas E2E", () => {
       "User A editor should be visible",
     );
 
+    await waitFor(
+      () => {
+        const button = findPlusButton(aliceContainer);
+        return button !== null && !button.disabled;
+      },
+      10000,
+      "Canvas action button should be enabled for user A",
+    );
+
     // Capture the chat URL for user B
     const chatHash = window.location.hash;
 
     // Create a canvas
-    const alicePlusButton =
-      aliceContainer.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...aliceContainer.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
+    const alicePlusButton = findPlusButton(aliceContainer);
     await act(async () => simulateClick(alicePlusButton as HTMLElement));
 
     await waitFor(

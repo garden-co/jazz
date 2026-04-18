@@ -405,7 +405,7 @@ impl TestingServer {
             storage: crate::ClientStorage::Memory,
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret.clone()),
-            admin_secret: Some(self.admin_secret.clone()),
+            admin_secret: None,
             sync_tracer: None,
         }
     }
@@ -515,6 +515,7 @@ mod tests {
         assert!(server.built_in_jwt_helpers_available());
         assert!(!server.uses_external_jwks());
         assert!(context.jwt_token.is_some());
+        assert!(context.admin_secret.is_none());
 
         server.shutdown().await;
     }
