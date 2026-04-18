@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
-import { publishStoredSchema } from "./schema-fetch.js";
-import { startLocalJazzServer } from "../testing/local-jazz-server.js";
 
 const reproApp = s.defineApp({
   teams: s.table({
@@ -38,11 +39,11 @@ type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1]
 
 type ReproEnv = {
   context: JazzContext;
-  server: { stop(): Promise<void>; url: string };
+  dataRoot: string;
 };
 
 function seedScenario(context: JazzContext): void {
-  const db = context.asBackend(reproApp);
+  const db = context.db(reproApp);
 
   const aliceTeam = db.insert(reproApp.teams, {
     name: "Alice",
@@ -85,32 +86,20 @@ async function runCase(
   defineCasePermissions: ReproPermissions,
 ): Promise<string[]> {
   const appId = randomUUID();
-  const backendSecret = "repro-backend-secret";
-  const adminSecret = "repro-admin-secret";
-  const server = await startLocalJazzServer({
-    appId,
-    backendSecret,
-    adminSecret,
-  });
-
-  await publishStoredSchema(server.url, {
-    adminSecret,
-    schema: reproApp.wasmSchema,
-  });
+  const dataRoot = await mkdtemp(join(tmpdir(), "jazz-permissions-repro-"));
+  const dataPath = join(dataRoot, "runtime.db");
 
   const permissions = definePermissions(reproApp, defineCasePermissions);
   const context = createJazzContext({
     appId,
     app: reproApp,
     permissions,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    backendSecret,
+    driver: { type: "persistent", dataPath },
     env: "test",
     userBranch: "main",
     tier: "edge",
   });
-  const env: ReproEnv = { context, server };
+  const env: ReproEnv = { context, dataRoot };
 
   try {
     seedScenario(context);
@@ -129,7 +118,7 @@ async function runCase(
   } finally {
     await env.context.shutdown();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await env.server.stop();
+    await rm(env.dataRoot, { recursive: true, force: true });
   }
 }
 
