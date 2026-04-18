@@ -1,6 +1,6 @@
 import { use } from "react";
 import { BrowserAuthSecretStore } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
 function TodoApp() {
   return null;
@@ -8,13 +8,14 @@ function TodoApp() {
 
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" }));
+  const auth = useLocalFirstAuth();
+  const secret = use(auth.getOrCreateSecret());
 
   return (
     <JazzProvider
       config={{
         appId: "my-app",
-        auth: { localFirstSecret: secret },
+        secret,
       }}
     >
       <TodoApp />
