@@ -48,7 +48,6 @@ import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.j
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
-  resolveRuntimeConfigWasmUrl,
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";

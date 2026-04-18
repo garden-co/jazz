@@ -258,7 +258,7 @@ describe("typed app prototype", () => {
 
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error invalid root key
-      app.unknown;
+      void app.unknown;
 
       // @ts-expect-error invalid where column
       app.todos.where({ missing: true });
