@@ -1900,6 +1900,146 @@ describe("translateQuery", () => {
     });
   });
 
+  it("lowers gather metadata seeded from a hop relation", () => {
+    const schema: WasmSchema = {
+      teams: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+      },
+      team_edges: {
+        columns: [
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      gather: {
+        seed: {
+          table: "team_edges",
+          conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
+          hops: ["parent_team"],
+        },
+        max_depth: 3,
+        step_table: "team_edges",
+        step_current_column: "child_team",
+        step_conditions: [],
+        step_hops: ["parent_team"],
+      },
+    });
+
+    const ir = toLegacyRelExprForTest(translateBuilderToRelationIr(builderJson, schema));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Project");
+    if (ir.seed.type !== "Project") {
+      throw new Error("Expected projected seed relation IR.");
+    }
+    expect(ir.seed.input.type).toBe("Join");
+    if (ir.seed.input.type !== "Join") {
+      throw new Error("Expected joined seed relation IR.");
+    }
+    expect(ir.seed.input.left.type).toBe("Filter");
+    if (ir.seed.input.left.type !== "Filter") {
+      throw new Error("Expected filtered seed relation IR.");
+    }
+  });
+
+  it("lowers gather metadata seeded from a union relation", () => {
+    const schema: WasmSchema = {
+      teams: {
+        columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+      },
+      team_edges: {
+        columns: [
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
+      },
+    };
+
+    const builderJson = JSON.stringify({
+      table: "team_edges",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      gather: {
+        seed: {
+          union: {
+            inputs: [
+              {
+                table: "team_edges",
+                conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
+                hops: ["parent_team"],
+              },
+              {
+                table: "teams",
+                conditions: [],
+                hops: [],
+                gather: {
+                  seed: {
+                    table: "teams",
+                    conditions: [{ column: "name", op: "eq", value: "admins" }],
+                    hops: [],
+                  },
+                  max_depth: 2,
+                  step_table: "team_edges",
+                  step_current_column: "child_team",
+                  step_conditions: [],
+                  step_hops: ["parent_team"],
+                },
+              },
+            ],
+          },
+        },
+        max_depth: 4,
+        step_table: "team_edges",
+        step_current_column: "child_team",
+        step_conditions: [],
+        step_hops: ["parent_team"],
+      },
+    });
+
+    const ir = toLegacyRelExprForTest(translateBuilderToRelationIr(builderJson, schema));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Union");
+    if (ir.seed.type !== "Union") {
+      throw new Error("Expected union seed relation IR.");
+    }
+    expect(ir.seed.inputs).toHaveLength(2);
+    expect(ir.seed.inputs[0]?.type).toBe("Project");
+    expect(ir.seed.inputs[1]?.type).toBe("Gather");
+  });
+
   describe("error handling", () => {
     it("throws for unknown column", () => {
       const builderJson = JSON.stringify({

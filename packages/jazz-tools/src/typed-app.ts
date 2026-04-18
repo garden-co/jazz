@@ -438,6 +438,11 @@ type QueryBuilderShape<
   readonly _initType: TableInit<TSchema, TTable>;
 };
 
+type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> & {
+  readonly _table: TTable;
+  _serializeRelation(): unknown;
+};
+
 type PermissionIntrospectionColumns = {
   $canRead: boolean | null;
   $canEdit: boolean | null;
@@ -748,13 +753,54 @@ type SelectedWithIncludesFromMeta<
 >;
 
 type BuiltCondition = { column: string; op: string; value: unknown };
+type BuiltRelation = {
+  table?: string;
+  conditions?: BuiltCondition[];
+  hops?: string[];
+  gather?: BuiltGather;
+  union?: {
+    inputs: BuiltRelation[];
+  };
+};
 type BuiltGather = {
+  seed?: BuiltRelation;
   max_depth: number;
   step_table: string;
   step_current_column: string;
   step_conditions: BuiltCondition[];
   step_hops: string[];
 };
+
+function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
+  return { ...condition };
+}
+
+function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
+  return {
+    ...(relation.table ? { table: relation.table } : {}),
+    ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
+    ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
+    ...(relation.union
+      ? {
+          union: {
+            inputs: relation.union.inputs.map(cloneBuiltRelation),
+          },
+        }
+      : {}),
+  };
+}
+
+function cloneBuiltGather(gather: BuiltGather): BuiltGather {
+  return {
+    ...(gather.seed ? { seed: cloneBuiltRelation(gather.seed) } : {}),
+    max_depth: gather.max_depth,
+    step_table: gather.step_table,
+    step_current_column: gather.step_current_column,
+    step_conditions: gather.step_conditions.map(cloneBuiltCondition),
+    step_hops: [...gather.step_hops],
+  };
+}
 
 export class TypedTableQueryBuilder<
   TMeta extends AnyTableMeta,
@@ -775,6 +821,7 @@ export class TypedTableQueryBuilder<
   private _offsetVal?: number;
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
+  private _unionVal?: BuiltRelation;
 
   constructor(table: TableNameFromMeta<TMeta>, schema: WasmSchema) {
     this._table = table;
@@ -784,19 +831,11 @@ export class TypedTableQueryBuilder<
   where(
     conditions: TableWhereFromMeta<TMeta>,
   ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    const clone = this._clone<TInclude, TSelection, TRequired>();
-    for (const [key, value] of Object.entries(conditions as Record<string, unknown>)) {
-      if (value === undefined) continue;
-      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        for (const [op, opValue] of Object.entries(value)) {
-          if (opValue !== undefined) {
-            clone._conditions.push({ column: key, op, value: opValue });
-          }
-        }
-      } else {
-        clone._conditions.push({ column: key, op: "eq", value });
-      }
+    if (this._unionVal) {
+      throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._conditions.push(...this._whereConditions(conditions as Record<string, unknown>));
     return clone;
   }
 
@@ -846,19 +885,19 @@ export class TypedTableQueryBuilder<
   hopTo(
     relation: RelationNameFromMeta<TMeta>,
   ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    if (this._unionVal) {
+      throw new Error("union(...) currently only supports gather(...) in MVP.");
+    }
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._hops.push(relation as string);
     return clone;
   }
 
   gather(options: {
-    start: TableWhereFromMeta<TMeta>;
+    start?: TableWhereFromMeta<TMeta>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    if (options.start === undefined) {
-      throw new Error("gather(...) requires start where conditions.");
-    }
     if (typeof options.step !== "function") {
       throw new Error("gather(...) requires step callback.");
     }
@@ -870,8 +909,8 @@ export class TypedTableQueryBuilder<
     if (Object.keys(this._includes).length > 0) {
       throw new Error("gather(...) does not support include(...) in MVP.");
     }
-    if (this._hops.length > 0) {
-      throw new Error("gather(...) must be called before hopTo(...).");
+    if (options.start && this._unionVal) {
+      throw new Error("gather(...) start does not support union(...) seeds in MVP.");
     }
 
     const currentToken = "__jazz_gather_current__";
@@ -918,16 +957,23 @@ export class TypedTableQueryBuilder<
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
 
-    const withStart = this.where(options.start);
-    const clone = withStart._clone<TInclude, TSelection, TRequired>();
+    const needsExplicitSeed =
+      this._unionVal !== undefined || this._hops.length > 0 || this._gatherVal !== undefined;
+    const seedSource = options.start === undefined ? this : this.where(options.start);
+    const clone = needsExplicitSeed
+      ? this._clone<TInclude, TSelection, TRequired>()
+      : seedSource._clone<TInclude, TSelection, TRequired>();
+    clone._conditions = [];
     clone._hops = [];
     clone._gatherVal = {
+      ...(needsExplicitSeed ? { seed: seedSource._serializeRelation() } : {}),
       max_depth: maxDepth,
       step_table: stepBuilt.table,
       step_current_column: currentCondition.column,
       step_conditions: stepConditions,
       step_hops: stepHops,
     };
+    clone._unionVal = undefined;
 
     return clone;
   }
@@ -944,6 +990,7 @@ export class TypedTableQueryBuilder<
       offset: this._offsetVal,
       hops: this._hops,
       gather: this._gatherVal,
+      ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
     });
   }
 
@@ -968,14 +1015,38 @@ export class TypedTableQueryBuilder<
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
     clone._hops = [...this._hops];
-    clone._gatherVal = this._gatherVal
-      ? {
-          ...this._gatherVal,
-          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
-          step_hops: [...this._gatherVal.step_hops],
-        }
-      : undefined;
+    clone._gatherVal = this._gatherVal ? cloneBuiltGather(this._gatherVal) : undefined;
+    clone._unionVal = this._unionVal ? cloneBuiltRelation(this._unionVal) : undefined;
     return clone;
+  }
+
+  private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
+    const built: BuiltCondition[] = [];
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            built.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        built.push({ column: key, op: "eq", value });
+      }
+    }
+    return built;
+  }
+
+  _serializeRelation(): BuiltRelation {
+    if (this._unionVal) {
+      return cloneBuiltRelation(this._unionVal);
+    }
+    return {
+      table: this._table,
+      conditions: this._conditions.map(cloneBuiltCondition),
+      hops: [...this._hops],
+      ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+    };
   }
 }
 
@@ -1012,7 +1083,7 @@ export interface Query<
     relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
   ): Query<TTable, TInclude, TSelection, TSchema>;
   gather(options: {
-    start: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
+    start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): Query<TTable, TInclude, TSelection, TSchema>;
@@ -1044,7 +1115,7 @@ export interface RequiredQuery<
     relation: RelationNameFromMeta<SchemaMeta<TTable, TSchema>>,
   ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
   gather(options: {
-    start: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
+    start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
   }): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
@@ -1072,6 +1143,9 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
+    union<TTable extends string>(
+      relations: readonly RelationSeedQuery<TTable>[],
+    ): TypedTableQueryBuilder<any, any, any, any>;
     wasmSchema: WasmSchema;
   }
 >;
@@ -1159,6 +1233,20 @@ export function defineApp(
 
   return {
     ...tables,
+    union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
+      if (relations.length === 0) {
+        throw new Error("union(...) requires at least one relation.");
+      }
+
+      const first = relations[0]!;
+      const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
+      (builder as any)._unionVal = {
+        union: {
+          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+        },
+      };
+      return builder;
+    },
     wasmSchema,
   } as App<Schema<SchemaDefinition>>;
 }
