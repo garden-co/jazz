@@ -5,6 +5,28 @@ use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
 use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IndexUpdateError {
+    pub column: String,
+    pub source: QueryError,
+}
+
+impl std::fmt::Display for IndexUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "index update failed for column {}: {}",
+            self.column, self.source
+        )
+    }
+}
+
+impl std::error::Error for IndexUpdateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl QueryManager {
     fn map_index_storage_error(error: StorageError) -> QueryError {
         match error {
@@ -323,12 +345,23 @@ impl QueryManager {
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), IndexUpdateError> {
         let mutations =
             Self::index_mutations_for_insert_on_branch(table, branch, object_id, data, descriptor);
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        for mutation in &mutations {
+            if let Err(error) = storage.apply_index_mutations(std::slice::from_ref(mutation)) {
+                let column = match mutation {
+                    IndexMutation::Insert { column, .. } | IndexMutation::Remove { column, .. } => {
+                        (*column).to_string()
+                    }
+                };
+                return Err(IndexUpdateError {
+                    column,
+                    source: Self::map_index_storage_error(error),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Update indices when a row is updated on a specific branch.
