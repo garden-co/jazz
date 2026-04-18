@@ -527,6 +527,11 @@ fn collect_relation_tables(rel: &RelExpr, tables: &mut HashSet<String>) {
         RelExpr::TableScan { table } => {
             tables.insert(table.as_str().to_string());
         }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                collect_relation_tables(input, tables);
+            }
+        }
         RelExpr::Filter { input, .. }
         | RelExpr::Project { input, .. }
         | RelExpr::Distinct { input, .. }

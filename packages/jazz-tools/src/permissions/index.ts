@@ -116,13 +116,24 @@ interface RelationFilterEntry {
 }
 
 interface RelationExprState {
-  kind: "table" | "recursive";
+  kind: "table" | "recursive" | "union";
   outputTable: string;
   base: RelExpr;
   initialScope: string;
   filters: RelationFilterEntry[];
   joins: RelationJoinSpec[];
   selectMap?: Record<string, string>;
+}
+
+function relationJoinAlias(
+  kind: RelationExprState["kind"],
+  join: RelationJoinSpec,
+  index: number,
+): string {
+  if (kind === "recursive") {
+    return `__recursive_join_${index}`;
+  }
+  return join.viaHop ? `__hop_${index}` : `__join_${index}`;
 }
 
 interface TableJoinTarget {
@@ -138,7 +149,7 @@ export interface PermissionRelation {
   select(columns: Record<string, string>): PermissionRelation;
   hopTo(relation: string): PermissionRelation;
   gather(options: {
-    start: Record<string, unknown>;
+    start?: Record<string, unknown>;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
@@ -155,6 +166,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   ) {}
 
   where(input: unknown): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("where(...) does not support union(...) relations in MVP.");
+    }
     const where = resolveRelationWhereInput(input);
     const filters = [
       ...this.state.filters,
@@ -170,6 +184,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   join(target: RelationJoinTarget, on: { left: string; right: string }): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("join(...) does not support union(...) relations in MVP.");
+    }
     const table = relationJoinTargetToTable(target);
     const joins = [
       ...this.state.joins,
@@ -189,6 +206,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   select(columns: Record<string, string>): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("select(...) does not support union(...) relations in MVP.");
+    }
     return new PermissionRelationBuilder(
       {
         ...this.state,
@@ -199,6 +219,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   hopTo(relation: string): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("hopTo(...) does not support union(...) relations in MVP.");
+    }
     const relationName = relation.trim();
     if (!relationName) {
       throw new Error("hopTo(...) requires a non-empty relation name.");
@@ -229,6 +252,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       return new PermissionRelationBuilder(
         {
           ...this.state,
+          outputTable: rel.toTable,
           joins: [...this.state.joins, join],
         },
         this.relations,
@@ -250,6 +274,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     return new PermissionRelationBuilder(
       {
         ...this.state,
+        outputTable: rel.toTable,
         joins: [
           ...this.state.joins,
           {
@@ -265,25 +290,21 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   gather(options: {
-    start: Record<string, unknown>;
+    start?: Record<string, unknown>;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation {
-    if (this.state.kind !== "table") {
-      throw new Error("gather(...) must start from policy.<table>.");
-    }
-    if (this.state.joins.length > 0) {
-      throw new Error("gather(...) does not support pre-joined start relations in MVP.");
-    }
     if (typeof options.step !== "function") {
       throw new Error("gather(...) requires a step callback.");
     }
+    if (this.state.selectMap && Object.keys(this.state.selectMap).length > 0) {
+      throw new Error("gather(...) does not support select(...) seeds in MVP.");
+    }
+    if (options.start && this.state.kind === "union") {
+      throw new Error("gather(...) start does not support union(...) seeds in MVP.");
+    }
 
-    const startWhere = resolveRelationWhereInput(options.start);
-    const startFilters = [
-      ...this.state.filters,
-      ...extractRelationFilters(startWhere, currentRelationScope(this.state)),
-    ];
+    const seedState = buildGatherSeedState(this.state, options.start, this.relations);
 
     const currentToken: RecursiveCurrentValue = {
       __jazzPermissionKind: "recursive-current",
@@ -322,8 +343,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
 
-    const seedPredicates = startFilters.flatMap((filter) => relationFilterToPredicates(filter));
-    const seed = applyRelFilter(this.state.base, seedPredicates);
+    const seed = relationStateToRelExpr(seedState);
 
     const stepPredicates = [
       ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter)),
@@ -487,6 +507,7 @@ export type PolicyContext<TApp extends AppLike> = {
     >;
   } & {
     exists(relation: PermissionRelation): ExistsRelationCondition;
+    union(relations: readonly PermissionRelation[]): PermissionRelation;
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
@@ -660,6 +681,8 @@ function buildPolicyContext(
     __jazzPermissionKind: "exists-relation",
     relation,
   });
+  context.union = (relations: readonly PermissionRelation[]): PermissionRelation =>
+    createUnionRelation(relations, relationsByTable);
   return context;
 }
 
@@ -731,7 +754,7 @@ function buildTablePolicyBuilder(
       return createTableRelation(table, relationsByTable).hopTo(relation);
     },
     gather(options: {
-      start: Record<string, unknown>;
+      start?: Record<string, unknown>;
       step: (ctx: { current: unknown }) => PermissionRelation;
       maxDepth?: number;
     }): PermissionRelation {
@@ -760,6 +783,148 @@ function createTableRelation(
     },
     relationsByTable,
   );
+}
+
+function createUnionRelation(
+  relations: readonly PermissionRelation[],
+  relationsByTable: Map<string, Relation[]>,
+): PermissionRelation {
+  if (relations.length === 0) {
+    throw new Error("union(...) requires at least one relation.");
+  }
+
+  const states = relations.map((relation) => getRelationState(relation));
+  const firstState = states[0];
+  if (!firstState) {
+    throw new Error("union(...) requires at least one relation.");
+  }
+  if (states.some((state) => state.outputTable !== firstState.outputTable)) {
+    throw new Error("union(...) requires all relations to output the same table.");
+  }
+  if (states.some((state) => state.selectMap && Object.keys(state.selectMap).length > 0)) {
+    throw new Error("union(...) does not support select(...) relations in MVP.");
+  }
+
+  return new PermissionRelationBuilder(
+    {
+      kind: "union",
+      outputTable: firstState.outputTable,
+      base: {
+        Union: {
+          inputs: states.map((state) => relationStateToRelExpr(state)),
+        },
+      },
+      initialScope: "",
+      filters: [],
+      joins: [],
+      selectMap: undefined,
+    },
+    relationsByTable,
+  );
+}
+
+function buildGatherSeedState(
+  state: RelationExprState,
+  start: Record<string, unknown> | undefined,
+  relationsByTable: Map<string, Relation[]>,
+): RelationExprState {
+  if (start === undefined) {
+    return state;
+  }
+
+  const startWhere = resolveRelationWhereInput(start);
+  const baseScope = currentRelationScope(state);
+  const joins = [...state.joins];
+  const filters = [...state.filters];
+  const qualifiedRelationByPrefix = new Map<string, Relation>();
+  const qualifiedScopeByPrefix = new Map<string, string>();
+
+  for (const [column, raw] of Object.entries(startWhere)) {
+    if (raw === undefined) {
+      continue;
+    }
+
+    const [prefix, bare] = splitQualifiedColumn(column);
+    if (!prefix || prefix === state.outputTable) {
+      filters.push({ column: bare, raw, scope: baseScope });
+      continue;
+    }
+
+    const relation = resolveQualifiedGatherStartRelation(
+      relationsByTable,
+      state.outputTable,
+      prefix,
+      bare,
+    );
+    const existingRelation = qualifiedRelationByPrefix.get(prefix);
+    if (existingRelation && existingRelation.name !== relation.name) {
+      throw new Error(
+        `gather(...) qualified start table "${prefix}" is ambiguous from "${state.outputTable}"; use an explicit relation seed instead.`,
+      );
+    }
+    qualifiedRelationByPrefix.set(prefix, relation);
+
+    let scope = qualifiedScopeByPrefix.get(prefix);
+    if (!scope) {
+      const join = relationToJoinSpec(relation);
+      joins.push(join);
+      scope = relationJoinAlias(state.kind, join, joins.length - 1);
+      qualifiedScopeByPrefix.set(prefix, scope);
+    }
+
+    filters.push({ column: bare, raw, scope });
+  }
+
+  return {
+    ...state,
+    joins,
+    filters,
+  };
+}
+
+function resolveQualifiedGatherStartRelation(
+  relationsByTable: Map<string, Relation[]>,
+  outputTable: string,
+  qualifiedTable: string,
+  column: string,
+): Relation {
+  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
+    (relation) => relation.toTable === qualifiedTable,
+  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `gather(...) qualified start column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
+    );
+  }
+  if (candidates.length === 1) {
+    return candidates[0]!;
+  }
+
+  const disambiguated = candidates.filter((relation) =>
+    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
+  );
+  if (disambiguated.length === 1) {
+    return disambiguated[0]!;
+  }
+
+  throw new Error(
+    `gather(...) qualified start table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation seed instead.`,
+  );
+}
+
+function relationToJoinSpec(relation: Relation): RelationJoinSpec {
+  if (relation.type === "forward") {
+    return {
+      table: relation.toTable,
+      left: relation.fromColumn,
+      right: "id",
+    };
+  }
+  return {
+    table: relation.toTable,
+    left: "id",
+    right: relation.toColumn,
+  };
 }
 
 function relationJoinTargetToTable(target: RelationJoinTarget): string {
@@ -814,10 +979,7 @@ function currentRelationScope(state: RelationExprState): string {
 
   const joinIndex = state.joins.length - 1;
   const join = state.joins[joinIndex]!;
-  if (state.kind === "recursive") {
-    return `__recursive_join_${joinIndex}`;
-  }
-  return join.viaHop ? `__hop_${joinIndex}` : `__join_${joinIndex}`;
+  return relationJoinAlias(state.kind, join, joinIndex);
 }
 
 function extractRelationFilters(
@@ -885,7 +1047,7 @@ function relationColumnRef(column: string, defaultScope: string): RelColumnRef {
   if (prefix) {
     return { scope: prefix, column: bare };
   }
-  return { scope: defaultScope, column: bare };
+  return defaultScope ? { scope: defaultScope, column: bare } : { column: bare };
 }
 
 function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelValueRef {
@@ -1147,12 +1309,7 @@ function relationStateToRelExpr(state: RelationExprState): RelExpr {
     joins: state.joins,
     filters: state.filters,
     selectMap: state.selectMap,
-    joinAlias: (join, index) =>
-      state.kind === "recursive"
-        ? `__recursive_join_${index}`
-        : join.viaHop
-          ? `__hop_${index}`
-          : `__join_${index}`,
+    joinAlias: (join, index) => relationJoinAlias(state.kind, join, index),
   });
 }
 
