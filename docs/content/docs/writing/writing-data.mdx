@@ -93,11 +93,11 @@ Required fields cannot be set to `null`.
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
-| `worker` | Persisted to local OPFS             | Browser/client |
+| `local`  | Persisted to local OPFS             | Browser/client |
 | `edge`   | Acknowledged by nearest sync server | Backend/server |
 | `global` | Propagated to global core           | —              |
 

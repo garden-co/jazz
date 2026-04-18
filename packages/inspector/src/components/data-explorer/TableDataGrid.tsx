@@ -596,7 +596,7 @@ export function TableDataGrid() {
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const builtQuery = useMemo(() => queryBuilder._build(), [queryBuilder]);
-  const mutationDurabilityTier = runtime === "standalone" ? "edge" : "worker";
+  const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
   const queryOptions = useMemo(
     () =>
       ({

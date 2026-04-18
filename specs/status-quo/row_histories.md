@@ -64,7 +64,7 @@ A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pai
 
 - the current winning batch id
 - the current visible row values for that branch view
-- optional tier-specific winner ids for `worker`, `edge`, and `global`
+- optional tier-specific winner ids for `local`, `edge`, and `global`
 
 Physically, the visible region is also stored as flat `row_format` rows with the same user columns
 and a slightly larger `_jazz_*` prefix. That lets ordinary reads stay fast while still allowing

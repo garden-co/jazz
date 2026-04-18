@@ -169,11 +169,11 @@ export interface AuthConfig {
 /**
  * Persistence tier for durability guarantees.
  *
- * - `worker`: Persisted in web worker / local storage
+ * - `local`: Persisted in local durable storage
  * - `edge`: Persisted at edge server
  * - `global`: Persisted at global server
  */
-export type DurabilityTier = "worker" | "edge" | "global";
+export type DurabilityTier = "local" | "edge" | "global";
 export type LocalUpdatesMode = "immediate" | "deferred";
 export type QueryPropagation = "full" | "local-only";
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
@@ -319,12 +319,12 @@ export function resolveDefaultDurabilityTier(
   }
 
   if (isBrowserRuntime()) {
-    return "worker";
+    return "local";
   }
 
   // In non-browser environments, default to edge when connected to a server.
-  // For local/in-memory runtimes without a server, keep worker semantics.
-  return context.serverUrl ? "edge" : "worker";
+  // For local/in-memory runtimes without a server, keep local semantics.
+  return context.serverUrl ? "edge" : "local";
 }
 
 export function resolveEffectiveQueryExecutionOptions(
@@ -679,7 +679,7 @@ function normalizeUpdatedAt(updatedAt?: number): number | undefined {
 
 function durabilityTierRank(tier: DurabilityTier): number {
   switch (tier) {
-    case "worker":
+    case "local":
       return 0;
     case "edge":
       return 1;

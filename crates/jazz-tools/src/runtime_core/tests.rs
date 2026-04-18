@@ -2241,7 +2241,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
     let mut server = create_runtime_with_schema_and_sync_manager(
         schema,
         "scope-bypass-subscription-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     let alice_session = Session::new("alice");
@@ -2459,7 +2459,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         documents_query_by_title(title),
         Some(bob_session.clone()),
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
             strict_transactions: false,
         },
@@ -2469,7 +2469,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut fresh_bob_query).poll(&mut cx).is_pending(),
-        "fresh bob full query should wait for Worker settlement instead of resolving from local empty state"
+        "fresh bob full query should wait for Local settlement instead of resolving from local empty state"
     );
 
     let server_outputs_after_fresh_bob_query = pump_server_with_three_clients(
@@ -2501,7 +2501,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
             );
         }
         Poll::Ready(Err(err)) => panic!("fresh bob full query should succeed: {err:?}"),
-        Poll::Pending => panic!("fresh bob full query should resolve after Worker settlement"),
+        Poll::Pending => panic!("fresh bob full query should resolve after Local settlement"),
     }
 }
 
@@ -2558,7 +2558,7 @@ fn create_3tier_rc() -> ThreeTierRC {
     let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     // B = Worker server
-    let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id, "dev", "main").unwrap();
     let mut b = new_test_core(mgr_b, MemoryStorage::new(), NoopScheduler);
 
@@ -2778,7 +2778,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     let mgr_b = SchemaManager::new(
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
         schema.clone(),
         app_id,
         "dev",
@@ -3123,7 +3123,7 @@ fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::QuerySettled {
             query_id: crate::sync_manager::QueryId(1),
-            tier: DurabilityTier::Worker,
+            tier: DurabilityTier::Local,
             through_seq: 1,
         },
     });
@@ -3180,7 +3180,7 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
             "users",
             user_insert_values(user_id, "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     assert!(!id.0.is_nil());
@@ -3197,7 +3197,7 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 }
@@ -3216,7 +3216,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3235,7 +3235,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
             branch_name,
             batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     core.immediate_tick();
@@ -3260,7 +3260,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3279,7 +3279,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
             branch_name,
             batch_id: row_batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     s.a.immediate_tick();
@@ -3309,7 +3309,7 @@ fn rc_insert_persisted_holds_until_correct_tier() {
     assert_eq!(
         receiver.try_recv(),
         Ok(None),
-        "Worker ack should not satisfy EdgeServer request"
+        "Local ack should not satisfy EdgeServer request"
     );
 
     pump_b_to_c(&mut s);
@@ -3331,7 +3331,7 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3339,8 +3339,8 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
-        Ok(Some(Err(rejection))) => panic!("Worker request should not reject: {rejection:?}"),
-        Ok(None) => panic!("EdgeServer ack should satisfy Worker request"),
+        Ok(Some(Err(rejection))) => panic!("Local request should not reject: {rejection:?}"),
+        Ok(None) => panic!("EdgeServer ack should satisfy Local request"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 }
@@ -3353,7 +3353,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3372,7 +3372,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .expect("persisted write should create a local batch record");
     assert_eq!(initial_record.batch_id, batch_id);
     assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
+    assert_eq!(initial_record.requested_tier, DurabilityTier::Local);
     assert_eq!(
         initial_record.latest_settlement, None,
         "client-side persisted direct writes should start pending until an upstream durability settlement arrives"
@@ -3385,7 +3385,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             branch_name,
             batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     s.a.immediate_tick();
@@ -3401,7 +3401,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -3419,7 +3419,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3436,7 +3436,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         payload: SyncPayload::BatchSettlement {
             settlement: crate::batch_fate::BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Worker,
+                confirmed_tier: DurabilityTier::Local,
                 visible_members: vec![crate::batch_fate::VisibleBatchMember {
                     object_id: row_id,
                     branch_name,
@@ -3467,7 +3467,7 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3583,7 +3583,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     let ((second_row_id, _), mut second_receiver) =
@@ -3591,7 +3591,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3612,7 +3612,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(
                 visible_members.len(),
                 2,
@@ -3644,7 +3644,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3685,7 +3685,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -3796,7 +3796,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
         history_rows[0].state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(history_rows[0].batch_id(), batch_id);
 
     let worker_row =
@@ -3853,7 +3853,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(worker_row.batch_id(), batch_id);
 
     assert_eq!(
@@ -3875,7 +3875,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         client_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(client_row.batch_id(), batch_id);
 }
 
@@ -3900,7 +3900,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3938,7 +3938,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Local));
 
     assert_eq!(
         receiver.try_recv(),
@@ -4111,7 +4111,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&open_write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4151,7 +4151,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
             "users",
             user_insert_values(ObjectId::new(), "Carol"),
             Some(&sealed_write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap_err();
     assert!(matches!(
@@ -4213,7 +4213,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4235,7 +4235,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         initial_record.mode,
         crate::batch_fate::BatchMode::Transactional
     );
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Worker);
+    assert_eq!(initial_record.requested_tier, DurabilityTier::Local);
     assert!(!initial_record.sealed);
     assert_eq!(initial_record.latest_settlement, None);
 
@@ -4260,7 +4260,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -4292,7 +4292,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4334,7 +4334,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -4362,7 +4362,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     let ((second_row_id, _second_row_values), mut second_receiver) =
@@ -4370,7 +4370,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4419,7 +4419,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             visible_members,
         } => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(visible_members.len(), 2);
             assert!(visible_members.iter().any(|member| {
                 member.object_id == first_row_id
@@ -4447,7 +4447,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(visible_members.len(), 2);
             assert!(visible_members.iter().any(|member| {
                 member.object_id == first_row_id
@@ -4483,7 +4483,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4531,7 +4531,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4587,7 +4587,7 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "direct-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4616,7 +4616,7 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4720,7 +4720,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "transactional-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4756,7 +4756,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4840,7 +4840,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "transactional-ack-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4870,7 +4870,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4938,7 +4938,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4968,7 +4968,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5039,7 +5039,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-seal-recovery-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     old_runtime
         .storage_mut()
@@ -5073,7 +5073,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         schema,
         "transactional-restart-seal-recovery-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     let settlement = restarted
@@ -5085,7 +5085,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         settlement,
         crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id: settled_batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             ref visible_members,
         } if settled_batch_id == batch_id
             && *visible_members == vec![crate::batch_fate::VisibleBatchMember {
@@ -5142,7 +5142,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-invalid-seal-recovery-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     for row_id in [main_row_id, draft_row_id] {
         old_runtime
@@ -5184,7 +5184,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         schema,
         "transactional-restart-invalid-seal-recovery-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     assert_eq!(
@@ -5265,7 +5265,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-frontier-conflict-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     for row_id in [existing_row_id, conflicting_row_id, staged_row_id] {
         old_runtime
@@ -5328,7 +5328,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
         schema,
         "transactional-restart-frontier-conflict-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     assert_eq!(
@@ -5389,7 +5389,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5506,7 +5506,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5586,7 +5586,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5676,7 +5676,7 @@ fn rc_update_persisted_resolves_on_ack() {
             id,
             vec![("name".into(), Value::Text("Bob".into()))],
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5686,7 +5686,7 @@ fn rc_update_persisted_resolves_on_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Update receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Update receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Update receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 
@@ -5704,7 +5704,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
 
     let mut receiver =
-        s.a.delete_persisted(id, None, DurabilityTier::Worker)
+        s.a.delete_persisted(id, None, DurabilityTier::Local)
             .unwrap();
 
     pump_a_to_b(&mut s);
@@ -5713,7 +5713,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Delete receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Delete receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Delete receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 
@@ -5731,7 +5731,7 @@ fn rc_multiple_persisted_inserts_independent() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5740,7 +5740,7 @@ fn rc_multiple_persisted_inserts_independent() {
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5794,7 +5794,7 @@ fn rc_query_settled_tier_holds() {
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -5805,7 +5805,7 @@ fn rc_query_settled_tier_holds() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should be pending before Local settlement"
     );
 
     pump_a_to_b(&mut s);
@@ -5847,7 +5847,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         "Query should wait for the initial remote frontier"
     );
 
-    // Worker frontier completion is enough to unblock the first snapshot. With
+    // Local frontier completion is enough to unblock the first snapshot. With
     // immediate local updates, the locally-authored row should still be visible
     // even though it has not reached EdgeServer durability yet.
     pump_a_to_b(&mut s);
@@ -5871,7 +5871,7 @@ fn rc_query_settled_tier_empty_resolves() {
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -5882,7 +5882,7 @@ fn rc_query_settled_tier_empty_resolves() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should be pending before Local settlement"
     );
 
     // No rows inserted anywhere; query should still resolve once settled tier is reached.
@@ -5953,7 +5953,7 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
             "users",
             second_visible.batch_id,
             None,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         )
         .unwrap();
 
@@ -5962,7 +5962,7 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
             strict_transactions: false,
         },
@@ -6006,12 +6006,12 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.batched_tick();
     s.b.sync_sender().take();
 
-    // One-shot settled query on A should wait for Worker settlement.
+    // One-shot settled query on A should wait for Local settlement.
     let mut future = s.a.query_with_propagation(
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -6022,7 +6022,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should be pending before Local settlement"
     );
 
     // Deliver A -> B query subscription and let B compute response traffic.
@@ -6127,7 +6127,7 @@ fn rc_subscribe_settled_tier() {
             },
             None,
             ReadDurabilityOptions {
-                tier: Some(DurabilityTier::Worker),
+                tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
                 strict_transactions: false,
             },
@@ -6142,7 +6142,7 @@ fn rc_subscribe_settled_tier() {
 
     assert!(
         received.lock().unwrap().is_empty(),
-        "Callback should not fire before Worker settlement"
+        "Callback should not fire before Local settlement"
     );
 
     pump_a_to_b(&mut s);
@@ -6199,7 +6199,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     );
     drop(calls);
 
-    // Worker frontier completion is enough to unblock the first snapshot. With
+    // Local frontier completion is enough to unblock the first snapshot. With
     // immediate local updates, the locally-authored row is shown immediately
     // while its EdgeServer durability is still pending.
     pump_a_to_b(&mut s);
@@ -6261,7 +6261,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
 fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     // alice strict-subscribes at EdgeServer durability
     //   alice stages one transactional row locally
-    //   worker frontier completion unblocks the first snapshot
+    //   local frontier completion unblocks the first snapshot
     //   the row should appear via alice's local pending overlay even before EdgeServer settlement
     //   later EdgeServer settlement should not emit the same row again
     let mut s = create_3tier_rc();
@@ -6316,7 +6316,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     assert_eq!(
         calls.len(),
         1,
-        "worker frontier completion should unblock the first snapshot"
+        "local frontier completion should unblock the first snapshot"
     );
     assert_eq!(
         calls[0].len(),
@@ -6340,7 +6340,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
 #[test]
 fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejected() {
     // alice strict-subscribes at EdgeServer durability
-    //   worker frontier first opens the subscription with an empty snapshot
+    //   local frontier first opens the subscription with an empty snapshot
     //   alice then stages one transactional row locally
     //   the row appears only through the local pending overlay
     //   a replayable rejected batch settlement should remove that overlay immediately
@@ -6505,7 +6505,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
             },
             None,
             ReadDurabilityOptions {
-                tier: Some(DurabilityTier::Worker),
+                tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
                 strict_transactions: true,
             },
