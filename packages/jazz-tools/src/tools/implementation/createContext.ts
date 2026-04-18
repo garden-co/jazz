@@ -118,6 +118,7 @@ export async function createJazzContextFromExistingCredentials<
   sessionProvider,
   onLogOut,
   asActiveAccount,
+  experimental_clockSyncFromServerPings,
 }: {
   credentials: Credentials;
   peers: Peer[];
@@ -128,6 +129,7 @@ export async function createJazzContextFromExistingCredentials<
   onLogOut?: () => void;
   storage?: StorageAPI;
   asActiveAccount: boolean;
+  experimental_clockSyncFromServerPings?: boolean;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const { sessionID, sessionDone } = await sessionProvider.acquireSession(
     credentials.accountID,
@@ -149,6 +151,7 @@ export async function createJazzContextFromExistingCredentials<
     crypto,
     storage,
     enableFullStorageReconciliation: !!storage,
+    experimental_clockSyncFromServerPings,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       if (asActiveAccount) {
@@ -193,6 +196,7 @@ export async function createJazzContextForNewAccount<
   onLogOut,
   storage,
   sessionProvider,
+  experimental_clockSyncFromServerPings,
 }: {
   creationProps: { name: string };
   initialAgentSecret?: AgentSecret;
@@ -203,6 +207,7 @@ export async function createJazzContextForNewAccount<
   onLogOut?: () => Promise<void>;
   storage?: StorageAPI;
   sessionProvider: SessionProvider;
+  experimental_clockSyncFromServerPings?: boolean;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
@@ -218,6 +223,7 @@ export async function createJazzContextForNewAccount<
     initialAgentSecret,
     storage,
     enableFullStorageReconciliation: !!storage,
+    experimental_clockSyncFromServerPings,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       activeAccountContext.set(account);
@@ -263,6 +269,7 @@ export async function createJazzContext<
   sessionProvider: SessionProvider;
   authSecretStorage: AuthSecretStorage;
   storage?: StorageAPI;
+  experimental_clockSyncFromServerPings?: boolean;
 }) {
   const crypto = options.crypto;
 
@@ -294,6 +301,8 @@ export async function createJazzContext<
       },
       storage: options.storage,
       asActiveAccount: true,
+      experimental_clockSyncFromServerPings:
+        options.experimental_clockSyncFromServerPings,
     });
   } else {
     const secretSeed = options.crypto.newRandomSecretSeed();
@@ -318,6 +327,8 @@ export async function createJazzContext<
         await authSecretStorage.clearWithoutNotify();
       },
       storage: options.storage,
+      experimental_clockSyncFromServerPings:
+        options.experimental_clockSyncFromServerPings,
     });
 
     if (!options.newAccountProps) {
@@ -341,11 +352,13 @@ export function createAnonymousJazzContext({
   syncWhen,
   crypto,
   storage,
+  experimental_clockSyncFromServerPings,
 }: {
   peers: Peer[];
   syncWhen?: SyncWhen;
   crypto: CryptoProvider;
   storage?: StorageAPI;
+  experimental_clockSyncFromServerPings?: boolean;
 }): JazzContextWithAgent {
   const agentSecret = crypto.newRandomAgentSecret();
 
@@ -355,6 +368,7 @@ export function createAnonymousJazzContext({
     crypto,
     syncWhen,
     !!storage,
+    { experimental_clockSyncFromServerPings },
   );
 
   for (const peer of peers) {

@@ -452,6 +452,7 @@ export function setupTestNode(
     secret?: AgentSecret;
     syncWhen?: SyncWhen;
     enableFullStorageReconciliation?: boolean;
+    experimental_clockSyncFromServerPings?: boolean;
   } = {},
 ) {
   const [admin, session] = opts.secret
@@ -464,6 +465,10 @@ export function setupTestNode(
     Crypto,
     opts.syncWhen,
     opts.enableFullStorageReconciliation,
+    {
+      experimental_clockSyncFromServerPings:
+        opts.experimental_clockSyncFromServerPings,
+    },
   );
 
   if (opts.isSyncServer) {
@@ -542,6 +547,10 @@ export function setupTestNode(
         Crypto,
         opts.syncWhen,
         opts.enableFullStorageReconciliation,
+        {
+          experimental_clockSyncFromServerPings:
+            opts.experimental_clockSyncFromServerPings,
+        },
       );
 
       if (opts.isSyncServer) {
@@ -556,6 +565,8 @@ export function setupTestNode(
         connected: opts.connected,
         isSyncServer: opts.isSyncServer,
         enableFullStorageReconciliation: opts.enableFullStorageReconciliation,
+        experimental_clockSyncFromServerPings:
+          opts.experimental_clockSyncFromServerPings,
       });
     },
     disconnect: () => {
@@ -577,6 +588,7 @@ export async function setupTestAccount(
     storage?: StorageAPI;
     accountID?: RawAccountID;
     accountSecret?: AgentSecret;
+    experimental_clockSyncFromServerPings?: boolean;
   } = {},
 ) {
   const ctx =
@@ -593,6 +605,8 @@ export async function setupTestAccount(
             accountID: opts.accountID,
             accountSecret: opts.accountSecret,
             sessionID: Crypto.newRandomSessionID(opts.accountID),
+            experimental_clockSyncFromServerPings:
+              opts.experimental_clockSyncFromServerPings,
           }),
           accountID: opts.accountID,
           accountSecret: opts.accountSecret,
@@ -602,6 +616,8 @@ export async function setupTestAccount(
           crypto: Crypto,
           creationProps: { name: "Client" },
           storage: opts.storage,
+          experimental_clockSyncFromServerPings:
+            opts.experimental_clockSyncFromServerPings,
         });
 
   if (opts.isSyncServer) {

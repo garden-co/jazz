@@ -47,6 +47,7 @@ type WorkerOptions<
    */
   asActiveAccount?: boolean;
   storage?: StorageAPI;
+  experimental_clockSyncFromServerPings?: boolean;
 };
 
 /** @category Context Creation */
@@ -86,6 +87,9 @@ export async function startWorker<
       },
       removePeer: () => {},
       WebSocketConstructor: options.WebSocket,
+      onPingReceived: (sample) => {
+        node?.clockOffset.addSample(sample);
+      },
     });
 
     wsPeer.enable();
@@ -115,6 +119,8 @@ export async function startWorker<
     crypto: options.crypto ?? (await WasmCrypto.create()),
     asActiveAccount,
     storage: options.storage,
+    experimental_clockSyncFromServerPings:
+      options.experimental_clockSyncFromServerPings,
   });
 
   const account = context.account as InstanceOfSchema<S>;

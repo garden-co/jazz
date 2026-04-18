@@ -30,6 +30,7 @@ export type BaseBrowserContextOptions = {
   storage?: "indexedDB";
   crypto?: CryptoProvider;
   authSecretStorage: AuthSecretStorage;
+  experimental_clockSyncFromServerPings?: boolean;
 };
 
 class BrowserWebSocketPeerWithReconnection extends WebSocketPeerWithReconnection {
@@ -78,6 +79,9 @@ async function setupPeers(options: BaseBrowserContextOptions) {
     },
     removePeer: (peer) => {
       peers.splice(peers.indexOf(peer), 1);
+    },
+    onPingReceived: (sample) => {
+      node?.clockOffset.addSample(sample);
     },
   });
 
@@ -136,6 +140,8 @@ export async function createJazzBrowserGuestContext(
     peers,
     syncWhen,
     storage,
+    experimental_clockSyncFromServerPings:
+      options.experimental_clockSyncFromServerPings,
   });
 
   setNode(context.agent.node);
@@ -214,6 +220,8 @@ export async function createJazzBrowserContext<
     AccountSchema: options.AccountSchema,
     sessionProvider: getBrowserLockSessionProvider(),
     authSecretStorage: options.authSecretStorage,
+    experimental_clockSyncFromServerPings:
+      options.experimental_clockSyncFromServerPings,
   });
 
   setNode(context.node);

@@ -23,6 +23,10 @@ export type CreateWebSocketPeerOpts = {
   meter?: Meter;
   enablePingDelayLogs?: boolean;
   pingDelayLogsData?: Record<string, string | number>;
+  onPingReceived?: (sample: {
+    serverTime: number;
+    localReceiveTime: number;
+  }) => void;
 };
 
 function createPingTimeoutListener(
@@ -110,6 +114,7 @@ export function createWebSocketPeer({
   meta,
   enablePingDelayLogs = false,
   pingDelayLogsData = {},
+  onPingReceived,
 }: CreateWebSocketPeerOpts): Peer {
   const meterProvider = meter ?? metrics.getMeter("cojson-transport-ws");
 
@@ -209,12 +214,19 @@ export function createWebSocketPeer({
         continue;
       }
 
-      if (enablePingDelayLogs && "time" in msg) {
-        logger.info("Ping delay", {
-          delay: Math.max(0, Date.now() - msg.time),
-          server: msg.dc,
-          ...pingDelayLogsData,
+      if ("time" in msg) {
+        onPingReceived?.({
+          serverTime: msg.time,
+          localReceiveTime: Date.now(),
         });
+
+        if (enablePingDelayLogs) {
+          logger.info("Ping delay", {
+            delay: Math.max(0, Date.now() - msg.time),
+            server: msg.dc,
+            ...pingDelayLogsData,
+          });
+        }
       }
 
       if ("action" in msg) {

@@ -47,6 +47,7 @@ export function JazzReactProvider<
   enableSSR,
   fallback = null,
   authSecretStorageKey,
+  experimental_clockSyncFromServerPings,
 }: JazzProviderProps<S>) {
   if (useContext(JazzContext)) {
     throw new Error(
@@ -82,8 +83,15 @@ export function JazzReactProvider<
       onAnonymousAccountDiscarded: onAnonymousAccountDiscarded
         ? onAnonymousAccountDiscardedRefCallback
         : undefined,
+      experimental_clockSyncFromServerPings,
     } satisfies JazzContextManagerProps<S>;
-  }, [guestMode, sync.peer, sync.when, storage]);
+  }, [
+    guestMode,
+    sync.peer,
+    sync.when,
+    storage,
+    experimental_clockSyncFromServerPings,
+  ]);
 
   if (contextManager.propsChanged(props) && typeof window !== "undefined") {
     contextManager.createContext(props).catch((error) => {

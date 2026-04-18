@@ -9,6 +9,10 @@ export class WebSocketPeerWithReconnection {
   private removePeer: (peer: Peer) => void;
   private WebSocketConstructor: AnyWebSocketConstructor;
   private pingTimeout: number;
+  private onPingReceived?: (sample: {
+    serverTime: number;
+    localReceiveTime: number;
+  }) => void;
 
   constructor(opts: {
     peer: string;
@@ -17,6 +21,10 @@ export class WebSocketPeerWithReconnection {
     removePeer: (peer: Peer) => void;
     WebSocketConstructor?: AnyWebSocketConstructor;
     pingTimeout?: number;
+    onPingReceived?: (sample: {
+      serverTime: number;
+      localReceiveTime: number;
+    }) => void;
   }) {
     this.peer = opts.peer;
     this.reconnectionTimeout = opts.reconnectionTimeout || 500;
@@ -24,6 +32,7 @@ export class WebSocketPeerWithReconnection {
     this.removePeer = opts.removePeer;
     this.WebSocketConstructor = opts.WebSocketConstructor || WebSocket;
     this.pingTimeout = opts.pingTimeout || 10_000;
+    this.onPingReceived = opts.onPingReceived;
   }
 
   enabled = false;
@@ -113,6 +122,7 @@ export class WebSocketPeerWithReconnection {
       pingTimeout: this.pingTimeout,
       id: this.peer,
       role: "server",
+      onPingReceived: this.onPingReceived,
       onClose: () => {
         this.closed = true;
         this.connected = false;

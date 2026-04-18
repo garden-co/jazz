@@ -77,6 +77,7 @@
     props.sync.peer;
     props.storage;
     props.guestMode;
+    props.experimental_clockSyncFromServerPings;
     return untrack(() => {
       if (!props.sync) return;
 
@@ -89,6 +90,8 @@
           defaultProfileName: props.defaultProfileName,
           onAnonymousAccountDiscarded: props.onAnonymousAccountDiscarded,
           onLogOut: props.onLogOut,
+          experimental_clockSyncFromServerPings:
+            props.experimental_clockSyncFromServerPings,
         })
         .catch((error) => {
           console.error("Error creating Jazz browser context:", error);
