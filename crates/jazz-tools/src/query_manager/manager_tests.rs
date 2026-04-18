@@ -3130,9 +3130,9 @@ fn delete_already_deleted_row_fails() {
 }
 
 #[test]
-fn soft_delete_with_concurrent_tips_uses_lww() {
+fn soft_delete_with_concurrent_tips_merges_preserved_content() {
     // Test that soft deleting an object with two concurrent tips results
-    // in a soft delete commit with content from the LWW winner (highest timestamp).
+    // in a soft delete commit with merged content from both field updates.
     use crate::object::BranchName;
     use crate::query_manager::encoding::encode_row;
 
@@ -3170,10 +3170,10 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .clone();
     let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
 
-    // Commit A: lower timestamp, content "TipA"
+    // Commit A: lower timestamp, update the first user column only.
     let content_a = encode_row(
         &descriptor,
-        &[Value::Text("TipA".into()), Value::Integer(100)],
+        &[Value::Text("TipA".into()), Value::Integer(0)],
     )
     .unwrap();
     let commit_a = stored_row_commit(
@@ -3183,10 +3183,10 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         handle.row_id.to_string(),
     );
 
-    // Commit B: higher timestamp, content "TipB" - this should win
+    // Commit B: higher timestamp, update the second user column only.
     let content_b = encode_row(
         &descriptor,
-        &[Value::Text("TipB".into()), Value::Integer(200)],
+        &[Value::Text("Original".into()), Value::Integer(200)],
     )
     .unwrap();
     let commit_b = stored_row_commit(
@@ -3212,7 +3212,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     assert!(tips.contains(&commit_a_id));
     assert!(tips.contains(&commit_b_id));
 
-    // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
+    // Now soft delete - should preserve merged content from both concurrent tips.
     let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
 
     // Get the delete commit and verify its content
@@ -3224,8 +3224,9 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         "visible row should be the delete version"
     );
     assert_eq!(
-        delete_row.data, content_b,
-        "Soft delete should preserve content from LWW winner"
+        decode_row(&descriptor, &delete_row.data).unwrap(),
+        vec![Value::Text("TipA".into()), Value::Integer(200)],
+        "Soft delete should preserve merged content from the conflicted frontier"
     );
     assert_eq!(delete_row.delete_kind, Some(DeleteKind::Soft));
 
@@ -3233,7 +3234,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let query = qm.query("users").include_deleted().build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1[0], Value::Text("TipB".into()));
+    assert_eq!(results[0].1[0], Value::Text("TipA".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
 }
 

@@ -2091,12 +2091,18 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
         let history_rows = history_by_visible_row
             .remove(&(branch.clone(), *row_id))
             .unwrap_or_default();
-        if let Some(current_row) = history_rows
-            .iter()
-            .find(|row| row.batch_id() == existing_entry.current_row.batch_id())
-            .cloned()
+        let context = if let Some(current_row) = history_rows.first() {
+            resolve_history_row_write_context(storage, table, current_row)?
+        } else {
+            continue;
+        };
+        if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+            context.user_descriptor.as_ref(),
+            &history_rows,
+        )
+        .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
         {
-            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current_row, &history_rows));
+            rebuilt_visible_entries.push(entry);
             continue;
         }
 
@@ -2113,7 +2119,14 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
         }
 
         if current.state.is_visible() {
-            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current, &history_rows));
+            if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+                context.user_descriptor.as_ref(),
+                &history_rows,
+            )
+            .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+            {
+                rebuilt_visible_entries.push(entry);
+            }
         } else {
             rows_without_visible_head.push((branch.clone(), *row_id));
         }
@@ -2158,14 +2171,15 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
     {
         *existing = row.clone();
     }
+    let context = resolve_history_row_write_context(storage, table, &row)?;
 
-    let visible_entries = patched_history
-        .iter()
-        .filter(|candidate| candidate.branch == branch && candidate.state.is_visible())
-        .cloned()
-        .max_by_key(|candidate| (candidate.updated_at, candidate.batch_id()))
-        .map(|current_row| vec![VisibleRowEntry::rebuild(current_row, &patched_history)])
-        .unwrap_or_default();
+    let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
+        context.user_descriptor.as_ref(),
+        &patched_history,
+    )
+    .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+    .into_iter()
+    .collect::<Vec<_>>();
 
     storage.apply_row_mutation(table, std::slice::from_ref(&row), &visible_entries, &[])?;
     if visible_entries.is_empty() {
@@ -3627,18 +3641,37 @@ pub trait Storage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        let Some(entry) = self.load_visible_region_entry(table, branch, row_id)? else {
+        let Some(row) = load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+        else {
             return Ok(None);
         };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(entry.current_row));
+        let entry = crate::row_histories::decode_flat_visible_row_entry(
+            row.user_descriptor.as_ref(),
+            row_id,
+            branch,
+            &row.bytes,
+        )
+        .map_err(|err| StorageError::IoError(format!("decode flat visible row: {err}")))?;
+        if entry
+            .current_row
+            .confirmed_tier
+            .is_some_and(|tier| tier >= required_tier)
+            || entry.batch_id_for_tier(required_tier).is_some()
+        {
+            return entry.materialize_preview_for_tier_with_storage(
+                self,
+                table,
+                row.user_descriptor.as_ref(),
+                required_tier,
+            );
         }
-
-        self.load_history_row_batch(table, branch, row_id, batch_id)
+        let history_rows = self.scan_history_region(table, branch, HistoryScan::Row { row_id })?;
+        crate::row_histories::visible_row_preview_from_history_rows(
+            row.user_descriptor.as_ref(),
+            &history_rows,
+            Some(required_tier),
+        )
+        .map_err(|err| StorageError::IoError(format!("load tiered visible preview: {err}")))
     }
 
     fn load_visible_query_row_for_tier(
@@ -3871,19 +3904,19 @@ pub trait Storage {
         {
             *existing = current_row.clone();
         }
-        let visible_entries = patched_history
-            .iter()
-            .filter(|candidate| candidate.branch == branch && candidate.state.is_visible())
-            .cloned()
-            .max_by_key(|candidate| (candidate.updated_at, candidate.batch_id()))
-            .map(|current_row| vec![VisibleRowEntry::rebuild(current_row, &patched_history)])
-            .unwrap_or_default();
         let context = prepared_row_write_context_for_schema_hash(
             self,
             table,
             schema_hash,
             current_row.row_id,
         )?;
+        let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
+            context.user_descriptor.as_ref(),
+            &patched_history,
+        )
+        .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+        .into_iter()
+        .collect::<Vec<_>>();
         let encoded_history_rows = vec![encode_history_row_bytes_with_context(
             &context,
             &current_row,
@@ -4735,31 +4768,6 @@ impl TableRowHistories {
         rows.sort_by_key(|row| (row.updated_at, row.batch_id()));
         rows
     }
-
-    fn rebuild_visible_entry(&mut self, branch: &str, row_id: ObjectId) {
-        let Some(current_row) = self
-            .visible
-            .get(branch)
-            .and_then(|rows| rows.get(&row_id))
-            .map(|entry| entry.current_row.clone())
-        else {
-            return;
-        };
-        let branch_key = current_row.branch.clone();
-
-        let mut history_rows = self.history_rows_for(branch, row_id);
-        if !history_rows
-            .iter()
-            .any(|row| row.batch_id() == current_row.batch_id())
-        {
-            history_rows.push(current_row.clone());
-        }
-
-        self.visible
-            .entry(branch_key)
-            .or_default()
-            .insert(row_id, VisibleRowEntry::rebuild(current_row, &history_rows));
-    }
 }
 
 /// In-memory Storage for testing and main-thread use.
@@ -5421,28 +5429,15 @@ impl Storage for MemoryStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        let Some(regions) = self.row_histories.get_mut(table) else {
-            return Ok(());
-        };
+        let mut rebuild_inputs = Vec::new();
 
-        let mut affected_visible_rows = HashSet::new();
-        for row in regions.history.values_mut() {
-            if row.batch_id == batch_id {
-                if let Some(state) = state {
-                    row.state = state;
-                }
-                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
-                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                    (Some(existing), None) => Some(existing),
-                    (None, incoming) => incoming,
-                };
-                affected_visible_rows.insert((row.branch.clone(), row.row_id));
-            }
-        }
+        {
+            let Some(regions) = self.row_histories.get_mut(table) else {
+                return Ok(());
+            };
 
-        for branch_rows in regions.visible.values_mut() {
-            for entry in branch_rows.values_mut() {
-                let row = &mut entry.current_row;
+            let mut affected_visible_rows = HashSet::new();
+            for row in regions.history.values_mut() {
                 if row.batch_id == batch_id {
                     if let Some(state) = state {
                         row.state = state;
@@ -5455,10 +5450,49 @@ impl Storage for MemoryStorage {
                     affected_visible_rows.insert((row.branch.clone(), row.row_id));
                 }
             }
+
+            for (branch, row_id) in affected_visible_rows {
+                let history_rows = regions.history_rows_for(&branch, row_id);
+                let context_row = regions
+                    .visible
+                    .get(branch.as_str())
+                    .and_then(|rows| rows.get(&row_id))
+                    .map(|entry| entry.current_row.clone())
+                    .or_else(|| {
+                        history_rows
+                            .iter()
+                            .rev()
+                            .find(|row| row.state.is_visible())
+                            .cloned()
+                    })
+                    .or_else(|| history_rows.last().cloned());
+                if let Some(context_row) = context_row {
+                    rebuild_inputs.push((branch, row_id, context_row, history_rows));
+                }
+            }
         }
 
-        for (branch, row_id) in affected_visible_rows {
-            regions.rebuild_visible_entry(&branch, row_id);
+        let mut rebuilt_visible_entries = Vec::new();
+        let mut rows_without_visible_head = Vec::new();
+        for (branch, row_id, context_row, history_rows) in rebuild_inputs {
+            let context = resolve_history_row_write_context(self, table, &context_row)?;
+            if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+                context.user_descriptor.as_ref(),
+                &history_rows,
+            )
+            .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+            {
+                rebuilt_visible_entries.push(entry);
+            } else {
+                rows_without_visible_head.push((branch, row_id));
+            }
+        }
+
+        if !rebuilt_visible_entries.is_empty() {
+            self.upsert_visible_region_rows(table, &rebuilt_visible_entries)?;
+        }
+        for (branch, row_id) in rows_without_visible_head {
+            self.delete_visible_region_row(table, branch.as_str(), row_id)?;
         }
 
         Ok(())
@@ -5605,18 +5639,27 @@ impl Storage for MemoryStorage {
         else {
             return Ok(None);
         };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(entry.current_row.clone()));
+        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
+        if entry
+            .current_row
+            .confirmed_tier
+            .is_some_and(|tier| tier >= required_tier)
+            || entry.batch_id_for_tier(required_tier).is_some()
+        {
+            return entry.materialize_preview_for_tier_with_storage(
+                self,
+                table,
+                context.user_descriptor.as_ref(),
+                required_tier,
+            );
         }
-
-        Ok(regions
-            .history_rows_for(branch, row_id)
-            .into_iter()
-            .find(|row| row.batch_id() == batch_id))
+        let history_rows = regions.history_rows_for(branch, row_id);
+        crate::row_histories::visible_row_preview_from_history_rows(
+            context.user_descriptor.as_ref(),
+            &history_rows,
+            Some(required_tier),
+        )
+        .map_err(|err| StorageError::IoError(format!("load tiered visible preview: {err}")))
     }
 
     fn load_visible_query_row_for_tier(
@@ -5626,29 +5669,10 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<QueryRowBatch>, StorageError> {
-        let Some(regions) = self.row_histories.get(table) else {
-            return Ok(None);
-        };
-        let Some(entry) = regions
-            .visible
-            .get(branch)
-            .and_then(|rows| rows.get(&row_id))
-        else {
-            return Ok(None);
-        };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(QueryRowBatch::from(&entry.current_row)));
-        }
-
-        Ok(regions
-            .history_rows_for(branch, row_id)
-            .into_iter()
-            .find(|row| row.batch_id() == batch_id)
-            .map(|row| QueryRowBatch::from(&row)))
+        Ok(self
+            .load_visible_region_row_for_tier(table, branch, row_id, required_tier)?
+            .as_ref()
+            .map(QueryRowBatch::from))
     }
 
     fn scan_visible_region_row_batches(
@@ -7908,6 +7932,134 @@ mod tests {
         assert!(
             matches!(error, StorageError::IoError(ref message) if message.contains("missing catalogue-backed row descriptor")),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn exact_visible_row_tier_load_uses_persisted_winner_sidecar() {
+        use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
+        use crate::row_format::decode_row;
+        use crate::row_histories::{RowState, VisibleRowEntry};
+
+        let mut storage = RawTableOnlyMemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let schema_hash = persist_test_schema(&mut storage, &schema);
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "tasks".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let base = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
+        );
+        let edge_title = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("edge-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let worker_done = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Worker),
+        );
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &user_descriptor,
+            &[base.clone(), edge_title.clone(), worker_done.clone()],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+
+        storage
+            .append_history_region_rows(
+                "tasks",
+                &[base.clone(), edge_title.clone(), worker_done.clone()],
+            )
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+            .unwrap();
+
+        let worker_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::Worker,
+        )
+        .unwrap()
+        .expect("worker preview");
+        let edge_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap()
+        .expect("edge preview");
+        let global_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("global preview");
+
+        assert_eq!(
+            decode_row(&user_descriptor, &worker_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &edge_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &global_preview.data).unwrap(),
+            vec![Value::Text("task".into()), Value::Boolean(false)]
         );
     }
 

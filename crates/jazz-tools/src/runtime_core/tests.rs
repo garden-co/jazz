@@ -5991,6 +5991,190 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
 }
 
 #[test]
+fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "tier-aware-merged-row",
+        SyncManager::new(),
+    );
+    let branch_name = core.schema_manager().branch_name().to_string();
+    let descriptor = &schema[&TableName::new("todos")].columns;
+
+    let (row_id, _) = core
+        .insert(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text("base".into())),
+                ("done".to_string(), Value::Boolean(false)),
+            ]),
+            None,
+        )
+        .unwrap();
+    core.immediate_tick();
+
+    let base = core
+        .storage()
+        .load_visible_region_row("todos", &branch_name, row_id)
+        .unwrap()
+        .expect("base visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "todos",
+            base.batch_id,
+            None,
+            Some(DurabilityTier::GlobalServer),
+        )
+        .unwrap();
+    let base = core
+        .storage()
+        .load_visible_region_row("todos", &branch_name, row_id)
+        .unwrap()
+        .expect("patched base visible row");
+
+    let edge_title = crate::row_histories::StoredRowBatch::new(
+        row_id,
+        branch_name.clone(),
+        vec![base.batch_id()],
+        encode_row(
+            descriptor,
+            &[Value::Text("edge-title".into()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        crate::metadata::RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+    let worker_done = crate::row_histories::StoredRowBatch::new(
+        row_id,
+        branch_name.clone(),
+        vec![base.batch_id()],
+        encode_row(
+            descriptor,
+            &[Value::Text("base".into()), Value::Boolean(true)],
+        )
+        .unwrap(),
+        crate::metadata::RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Worker),
+    );
+
+    core.storage_mut()
+        .append_history_region_rows("todos", &[edge_title.clone(), worker_done.clone()])
+        .unwrap();
+    core.storage_mut()
+        .upsert_visible_region_rows(
+            "todos",
+            std::slice::from_ref(
+                &crate::row_histories::VisibleRowEntry::rebuild_with_descriptor(
+                    descriptor,
+                    &[base.clone(), edge_title.clone(), worker_done.clone()],
+                )
+                .unwrap()
+                .expect("merged visible entry"),
+            ),
+        )
+        .unwrap();
+
+    let worker_preview = core
+        .storage()
+        .load_visible_region_row_for_tier("todos", &branch_name, row_id, DurabilityTier::Worker)
+        .unwrap()
+        .expect("worker preview");
+    let edge_preview = core
+        .storage()
+        .load_visible_region_row_for_tier("todos", &branch_name, row_id, DurabilityTier::EdgeServer)
+        .unwrap()
+        .expect("edge preview");
+    let global_preview = core
+        .storage()
+        .load_visible_region_row_for_tier(
+            "todos",
+            &branch_name,
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("global preview");
+    assert_eq!(
+        decode_row(descriptor, &worker_preview.data).unwrap(),
+        vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+    );
+    assert_eq!(
+        decode_row(descriptor, &edge_preview.data).unwrap(),
+        vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+    );
+    assert_eq!(
+        decode_row(descriptor, &global_preview.data).unwrap(),
+        vec![Value::Text("base".into()), Value::Boolean(false)]
+    );
+
+    let worker_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let edge_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let global_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::GlobalServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+
+    assert_eq!(
+        worker_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+        )]
+    );
+    assert_eq!(
+        edge_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+        )]
+    );
+    assert_eq!(
+        global_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("base".into()), Value::Boolean(false)]
+        )]
+    );
+}
+
+#[test]
 fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut s = create_3tier_rc();
 
