@@ -72,6 +72,7 @@ describe("Db auth state", () => {
     const session = {
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external" as const,
     };
     const runtimeClient = {
       updateAuthToken: vi.fn(),
@@ -88,8 +89,7 @@ describe("Db auth state", () => {
     );
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session,
     });
 
@@ -97,8 +97,7 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session,
     });
   });
@@ -121,7 +120,7 @@ describe("Db auth state", () => {
         jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
       },
       runtimeClient as any,
-      { user_id: "bob", claims: { role: "writer" } },
+      { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
       "bob@writer",
     );
 
@@ -129,15 +128,13 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(sharedDb.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session: {
         user_id: "bob",
       },
