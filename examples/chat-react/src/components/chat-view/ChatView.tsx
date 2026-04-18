@@ -5,6 +5,7 @@ import { ChatMessage } from "@/components/chat/ChatMessage";
 import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
+import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../../schema.js";
 
 const INITIAL_MESSAGES_TO_SHOW = 20;
@@ -18,6 +19,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const myProfile = useMyProfile();
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
@@ -100,8 +102,8 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
               <ChatMessage
                 key={msg.id}
                 message={msg}
-                sender={msg.sender}
-                isMe={msg.sender.userId === userId}
+                sender={msg.sender ?? undefined}
+                isMe={msg.senderId === myProfile?.id || msg.sender?.userId === userId}
                 onDelete={() => handleDelete(msg.id)}
               />
             ))

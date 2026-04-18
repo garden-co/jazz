@@ -19,7 +19,11 @@ declare module "vitest/internal/browser" {
     testingServerBlockNetwork: (serverUrl: string) => Promise<void>;
     testingServerUnblockNetwork: (serverUrl: string) => Promise<void>;
     testingServerNetworkDebug: (serverUrl: string) => Promise<TestingServerNetworkDebugState>;
-    testingServerJwtForUser: (userId: string, claims?: Record<string, unknown>) => Promise<string>;
+    testingServerJwtForUser: (
+      userId: string,
+      claims?: Record<string, unknown>,
+      appId?: string,
+    ) => Promise<string>;
   }
 }
 
@@ -44,6 +48,7 @@ export function getTestingServerNetworkDebug(
 export async function getTestingServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
+  appId?: string,
 ): Promise<string> {
-  return commands.testingServerJwtForUser(userId, claims);
+  return commands.testingServerJwtForUser(userId, claims, appId);
 }

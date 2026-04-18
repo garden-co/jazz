@@ -25,6 +25,13 @@ const SCHEMA_PATH = path.join(
   "schema",
   "project_board.schema.json",
 );
+const B5_SCENARIO_PATH = path.join(
+  ROOT_DIR,
+  "benchmarks",
+  "realistic",
+  "scenarios",
+  "b5_server_permission_recursive.json",
+);
 
 function parseArgs(argv) {
   const args = {
@@ -87,7 +94,7 @@ function printHelp() {
   console.log(`Usage: node benchmarks/realistic/profile_browser.mjs [options]
 
 Options:
-  --scenario w4,b2,b3      Comma-separated scenario list (default: ${DEFAULT_SCENARIOS.join(",")})
+  --scenario w4,b2,b3,b5   Comma-separated scenario list (default: ${DEFAULT_SCENARIOS.join(",")})
   --out-dir PATH           Where to write .cpuprofile files (default: ${DEFAULT_OUT_DIR})
   --vite-port N            Vite dev-server port (default: ${DEFAULT_VITE_PORT})
   --cdp-port N             Chromium DevTools port (default: ${DEFAULT_CDP_PORT})
@@ -319,8 +326,10 @@ async function waitForHttp(url, timeoutMs = 10_000) {
 function buildInitScript(schemaTables) {
   return String.raw`
     (async () => {
-      const [{ createDb }] = await Promise.all([
+      const [{ createDb }, { loadWasmModule }, { generateAuthSecret }] = await Promise.all([
         import("/src/runtime/db.ts"),
+        import("/src/runtime/client.js"),
+        import("/src/runtime/auth-secret-store.js"),
       ]);
       const schema = ${jsLiteral(schemaTables)};
       function tableProxy(table, tableSchema = schema) {
@@ -337,8 +346,240 @@ function buildInitScript(schemaTables) {
         };
       }
       function nowMicros() { return Date.now() * 1000; }
-      async function createServerDb(appId, dbName, jwtToken, serverUrl, adminSecret) {
-        return createDb({ appId, dbName, serverUrl, adminSecret, jwtToken, logLevel: "warn" });
+      class Lcg {
+        constructor(seed) {
+          this.state = (BigInt(seed >>> 0) | 1n);
+        }
+        nextU64() {
+          this.state =
+            (this.state * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
+          return this.state;
+        }
+        nextInt(upper) {
+          if (upper <= 1) return 0;
+          return Number(this.nextU64() % BigInt(upper));
+        }
+      }
+      async function createServerDb(options) {
+        const config = {
+          appId: options.appId,
+          dbName: options.dbName,
+          serverUrl: options.serverUrl,
+          adminSecret: options.includeAdminSecret === false ? undefined : options.adminSecret,
+          logLevel: "warn",
+        };
+        if (options.includeJwt !== false && options.jwtToken) {
+          config.jwtToken = options.jwtToken;
+        }
+        if (options.localFirstSecret) {
+          config.auth = { localFirstSecret: options.localFirstSecret };
+        }
+        return createDb(config);
+      }
+      function permissionRecursiveSchema(recursiveDepth) {
+        const folderSelectPolicy = {
+          using: {
+            type: "Or",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "owner_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["user_id"] },
+              },
+              {
+                type: "And",
+                exprs: [
+                  { type: "IsNotNull", column: "parent_id" },
+                  {
+                    type: "Inherits",
+                    operation: "Select",
+                    via_column: "parent_id",
+                    max_depth: recursiveDepth,
+                  },
+                ],
+              },
+            ],
+          },
+        };
+        const folderUpdatePolicy = {
+          using: {
+            type: "Or",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "owner_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["user_id"] },
+              },
+              {
+                type: "And",
+                exprs: [
+                  { type: "IsNotNull", column: "parent_id" },
+                  {
+                    type: "Inherits",
+                    operation: "Update",
+                    via_column: "parent_id",
+                    max_depth: recursiveDepth,
+                  },
+                ],
+              },
+            ],
+          },
+          with_check: {
+            type: "Or",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "owner_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["user_id"] },
+              },
+              {
+                type: "And",
+                exprs: [
+                  { type: "IsNotNull", column: "parent_id" },
+                  {
+                    type: "Inherits",
+                    operation: "Update",
+                    via_column: "parent_id",
+                    max_depth: recursiveDepth,
+                  },
+                ],
+              },
+            ],
+          },
+        };
+        const documentSelectPolicy = {
+          using: {
+            type: "Inherits",
+            operation: "Select",
+            via_column: "folder_id",
+            max_depth: recursiveDepth,
+          },
+        };
+        const documentUpdatePolicy = {
+          using: {
+            type: "And",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "editor_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["user_id"] },
+              },
+              {
+                type: "Inherits",
+                operation: "Update",
+                via_column: "folder_id",
+                max_depth: recursiveDepth,
+              },
+            ],
+          },
+          with_check: {
+            type: "And",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "editor_id",
+                op: "Eq",
+                value: { type: "SessionRef", path: ["user_id"] },
+              },
+              {
+                type: "Inherits",
+                operation: "Update",
+                via_column: "folder_id",
+                max_depth: recursiveDepth,
+              },
+            ],
+          },
+        };
+        return {
+          folders: {
+            columns: [
+              { name: "parent_id", column_type: { type: "Uuid" }, nullable: true, references: "folders" },
+              { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+              { name: "title", column_type: { type: "Text" }, nullable: false },
+              { name: "updated_at", column_type: { type: "Timestamp" }, nullable: false },
+            ],
+            policies: {
+              select: folderSelectPolicy,
+              insert: {},
+              update: folderUpdatePolicy,
+              delete: {},
+            },
+          },
+          documents: {
+            columns: [
+              { name: "folder_id", column_type: { type: "Uuid" }, nullable: false, references: "folders" },
+              { name: "editor_id", column_type: { type: "Text" }, nullable: false },
+              { name: "body", column_type: { type: "Text" }, nullable: false },
+              { name: "revision", column_type: { type: "Integer" }, nullable: false },
+              { name: "updated_at", column_type: { type: "Timestamp" }, nullable: false },
+            ],
+            policies: {
+              select: documentSelectPolicy,
+              insert: {},
+              update: documentUpdatePolicy,
+              delete: {},
+            },
+          },
+        };
+      }
+      async function seedPermissionDataset(db, scenario, permissionSchema, owners) {
+        const folderTable = tableProxy("folders", permissionSchema);
+        const documentTable = tableProxy("documents", permissionSchema);
+        const rng = new Lcg(scenario.seed);
+        const totalFolders = Math.max(4, scenario.folders);
+        const totalDocuments = Math.max(20, scenario.documents);
+        const allowedFolders = [];
+        const deniedFolders = [];
+        const ts = nowMicros();
+        const allowedRoot = await db.insertDurable(folderTable, {
+          parent_id: null,
+          owner_id: owners.allowedOwnerId,
+          title: "allowed-root",
+          updated_at: ts,
+        }, { tier: "worker" });
+        const deniedRoot = await db.insertDurable(folderTable, {
+          parent_id: null,
+          owner_id: owners.deniedOwnerId,
+          title: "denied-root",
+          updated_at: ts + 1,
+        }, { tier: "worker" });
+        allowedFolders.push(allowedRoot.id);
+        deniedFolders.push(deniedRoot.id);
+        for (let i = 2; i < totalFolders; i += 1) {
+          const allowedChain = i % 2 === 0;
+          const parent = allowedChain
+            ? allowedFolders[allowedFolders.length - 1]
+            : deniedFolders[deniedFolders.length - 1];
+          const row = await db.insertDurable(folderTable, {
+            parent_id: parent,
+            owner_id: allowedChain ? owners.allowedOwnerId : owners.deniedOwnerId,
+            title: "folder-" + i,
+            updated_at: ts + i,
+          }, { tier: "worker" });
+          if (allowedChain) allowedFolders.push(row.id);
+          else deniedFolders.push(row.id);
+        }
+        const allowThreshold = Math.max(1, Math.min(99, Math.round(scenario.allow_fraction * 100)));
+        for (let i = 0; i < totalDocuments; i += 1) {
+          const useAllowed = rng.nextInt(100) < allowThreshold;
+          const folderList = useAllowed ? allowedFolders : deniedFolders;
+          const folderId = folderList[rng.nextInt(folderList.length)];
+          const allowAllowedUserWrite = rng.nextInt(100) < allowThreshold;
+          const editorId = useAllowed
+            ? (allowAllowedUserWrite ? owners.allowedOwnerId : owners.intermediateOwnerId)
+            : owners.deniedOwnerId;
+          await db.insertDurable(documentTable, {
+            folder_id: folderId,
+            editor_id: editorId,
+            body: "doc-" + i,
+            revision: 0,
+            updated_at: ts + 10000 + i,
+          }, { tier: "worker" });
+        }
       }
       async function seedDataset(db, config) {
         const usersTable = tableProxy("users");
@@ -435,7 +676,17 @@ function buildInitScript(schemaTables) {
         const hotProjectCount = Math.max(1, Math.round(config.projects * config.hot_project_fraction));
         return { users, projects, taskIds, hotProjectCount };
       }
-      globalThis.__profileHarness = { createDb, createServerDb, query, seedDataset, schema };
+      globalThis.__profileHarness = {
+        createDb,
+        createServerDb,
+        query,
+        seedDataset,
+        schema,
+        loadWasmModule,
+        generateAuthSecret,
+        permissionRecursiveSchema,
+        seedPermissionDataset,
+      };
       return true;
     })()
   `;
@@ -559,6 +810,107 @@ function buildB3Cleanup() {
   return `(async () => { const db = globalThis.__b3Profile?.db; if (db) await db.shutdown(); return true; })()`;
 }
 
+function buildB5Setup(scenario, serverInfo, dbPrefix) {
+  return `
+    (async () => {
+      const h = globalThis.__profileHarness;
+      const scenario = ${jsLiteral(scenario)};
+      const server = ${jsLiteral(serverInfo)};
+      const dbPrefix = ${jsLiteral(dbPrefix)};
+      const permissionSchema = h.permissionRecursiveSchema(Math.max(1, scenario.recursive_depth));
+      const seedLocalSecret = h.generateAuthSecret();
+      const allowedLocalSecret = h.generateAuthSecret();
+      const intermediateLocalSecret = h.generateAuthSecret();
+      const wasmModule = await h.loadWasmModule();
+      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(h.generateAuthSecret());
+      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+      const seedDb = await h.createServerDb({
+        appId: server.appId,
+        dbName: dbPrefix + "-seed",
+        serverUrl: server.serverUrl,
+        adminSecret: server.adminSecret,
+        includeJwt: false,
+        localFirstSecret: seedLocalSecret,
+      });
+      await h.seedPermissionDataset(seedDb, scenario, permissionSchema, {
+        allowedOwnerId: allowedPrincipalId,
+        deniedOwnerId: deniedPrincipalId,
+        intermediateOwnerId: intermediatePrincipalId,
+      });
+      const allowedDb = await h.createServerDb({
+        appId: server.appId,
+        dbName: dbPrefix + "-allowed",
+        serverUrl: server.serverUrl,
+        adminSecret: server.adminSecret,
+        includeAdminSecret: false,
+        includeJwt: false,
+        localFirstSecret: allowedLocalSecret,
+      });
+      const visibleDocumentsQuery = h.query(
+        "documents",
+        [],
+        [["updated_at", "desc"]],
+        1000,
+        permissionSchema
+      );
+      let warmAllowedVisible = 0;
+      const allowedSession = {
+        user_id: allowedPrincipalId,
+        claims: { auth_mode: "local-first" },
+      };
+      const unsubscribe = allowedDb.subscribeAll(
+        visibleDocumentsQuery,
+        (delta) => {
+          warmAllowedVisible = delta.all.length;
+        },
+        undefined,
+        allowedSession,
+      );
+      const warmupDeadline = performance.now() + 30000;
+      while (performance.now() < warmupDeadline) {
+        if (warmAllowedVisible > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (warmAllowedVisible <= 0) {
+        throw new Error("Timed out warming B5 allowed documents");
+      }
+      globalThis.__b5Profile = {
+        seedDb,
+        allowedDb,
+        permissionSchema,
+        visibleDocumentsQuery,
+        unsubscribe,
+      };
+      return { warmAllowedVisible };
+    })()
+  `;
+}
+
+function buildB5Run() {
+  return `
+    (async () => {
+      const { allowedDb, visibleDocumentsQuery } = globalThis.__b5Profile;
+      const t0 = performance.now();
+      const rows = await allowedDb.all(visibleDocumentsQuery);
+      return { rows: rows.length, elapsedMs: performance.now() - t0 };
+    })()
+  `;
+}
+
+function buildB5Cleanup() {
+  return `
+    (async () => {
+      const state = globalThis.__b5Profile;
+      if (!state) return true;
+      if (state.unsubscribe) state.unsubscribe();
+      if (state.seedDb) await state.seedDb.shutdown();
+      if (state.allowedDb) await state.allowedDb.shutdown();
+      return true;
+    })()
+  `;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const outDir = args.outDir;
@@ -566,6 +918,7 @@ async function main() {
 
   const profile = JSON.parse(await readFile(PROFILE_PATH, "utf8"));
   const schemaTables = JSON.parse(await readFile(SCHEMA_PATH, "utf8")).tables;
+  const b5Scenario = JSON.parse(await readFile(B5_SCENARIO_PATH, "utf8"));
 
   const smallProfile = scaledProfile(profile, args.scale);
   const largeProfile = scaledLargeProfile(profile, args.scale, args.largeMultiplier);
@@ -770,6 +1123,13 @@ async function main() {
           buildB3Setup(largeProfile, serverInfo, `profile-b3-${now}`),
           buildB3Run(),
           buildB3Cleanup(),
+        );
+      } else if (scenario === "b5") {
+        await withScenarioProfile(
+          "b5",
+          buildB5Setup(b5Scenario, serverInfo, `profile-b5-${now}`),
+          buildB5Run(),
+          buildB5Cleanup(),
         );
       } else {
         throw new Error(`Unsupported scenario: ${scenario}`);

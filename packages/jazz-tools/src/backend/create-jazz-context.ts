@@ -202,8 +202,25 @@ export class JazzContext {
     };
   }
 
-  private wrapDb(client: JazzClient, session?: Session, attribution?: string): Db {
-    return createDbFromClient(this.buildDbConfig(), client, session, attribution);
+  private wrapDb(
+    client: JazzClient,
+    session?: Session,
+    attribution?: string,
+    backendScoped = false,
+  ): Db {
+    return createDbFromClient(
+      this.buildDbConfig(),
+      client,
+      session,
+      attribution,
+      backendScoped
+        ? {
+            status: "authenticated",
+            transport: "backend",
+            session: session ?? null,
+          }
+        : undefined,
+    );
   }
 
   /**
@@ -239,7 +256,7 @@ export class JazzContext {
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
   asBackend(source?: BackendSchemaInput): Db {
-    return this.wrapDb(this.getClient(source).asBackend());
+    return this.wrapDb(this.getClient(source).asBackend(), undefined, undefined, true);
   }
 
   /**
@@ -249,7 +266,7 @@ export class JazzContext {
   withAttribution(principalId: string, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, principalId);
+    return this.wrapDb(client, undefined, principalId, true);
   }
 
   /**
@@ -283,7 +300,7 @@ export class JazzContext {
     const client = this.getClient(source);
     const session = await this.resolveRequestSession(request);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session);
+    return this.wrapDb(client, session, undefined, true);
   }
 
   /**
@@ -293,7 +310,7 @@ export class JazzContext {
   withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, session.user_id);
+    return this.wrapDb(client, undefined, session.user_id, true);
   }
 
   /**
@@ -310,7 +327,7 @@ export class JazzContext {
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session);
+    return this.wrapDb(client, session, undefined, true);
   }
 
   /**

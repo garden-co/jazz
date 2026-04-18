@@ -556,6 +556,7 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
 
     let mut last_error: Option<String> = None;
+    let mut last_rows: Option<QueryRows> = None;
 
     loop {
         match tokio::time::timeout(
@@ -565,9 +566,10 @@ where
         .await
         {
             Ok(Ok(rows)) => {
-                if let Some(value) = check_rows(rows) {
+                if let Some(value) = check_rows(rows.clone()) {
                     return value;
                 }
+                last_rows = Some(rows);
                 last_error = None;
             }
             Ok(Err(e)) => last_error = Some(e.to_string()),
@@ -577,7 +579,10 @@ where
         if tokio::time::Instant::now() >= deadline {
             match last_error {
                 Some(e) => panic!("timed out waiting for {description}: last query error: {e}"),
-                None => panic!("timed out waiting for {description}"),
+                None => panic!(
+                    "timed out waiting for {description}: last rows: {:?}",
+                    last_rows
+                ),
             }
         }
 
@@ -700,12 +705,14 @@ pub async fn wait_for_subscription_update<F>(
 
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            panic!("timed out waiting for {description}");
+            panic!("timed out waiting for {description}; observed log: {log:#?}");
         }
 
         let delta = tokio::time::timeout(deadline - now, stream.next())
             .await
-            .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for {description}; observed log: {log:#?}")
+            })
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });

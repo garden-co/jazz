@@ -8,7 +8,6 @@ use std::time::Duration;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::server::TestingServer;
-use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,

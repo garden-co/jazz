@@ -52,7 +52,9 @@ function ChatShell(): React.JSX.Element {
 
   async function handleSignOut() {
     await authClient.signOut();
-    await BrowserAuthSecretStore.clearSecret();
+    await BrowserAuthSecretStore.clearSecret({
+      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+    });
   }
 
   const authMode = session?.claims.auth_mode;
@@ -142,7 +144,9 @@ export default function Page(): React.JSX.Element {
         if (ac.signal.aborted) return;
         setConfig({ ...sharedConfig, jwtToken: jwtToken! });
       } else {
-        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret({
+          appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+        });
         if (ac.signal.aborted) return;
         setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
       }

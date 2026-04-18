@@ -313,4 +313,110 @@ describe("JazzClient mutation durability split", () => {
       ],
     ]);
   });
+
+  it("encodes custom updated_at overrides for create and update mutation options", async () => {
+    const insertWithSession = vi.fn(
+      (
+        table: string,
+        values: Record<string, unknown>,
+        _writeContextJson?: string | null,
+        objectId?: string | null,
+      ) => ({
+        id: objectId ?? "generated-id",
+        values: [],
+      }),
+    );
+    const insertDurableWithSession = vi.fn(
+      async (
+        table: string,
+        values: Record<string, unknown>,
+        _writeContextJson?: string | null,
+        _tier = "edge",
+        objectId?: string | null,
+      ) => ({
+        id: objectId ?? "generated-id",
+        values: [],
+      }),
+    );
+    const updateWithSession = vi.fn();
+    const updateDurableWithSession = vi.fn(async () => {});
+    const { client } = makeClient({
+      insertWithSession,
+      insertDurableWithSession,
+      updateWithSession,
+      updateDurableWithSession,
+    });
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+    const updatedAt = 1_764_000_000_000_000;
+    const updatedAtContext = JSON.stringify({ updated_at: updatedAt });
+
+    client.create("todos", insertValues, { updatedAt });
+    await client.createDurable("todos", insertValues, {
+      id: "todo-1",
+      tier: "global",
+      updatedAt,
+    });
+    client.update("row-1", updates, { updatedAt });
+    await client.updateDurable("row-1", updates, { tier: "global", updatedAt });
+
+    expect(insertWithSession).toHaveBeenCalledWith("todos", insertValues, updatedAtContext);
+    expect(insertDurableWithSession).toHaveBeenCalledWith(
+      "todos",
+      insertValues,
+      updatedAtContext,
+      "global",
+      "todo-1",
+    );
+    expect(updateWithSession).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
+    expect(updateDurableWithSession).toHaveBeenCalledWith(
+      "row-1",
+      updates,
+      updatedAtContext,
+      "global",
+    );
+  });
+
+  it("preserves custom updated_at overrides when upsert falls back to update", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insertWithSession = vi.fn(() => {
+      throw insertError;
+    });
+    const insertDurableWithSession = vi.fn(async () => {
+      throw insertError;
+    });
+    const updateWithSession = vi.fn();
+    const updateDurableWithSession = vi.fn(async () => {});
+    const { client } = makeClient({
+      insertWithSession,
+      insertDurableWithSession,
+      updateWithSession,
+      updateDurableWithSession,
+    });
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+    const updatedAt = 1_764_000_000_000_000;
+    const updatedAtContext = JSON.stringify({ updated_at: updatedAt });
+
+    expect(client.upsert("todos", values, { id: externalId, updatedAt })).toBeUndefined();
+    await expect(
+      client.upsertDurable("todos", values, { id: externalId, updatedAt }),
+    ).resolves.toBeUndefined();
+
+    expect(insertWithSession).toHaveBeenCalledWith("todos", values, updatedAtContext, externalId);
+    expect(insertDurableWithSession).toHaveBeenCalledWith(
+      "todos",
+      values,
+      updatedAtContext,
+      "edge",
+      externalId,
+    );
+    expect(updateWithSession).toHaveBeenCalledWith(externalId, values, updatedAtContext);
+    expect(updateDurableWithSession).toHaveBeenCalledWith(
+      externalId,
+      values,
+      updatedAtContext,
+      "edge",
+    );
+  });
 });
