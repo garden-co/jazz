@@ -5864,6 +5864,84 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
 }
 
 #[test]
+fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
+    let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    // Keep the row local-only so B replies with an empty remote scope snapshot.
+    s.a.batched_tick();
+    s.a.sync_sender().take();
+
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    s.a.batched_tick();
+    let a_out = s.a.sync_sender().take();
+    for entry in a_out {
+        if entry.destination == Destination::Server(s.b_server_for_a)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+
+    let b_out = s.b.sync_sender().take();
+    assert!(
+        b_out.iter().any(|entry| matches!(
+            entry.payload,
+            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+        )),
+        "Expected an empty remote scope snapshot from B"
+    );
+    for entry in b_out {
+        if entry.destination == Destination::Client(s.a_client_of_b) {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the local row visible"
+            );
+            assert_eq!(results[0].0, id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
 fn rc_query_settled_tier_empty_resolves() {
     let mut s = create_3tier_rc();
 
@@ -6439,6 +6517,88 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         "Second callback should contain one added row"
     );
     assert_eq!(second_delivery[0].0, second_id);
+}
+
+#[test]
+fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
+    let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    // Keep the row local-only so B replies with an empty remote scope snapshot.
+    s.a.batched_tick();
+    s.a.sync_sender().take();
+
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                received_clone
+                    .lock()
+                    .unwrap()
+                    .push(decode_added_rows(&delta));
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    s.a.batched_tick();
+    let a_out = s.a.sync_sender().take();
+    for entry in a_out {
+        if entry.destination == Destination::Server(s.b_server_for_a)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+
+    let b_out = s.b.sync_sender().take();
+    assert!(
+        b_out.iter().any(|entry| matches!(
+            entry.payload,
+            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+        )),
+        "Expected an empty remote scope snapshot from B"
+    );
+    for entry in b_out {
+        if entry.destination == Destination::Client(s.a_client_of_b) {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Frontier completion should emit one initial snapshot"
+    );
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "Initial snapshot should keep the local row"
+    );
+    assert_eq!(calls[0][0].0, id);
 }
 
 #[test]

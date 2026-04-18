@@ -2181,13 +2181,13 @@ impl QueryManager {
         tuples
             .into_iter()
             .filter(|tuple| {
-                tuple
-                    .id_iter()
-                    .any(|id| pending_local_row_ids.contains(&id))
-                    || tuple
-                        .provenance()
-                        .iter()
-                        .any(|scoped_object| remote_scope.contains(scoped_object))
+                tuple.id_iter().any(|id| {
+                    pending_local_row_ids.contains(&id)
+                        || self.pending_local_row_batches.contains_key(&id)
+                }) || tuple
+                    .provenance()
+                    .iter()
+                    .any(|scoped_object| remote_scope.contains(scoped_object))
             })
             .collect()
     }
