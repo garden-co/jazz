@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import react from "@vitejs/plugin-react-swc";
+import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -7,8 +7,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 /**
  * Vitest configuration for React component/hook tests in react-core.
- * Uses happy-dom and @vitejs/plugin-react-swc, mirroring the inspector package's
- * working test setup.
+ * Uses happy-dom and @vitejs/plugin-react.
  * Cannot share the main vitest.config.ts which uses pool:forks and ssr.noExternal:true
  * (required for node:sqlite tests, incompatible with React hooks testing).
  */
