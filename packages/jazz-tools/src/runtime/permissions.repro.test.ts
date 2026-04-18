@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
@@ -40,8 +40,6 @@ type ReproEnv = {
   context: JazzContext;
   server: { stop(): Promise<void>; url: string };
 };
-
-const envs: ReproEnv[] = [];
 
 function seedScenario(context: JazzContext): void {
   const db = context.asBackend(reproApp);
@@ -112,35 +110,30 @@ async function runCase(
     userBranch: "main",
     tier: "edge",
   });
-  envs.push({ context, server });
+  const env: ReproEnv = { context, server };
 
-  seedScenario(context);
+  try {
+    seedScenario(context);
 
-  const aliceDb = context.forSession(
-    {
-      user_id: "alice",
-      claims: {},
-    },
-    reproApp,
-  );
+    const aliceDb = context.forSession(
+      {
+        user_id: "alice",
+        claims: {},
+      },
+      reproApp,
+    );
 
-  const names = (await aliceDb.all(reproApp.teams.where({}))).map((team) => team.name).sort();
-  expect(names).toEqual([...expectedNames].sort());
-  return names;
+    const names = (await aliceDb.all(reproApp.teams.where({}))).map((team) => team.name).sort();
+    expect(names).toEqual([...expectedNames].sort());
+    return names;
+  } finally {
+    await env.context.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await env.server.stop();
+  }
 }
 
 describe("runtime permission repros for recursive gather and qualified predicates", () => {
-  afterEach(async () => {
-    while (envs.length > 0) {
-      const env = envs.pop();
-      if (!env) {
-        continue;
-      }
-      await env.context.shutdown();
-      await env.server.stop();
-    }
-  });
-
   it("matches the original four runtime repro cases", async () => {
     await runCase(["Alice"], ({ policy, session }) => {
       policy.teams.allowRead.where((team) =>
