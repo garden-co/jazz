@@ -44,7 +44,7 @@ import {
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery } from "./query-builder-shape.js";
+import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -197,6 +197,48 @@ function resolveHopOutputTable(
     currentTable = relation.toTable;
   }
   return currentTable;
+}
+
+function resolveBuiltRelationOutputTable(schema: WasmSchema, relation: BuiltRelation): string {
+  if (relation.union) {
+    const first = relation.union.inputs[0];
+    if (!first) {
+      throw new Error("union(...) requires at least one relation.");
+    }
+    const firstTable = resolveBuiltRelationOutputTable(schema, first);
+    for (const input of relation.union.inputs.slice(1)) {
+      const inputTable = resolveBuiltRelationOutputTable(schema, input);
+      if (inputTable !== firstTable) {
+        throw new Error("union(...) requires all relations to output the same table.");
+      }
+    }
+    return firstTable;
+  }
+
+  const seedTable = relation.gather?.seed
+    ? resolveBuiltRelationOutputTable(schema, relation.gather.seed)
+    : relation.table;
+  if (!seedTable) {
+    throw new Error("gather(...) seed relation is missing table metadata.");
+  }
+  const hops = relation.hops ?? [];
+  return hops.length > 0 ? resolveHopOutputTable(schema, seedTable, hops) : seedTable;
+}
+
+function resolveBuiltQueryOutputTable(
+  schema: WasmSchema,
+  builtQuery: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  if (builtQuery.gather?.seed) {
+    const gatherTable = resolveBuiltRelationOutputTable(schema, builtQuery.gather.seed);
+    return builtQuery.hops.length > 0
+      ? resolveHopOutputTable(schema, gatherTable, builtQuery.hops)
+      : gatherTable;
+  }
+
+  return builtQuery.hops.length > 0
+    ? resolveHopOutputTable(schema, builtQuery.table, builtQuery.hops)
+    : builtQuery.table;
 }
 
 function resolveSchemaWithTable(
@@ -1332,14 +1374,11 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -1442,12 +1481,9 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
@@ -1696,10 +1732,7 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
@@ -1707,7 +1740,7 @@ class ClientBackedDb extends Db {
       this.session,
       options,
     );
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -1727,12 +1760,9 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>

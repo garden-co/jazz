@@ -1403,6 +1403,20 @@ pub fn bind_relation_refs(
                     outer_row_id,
                 )?,
             }),
+            RelExpr::Union { inputs } => Some(RelExpr::Union {
+                inputs: inputs
+                    .iter()
+                    .map(|input| {
+                        bind_rel_expr(
+                            input,
+                            outer_content,
+                            outer_descriptor,
+                            session,
+                            outer_row_id,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            }),
             RelExpr::Join {
                 left,
                 right,
