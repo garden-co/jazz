@@ -6,7 +6,7 @@ use crate::query_manager::types::Value;
 
 use super::{StorageError, encode_value};
 
-const INDEX_KEY_MAX_BYTES: usize = u16::MAX as usize;
+const INDEX_KEY_MAX_BYTES: usize = 5 * 1024;
 const INDEX_ENTRY_UUID_HEX_BYTES: usize = 32;
 const COMMIT_ID_HEX_BYTES: usize = 64;
 const OVERFLOW_INDEX_VALUE_MARKER: char = '~';
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn oversized_text_index_segments_preserve_real_prefix() {
-        let value = Value::Text("x".repeat(40_000));
+        let value = Value::Text("x".repeat(3_000));
         let encoded_hex = hex::encode(encode_value(&value));
         let segment = encode_index_value_segment("todos", "title", "main", &value)
             .expect("oversized text should use overflow segment");
@@ -492,18 +492,18 @@ mod tests {
     #[test]
     fn oversized_text_segments_sort_by_prefix() {
         let a =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(40_000)))
+            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(3_000)))
                 .expect("a segment");
         let b =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(40_000)))
+            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(3_000)))
                 .expect("b segment");
         assert!(a < b, "overflow segments should preserve prefix ordering");
     }
 
     #[test]
     fn range_bounds_support_oversized_text_values() {
-        let min = Value::Text("a".repeat(40_000));
-        let max = Value::Text("b".repeat(40_000));
+        let min = Value::Text("a".repeat(3_000));
+        let max = Value::Text("b".repeat(3_000));
         let bounds = index_range_scan_bounds(
             "todos",
             "title",
@@ -514,6 +514,35 @@ mod tests {
         assert!(
             bounds.is_some(),
             "overflow text values should still produce range bounds"
+        );
+    }
+
+    #[test]
+    fn huge_text_index_entries_stay_within_5kb_budget() {
+        let key = index_entry_key(
+            "corporations",
+            "name",
+            "dev-28d7fd1c1869-main",
+            &Value::Text("x".repeat(20_000)),
+            ObjectId::new(),
+        )
+        .expect("huge indexed text should still compress into the budget");
+        let (segment, _) = key
+            .rsplit_once(':')
+            .expect("index keys should end with the row uuid");
+        assert!(
+            segment.contains(OVERFLOW_INDEX_VALUE_MARKER),
+            "large values should still use the overflow marker"
+        );
+        let key_bytes = index_entry_key_bytes(
+            "corporations",
+            "name",
+            "dev-28d7fd1c1869-main",
+            segment.len(),
+        );
+        assert!(
+            key_bytes <= INDEX_KEY_MAX_BYTES,
+            "encoded key should fit within the configured budget"
         );
     }
 }
