@@ -395,10 +395,34 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
-        let _ = (table, object_id, values, write_context);
-        Err(RuntimeError::WriteError(
-            "upsert_with_id is not supported on this branch".to_string(),
-        ))
+        let _span = debug_span!("upsert", table, %object_id).entered();
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let batch_id = self
+            .schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            self.track_local_batch(
+                object_id,
+                batch_id,
+                BatchMode::Transactional,
+                self.default_requested_tier_for_transaction(),
+            )?;
+        }
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
     }
 
     /// Delete a row.
@@ -625,10 +649,41 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-        let _ = (table, object_id, values, write_context, tier);
-        Err(RuntimeError::WriteError(
-            "upsert_persisted_with_id is not supported on this branch".to_string(),
-        ))
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let batch_id = self
+            .schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
+
+        let (sender, receiver) = oneshot::channel();
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(Ok(()));
+        } else {
+            let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
+            self.ack_watchers
+                .entry(row_batch_key)
+                .or_default()
+                .push((tier, sender));
+        }
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(receiver)
     }
 
     /// Delete a row and return the logical batch id plus a receiver that

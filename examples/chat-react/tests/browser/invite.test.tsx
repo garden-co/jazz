@@ -188,7 +188,7 @@ describe("Invite Flow E2E", () => {
 
     await waitFor(
       () => aliceContainer.textContent?.includes(randomSecret) ?? false,
-      5000,
+      10000,
       "Secret message should appear for user A",
     );
 

@@ -8,6 +8,13 @@ use std::collections::HashMap;
 type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowBatch);
 
 impl SyncManager {
+    fn scope_delivery_row(mut row: StoredRowBatch) -> StoredRowBatch {
+        if row.state.is_visible() {
+            row.parents.clear();
+        }
+        row
+    }
+
     pub(super) fn queue_catalogue_sync_to_server_from_storage<H: Storage>(
         &mut self,
         server_id: ServerId,
@@ -263,6 +270,7 @@ impl SyncManager {
         force_resend: bool,
         require_scope: bool,
     ) {
+        let row = Self::scope_delivery_row(row);
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")

@@ -171,6 +171,36 @@ impl FailingHistoryPatchStorage {
 }
 
 impl Storage for FailingHistoryPatchStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn raw_table_put(
         &mut self,
         table: &str,
@@ -409,16 +439,13 @@ fn memory_size_separates_sync_state_buckets() {
         operation: crate::query_manager::policy::Operation::Insert,
     });
 
-    let (row_objects, index_objects, subscriptions, outbox_inbox, total) = sm.memory_size();
+    let (catalogue, connections, subscriptions, queues, total) = sm.memory_size();
 
-    assert!(row_objects > 0);
-    assert_eq!(index_objects, 0);
+    assert_eq!(catalogue, 0);
+    assert!(connections > 0);
     assert!(subscriptions > 0);
-    assert!(outbox_inbox > 0);
-    assert_eq!(
-        total,
-        row_objects + index_objects + subscriptions + outbox_inbox
-    );
+    assert!(queues > 0);
+    assert_eq!(total, catalogue + connections + subscriptions + queues);
 }
 
 #[test]
@@ -671,6 +698,7 @@ fn row_batch_created_emits_row_batch_state_changed_to_source() {
     let server_id = ServerId::new();
     let row_id = ObjectId::new();
     let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    seed_users_schema(&mut io);
 
     sm.process_from_server(
         &mut io,
@@ -1010,6 +1038,10 @@ fn initial_query_sync_sends_only_current_row_for_deep_history() {
     );
     assert_eq!(row_payloads[0].batch_id(), newer.batch_id());
     assert_eq!(row_payloads[0].data, newer.data);
+    assert!(
+        row_payloads[0].parents.is_empty(),
+        "initial sync payload should be self-contained for subscribers"
+    );
 }
 
 #[test]
@@ -1433,6 +1465,154 @@ fn stale_row_batch_from_client_replays_upstream_without_regressing_visible_row()
             payload: SyncPayload::RowBatchCreated { row, .. },
         } if id == server_id && row.batch_id() == older.batch_id()
     )));
+}
+
+#[test]
+fn stale_row_batch_state_change_from_server_does_not_regress_newer_visible_row() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+
+    add_server(&mut sm, &io, server_id);
+
+    let newer = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 2_000, b"newer"),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+    seed_visible_row(&mut sm, &mut io, "users", newer.clone());
+
+    let older = visible_row(row_id, "main", Vec::new(), 1_000, b"older");
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: older.clone(),
+        },
+    );
+
+    assert_eq!(
+        load_visible_row(&io, "users", row_id, "main").batch_id(),
+        newer.batch_id(),
+        "stale row replay should not replace the newer visible row",
+    );
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            batch_id: older.batch_id(),
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    assert_eq!(
+        load_visible_row(&io, "users", row_id, "main").batch_id(),
+        newer.batch_id(),
+        "confirming a stale replayed row must not regress the visible winner",
+    );
+}
+
+#[test]
+fn stale_divergent_row_batch_from_client_does_not_regress_newer_visible_row() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    add_server(&mut sm, &io, server_id);
+
+    seed_users_schema(&mut io);
+    create_test_row_with_id(&mut io, row_id, Some(row_metadata("users")));
+
+    let base = visible_row(row_id, "main", Vec::new(), 1_000, b"alice-v1");
+    let alice_v2 = visible_row(row_id, "main", vec![base.batch_id()], 2_000, b"alice-v2");
+    let alice_v3 = visible_row(
+        row_id,
+        "main",
+        vec![alice_v2.batch_id()],
+        3_000,
+        b"alice-v3",
+    );
+    let alice_v4 = row_with_state(
+        visible_row(
+            row_id,
+            "main",
+            vec![alice_v3.batch_id()],
+            4_000,
+            b"alice-v4",
+        ),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+
+    let history = vec![
+        base.clone(),
+        alice_v2.clone(),
+        alice_v3.clone(),
+        alice_v4.clone(),
+    ];
+    io.append_history_region_rows("users", &history).unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&VisibleRowEntry::rebuild(alice_v4.clone(), &history)),
+    )
+    .unwrap();
+
+    let bob_stale = visible_row(
+        row_id,
+        "main",
+        vec![base.batch_id()],
+        2_500,
+        b"bob-offline-edit",
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: bob_stale.clone(),
+        },
+    );
+
+    assert_eq!(
+        load_visible_row(&io, "users", row_id, "main").batch_id(),
+        alice_v4.batch_id(),
+        "stale divergent replay should not replace the newer visible row",
+    );
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            batch_id: bob_stale.batch_id(),
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    assert_eq!(
+        load_visible_row(&io, "users", row_id, "main").batch_id(),
+        alice_v4.batch_id(),
+        "acknowledging the stale divergent replay must not regress the visible winner",
+    );
 }
 
 #[test]

@@ -419,6 +419,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;
@@ -709,6 +710,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;
@@ -1116,6 +1118,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;
@@ -1260,6 +1263,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("documents", READY_TIMEOUT)
         .connect()
         .await;

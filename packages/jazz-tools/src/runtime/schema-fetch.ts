@@ -232,6 +232,43 @@ export async function publishStoredPermissions(
   };
 }
 
+export interface FetchSchemaConnectivityOptions {
+  adminSecret: string;
+  pathPrefix?: string;
+  fromHash: string;
+  toHash: string;
+}
+
+export async function fetchSchemaConnectivity(
+  serverUrl: string,
+  options: FetchSchemaConnectivityOptions,
+): Promise<{ connected: boolean }> {
+  const endpoint = buildEndpointUrl(serverUrl, "/admin/schema-connectivity", options.pathPrefix);
+  const url = new URL(endpoint);
+  url.searchParams.set("fromHash", options.fromHash);
+  url.searchParams.set("toHash", options.toHash);
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      "X-Jazz-Admin-Secret": options.adminSecret,
+    },
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(
+      `Schema connectivity fetch failed: ${response.status} ${response.statusText}${detail}`,
+    );
+  }
+
+  const body = (await response.json()) as { connected?: boolean };
+  return {
+    connected: body.connected ?? false,
+  };
+}
+
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: number }

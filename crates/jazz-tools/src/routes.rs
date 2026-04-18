@@ -32,6 +32,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .route("/admin/schemas", post(publish_schema_handler))
+        .route(
+            "/admin/schema-connectivity",
+            get(schema_connectivity_handler),
+        )
         .route("/admin/permissions/head", get(permissions_head_handler))
         .route(
             "/admin/permissions",
@@ -69,6 +73,13 @@ struct StoredSchemaResponse {
 struct AdminSubscriptionIntrospectionParams {
     #[serde(rename = "appId")]
     app_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaConnectivityParams {
+    from_hash: String,
+    to_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +173,11 @@ struct StoredPermissionsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct SchemaConnectivityResponse {
+    connected: bool,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishMigrationResponse {
     object_id: String,
@@ -250,6 +266,11 @@ fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> 
     origin.set_query(None);
     origin.set_fragment(None);
 
+    let (path_only, query) = match path.split_once('?') {
+        Some((path_only, query)) => (path_only, Some(query)),
+        None => (path, None),
+    };
+
     let mut full_path = parsed.path().trim_end_matches('/').to_string();
     if full_path.is_empty() {
         full_path.push('/');
@@ -257,9 +278,10 @@ fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> 
     if !full_path.ends_with('/') {
         full_path.push('/');
     }
-    full_path.push_str(path.trim_start_matches('/'));
+    full_path.push_str(path_only.trim_start_matches('/'));
 
     origin.set_path(&full_path);
+    origin.set_query(query);
     Ok(origin.to_string())
 }
 
@@ -392,6 +414,80 @@ async fn schema_hashes_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "failed to read schema hashes: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
+/// Return whether two known schema hashes are connected by non-draft uploaded migrations.
+///
+/// Requires a valid admin secret.
+async fn schema_connectivity_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<SchemaConnectivityParams>,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    if matches!(
+        &state.catalogue_authority,
+        CatalogueAuthorityMode::Forward { .. }
+    ) {
+        let forwarded_path = format!(
+            "/admin/schema-connectivity?fromHash={}&toHash={}",
+            params.from_hash, params.to_hash
+        );
+        return match forward_catalogue_request(&state, reqwest::Method::GET, &forwarded_path, None)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+    }
+
+    let from_hash = match parse_schema_hash_param(&params.from_hash) {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+    let to_hash = match parse_schema_hash_param(&params.to_hash) {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+
+    match state.runtime.with_schema_manager(|schema_manager| {
+        schema_manager.are_schema_hashes_connected(from_hash, to_hash)
+    }) {
+        Ok(connected) => (
+            StatusCode::OK,
+            Json(SchemaConnectivityResponse { connected }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to compute schema connectivity: {err}"
             ))),
         )
             .into_response(),
@@ -1076,6 +1172,23 @@ fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
     Ok(SchemaHash::from_bytes(hash_bytes))
 }
 
+fn connection_schema_diagnostics_from_handshake(
+    state: &Arc<ServerState>,
+    handshake: &crate::transport_manager::AuthHandshake,
+) -> Result<
+    Option<crate::sync_manager::ConnectionSchemaDiagnostics>,
+    crate::runtime_tokio::RuntimeError,
+> {
+    let Some(client_schema_hash) = handshake.declared_schema_hash() else {
+        return Ok(None);
+    };
+
+    let diagnostics = state
+        .runtime
+        .with_schema_manager(|sm| sm.connection_schema_diagnostics(client_schema_hash))?;
+    Ok(diagnostics.has_issues().then_some(diagnostics))
+}
+
 fn parse_object_id_param(object_id_text: &str) -> Result<ObjectId, String> {
     let uuid = Uuid::parse_str(object_id_text)
         .map_err(|_| "invalid object id: expected UUID".to_string())?;
@@ -1155,15 +1268,14 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerStat
 /// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
 /// the old `/sync` + `/events` handlers.
 enum WsClientSetup {
-    Admin,
     Backend,
     Session(crate::query_manager::session::Session),
 }
 
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
-/// Priority matches the old HTTP handler pair:
-/// 1. `admin_secret` valid → `WsClientSetup::Admin` (full catalogue access)
+/// Priority is:
+/// 1. `admin_secret` valid → `WsClientSetup::Backend`
 /// 2. `backend_secret` present + no session header → `WsClientSetup::Backend`
 /// 3. Otherwise → `extract_session` → `WsClientSetup::Session`
 ///
@@ -1178,6 +1290,14 @@ async fn authenticate_ws_handshake(
 
     let auth = &handshake.auth;
 
+    // `admin_secret` is an explicit request to run this WS transport as the
+    // backend. Validate it first and short-circuit all user-scoped auth.
+    if let Some(admin_secret) = auth.admin_secret.as_deref() {
+        validate_admin_secret(Some(admin_secret), &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Backend);
+    }
+
     // Build a synthetic HeaderMap from the handshake auth fields.
     let mut headers = HeaderMap::new();
 
@@ -1191,11 +1311,6 @@ async fn authenticate_ws_handshake(
             .map_err(|e| format!("invalid backend_secret header value: {e}"))?;
         headers.insert("X-Jazz-Backend-Secret", value);
     }
-    if let Some(admin) = &auth.admin_secret {
-        let value = HeaderValue::from_str(admin)
-            .map_err(|e| format!("invalid admin_secret header value: {e}"))?;
-        headers.insert("X-Jazz-Admin-Secret", value);
-    }
     if let Some(session_val) = &auth.backend_session {
         let json = serde_json::to_string(session_val)
             .map_err(|e| format!("failed to serialise backend_session: {e}"))?;
@@ -1207,23 +1322,9 @@ async fn authenticate_ws_handshake(
 
     let has_jwt = headers.get(axum::http::header::AUTHORIZATION).is_some();
     let has_session_header = headers.get("X-Jazz-Session").is_some();
-    let admin_secret = headers
-        .get("X-Jazz-Admin-Secret")
-        .and_then(|v| v.to_str().ok());
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|v| v.to_str().ok());
-
-    // 1. Admin secret — only when no user-scoped credential (JWT or session) is
-    //    present.  Browser workers send both admin_secret and jwt_token; the JWT
-    //    must win so the connection carries a session and row-level policies are
-    //    applied correctly.  Pure admin/tooling clients that have no JWT still
-    //    get full Admin access.
-    if admin_secret.is_some() && !has_jwt && !has_session_header {
-        validate_admin_secret(admin_secret, &state.auth_config)
-            .map_err(|(_, msg)| msg.to_string())?;
-        return Ok(WsClientSetup::Admin);
-    }
 
     // 2. Backend secret — only when no user-scoped JWT is present.  Clients
     //    that carry both a backend_secret and a jwt_token (e.g. test helpers
@@ -1248,15 +1349,6 @@ async fn authenticate_ws_handshake(
         .await
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?
     };
-
-    // 4. Fallback: admin secret when JWT auth produced no session (e.g. JWT is
-    //    absent but admin_secret was provided alongside a session header for
-    //    backend impersonation with elevated access).
-    if session.is_none() && admin_secret.is_some() {
-        validate_admin_secret(admin_secret, &state.auth_config)
-            .map_err(|(_, msg)| msg.to_string())?;
-        return Ok(WsClientSetup::Admin);
-    }
 
     let session =
         session.ok_or_else(|| "Session required. Provide JWT or backend secret.".to_string())?;
@@ -1325,7 +1417,6 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     };
     let role = match &setup {
-        WsClientSetup::Admin => "admin",
         WsClientSetup::Backend => "backend",
         WsClientSetup::Session(_) => "session",
     };
@@ -1345,9 +1436,6 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
 
     // 5. Ensure the client state in the runtime.
     match setup {
-        WsClientSetup::Admin => {
-            let _ = state.runtime.ensure_client_as_admin(client_id);
-        }
         WsClientSetup::Backend => {
             let _ = state.runtime.ensure_client_as_backend(client_id);
         }
@@ -1356,28 +1444,21 @@ async fn handle_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
         }
     }
 
-    // 5b. Dispatch connection schema diagnostics if client sent a schema hash.
-    if let Some(ref hash_str) = handshake.catalogue_state_hash
-        && let Ok(client_schema_hash) = parse_schema_hash_param(hash_str)
-    {
-        match state
-            .runtime
-            .with_schema_manager(|sm| sm.connection_schema_diagnostics(client_schema_hash))
-        {
-            Ok(diagnostics) if diagnostics.has_issues() => {
-                state.connection_event_hub.dispatch_payload(
-                    client_id,
-                    crate::sync_manager::SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
-                );
-            }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::error!(
-                    %client_id,
-                    %client_schema_hash,
-                    "failed to compute connection schema diagnostics: {err}"
-                );
-            }
+    // 5b. Dispatch connection schema diagnostics if client sent a declared schema hash.
+    match connection_schema_diagnostics_from_handshake(&state, &handshake) {
+        Ok(Some(diagnostics)) => {
+            state.connection_event_hub.dispatch_payload(
+                client_id,
+                crate::sync_manager::SyncPayload::ConnectionSchemaDiagnostics(diagnostics),
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(
+                %client_id,
+                declared_schema_hash = ?handshake.declared_schema_hash,
+                "failed to compute connection schema diagnostics: {err}"
+            );
         }
     }
 
@@ -1730,6 +1811,7 @@ mod tests {
             client_id: client_id.to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
 
         // Authenticate should fail — the `authenticate_ws_handshake` function is
@@ -2016,6 +2098,32 @@ mod tests {
                 }),
             )
             .route(
+                "/admin/schema-connectivity",
+                get({
+                    let forwarded = forwarded_for_router.clone();
+                    move |Query(params): Query<SchemaConnectivityParams>, headers: HeaderMap| {
+                        let forwarded = forwarded.clone();
+                        async move {
+                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
+                                method: "GET".to_string(),
+                                path: format!(
+                                    "/admin/schema-connectivity?fromHash={}&toHash={}",
+                                    params.from_hash, params.to_hash
+                                ),
+                                admin_secret: headers
+                                    .get("X-Jazz-Admin-Secret")
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(str::to_string),
+                                body: None,
+                            });
+                            Json(serde_json::json!({
+                                "connected": true,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
                 "/admin/permissions/head",
                 get({
                     let forwarded = forwarded_for_router.clone();
@@ -2219,6 +2327,19 @@ mod tests {
             .unwrap();
         assert_eq!(permissions_head_response.status(), StatusCode::OK);
 
+        let schema_connectivity_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(schema_connectivity_response.status(), StatusCode::OK);
+
         let permissions_response = app
             .clone()
             .oneshot(
@@ -2258,7 +2379,7 @@ mod tests {
         assert_eq!(publish_permissions_response.status(), StatusCode::CONFLICT);
 
         let forwarded = forwarded.lock().unwrap().clone();
-        assert_eq!(forwarded.len(), 7);
+        assert_eq!(forwarded.len(), 8);
         assert!(
             forwarded
                 .iter()
@@ -2269,10 +2390,14 @@ mod tests {
         assert_eq!(forwarded[2].path, "/admin/schemas");
         assert_eq!(forwarded[3].path, "/admin/migrations");
         assert_eq!(forwarded[4].path, "/admin/permissions/head");
-        assert_eq!(forwarded[5].path, "/admin/permissions");
-        assert_eq!(forwarded[6].path, "/admin/permissions");
         assert_eq!(
-            forwarded[6]
+            forwarded[5].path,
+            "/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(forwarded[6].path, "/admin/permissions");
+        assert_eq!(forwarded[7].path, "/admin/permissions");
+        assert_eq!(
+            forwarded[7]
                 .body
                 .as_ref()
                 .and_then(|body| body.get("expectedParentBundleObjectId"))
@@ -2485,6 +2610,106 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).expect("permissions json");
         assert!(json["head"].is_null());
         assert!(json["permissions"].is_null());
+    }
+
+    #[tokio::test]
+    async fn schema_connectivity_handler_reports_uploaded_migration_connectivity() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2).await;
+        state
+            .runtime
+            .add_known_schema(v1)
+            .expect("seed known schema for connectivity test");
+        let app = make_test_router(state.clone());
+
+        let disconnected = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/admin/schema-connectivity?fromHash={}&toHash={}",
+                        v1_hash, v2_hash
+                    ))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        let disconnected_body = body::to_bytes(disconnected.into_body(), usize::MAX)
+            .await
+            .expect("disconnected body");
+        let disconnected_json: Value =
+            serde_json::from_slice(&disconnected_body).expect("disconnected json");
+        assert_eq!(disconnected_json["connected"], Value::Bool(false));
+
+        let publish_migration_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "fromHash": v1_hash.to_string(),
+                            "toHash": v2_hash.to_string(),
+                            "forward": [{
+                                "table": "users",
+                                "operations": [{
+                                    "type": "rename",
+                                    "column": "email",
+                                    "value": "email_address"
+                                }]
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(publish_migration_response.status(), StatusCode::CREATED);
+
+        let connected = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!(
+                        "/admin/schema-connectivity?fromHash={}&toHash={}",
+                        v1_hash, v2_hash
+                    ))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(connected.status(), StatusCode::OK);
+        let connected_body = body::to_bytes(connected.into_body(), usize::MAX)
+            .await
+            .expect("connected body");
+        let connected_json: Value =
+            serde_json::from_slice(&connected_body).expect("connected json");
+        assert_eq!(connected_json["connected"], Value::Bool(true));
     }
 
     #[tokio::test]
@@ -2994,6 +3219,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ws_handler_uses_declared_schema_hash_for_connection_diagnostics() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let state = make_state_with_schema(schema).await;
+        let declared_hash = SchemaHash::from_bytes([9; 32]);
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
+            declared_schema_hash: Some(declared_hash.to_string()),
+        };
+
+        let diagnostics = connection_schema_diagnostics_from_handshake(&state, &handshake)
+            .expect("compute diagnostics")
+            .expect("declared schema mismatch should produce diagnostics");
+
+        assert_eq!(diagnostics.client_schema_hash, declared_hash);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ws_handler_logs_when_connection_is_established() {
         // Exercise the real /ws route so the assertion covers the actual
@@ -3024,6 +3274,7 @@ mod tests {
                 ..Default::default()
             },
             catalogue_state_hash: None,
+            declared_schema_hash: None,
         };
         let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
         ws.send(WsMessage::Binary(

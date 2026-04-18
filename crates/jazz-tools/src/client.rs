@@ -915,6 +915,79 @@ mod tests {
         catalogue_hash
     }
 
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn seeded_client_storage_persists_learned_schema_and_lens() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-seeded-storage");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+
+        let db_path = data_dir.path().join("jazz.rocksdb");
+        let storage =
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        let entries = storage
+            .scan_catalogue_entries()
+            .expect("scan seeded catalogue entries");
+        let learned_object_id = learned_hash.to_object_id();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.object_id == learned_object_id),
+            "seeded storage should persist the learned schema object"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.object_type()
+                == Some(crate::metadata::ObjectType::CatalogueLens.as_str())),
+            "seeded storage should persist at least one learned lens"
+        );
+
+        storage.close().expect("close seeded client storage");
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn boxed_client_storage_rehydrates_learned_schema_from_catalogue() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-boxed-rehydrate");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let concrete_storage = {
+            let db_path = data_dir.path().join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
+                .expect("open seeded client storage concretely")
+        };
+        let concrete_manager = build_client_schema_manager(&concrete_storage, &context)
+            .expect("rehydrate schema manager from concrete storage");
+        assert!(
+            concrete_manager
+                .known_schema_hashes()
+                .contains(&learned_hash),
+            "concrete storage rehydrate should learn the newer schema"
+        );
+        concrete_storage
+            .close()
+            .expect("close seeded client storage");
+
+        let boxed_storage = open_persistent_storage(data_dir.path())
+            .await
+            .expect("open boxed client storage");
+        let boxed_manager = build_client_schema_manager(boxed_storage.as_ref(), &context)
+            .expect("rehydrate schema manager from boxed storage");
+        assert!(
+            boxed_manager.known_schema_hashes().contains(&learned_hash),
+            "boxed client storage rehydrate should learn the newer schema"
+        );
+        boxed_storage.close().expect("close boxed client storage");
+    }
+
     #[test]
     fn query_rows_are_reordered_back_to_declared_schema() {
         let aligned = align_row_values_to_declared_schema(
