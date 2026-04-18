@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { JazzClient } from "./client.js";
+import { JazzClient, resolveDefaultDurabilityTier } from "./client.js";
 import type { AppContext } from "./context.js";
 
 function makeFakeRuntime() {
@@ -146,5 +146,15 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+  });
+});
+
+describe("resolveDefaultDurabilityTier", () => {
+  it("uses local as the default offline durability tier", () => {
+    expect(resolveDefaultDurabilityTier({})).toBe("local");
+  });
+
+  it("still prefers edge when a server is configured outside the browser runtime", () => {
+    expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
   });
 });

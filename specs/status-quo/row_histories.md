@@ -64,7 +64,7 @@ A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pai
 
 - the current visible row values for that branch view
 - the current branch frontier
-- optional preview metadata batch ids for `worker`, `edge`, and `global`
+- optional preview metadata batch ids for `local`, `edge`, and `global`
 - an optional winner batch-id pool plus packed ordinal vectors when a preview is synthetic
 
 Physically, the visible region is also stored as flat `row_format` rows with the same user columns

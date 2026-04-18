@@ -40,7 +40,7 @@ describe("TS Delete API", () => {
     const project = await db.insertDurable(
       app.projects,
       { name: "Test Project" },
-      { tier: "worker" },
+      { tier: "local" },
     );
     const owner = insertUser(db);
     const todo = await db.insertDurable(
@@ -53,15 +53,15 @@ describe("TS Delete API", () => {
         ownerId: owner.id,
         assigneesIds: [],
       },
-      { tier: "worker" },
+      { tier: "local" },
     );
 
-    const pending = db.deleteDurable(app.todos, todo.id, { tier: "worker" });
+    const pending = db.deleteDurable(app.todos, todo.id, { tier: "local" });
     expect(pending).toBeInstanceOf(Promise);
 
     await pending;
 
-    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(rows).toEqual([]);
   });
 });

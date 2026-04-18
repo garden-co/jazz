@@ -116,11 +116,11 @@ struct WasmLensEdgeDebug {
 /// Parse a persistence tier string from JS.
 fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
     match tier {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(JsError::new(&format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
+            "Invalid tier '{}'. Must be 'local', 'edge', or 'global'.",
             tier
         ))),
     }
@@ -288,7 +288,7 @@ fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>
 
 fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
     match tier {
-        Some("worker") => "worker",
+        Some("local") => "local",
         Some("edge") => "edge",
         Some("global") => "global",
         _ => "client",
@@ -468,7 +468,7 @@ pub struct WasmRuntime {
     /// the main thread via postMessage. Server sync goes through `connect()`.
     sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
-    /// Label for tracing (e.g. "worker", "edge", or "client").
+    /// Label for tracing (e.g. "local", "edge", or "client").
     tier_label: &'static str,
 }
 
@@ -483,7 +483,7 @@ impl WasmRuntime {
     /// * `app_id` - Application identifier
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User's branch name (e.g., "main")
-    /// * `tier` - Optional node durability tier ("worker", "edge", "global").
+    /// * `tier` - Optional node durability tier ("local", "edge", "global").
     ///            Set for server nodes to enable ack emission.
     /// * `use_binary_encoding` - Optional outgoing sync payload encoding mode.
     ///   `Some(true)` emits postcard bytes (`Uint8Array`), otherwise JSON strings.
@@ -891,7 +891,7 @@ impl WasmRuntime {
 
     /// Insert a row and return a Promise that resolves when the tier acks.
     ///
-    /// `tier` must be one of: "worker", "edge", "global".
+    /// `tier` must be one of: "local", "edge", "global".
     #[wasm_bindgen(js_name = insertDurable)]
     pub fn insert_durable(
         &self,

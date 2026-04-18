@@ -105,7 +105,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
 

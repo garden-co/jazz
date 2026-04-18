@@ -17,11 +17,11 @@ pub async fn run(
     in_memory: bool,
     auth_config: AuthConfig,
     catalogue_authority: CatalogueAuthorityMode,
+    bound_port_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     let app_id_string = app_id.to_string();
-    let inspector_link =
-        build_inspector_link(port, &app_id_string, auth_config.admin_secret.as_deref());
+    let admin_secret = auth_config.admin_secret.clone();
 
     info!("Starting Jazz server for app: {}", app_id);
     if in_memory {
@@ -41,10 +41,18 @@ pub async fn run(
     .map_err(|e| format!("failed to build server: {e}"))?;
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!("Listening on http://{}", addr);
-    info!("Open the inspector: {}", inspector_link);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    let inspector_link =
+        build_inspector_link(bound_addr.port(), &app_id_string, admin_secret.as_deref());
+
+    if let Some(path) = bound_port_file {
+        std::fs::write(&path, bound_addr.port().to_string())
+            .map_err(|e| format!("failed to write bound port file {path}: {e}"))?;
+    }
+
+    info!("Listening on http://{}", bound_addr);
+    info!("Open the inspector: {}", inspector_link);
     axum::serve(listener, built.app).await?;
 
     Ok(())

@@ -23,10 +23,10 @@ pub struct PolicyError {
 // ID Types
 // ============================================================================
 
-/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < GlobalServer).
+/// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum DurabilityTier {
-    Worker,
+    Local,
     EdgeServer,
     GlobalServer,
 }

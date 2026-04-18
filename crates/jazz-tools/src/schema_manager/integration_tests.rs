@@ -4663,8 +4663,8 @@ mod tests {
         assert_eq!(matching[0].delta.added.len(), 1);
     }
 
-    /// Test 2: Client A subscribes on server B with settled_tier=Worker.
-    /// B settles → emits QuerySettled(Worker). After A receives it, A delivers.
+    /// Test 2: Client A subscribes on server B with settled_tier=Local.
+    /// B settles → emits QuerySettled(Local). After A receives it, A delivers.
     #[test]
     fn query_settled_direct() {
         let schema = SchemaBuilder::new()
@@ -4686,9 +4686,9 @@ mod tests {
         .unwrap();
         let mut io_a = MemoryStorage::new();
 
-        // === Setup Server B (Worker tier) ===
+        // === Setup Server B (Local tier) ===
         let mut server_b = SchemaManager::new(
-            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Local),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -4719,13 +4719,13 @@ mod tests {
         server_b.insert(&mut io_b, "items", values).unwrap();
         server_b.process(&mut io_b);
 
-        // === Client A subscribes with settled_tier=Worker ===
+        // === Client A subscribes with settled_tier=Local ===
         let query = QueryBuilder::new("items")
             .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -4766,13 +4766,13 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
 
-        // Expect QuerySettled(Worker) in outbox
+        // Expect QuerySettled(Local) in outbox
         let settled_msg = outbox_b
             .iter()
             .find(|e| matches!(e.payload, SyncPayload::QuerySettled { .. }));
         assert!(
             settled_msg.is_some(),
-            "Server B should emit QuerySettled(Worker)"
+            "Server B should emit QuerySettled(Local)"
         );
 
         // Forward all from B to A (including data + QuerySettled)
@@ -4800,7 +4800,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker) received"
+            "Should deliver after QuerySettled(Local) received"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert!(total_added >= 1, "Should have at least 1 row delivered");
@@ -4872,7 +4872,7 @@ mod tests {
             .expect("one visible row");
         let server_b_id = ServerId::new();
 
-        // Simulate per-row Worker settlement — still insufficient for EdgeServer reads.
+        // Simulate per-row Local settlement — still insufficient for EdgeServer reads.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
@@ -4883,7 +4883,7 @@ mod tests {
                     branch_name: BranchName::new(&visible_row.branch),
                     batch_id: visible_row.batch_id,
                     state: None,
-                    confirmed_tier: Some(DurabilityTier::Worker),
+                    confirmed_tier: Some(DurabilityTier::Local),
                 },
             });
         client_a.process(&mut io_a);
@@ -4895,7 +4895,7 @@ mod tests {
             .collect();
         assert!(
             matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Worker < EdgeServer — should still not deliver"
+            "Local < EdgeServer — should still not deliver"
         );
 
         // Simulate per-row EdgeServer settlement — now the row may become visible.
@@ -4944,7 +4944,7 @@ mod tests {
             )
             .build();
 
-        // A = end client, B = worker tier mid-tier, C = edge tier upstream.
+        // A = end client, B = local tier mid-tier, C = edge tier upstream.
         let mut client_a = SchemaManager::new(
             SyncManager::new(),
             schema.clone(),
@@ -4956,7 +4956,7 @@ mod tests {
         let mut io_a = MemoryStorage::new();
 
         let mut worker_b = SchemaManager::new(
-            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Local),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -5119,7 +5119,7 @@ mod tests {
         });
         assert!(
             edge_settled.is_some(),
-            "Worker tier should relay QuerySettled(EdgeServer) from upstream to client"
+            "Local tier should relay QuerySettled(EdgeServer) from upstream to client"
         );
 
         for entry in &relayed_from_b {
@@ -5173,7 +5173,7 @@ mod tests {
         .unwrap();
         let mut storage = MemoryStorage::new();
 
-        // Subscribe with settled_tier=Worker
+        // Subscribe with settled_tier=Local
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
@@ -5182,7 +5182,7 @@ mod tests {
             .subscribe_with_sync_with_local_updates(
                 query,
                 None,
-                Some(DurabilityTier::Worker),
+                Some(DurabilityTier::Local),
                 LocalUpdates::Deferred,
             )
             .unwrap();
@@ -5225,7 +5225,7 @@ mod tests {
                         branch_name: BranchName::new(&row.branch),
                         batch_id: row.batch_id,
                         state: None,
-                        confirmed_tier: Some(DurabilityTier::Worker),
+                        confirmed_tier: Some(DurabilityTier::Local),
                     },
                 });
         }
@@ -5280,13 +5280,13 @@ mod tests {
         client.insert(&mut storage, "items", values).unwrap();
         client.process(&mut storage);
 
-        // Subscribe with settled_tier=Worker (simulating one-shot behavior)
+        // Subscribe with settled_tier=Local (simulating one-shot behavior)
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client.process(&mut storage);
 
@@ -5321,12 +5321,12 @@ mod tests {
                     branch_name: BranchName::new(&visible_row.branch),
                     batch_id: visible_row.batch_id,
                     state: None,
-                    confirmed_tier: Some(DurabilityTier::Worker),
+                    confirmed_tier: Some(DurabilityTier::Local),
                 },
             });
         client.process(&mut storage);
 
-        // Worker durability arriving later should not emit another visible
+        // Local durability arriving later should not emit another visible
         // delta because the row is already present.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
@@ -5335,7 +5335,7 @@ mod tests {
             .collect();
         assert!(
             matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Worker promotion should not emit a second visible delta"
+            "Local promotion should not emit a second visible delta"
         );
     }
 
@@ -5360,13 +5360,13 @@ mod tests {
         .unwrap();
         let mut storage = MemoryStorage::new();
 
-        // No rows inserted. Subscribe with settled_tier=Worker.
+        // No rows inserted. Subscribe with settled_tier=Local.
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client.process(&mut storage);
 

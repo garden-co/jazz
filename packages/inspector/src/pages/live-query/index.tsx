@@ -103,7 +103,7 @@ function formatTime(value: string | number): string {
 
 function tierRank(tier: DurabilityTier): number {
   switch (tier) {
-    case "worker":
+    case "local":
       return 0;
     case "edge":
       return 1;

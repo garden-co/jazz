@@ -122,6 +122,69 @@ describe("Db browser storage isolation", () => {
       "alice should recover her local rows when reopening",
     );
   });
+
+  it("logout with wipeData only clears the current user's scoped storage", async () => {
+    const appId = `browser-storage-logout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const aliceJwt = makeFakeJwt({
+      sub: "alice",
+      claims: { role: "member" },
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const bobJwt = makeFakeJwt({
+      sub: "bob",
+      claims: { role: "member" },
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+
+    const aliceWriter = ctx.track(
+      await createDb({
+        appId,
+        jwtToken: aliceJwt,
+      }),
+    );
+    const bobWriter = ctx.track(
+      await createDb({
+        appId,
+        jwtToken: bobJwt,
+      }),
+    );
+
+    aliceWriter.insert(todos, { title: "alice-only", done: false });
+    bobWriter.insert(todos, { title: "bob-only", done: false });
+
+    await waitForQuery(
+      aliceWriter,
+      allTodos,
+      (rows) => rows.length === 1 && rows[0]?.title === "alice-only",
+      "alice should only see alice rows before logout",
+    );
+    await waitForQuery(
+      bobWriter,
+      allTodos,
+      (rows) => rows.length === 1 && rows[0]?.title === "bob-only",
+      "bob should only see bob rows before alice logout",
+    );
+
+    await aliceWriter.logout({ wipeData: true });
+    ctx.untrack(aliceWriter);
+    await sleep(200);
+
+    await waitForQuery(
+      bobWriter,
+      allTodos,
+      (rows) => rows.length === 1 && rows[0]?.title === "bob-only",
+      "bob should retain scoped rows after alice logout wipe",
+    );
+
+    const aliceReader = ctx.track(
+      await createDb({
+        appId,
+        jwtToken: aliceJwt,
+      }),
+    );
+
+    await expectRowsToStayEmpty(aliceReader, 1500);
+  });
 });
 
 function toBase64Url(value: unknown): string {

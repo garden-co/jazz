@@ -36,6 +36,7 @@ export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
+  type LogoutOptions,
   DbDirectBatch,
   DbPersistedWrite,
   DbTransaction,

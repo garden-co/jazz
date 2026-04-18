@@ -52,6 +52,18 @@ const defaultedSchema = {
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
 
+const graphSchema = {
+  teams: s.table({
+    name: s.string(),
+  }),
+  team_edges: s.table({
+    child_team: s.ref("teams"),
+    parent_team: s.ref("teams"),
+  }),
+};
+type GraphAppSchema = s.Schema<typeof graphSchema>;
+const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
+
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
@@ -105,6 +117,88 @@ describe("typed app prototype", () => {
     expectTypeOf(row.title).toEqualTypeOf<string>();
     expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
     expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
+  });
+
+  it("serializes gather seeded from the current relation", () => {
+    const directParents = graphApp.team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+    const reachableTeams = directParents.gather({
+      step: ({ current }) =>
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+      maxDepth: 3,
+    });
+
+    expect(JSON.parse(reachableTeams._build())).toEqual({
+      table: "team_edges",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      hops: [],
+      gather: {
+        seed: {
+          table: "team_edges",
+          conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
+          hops: ["parent_team"],
+        },
+        max_depth: 3,
+        step_table: "team_edges",
+        step_current_column: "child_team",
+        step_conditions: [],
+        step_hops: ["parent_team"],
+      },
+    });
+  });
+
+  it("serializes union gather seeds", () => {
+    const directParents = graphApp.team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+    const adminReachableTeams = graphApp.teams.gather({
+      start: { name: "admins" },
+      step: ({ current }) =>
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+      maxDepth: 2,
+    });
+    const reachableTeams = graphApp.union([directParents, adminReachableTeams]).gather({
+      step: ({ current }) =>
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+      maxDepth: 4,
+    });
+
+    expect(JSON.parse(reachableTeams._build())).toEqual({
+      table: "team_edges",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      hops: [],
+      gather: {
+        seed: {
+          union: {
+            inputs: [
+              {
+                table: "team_edges",
+                conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
+                hops: ["parent_team"],
+              },
+              {
+                table: "teams",
+                conditions: [],
+                hops: [],
+                gather: {
+                  max_depth: 2,
+                  step_table: "team_edges",
+                  step_current_column: "child_team",
+                  step_conditions: [],
+                  step_hops: ["parent_team"],
+                },
+              },
+            ],
+          },
+        },
+        max_depth: 4,
+        step_table: "team_edges",
+        step_current_column: "child_team",
+        step_conditions: [],
+        step_hops: ["parent_team"],
+      },
+    });
   });
 
   it("infers rows, init payloads, where inputs, and include names from schema literals", () => {
@@ -164,7 +258,7 @@ describe("typed app prototype", () => {
 
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error invalid root key
-      app.unknown;
+      void app.unknown;
 
       // @ts-expect-error invalid where column
       app.todos.where({ missing: true });

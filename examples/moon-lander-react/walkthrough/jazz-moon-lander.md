@@ -224,12 +224,12 @@ The tier on a write controls where the promise resolves. All writes eventually p
   <line x1="390" y1="48" x2="390" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <line x1="555" y1="48" x2="555" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
 
-  <!-- write "worker": Client -> OPFS Worker -->
+  <!-- write "local": Client -> OPFS Worker -->
   <line x1="79" y1="90" x2="226" y2="90" stroke="rgba(20,106,255,0.45)" stroke-width="1.5" marker-end="url(#aw)"/>
   <circle cx="230" cy="90" r="5" fill="rgba(20,106,255,0.45)" stroke="#fff" stroke-width="1.5"/>
   <line x1="235" y1="90" x2="386" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <line x1="394" y1="90" x2="551" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="152" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.6)">db.insert({tier:"worker"})</text>
+  <text x="152" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="rgba(20,106,255,0.6)">db.insert({tier:"local"})</text>
 
   <!-- write "edge": Client -> Edge Node -->
   <line x1="79" y1="135" x2="386" y2="135" stroke="rgba(20,106,255,0.7)" stroke-width="1.5" marker-end="url(#ae)"/>
