@@ -438,6 +438,11 @@ type QueryBuilderShape<
   readonly _initType: TableInit<TSchema, TTable>;
 };
 
+type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> & {
+  readonly _table: TTable;
+  _serializeRelation(): unknown;
+};
+
 type PermissionIntrospectionColumns = {
   $canRead: boolean | null;
   $canEdit: boolean | null;
@@ -1032,7 +1037,7 @@ export class TypedTableQueryBuilder<
     return built;
   }
 
-  private _serializeRelation(): BuiltRelation {
+  _serializeRelation(): BuiltRelation {
     if (this._unionVal) {
       return cloneBuiltRelation(this._unionVal);
     }
@@ -1138,8 +1143,8 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
-    union(
-      relations: readonly TypedTableQueryBuilder<any, any, any, any>[],
+    union<TTable extends string>(
+      relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
     wasmSchema: WasmSchema;
   }
@@ -1228,7 +1233,7 @@ export function defineApp(
 
   return {
     ...tables,
-    union(relations: readonly TypedTableQueryBuilder<any, any, any, any>[]) {
+    union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
       if (relations.length === 0) {
         throw new Error("union(...) requires at least one relation.");
       }
@@ -1237,7 +1242,7 @@ export function defineApp(
       const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
       (builder as any)._unionVal = {
         union: {
-          inputs: relations.map((relation) => (relation as any)._serializeRelation()),
+          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
         },
       };
       return builder;
