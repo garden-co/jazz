@@ -64,10 +64,15 @@ the following challenges:
 The short version: Jazz is a local-first relational database. We'll explain all the unique bits in the
 next sections, but let's first unpack the basics.
 
-That means local state is real durable data, not just a cache. It means Jazz keeps the semantics of a
-relational database: tables, relations, queries, mutations, and permissions. And it means that sync,
-auth, consistency, and collaboration are treated as database concerns rather than glue code between
-other systems.
+"Relational" means that it looks like a traditional database with table schemas, relations, queries and mutations. Jazz is TypeScript-first around a Rust core for now, with idiomatic bindings for other languages and direct SQL access coming soon.
+
+The API looks like familiar modern ORMs but goes a bit further with type-checked permissions and migrations and first class support for reactive subscriptions, not just one-shot queries.
+
+"Local-first" means that Jazz offers real durable local state like an embedded database, while automatically syncing to the cloud and other users in the background. This results in an unparalleled "feels like reactive local state" developer experience *and* makes it easy to build snappy, even offline-capable apps.
+
+But this approach also brings new challenges that centralized databases don't have. We'll line out solutions to these in the following sections and you'll see how tackling those has allowed us to deeive some unique strenghts and features from the same solutions.
+
+One important thing to note is that Jazz is built
 
 ## Fresh Idea 1: Local-First Data With Tunable Consistency
 
