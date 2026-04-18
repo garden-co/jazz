@@ -2,10 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
-import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 
 const reproApp = s.defineApp({
   teams: s.table({
@@ -37,30 +36,53 @@ const reproApp = s.defineApp({
 
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
 
-type ReproEnv = {
-  context: JazzContext;
-  dataRoot: string;
-};
-
-async function settleRuntimeTeardown(delayMs: number = 250): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
 function seedScenario(context: JazzContext): void {
   const db = context.db(reproApp);
 
-  const aliceTeam = db.insert(reproApp.teams, {
-    name: "Alice",
-    route_key: "alice",
+  const directTeam = db.insert(reproApp.teams, {
+    name: "Direct Membership",
+    route_key: "base-direct",
     corporation_id: "corp",
     kind: "individual",
     identity_key: "alice",
     system_owned: false,
     archived: false,
   });
+  const relationTeam = db.insert(reproApp.teams, {
+    name: "Relation Membership",
+    route_key: "relation-direct",
+    corporation_id: "corp",
+    kind: "manual",
+    system_owned: false,
+    archived: false,
+  });
+  const qualifiedTeam = db.insert(reproApp.teams, {
+    name: "Qualified Predicate",
+    route_key: "qualified-predicate",
+    corporation_id: "corp",
+    kind: "manual",
+    system_owned: false,
+    archived: false,
+  });
   const opsTeam = db.insert(reproApp.teams, {
-    name: "Ops",
-    route_key: "ops",
+    name: "Operations",
+    route_key: "gather-target",
+    corporation_id: "corp",
+    kind: "manual",
+    system_owned: false,
+    archived: false,
+  });
+  const grantTargetTeam = db.insert(reproApp.teams, {
+    name: "Incident Desk",
+    route_key: "grant-target",
+    corporation_id: "corp",
+    kind: "manual",
+    system_owned: false,
+    archived: false,
+  });
+  db.insert(reproApp.teams, {
+    name: "Hidden Team",
+    route_key: "hidden",
     corporation_id: "corp",
     kind: "manual",
     system_owned: false,
@@ -69,31 +91,41 @@ function seedScenario(context: JazzContext): void {
 
   db.insert(reproApp.user_team_edges, {
     user_id: "alice",
-    team: aliceTeam.id,
-    administrator: true,
+    team: directTeam.id,
+    administrator: false,
+  });
+  db.insert(reproApp.user_team_edges, {
+    user_id: "alice",
+    team: relationTeam.id,
+    administrator: false,
+  });
+  db.insert(reproApp.user_team_edges, {
+    user_id: "alice",
+    team: qualifiedTeam.id,
+    administrator: false,
   });
   db.insert(reproApp.team_team_edges, {
-    child_team: aliceTeam.id,
+    child_team: directTeam.id,
     parent_team: opsTeam.id,
     administrator: false,
   });
   db.insert(reproApp.team_access_edges, {
-    target_team: opsTeam.id,
-    team: aliceTeam.id,
+    target_team: grantTargetTeam.id,
+    team: relationTeam.id,
     grant_role: "viewer",
     administrator: false,
   });
 }
 
-async function runCase(
-  expectedNames: string[],
-  defineCasePermissions: ReproPermissions,
-): Promise<string[]> {
+type JazzContext = import("../backend/create-jazz-context.js").JazzContext;
+
+async function createReproContext(defineCasePermissions: ReproPermissions): Promise<JazzContext> {
   const appId = randomUUID();
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-permissions-repro-"));
   const dataPath = join(dataRoot, "runtime.db");
 
   const permissions = definePermissions(reproApp, defineCasePermissions);
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
     appId,
     app: reproApp,
@@ -103,9 +135,82 @@ async function runCase(
     userBranch: "main",
     tier: "edge",
   });
-  const env: ReproEnv = { context, dataRoot };
+  onTestFinished(async () => {
+    context.flush();
+    await context.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await rm(dataRoot, { recursive: true, force: true });
+  });
 
-  try {
+  return context;
+}
+
+describe("runtime permission repros for recursive gather and qualified predicates", () => {
+  it("supports the full alpha.33 grant-closure repro end to end", async () => {
+    const context = await createReproContext(({ policy, session, allOf }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          "user_team_edges.user_id": session.user_id,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges
+            .where({
+              child_team: current,
+              administrator: false,
+            })
+            .hopTo("parent_team"),
+        maxDepth: 8,
+      });
+
+      return [
+        policy.teams.allowRead.where((team) =>
+          allOf([
+            { route_key: "base-direct" },
+            policy.user_team_edges.exists.where({
+              user_id: session.user_id,
+              team: team.id,
+            }),
+          ]),
+        ),
+        policy.teams.allowRead.where((team) =>
+          allOf([
+            { route_key: "relation-direct" },
+            policy.exists(
+              policy.user_team_edges.where({ user_id: session.user_id }).hopTo("team").where({
+                id: team.id,
+              }),
+            ),
+          ]),
+        ),
+        policy.teams.allowRead.where({
+          route_key: "qualified-predicate",
+          "user_team_edges.user_id": session.user_id,
+        }),
+        policy.teams.allowRead.where((team) =>
+          allOf([
+            { route_key: "gather-target" },
+            policy.exists(
+              reachableTeams.where({
+                id: team.id,
+              }),
+            ),
+          ]),
+        ),
+        policy.teams.allowRead.where((team) =>
+          allOf([
+            { route_key: "grant-target" },
+            policy.exists(
+              reachableTeams.hopTo("team_access_edgesViaTeam").where({
+                "team_access_edges.target_team": team.id,
+                grant_role: { in: ["viewer", "editor", "manager"] },
+                administrator: false,
+              }),
+            ),
+          ]),
+        ),
+      ];
+    });
+
     seedScenario(context);
 
     const aliceDb = context.forSession(
@@ -117,99 +222,14 @@ async function runCase(
     );
 
     const names = (await aliceDb.all(reproApp.teams.where({}))).map((team) => team.name).sort();
-    expect(names).toEqual([...expectedNames].sort());
-    return names;
-  } finally {
-    env.context.flush();
-    await env.context.shutdown();
-    await settleRuntimeTeardown();
-    await rm(env.dataRoot, { recursive: true, force: true });
-    await settleRuntimeTeardown(50);
-  }
-}
-
-describe("runtime permission repros for recursive gather and qualified predicates", () => {
-  afterAll(async () => {
-    await settleRuntimeTeardown();
-  });
-
-  it("matches the original four runtime repro cases", async () => {
-    await runCase(["Alice"], ({ policy, session }) => {
-      policy.teams.allowRead.where((team) =>
-        policy.user_team_edges.exists.where({
-          user_id: session.user_id,
-          team: team.id,
-        }),
-      );
-    });
-
-    await runCase(["Alice"], ({ policy, session }) => {
-      const directTeams = policy.user_team_edges.where({ user_id: session.user_id }).hopTo("team");
-      policy.teams.allowRead.where((team) =>
-        policy.exists(
-          directTeams.where({
-            id: team.id,
-          }),
-        ),
-      );
-    });
-
-    await runCase(["Alice"], ({ policy, session }) => {
-      policy.teams.allowRead.where({
-        "user_team_edges.user_id": session.user_id,
-      });
-    });
-
-    await runCase(["Alice", "Ops"], ({ policy, session }) => {
-      const reachableTeams = policy.teams.gather({
-        start: {
-          "user_team_edges.user_id": session.user_id,
-        },
-        step: ({ current }) =>
-          policy.team_team_edges
-            .where({
-              child_team: current,
-              administrator: false,
-            })
-            .hopTo("parent_team"),
-        maxDepth: 8,
-      });
-
-      policy.teams.allowRead.where((team) =>
-        policy.exists(
-          reachableTeams.where({
-            id: team.id,
-          }),
-        ),
-      );
-    });
-  });
-
-  it("supports correlated exists over a gathered team closure hopped through grants", async () => {
-    await runCase(["Ops"], ({ policy, session }) => {
-      const reachableTeams = policy.teams.gather({
-        start: {
-          "user_team_edges.user_id": session.user_id,
-        },
-        step: ({ current }) =>
-          policy.team_team_edges
-            .where({
-              child_team: current,
-              administrator: false,
-            })
-            .hopTo("parent_team"),
-        maxDepth: 8,
-      });
-
-      policy.teams.allowRead.where((team) =>
-        policy.exists(
-          reachableTeams.hopTo("team_access_edgesViaTeam").where({
-            "team_access_edges.target_team": team.id,
-            grant_role: { in: ["viewer", "editor", "manager"] },
-            administrator: false,
-          }),
-        ),
-      );
-    });
+    expect(names).toEqual(
+      [
+        "Direct Membership",
+        "Incident Desk",
+        "Operations",
+        "Qualified Predicate",
+        "Relation Membership",
+      ].sort(),
+    );
   });
 });
