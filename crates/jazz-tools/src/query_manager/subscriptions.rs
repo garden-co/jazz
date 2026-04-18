@@ -347,6 +347,14 @@ impl QueryManager {
 
         if let Some(subscription) = self.subscriptions.get_mut(&sub_id) {
             subscription.sync_backed = true;
+            if subscription.local_updates == LocalUpdates::Immediate
+                && !self.pending_local_row_batches.is_empty()
+            {
+                subscription
+                    .pending_local_row_ids
+                    .extend(self.pending_local_row_batches.keys().copied());
+                subscription.has_pending_local_updates = true;
+            }
         }
 
         let sync_query = self.sync_query_payload_for_upstream(&query);
