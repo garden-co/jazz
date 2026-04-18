@@ -1201,6 +1201,55 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("binds qualified gathered-hop filters to the hop alias for correlated exists", () => {
+    let relation: PermissionRelation | undefined;
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [
+        policy.todos.allowRead.where((todo) => {
+          relation = reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+            "resource_access_edges.resource": todo.id,
+            grant_role: "viewer",
+          });
+
+          return policy.exists(relation);
+        }),
+      ];
+    });
+
+    expect(compiled.todos?.select?.using?.type).toBe("ExistsRel");
+    if (!relation) {
+      throw new Error("Expected correlated relation to be initialized.");
+    }
+
+    const rel = toLegacyRelExprForTest(relationToIr(relation));
+    expect(rel.type).toBe("Project");
+    if (rel.type !== "Project") {
+      throw new Error("Expected gathered-hop relation to project hop rows.");
+    }
+    expect(rel.input.type).toBe("Filter");
+    if (rel.input.type !== "Filter") {
+      throw new Error("Expected correlated gathered-hop relation to be filtered.");
+    }
+    expect(rel.input.predicate.type).toBe("And");
+    if (rel.input.predicate.type !== "And") {
+      throw new Error("Expected correlated gathered-hop predicate group.");
+    }
+
+    const predicateScopes = rel.input.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(["__recursive_join_0", "__recursive_join_0"]);
+    expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
+  });
+
   it("rejects invalid gather(...) step shapes", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => {
