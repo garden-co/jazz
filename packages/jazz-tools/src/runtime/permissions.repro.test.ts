@@ -26,6 +26,12 @@ const reproApp = s.defineApp({
     parent_team: s.ref("teams"),
     administrator: s.boolean(),
   }),
+  team_access_edges: s.table({
+    target_team: s.ref("teams"),
+    team: s.ref("teams"),
+    grant_role: s.string(),
+    administrator: s.boolean(),
+  }),
 });
 
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
@@ -66,6 +72,12 @@ function seedScenario(context: JazzContext): void {
   db.insert(reproApp.team_team_edges, {
     child_team: aliceTeam.id,
     parent_team: opsTeam.id,
+    administrator: false,
+  });
+  db.insert(reproApp.team_access_edges, {
+    target_team: opsTeam.id,
+    team: aliceTeam.id,
+    grant_role: "viewer",
     administrator: false,
   });
 }
@@ -175,6 +187,34 @@ describe("runtime permission repros for recursive gather and qualified predicate
         policy.exists(
           reachableTeams.where({
             id: team.id,
+          }),
+        ),
+      );
+    });
+  });
+
+  it("supports correlated exists over a gathered team closure hopped through grants", async () => {
+    await runCase(["Ops"], ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          "user_team_edges.user_id": session.user_id,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges
+            .where({
+              child_team: current,
+              administrator: false,
+            })
+            .hopTo("parent_team"),
+        maxDepth: 8,
+      });
+
+      policy.teams.allowRead.where((team) =>
+        policy.exists(
+          reachableTeams.hopTo("team_access_edgesViaTeam").where({
+            "team_access_edges.target_team": team.id,
+            grant_role: { in: ["viewer", "editor", "manager"] },
+            administrator: false,
           }),
         ),
       );
