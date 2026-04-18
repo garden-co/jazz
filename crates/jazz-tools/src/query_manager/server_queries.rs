@@ -1495,7 +1495,7 @@ impl QueryManager {
         clauses: &[ComplexClause],
         content: &[u8],
         descriptor: &RowDescriptor,
-        _table: &TableName,
+        table: &TableName,
         session: &Session,
         branch: &str,
     ) -> Option<Vec<PolicyGraph>> {
@@ -1587,6 +1587,7 @@ impl QueryManager {
                         branch,
                         Some(session.clone()),
                         self.row_policy_mode,
+                        Some(table),
                     ) {
                         graphs.push(graph);
                     } else {
