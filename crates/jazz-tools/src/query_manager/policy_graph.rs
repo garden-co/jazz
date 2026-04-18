@@ -17,6 +17,8 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::{PolicyFilterNode, PolicyFilterOptions};
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
+use super::relation_ir::RelExpr;
+use super::relation_ir_query_plan::lower_relation_to_execution_plan;
 use super::session::Session;
 use super::types::ColumnName;
 use super::types::{LoadedRow, RowPolicyMode, Schema, TableName, TupleDescriptor, Value};
@@ -58,6 +60,15 @@ impl<'a> PolicyGraphBuildOptions<'a> {
 }
 
 impl PolicyGraph {
+    fn exists_rel_output_table(rel: &RelExpr, branch: &str) -> Option<TableName> {
+        let branches = vec![branch.to_string()];
+        let plan = lower_relation_to_execution_plan(rel, &branches, false, Vec::new(), None)?;
+        match plan.result_element_index {
+            None | Some(0) => Some(plan.table),
+            Some(index) => plan.joins.get(index - 1).map(|join| join.table),
+        }
+    }
+
     /// Create a graph for USING check: can session see this specific row?
     ///
     /// Graph structure: IndexScan(_id = objectId) → Materialize → PolicyFilter → ExistsOutput
@@ -234,23 +245,33 @@ impl PolicyGraph {
     /// Compiles relation IR through the shared query planner, then appends an
     /// ExistsOutput node over the compiled query output.
     pub fn for_exists_rel(
-        rel: &crate::query_manager::relation_ir::RelExpr,
+        rel: &RelExpr,
         schema: &Schema,
         branch: &str,
         session: Option<Session>,
-        _row_policy_mode: RowPolicyMode,
+        row_policy_mode: RowPolicyMode,
+        current_table: Option<&TableName>,
     ) -> Option<Self> {
-        // Relation-backed policy checks must inspect structural rows, not re-run
-        // SELECT policies on the scanned tables, or self-referential permission
-        // closures collapse to false.
-        let compile_schema: Schema = schema
-            .iter()
-            .map(|(table_name, table_schema)| {
-                let mut structural = table_schema.clone();
-                structural.policies = crate::query_manager::types::TablePolicies::default();
-                (*table_name, structural)
+        let use_structural_rows = current_table
+            .and_then(|table| {
+                Self::exists_rel_output_table(rel, branch).map(|output| output == *table)
             })
-            .collect();
+            .unwrap_or(false);
+        let compile_schema: Schema = if use_structural_rows {
+            // Same-table relation closures must inspect structural rows, not re-run
+            // SELECT policies on the scanned tables, or self-referential permission
+            // closures collapse to false.
+            schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = crate::query_manager::types::TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect()
+        } else {
+            schema.clone()
+        };
         let branches = vec![branch.to_string()];
         let schema_context = SchemaContext::with_defaults(compile_schema.clone(), "main");
         let mut graph = QueryGraph::compile_relation_ir_with_schema_context_and_features(
@@ -260,7 +281,11 @@ impl PolicyGraph {
             session,
             &schema_context,
             RelationCompileFeatures::default(),
-            RowPolicyMode::PermissiveLocal,
+            if use_structural_rows {
+                RowPolicyMode::PermissiveLocal
+            } else {
+                row_policy_mode
+            },
         )?;
         let output_descriptor = match graph
             .nodes
@@ -492,6 +517,7 @@ mod tests {
             "main",
             None,
             RowPolicyMode::PermissiveLocal,
+            None,
         );
         assert!(graph.is_some(), "exists-rel graph should compile");
 
@@ -511,6 +537,7 @@ mod tests {
     fn test_for_exists_rel_ignores_select_policies_on_relation_tables() {
         let schema = test_schema();
         let session = Session::new("user1");
+        let current_table = TableName::new("documents");
         let rel = RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
                 table: TableName::new("documents"),
@@ -528,6 +555,7 @@ mod tests {
             "main",
             Some(session),
             RowPolicyMode::Enforcing,
+            Some(&current_table),
         )
         .expect("exists-rel graph");
 
@@ -542,8 +570,44 @@ mod tests {
     }
 
     #[test]
+    fn test_for_exists_rel_keeps_select_policies_for_other_output_tables() {
+        let schema = test_schema();
+        let current_table = TableName::new("projects");
+        let rel = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("documents"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("owner_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Text("user1".to_string())),
+            },
+        };
+
+        let graph = PolicyGraph::for_exists_rel(
+            &rel,
+            &schema,
+            "main",
+            Some(Session::new("user1")),
+            RowPolicyMode::Enforcing,
+            Some(&current_table),
+        )
+        .expect("exists-rel graph");
+
+        assert!(
+            graph
+                .graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(ctx.node, GraphNode::PolicyFilter(_))),
+            "different-table exists-rel checks should still honor scanned-table select policies"
+        );
+    }
+
+    #[test]
     fn test_for_exists_rel_with_gather_post_join_compiles() {
         let mut schema = Schema::new();
+        let current_table = TableName::new("resource_access_edges");
         schema.insert(
             TableName::new("teams"),
             TableSchema::with_policies(
@@ -652,6 +716,7 @@ mod tests {
             "main",
             Some(Session::new("user1")),
             RowPolicyMode::Enforcing,
+            Some(&current_table),
         );
         assert!(
             graph.is_some(),

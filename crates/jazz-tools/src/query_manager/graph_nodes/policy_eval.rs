@@ -237,9 +237,9 @@ impl<'a> PolicyContextEvaluator<'a> {
             PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_context(
                 table, condition, row, descriptor, io, row_loader, depth,
             ),
-            PolicyExpr::ExistsRel { rel } => {
-                self.evaluate_exists_rel_with_context(rel, row, descriptor, io, row_loader, depth)
-            }
+            PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
+                rel, row, descriptor, table_name, io, row_loader, depth,
+            ),
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
                     e,
@@ -427,6 +427,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         rel: &RelExpr,
         row: &Row,
         descriptor: &RowDescriptor,
+        table_name: &str,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
@@ -441,12 +442,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 None => return false,
             };
 
+        let current_table = TableName::new(table_name);
         let mut graph = match PolicyGraph::for_exists_rel(
             &bound_rel,
             self.schema,
             self.branch,
             Some(self.session.clone()),
             self.row_policy_mode,
+            Some(&current_table),
         ) {
             Some(g) => g,
             None => return false,

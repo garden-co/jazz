@@ -98,7 +98,7 @@ async function runCase(
     backendSecret,
     env: "test",
     userBranch: "main",
-    tier: "worker",
+    tier: "edge",
   });
   envs.push({ context, server });
 
