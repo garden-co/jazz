@@ -3,15 +3,15 @@ import * as React from "react";
 import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
 function App() {
-  const auth = useLocalFirstAuth();
   return (
     <React.Suspense fallback={<p>Loading…</p>}>
-      <AppInner auth={auth} />
+      <AppInner />
     </React.Suspense>
   );
 }
 
-function AppInner({ auth }: { auth: ReturnType<typeof useLocalFirstAuth> }) {
+function AppInner() {
+  const auth = useLocalFirstAuth();
   const secret = React.use(auth.getOrCreateSecret());
 
   return (
