@@ -95,6 +95,20 @@ interface TeamWhere {
   identity_key?: string;
 }
 
+interface UserTeamEdge {
+  id: string;
+  user_id: string;
+  team: string;
+  administrator: boolean;
+}
+
+interface UserTeamEdgeWhere {
+  id?: string;
+  user_id?: string;
+  team?: string;
+  administrator?: boolean;
+}
+
 interface TeamTeamEdge {
   id: string;
   child_team: string;
@@ -170,6 +184,13 @@ class TeamQueryBuilder {
   }
 }
 
+class UserTeamEdgeQueryBuilder {
+  declare readonly _rowType: UserTeamEdge;
+  where(_input: UserTeamEdgeWhere): UserTeamEdgeQueryBuilder {
+    return this;
+  }
+}
+
 class TeamTeamEdgeQueryBuilder {
   declare readonly _rowType: TeamTeamEdge;
   where(_input: TeamTeamEdgeWhere): TeamTeamEdgeQueryBuilder {
@@ -189,6 +210,7 @@ const app = {
   projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
+  user_team_edges: new UserTeamEdgeQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
@@ -230,6 +252,19 @@ const app = {
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
         { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    user_team_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "user_id", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        { name: "administrator", column_type: { type: "Boolean" }, nullable: false },
       ],
     },
     team_team_edges: {
@@ -275,6 +310,7 @@ const appWithoutSchema = {
   projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
+  user_team_edges: new UserTeamEdgeQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
 };
@@ -1055,14 +1091,81 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("rejects qualified allowRead.where(...) columns outside relation seeds", () => {
-    expect(() =>
-      definePermissions(app, ({ policy, session }) => [
-        policy.teams.allowRead.where({
-          "user_team_edges.user_id": session.userId,
+  it("compiles qualified allowRead.where(...) columns into implicit correlated exists relations", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where({
+        kind: "manual",
+        "user_team_edges.user_id": session.userId,
+        "user_team_edges.administrator": true,
+      } as Record<string, unknown>),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified rule predicate to compile to ExistsRel.");
+    }
+
+    const rel = toLegacyRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected outer correlation filter.");
+    }
+    expect(rel.predicate).toEqual({
+      type: "Cmp",
+      left: { scope: "teams", column: "id" },
+      op: "Eq",
+      right: { type: "RowId", source: "Outer" },
+    });
+    expect(rel.input.type).toBe("Filter");
+    if (rel.input.type !== "Filter") {
+      throw new Error("Expected qualified predicate filter.");
+    }
+    expect(rel.input.input.type).toBe("Join");
+    if (rel.input.input.type !== "Join") {
+      throw new Error("Expected implicit join for qualified rule predicate.");
+    }
+    expect(rel.input.predicate.type).toBe("And");
+    if (rel.input.predicate.type !== "And") {
+      throw new Error("Expected grouped qualified predicate filters.");
+    }
+    const predicateScopes = rel.input.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(expect.arrayContaining(["teams", "__join_0"]));
+  });
+
+  it("compiles qualified policy.<table>.exists.where(...) into ExistsRel", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where((team) =>
+        policy.user_team_edges.exists.where({
+          user_id: session.userId,
+          team: team.id,
+          "teams.kind": "manual",
         } as Record<string, unknown>),
-      ]),
-    ).toThrow(/qualified.*where|policy\.exists\(relation\)|gather/i);
+      ),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified exists.where(...) to compile to ExistsRel.");
+    }
+
+    const rel = toLegacyRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected qualified exists relation filter.");
+    }
+    expect(rel.input.type).toBe("Join");
+    if (rel.input.type !== "Join") {
+      throw new Error("Expected qualified exists relation join.");
+    }
+    expect(rel.predicate.type).toBe("And");
+    if (rel.predicate.type !== "And") {
+      throw new Error("Expected qualified exists predicate group.");
+    }
+    const predicateScopes = rel.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(expect.arrayContaining(["user_team_edges", "__join_0"]));
+    expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
   });
 
   it("compiles policy.exists(relation) to ExistsRel in definePermissions", () => {
