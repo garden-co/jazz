@@ -217,6 +217,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       {
         user_id: "alice",
         claims: {},
+        authMode: "external",
       },
       reproApp,
     );

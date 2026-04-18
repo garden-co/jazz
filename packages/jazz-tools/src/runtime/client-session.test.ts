@@ -31,6 +31,7 @@ describe("client session resolution", () => {
         subject: "subject-123",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     };
 
     expect(

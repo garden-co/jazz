@@ -56,11 +56,11 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "reader" }),
@@ -229,6 +229,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
     const refreshed: Session = {
       user_id: "alice",
@@ -238,6 +239,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     };
     const states: AuthState[] = [];
 
@@ -250,16 +252,14 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateCookieSession).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
     expect(states.at(-1)).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
     });
   });
 });
