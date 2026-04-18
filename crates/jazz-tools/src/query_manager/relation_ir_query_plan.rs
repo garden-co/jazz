@@ -428,6 +428,117 @@ fn builder_select_columns_to_project_columns(columns: Vec<String>) -> Vec<Projec
         .collect()
 }
 
+fn projected_result_element_index(
+    scope_order: &[String],
+    columns: &[ProjectColumn],
+) -> Option<usize> {
+    let projected_column = match columns {
+        [
+            ProjectColumn {
+                expr: ProjectExpr::Column(column),
+                ..
+            },
+        ] => column,
+        _ => return None,
+    };
+    if to_runtime_column(&projected_column.column) != "_id" {
+        return None;
+    }
+    match projected_column.scope.as_deref() {
+        Some(scope) => scope_order.iter().position(|candidate| candidate == scope),
+        None if scope_order.len() == 1 => Some(0),
+        None => None,
+    }
+}
+
+fn bind_unscoped_project_filter_scope(predicate: &PredicateExpr, scope: &str) -> PredicateExpr {
+    fn bind_column_ref(column: &ColumnRef, scope: &str) -> ColumnRef {
+        if column.scope.is_some() {
+            column.clone()
+        } else {
+            ColumnRef::scoped(scope, column.column.clone())
+        }
+    }
+
+    match predicate {
+        PredicateExpr::Cmp { left, op, right } => PredicateExpr::Cmp {
+            left: bind_column_ref(left, scope),
+            op: *op,
+            right: right.clone(),
+        },
+        PredicateExpr::Contains { left, right } => PredicateExpr::Contains {
+            left: bind_column_ref(left, scope),
+            right: right.clone(),
+        },
+        PredicateExpr::IsNull { column } => PredicateExpr::IsNull {
+            column: bind_column_ref(column, scope),
+        },
+        PredicateExpr::IsNotNull { column } => PredicateExpr::IsNotNull {
+            column: bind_column_ref(column, scope),
+        },
+        PredicateExpr::In { left, values } => PredicateExpr::In {
+            left: bind_column_ref(left, scope),
+            values: values.clone(),
+        },
+        PredicateExpr::And(exprs) => PredicateExpr::And(
+            exprs
+                .iter()
+                .map(|expr| bind_unscoped_project_filter_scope(expr, scope))
+                .collect(),
+        ),
+        PredicateExpr::Or(exprs) => PredicateExpr::Or(
+            exprs
+                .iter()
+                .map(|expr| bind_unscoped_project_filter_scope(expr, scope))
+                .collect(),
+        ),
+        PredicateExpr::Not(inner) => {
+            PredicateExpr::Not(Box::new(bind_unscoped_project_filter_scope(inner, scope)))
+        }
+        PredicateExpr::True => PredicateExpr::True,
+        PredicateExpr::False => PredicateExpr::False,
+    }
+}
+
+fn parse_projected_result_element_plan(
+    input: &RelExpr,
+    columns: &[ProjectColumn],
+) -> Option<(RuntimeCorePlan, String)> {
+    let normalized_columns = normalize_project_columns(columns);
+
+    if let Some(mut gather_info) = parse_gather_join_info(input) {
+        let mut scope_order = vec![gather_info.plan.base_scope.clone()];
+        scope_order.extend(
+            gather_info
+                .plan
+                .joins
+                .iter()
+                .map(|join| join.effective_name().to_string()),
+        );
+        let index = projected_result_element_index(&scope_order, &normalized_columns)?;
+        let selected_scope = scope_order.get(index)?.clone();
+        gather_info.plan.result_element_index = Some(index);
+        return Some((gather_info.plan, selected_scope));
+    }
+
+    let linear = extract_linear_join_info(input)?;
+    let index = projected_result_element_index(&linear.scope_order, &normalized_columns)?;
+    let selected_scope = linear.scope_order.get(index)?.clone();
+    Some((
+        RuntimeCorePlan {
+            table: linear.base_table,
+            base_scope: linear.scope_order[0].clone(),
+            disjuncts: linear.disjuncts,
+            joins: linear.joins.clone(),
+            result_element_index: Some(index),
+            recursive: None,
+            seed_relation: None,
+            project_columns: None,
+        },
+        selected_scope,
+    ))
+}
+
 fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option<RuntimeCorePlan> {
     let simple_seed = extract_linear_join_info(seed).filter(|info| info.joins.is_empty());
 
@@ -546,12 +657,38 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         }
     };
 
+    let projected_join_seed = extract_linear_join_info(seed)
+        .filter(|info| !info.joins.is_empty() && info.base_table == step_hop_table)
+        .map(|info| {
+            (
+                info.base_table,
+                info.scope_order[0].clone(),
+                RelExpr::Project {
+                    input: Box::new(seed.clone()),
+                    columns: vec![ProjectColumn {
+                        alias: "id".to_string(),
+                        expr: ProjectExpr::Column(ColumnRef::scoped(
+                            info.scope_order[0].clone(),
+                            "id",
+                        )),
+                    }],
+                },
+            )
+        });
+
     let (table, base_scope, disjuncts, seed_relation) = if let Some(seed_info) = simple_seed {
         (
             seed_info.base_table,
             seed_info.scope_order[0].clone(),
             seed_info.disjuncts,
             None,
+        )
+    } else if let Some((seed_table, seed_scope, projected_seed_relation)) = projected_join_seed {
+        (
+            seed_table,
+            seed_scope,
+            dnf_true(),
+            Some(projected_seed_relation),
         )
     } else {
         (
@@ -645,29 +782,6 @@ fn parse_gather_join_info(expr: &RelExpr) -> Option<GatherJoinInfo> {
 }
 
 fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
-    fn projected_result_element_index(
-        scope_order: &[String],
-        columns: &[ProjectColumn],
-    ) -> Option<usize> {
-        let projected_column = match columns {
-            [
-                ProjectColumn {
-                    expr: ProjectExpr::Column(column),
-                    ..
-                },
-            ] => column,
-            _ => return None,
-        };
-        if to_runtime_column(&projected_column.column) != "_id" {
-            return None;
-        }
-        match projected_column.scope.as_deref() {
-            Some(scope) => scope_order.iter().position(|candidate| candidate == scope),
-            None if scope_order.len() == 1 => Some(0),
-            None => None,
-        }
-    }
-
     match core {
         RelExpr::Gather {
             seed,
@@ -675,27 +789,48 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
             max_depth,
             ..
         } => parse_gather_core(seed, step, *max_depth),
-        RelExpr::Project { input, columns } => {
-            let normalized_columns = normalize_project_columns(columns);
-            if let Some(mut gather_info) = parse_gather_join_info(input) {
-                let mut scope_order = vec![gather_info.plan.base_scope.clone()];
-                scope_order.extend(
-                    gather_info
-                        .plan
-                        .joins
-                        .iter()
-                        .map(|join| join.effective_name().to_string()),
-                );
-                if let Some(index) =
-                    projected_result_element_index(&scope_order, &normalized_columns)
-                {
-                    gather_info.plan.result_element_index = Some(index);
-                } else {
-                    gather_info.plan.project_columns = Some(normalized_columns);
+        RelExpr::Filter { input, predicate } => {
+            if let RelExpr::Project {
+                input: project_input,
+                columns,
+            } = input.as_ref()
+                && let Some((mut plan, selected_scope)) =
+                    parse_projected_result_element_plan(project_input, columns)
+            {
+                let scoped_predicate =
+                    bind_unscoped_project_filter_scope(predicate, &selected_scope);
+                let filter_disjuncts = relation_predicate_to_disjuncts(&scoped_predicate)?;
+                plan.disjuncts = and_disjuncts(plan.disjuncts, filter_disjuncts);
+                if plan.disjuncts.is_empty() {
+                    return None;
                 }
+                return Some(plan);
+            }
+
+            if let Some(gather_info) = parse_gather_join_info(core) {
                 return Some(gather_info.plan);
             }
 
+            let linear = extract_linear_join_info(core)?;
+            Some(RuntimeCorePlan {
+                table: linear.base_table,
+                base_scope: linear.scope_order[0].clone(),
+                disjuncts: linear.disjuncts,
+                joins: linear.joins,
+                result_element_index: None,
+                recursive: None,
+                seed_relation: None,
+                project_columns: None,
+            })
+        }
+        RelExpr::Project { input, columns } => {
+            if let Some((plan, _selected_scope)) =
+                parse_projected_result_element_plan(input, columns)
+            {
+                return Some(plan);
+            }
+
+            let normalized_columns = normalize_project_columns(columns);
             let linear = extract_linear_join_info(input)?;
             let result_element_index =
                 projected_result_element_index(&linear.scope_order, &normalized_columns);
@@ -894,5 +1029,136 @@ mod tests {
                 value: Value::Text("Bob".to_string()),
             }]
         );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_supports_filter_over_result_element_projection() {
+        let team_id = crate::object::ObjectId::new();
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team"),
+                            right: ColumnRef::scoped("__hop_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("user_team_edges", "user_id"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("alice".to_string())),
+                    },
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "id")),
+                }],
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Uuid(team_id)),
+            },
+        };
+        let branches = vec!["main".to_string()];
+
+        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
+            .expect("post-projection result-element filter should lower");
+
+        assert_eq!(plan.base_scope, "user_team_edges");
+        assert_eq!(plan.result_element_index, Some(1));
+        assert_eq!(plan.joins.len(), 1);
+        assert_eq!(plan.joins[0].alias.as_deref(), Some("__hop_0"));
+        assert_eq!(
+            plan.disjuncts[0].conditions,
+            vec![
+                Condition::Eq {
+                    column: "user_team_edges.user_id".to_string(),
+                    value: Value::Text("alice".to_string()),
+                },
+                Condition::Eq {
+                    column: "__hop_0._id".to_string(),
+                    value: Value::Uuid(team_id),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_projects_join_seed_back_to_base_rows_for_gather() {
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("user_team_edges"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("teams", "id"),
+                        right: ColumnRef::scoped("__join_0", "team"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("__join_0", "user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Text("alice".to_string())),
+                },
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_team_edges"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("team_team_edges", "child_team"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Frontier),
+                        },
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: super::super::relation_ir::KeyRef::RowId(RowIdRef::Current),
+            max_depth: 8,
+            dedupe_key: vec![super::super::relation_ir::KeyRef::RowId(RowIdRef::Current)],
+        };
+        let branches = vec!["main".to_string()];
+
+        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
+            .expect("join-seeded gather should lower");
+
+        let Some(RelExpr::Project { input, columns }) = plan.seed_relation else {
+            panic!("expected projected seed relation");
+        };
+        assert!(matches!(input.as_ref(), RelExpr::Filter { .. }));
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].alias, "id");
+        assert!(matches!(
+            &columns[0].expr,
+            ProjectExpr::Column(ColumnRef { scope: Some(scope), column })
+                if scope == "teams" && column == "id"
+        ));
     }
 }
