@@ -3,10 +3,14 @@
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 
 use serde_json::json;
 use smallvec::smallvec;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::{Layer, Registry};
 
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -26,7 +30,7 @@ use crate::storage::{
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
     apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    put_test_row_metadata, seeded_memory_storage,
+    persist_test_schema, put_test_row_metadata, seeded_memory_storage,
 };
 
 #[derive(Debug, Clone)]
@@ -228,6 +232,211 @@ impl Storage for CountingCatalogueUpsertsStorage {
         entry: &crate::catalogue::CatalogueEntry,
     ) -> Result<(), StorageError> {
         self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+        self.inner.upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: crate::object::ObjectId,
+    ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.inner.load_catalogue_entry(object_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedEvent {
+    level: tracing::Level,
+    message: Option<String>,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct EventCollector {
+    events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+}
+
+impl EventCollector {
+    fn snapshot(&self) -> Vec<CapturedEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl<S> Layer<S> for EventCollector
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = CapturedEventVisitor::default();
+        event.record(&mut visitor);
+        self.events.lock().unwrap().push(CapturedEvent {
+            level: *event.metadata().level(),
+            message: visitor.message,
+            fields: visitor.fields,
+        });
+    }
+}
+
+#[derive(Default)]
+struct CapturedEventVisitor {
+    message: Option<String>,
+    fields: BTreeMap<String, String>,
+}
+
+impl CapturedEventVisitor {
+    fn record_value(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = Some(value.clone());
+        }
+        self.fields.insert(field.name().to_string(), value);
+    }
+}
+
+impl Visit for CapturedEventVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.record_value(field, format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.record_value(field, value.to_string());
+    }
+}
+
+struct FailOnIndexColumnStorage {
+    inner: MemoryStorage,
+    failing_column: &'static str,
+}
+
+impl FailOnIndexColumnStorage {
+    fn new(failing_column: &'static str) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            failing_column,
+        }
+    }
+}
+
+impl Storage for FailOnIndexColumnStorage {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_raw_table_mutations(mutations)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[OwnedHistoryRowBytes],
+        visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if index_mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                IndexMutation::Insert { column, .. } | IndexMutation::Remove { column, .. }
+                    if *column == self.failing_column
+            )
+        }) {
+            return Err(StorageError::IoError(format!(
+                "simulated index failure for column {}",
+                self.failing_column
+            )));
+        }
+        self.inner.apply_index_mutations(index_mutations)
+    }
+
+    fn upsert_catalogue_entry(
+        &mut self,
+        entry: &crate::catalogue::CatalogueEntry,
+    ) -> Result<(), StorageError> {
         self.inner.upsert_catalogue_entry(entry)
     }
 
@@ -585,6 +794,67 @@ fn update_rejects_json_schema_violation() {
     assert_eq!(
         rows[0].1,
         vec![Value::Text("{\"name\":\"ok\"}".to_string())]
+    );
+}
+
+#[test]
+fn synced_insert_log_includes_failing_index_column() {
+    let collector = EventCollector::default();
+    let subscriber = Registry::default().with(collector.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let descriptor = schema[&TableName::new("documents")].columns.clone();
+
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema.clone(), "dev", "main");
+
+    let mut storage = FailOnIndexColumnStorage::new("payload");
+    persist_test_schema(&mut storage, &schema);
+
+    let branch = get_branch(&qm);
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
+    put_test_row_metadata(&mut storage, row_id, metadata);
+
+    let raw_json = json!({
+        "content": "x".repeat(4_096),
+        "kind": "payload"
+    })
+    .to_string();
+    let row_data = encode_row(&descriptor, &[Value::Text(raw_json)]).unwrap();
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: None,
+            row: stored_row_commit(smallvec![], row_data, 1_000, row_id.to_string()).to_row(
+                row_id,
+                &branch,
+                RowState::VisibleDirect,
+            ),
+        },
+    });
+    qm.process(&mut storage);
+
+    let event = collector
+        .snapshot()
+        .into_iter()
+        .find(|event| {
+            event.level == tracing::Level::ERROR
+                && event.message.as_deref() == Some("failed to update indices for synced insert")
+        })
+        .expect("synced insert failure should be logged");
+
+    assert_eq!(
+        event.fields.get("index_column").map(String::as_str),
+        Some("payload")
+    );
+    assert_eq!(
+        event.fields.get("table").map(String::as_str),
+        Some("documents")
     );
 }
 

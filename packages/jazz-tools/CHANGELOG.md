@@ -1,5 +1,13 @@
 # jazz-tools
 
+## 2.0.0-alpha.32
+
+### Patch Changes
+
+- 2d10b2e: Include the failing index column in synced insert index-update error logs so OPFS-backed index failures are easier to diagnose.
+  - jazz-wasm@2.0.0-alpha.32
+  - jazz-rn@2.0.0-alpha.32
+
 ## 2.0.0-alpha.31
 
 ### Patch Changes

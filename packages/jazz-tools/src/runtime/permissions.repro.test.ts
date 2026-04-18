@@ -1,0 +1,183 @@
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import { schema as s } from "../index.js";
+import { definePermissions } from "../permissions/index.js";
+import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
+import { publishStoredSchema } from "./schema-fetch.js";
+import { startLocalJazzServer } from "../testing/local-jazz-server.js";
+
+const reproApp = s.defineApp({
+  teams: s.table({
+    name: s.string(),
+    route_key: s.string(),
+    corporation_id: s.string(),
+    kind: s.string(),
+    identity_key: s.string().optional(),
+    system_owned: s.boolean(),
+    archived: s.boolean(),
+  }),
+  user_team_edges: s.table({
+    user_id: s.string(),
+    team: s.ref("teams"),
+    administrator: s.boolean(),
+  }),
+  team_team_edges: s.table({
+    child_team: s.ref("teams"),
+    parent_team: s.ref("teams"),
+    administrator: s.boolean(),
+  }),
+});
+
+type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
+
+type ReproEnv = {
+  context: JazzContext;
+  server: { stop(): Promise<void>; url: string };
+};
+
+const envs: ReproEnv[] = [];
+
+function seedScenario(context: JazzContext): void {
+  const db = context.asBackend(reproApp);
+
+  const aliceTeam = db.insert(reproApp.teams, {
+    name: "Alice",
+    route_key: "alice",
+    corporation_id: "corp",
+    kind: "individual",
+    identity_key: "alice",
+    system_owned: false,
+    archived: false,
+  });
+  const opsTeam = db.insert(reproApp.teams, {
+    name: "Ops",
+    route_key: "ops",
+    corporation_id: "corp",
+    kind: "manual",
+    system_owned: false,
+    archived: false,
+  });
+
+  db.insert(reproApp.user_team_edges, {
+    user_id: "alice",
+    team: aliceTeam.id,
+    administrator: true,
+  });
+  db.insert(reproApp.team_team_edges, {
+    child_team: aliceTeam.id,
+    parent_team: opsTeam.id,
+    administrator: false,
+  });
+}
+
+async function runCase(
+  expectedNames: string[],
+  defineCasePermissions: ReproPermissions,
+): Promise<string[]> {
+  const appId = randomUUID();
+  const backendSecret = "repro-backend-secret";
+  const adminSecret = "repro-admin-secret";
+  const server = await startLocalJazzServer({
+    appId,
+    backendSecret,
+    adminSecret,
+  });
+
+  await publishStoredSchema(server.url, {
+    adminSecret,
+    schema: reproApp.wasmSchema,
+  });
+
+  const permissions = definePermissions(reproApp, defineCasePermissions);
+  const context = createJazzContext({
+    appId,
+    app: reproApp,
+    permissions,
+    driver: { type: "memory" },
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    userBranch: "main",
+    tier: "edge",
+  });
+  envs.push({ context, server });
+
+  seedScenario(context);
+
+  const aliceDb = context.forSession(
+    {
+      user_id: "alice",
+      claims: {},
+    },
+    reproApp,
+  );
+
+  const names = (await aliceDb.all(reproApp.teams.where({}))).map((team) => team.name).sort();
+  expect(names).toEqual([...expectedNames].sort());
+  return names;
+}
+
+describe("runtime permission repros for recursive gather and qualified predicates", () => {
+  afterEach(async () => {
+    while (envs.length > 0) {
+      const env = envs.pop();
+      if (!env) {
+        continue;
+      }
+      await env.context.shutdown();
+      await env.server.stop();
+    }
+  });
+
+  it("matches the original four runtime repro cases", async () => {
+    await runCase(["Alice"], ({ policy, session }) => {
+      policy.teams.allowRead.where((team) =>
+        policy.user_team_edges.exists.where({
+          user_id: session.user_id,
+          team: team.id,
+        }),
+      );
+    });
+
+    await runCase(["Alice"], ({ policy, session }) => {
+      const directTeams = policy.user_team_edges.where({ user_id: session.user_id }).hopTo("team");
+      policy.teams.allowRead.where((team) =>
+        policy.exists(
+          directTeams.where({
+            id: team.id,
+          }),
+        ),
+      );
+    });
+
+    await runCase(["Alice"], ({ policy, session }) => {
+      policy.teams.allowRead.where({
+        "user_team_edges.user_id": session.user_id,
+      });
+    });
+
+    await runCase(["Alice", "Ops"], ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          "user_team_edges.user_id": session.user_id,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges
+            .where({
+              child_team: current,
+              administrator: false,
+            })
+            .hopTo("parent_team"),
+        maxDepth: 8,
+      });
+
+      policy.teams.allowRead.where((team) =>
+        policy.exists(
+          reachableTeams.where({
+            id: team.id,
+          }),
+        ),
+      );
+    });
+  });
+});
