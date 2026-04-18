@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-18T21:03:22.446Z",
+  "updated_at": "2026-04-18T23:32:40.145Z",
   "entries": [
     {
       "id": "browser:b5",
@@ -19,8 +19,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-10T15:44:43.273Z",
-      "last_observed_at": "2026-04-10T15:44:43.273Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:05:02.435Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:r4_fanout_updates",
@@ -49,8 +49,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:rocksdb:r1_crud_sustained_single_hop",
@@ -59,8 +59,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:rocksdb:r2_reads_sustained",
@@ -69,8 +69,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:rocksdb:r2_reads_sustained_single_hop",
@@ -79,7 +79,17 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
+    },
+    {
+      "id": "native-criterion:rocksdb:r2_reads_with_write_churn",
+      "suite": "native",
+      "label": "Criterion R2 reads with churn (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:20:08.285Z",
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
       "observations": 1
     },
     {
@@ -99,7 +109,17 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
+    },
+    {
+      "id": "native-criterion:rocksdb:r6_permission_write_heavy",
+      "suite": "native",
+      "label": "Criterion R6 permission write-heavy (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:20:08.285Z",
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
       "observations": 1
     },
     {
@@ -109,8 +129,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:rocksdb:r8_many_branches",
@@ -129,7 +149,37 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:25:53.776Z",
-      "last_observed_at": "2026-04-08T22:25:53.776Z",
+      "last_observed_at": "2026-04-18T23:20:08.285Z",
+      "observations": 2
+    },
+    {
+      "id": "native-criterion:sqlite:r1_crud_sustained",
+      "suite": "native",
+      "label": "Criterion R1 CRUD sustained (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r1_crud_sustained_single_hop",
+      "suite": "native",
+      "label": "Criterion R1 CRUD single-hop (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r2_reads_sustained",
+      "suite": "native",
+      "label": "Criterion R2 reads sustained (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
       "observations": 1
     },
     {
@@ -139,7 +189,27 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:36:17.190Z",
-      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 2
+    },
+    {
+      "id": "native-criterion:sqlite:r2_reads_with_write_churn",
+      "suite": "native",
+      "label": "Criterion R2 reads with churn (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r3_cold_load",
+      "suite": "native",
+      "label": "Criterion R3 cold-load (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
       "observations": 1
     },
     {
@@ -149,8 +219,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:36:17.190Z",
-      "last_observed_at": "2026-04-08T22:36:17.190Z",
-      "observations": 1
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:sqlite:r5_permission_recursive",
@@ -159,7 +229,27 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-08T22:36:17.190Z",
-      "last_observed_at": "2026-04-08T22:36:17.190Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 2
+    },
+    {
+      "id": "native-criterion:sqlite:r6_permission_write_heavy",
+      "suite": "native",
+      "label": "Criterion R6 permission write-heavy (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
+      "observations": 1
+    },
+    {
+      "id": "native-criterion:sqlite:r7_hotspot_history",
+      "suite": "native",
+      "label": "Criterion R7 hotspot history (SQLite)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-18T23:32:08.811Z",
+      "last_observed_at": "2026-04-18T23:32:08.811Z",
       "observations": 1
     },
     {
