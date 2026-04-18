@@ -455,9 +455,10 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         }
     };
     info!(
-        "Auth configured: local_first={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+        "Auth configured: local_first={}, jwks={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
+        auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         authority_mode

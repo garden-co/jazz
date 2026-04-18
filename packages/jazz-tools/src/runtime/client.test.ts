@@ -114,3 +114,37 @@ describe("JazzClient.updateAuthToken", () => {
     });
   });
 });
+
+describe("JazzClient.updateCookieSession", () => {
+  it("refreshes transport auth without requiring a JS-readable JWT", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "cookie-app",
+      schema: {},
+      serverUrl: "https://example.test",
+      cookieSession: {
+        user_id: "alice",
+        claims: {
+          role: "reader",
+          auth_mode: "external",
+          subject: "alice-subject",
+          issuer: "https://issuer.example",
+        },
+      },
+    });
+
+    client.updateCookieSession({
+      user_id: "alice",
+      claims: {
+        role: "writer",
+        auth_mode: "external",
+        subject: "alice-subject",
+        issuer: "https://issuer.example",
+      },
+    });
+
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+  });
+});

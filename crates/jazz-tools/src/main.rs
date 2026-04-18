@@ -78,6 +78,10 @@ enum Commands {
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
 
+        /// Cookie name used for browser auth on the `/ws` upgrade.
+        #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
+        auth_cookie_name: Option<String>,
+
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
         /// Required in NODE_ENV=production.
@@ -135,6 +139,7 @@ async fn main() {
             data_dir,
             in_memory,
             jwks_url,
+            auth_cookie_name,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
@@ -148,6 +153,7 @@ async fn main() {
 
             let auth_config = AuthConfig {
                 jwks_url,
+                auth_cookie_name,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,

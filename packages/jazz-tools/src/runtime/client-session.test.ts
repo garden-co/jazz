@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Session } from "./context.js";
 import { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 
 function toBase64Url(value: string): string {
@@ -15,6 +16,28 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("client session resolution", () => {
+  it("uses a mirrored cookie session when provided", () => {
+    const session: Session = {
+      user_id: "cookie-user",
+      claims: {
+        role: "writer",
+        auth_mode: "external",
+        subject: "subject-123",
+        issuer: "https://issuer.example",
+      },
+    };
+
+    expect(
+      resolveClientSessionStateSync({
+        appId: "cookie-app",
+        cookieSession: session,
+      }),
+    ).toEqual({
+      transport: "cookie",
+      session,
+    });
+  });
+
   it("prefers jazz_principal_id from JWT when present", () => {
     const jwt = makeJwt({
       sub: "user-subject",

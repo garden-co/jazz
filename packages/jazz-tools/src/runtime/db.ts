@@ -87,6 +87,8 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
+  /** Mirrored session for local permission evaluation when sync auth uses cookies. */
+  cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -817,6 +819,30 @@ export class Db {
     return true;
   }
 
+  protected applyCookieSessionUpdate(session: Session | null): boolean {
+    const cookieSession = session ?? undefined;
+    const previousSession = this.config.cookieSession;
+    const previousState = this.authStateStore.getState();
+    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
+
+    if (!sessionChanged && nextState === previousState) {
+      return false;
+    }
+
+    this.config.cookieSession = cookieSession;
+
+    for (const client of this.clients.values()) {
+      client.updateCookieSession(cookieSession);
+    }
+
+    this.workerBridge?.updateAuth({
+      jwtToken: this.config.jwtToken,
+    });
+
+    return true;
+  }
+
   /**
    * Create a Db instance with pre-loaded WASM module.
    * @internal Use createDb() instead.
@@ -919,6 +945,7 @@ export class Db {
           env: this.config.env,
           userBranch: this.config.userBranch,
           jwtToken: this.config.jwtToken,
+          cookieSession: this.config.cookieSession,
           adminSecret: this.config.adminSecret,
           tier: this.worker ? undefined : "worker",
           // Keep worker-bridged browser clients on worker durability by default.
@@ -1446,6 +1473,10 @@ export class Db {
 
   updateAuthToken(jwtToken: string | null): void {
     this.applyAuthUpdate(jwtToken);
+  }
+
+  updateCookieSession(cookieSession: Session | null): void {
+    this.applyCookieSessionUpdate(cookieSession);
   }
 
   getAuthState(): AuthState {
@@ -2108,6 +2139,18 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
   }
 
+  override updateCookieSession(cookieSession: Session | null): void {
+    if (this.hasScopedAuthState) {
+      return;
+    }
+
+    if (!this.applyCookieSessionUpdate(cookieSession)) {
+      return;
+    }
+
+    this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
+  }
+
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2409,8 +2452,11 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  if (config.auth && config.jwtToken) {
-    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  if (config.auth && (config.jwtToken || config.cookieSession)) {
+    throw new Error("DbConfig error: auth, jwtToken, and cookieSession are mutually exclusive");
+  }
+  if (config.jwtToken && config.cookieSession) {
+    throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
 
   let resolvedConfig = { ...config };
