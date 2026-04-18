@@ -176,10 +176,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       throw new Error("where(...) does not support union(...) relations in MVP.");
     }
     const where = resolveRelationWhereInput(input);
-    const filters = [
-      ...this.state.filters,
-      ...extractRelationFilters(where, currentRelationScope(this.state)),
-    ];
+    const filters = [...this.state.filters, ...extractRelationFilters(where, this.state)];
     return new PermissionRelationBuilder(
       {
         ...this.state,
@@ -1032,16 +1029,67 @@ function currentRelationScope(state: RelationExprState): string {
 
 function extractRelationFilters(
   where: Record<string, unknown>,
-  scope: string,
+  state: RelationExprState,
 ): RelationFilterEntry[] {
   const filters: RelationFilterEntry[] = [];
+  const defaultScope = currentRelationScope(state);
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    filters.push({ column, raw, scope });
+    const [prefix, bare] = splitQualifiedColumn(column);
+    filters.push({
+      column: bare,
+      raw,
+      scope: prefix ? resolveQualifiedRelationFilterScope(state, prefix, bare) : defaultScope,
+    });
   }
   return filters;
+}
+
+function relationBaseScopeBinding(
+  state: RelationExprState,
+): { table: string; scope: string } | null {
+  if (!state.initialScope) {
+    return null;
+  }
+
+  return {
+    table: state.initialScope,
+    scope: state.initialScope,
+  };
+}
+
+function resolveQualifiedRelationFilterScope(
+  state: RelationExprState,
+  qualifiedTable: string,
+  column: string,
+): string {
+  const scopes = new Set<string>();
+  const baseBinding = relationBaseScopeBinding(state);
+  if (baseBinding && baseBinding.table === qualifiedTable) {
+    scopes.add(baseBinding.scope);
+  }
+
+  state.joins.forEach((join, index) => {
+    if (join.table === qualifiedTable) {
+      scopes.add(relationJoinAlias(state.kind, join, index));
+    }
+  });
+
+  if (scopes.size === 0) {
+    throw new Error(
+      `Qualified relation where(...) column "${qualifiedTable}.${column}" does not match the current relation scopes.`,
+    );
+  }
+
+  if (scopes.size > 1) {
+    throw new Error(
+      `Qualified relation where(...) table "${qualifiedTable}" is ambiguous in the current relation; use an unambiguous relation shape instead.`,
+    );
+  }
+
+  return scopes.values().next().value as string;
 }
 
 function normalizeRelationSelectMap(columns: Record<string, string>): Record<string, string> {
