@@ -23,6 +23,8 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
+  type UpdateDurabilityOptions,
+  type UpdateOptions,
   type UpsertDurabilityOptions,
   type UpsertOptions,
   type WriteDurabilityOptions,

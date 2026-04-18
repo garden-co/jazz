@@ -70,6 +70,7 @@ async fn create_note_with_backend_attribution(
     let write_context = WriteContext {
         session: None,
         attribution: Some(attributed_user_id.to_string()),
+        updated_at: None,
         batch_mode: None,
         batch_id: None,
         target_branch_name: None,
