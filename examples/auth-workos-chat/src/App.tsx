@@ -13,7 +13,7 @@ type ChatShellProps = {
 };
 
 function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
-  const { claims } = useAuthState(); // TODO: implement
+  const { claims } = useAuthState();
   const canPostAnnouncements = claims.role === "admin";
   const canPostGeneric = claims.role === "member" || claims.role === "admin";
   const displayName = user ? `${user.firstName} ${user.lastName}`.trim() : "Anonymous";
@@ -107,11 +107,9 @@ function JazzApp() {
   const config = React.useMemo(
     (): DbConfig => ({
       appId,
-      env: "dev" as const, // TODO: detect from process.env
-      userBranch: "main" as const, // TODO: should be the default
+      env: "dev" as const,
+      userBranch: "main" as const,
       serverUrl,
-      // TODO: When no jwt or secret are passed, anonymous mode is activated.
-      // Should be a JWT created x session, with deny-all write access
       jwtToken: workos.jwt,
     }),
     [workos.jwt],
@@ -121,7 +119,6 @@ function JazzApp() {
     return <p className="loading-state">Loading auth...</p>;
   }
 
-  // We should make it so
   return (
     <JazzProvider
       config={config}
