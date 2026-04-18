@@ -12,9 +12,12 @@
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+
+use futures::channel::oneshot;
 
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
@@ -38,8 +41,8 @@ use crate::sync_manager::{
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
-type PersistedWriteAck = futures::channel::oneshot::Receiver<()>;
-type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteAck);
+type PersistedWriteReceiver = oneshot::Receiver<crate::runtime_core::PersistedWriteAck>;
+type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteReceiver);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -135,6 +138,10 @@ impl CallbackSyncSender {
 impl SyncSender for CallbackSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         (self.callback)(message);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -343,9 +350,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<PersistedInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result =
+        let (result, receiver) =
             core.insert_persisted_with_id(table, values, object_id, owned.as_ref(), tier)?;
-        Ok(result)
+        Ok((result, receiver))
     }
 
     /// Update a row (partial update by column name).
@@ -383,7 +390,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<PersistedWriteAck, RuntimeError> {
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
         let receiver = core.update_persisted(object_id, values, owned.as_ref(), tier)?;
@@ -399,7 +406,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<PersistedWriteAck, RuntimeError> {
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
         let receiver =
@@ -426,7 +433,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<PersistedWriteAck, RuntimeError> {
+    ) -> Result<PersistedWriteReceiver, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
         let receiver = core.delete_persisted(object_id, owned.as_ref(), tier)?;

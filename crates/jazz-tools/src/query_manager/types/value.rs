@@ -21,6 +21,7 @@ pub enum Value {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
+    BatchId([u8; 16]),
     Bytea(Vec<u8>),
     /// Homogeneous array of values.
     Array(Vec<Value>),
@@ -46,6 +47,7 @@ enum ValueHuman {
     Text(String),
     Timestamp(#[serde(deserialize_with = "deserialize_timestamp_value")] u64),
     Uuid(ObjectId),
+    BatchId([u8; 16]),
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
@@ -69,6 +71,7 @@ enum ValueBinary {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
+    BatchId([u8; 16]),
     Bytea(Vec<u8>),
     Array(Vec<ValueBinary>),
     Row(Vec<ValueBinary>),
@@ -134,6 +137,7 @@ impl From<&Value> for ValueHuman {
             Value::Text(v) => ValueHuman::Text(v.clone()),
             Value::Timestamp(v) => ValueHuman::Timestamp(*v),
             Value::Uuid(v) => ValueHuman::Uuid(*v),
+            Value::BatchId(v) => ValueHuman::BatchId(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
             Value::Row { id, values } => ValueHuman::Row(RowHuman {
@@ -155,6 +159,7 @@ impl From<ValueHuman> for Value {
             ValueHuman::Text(v) => Value::Text(v),
             ValueHuman::Timestamp(v) => Value::Timestamp(v),
             ValueHuman::Uuid(v) => Value::Uuid(v),
+            ValueHuman::BatchId(v) => Value::BatchId(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
             ValueHuman::Row(r) => Value::Row {
@@ -176,6 +181,7 @@ impl From<&Value> for ValueBinary {
             Value::Text(v) => ValueBinary::Text(v.clone()),
             Value::Timestamp(v) => ValueBinary::Timestamp(*v),
             Value::Uuid(v) => ValueBinary::Uuid(*v),
+            Value::BatchId(v) => ValueBinary::BatchId(*v),
             Value::Bytea(v) => ValueBinary::Bytea(v.clone()),
             Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
             Value::Row { values, .. } => {
@@ -196,6 +202,7 @@ impl From<ValueBinary> for Value {
             ValueBinary::Text(v) => Value::Text(v),
             ValueBinary::Timestamp(v) => Value::Timestamp(v),
             ValueBinary::Uuid(v) => Value::Uuid(v),
+            ValueBinary::BatchId(v) => Value::BatchId(v),
             ValueBinary::Bytea(v) => Value::Bytea(v),
             ValueBinary::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
             ValueBinary::Row(v) => Value::Row {
@@ -243,6 +250,7 @@ impl PartialEq for Value {
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::BatchId(a), Value::BatchId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (
@@ -275,6 +283,7 @@ impl Value {
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),
             Value::Uuid(_) => Some(ColumnType::Uuid),
+            Value::BatchId(_) => Some(ColumnType::BatchId),
             Value::Bytea(_) => Some(ColumnType::Bytea),
             Value::Array(elements) => {
                 // Infer element type from first element; empty arrays have no inferable type
@@ -374,6 +383,12 @@ impl From<String> for Value {
 impl From<ObjectId> for Value {
     fn from(v: ObjectId) -> Self {
         Value::Uuid(v)
+    }
+}
+
+impl From<[u8; 16]> for Value {
+    fn from(v: [u8; 16]) -> Self {
+        Value::BatchId(v)
     }
 }
 
@@ -491,6 +506,13 @@ mod tests {
         assert_eq!(v, Value::Uuid(oid));
     }
 
+    #[test]
+    fn from_batch_id_bytes() {
+        let bytes = [7u8; 16];
+        let v: Value = bytes.into();
+        assert_eq!(v, Value::BatchId(bytes));
+    }
+
     // ── From<Vec<u8>> ───────────────────────────────────────────────
 
     #[test]
@@ -498,6 +520,14 @@ mod tests {
         let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let v: Value = bytes.clone().into();
         assert_eq!(v, Value::Bytea(bytes));
+    }
+
+    #[test]
+    fn batch_id_json_round_trip() {
+        let value = Value::BatchId([9u8; 16]);
+        let json = serde_json::to_string(&value).expect("serialize batch id");
+        let decoded: Value = serde_json::from_str(&json).expect("deserialize batch id");
+        assert_eq!(decoded, value);
     }
 
     // ── From<Vec<Value>> ────────────────────────────────────────────

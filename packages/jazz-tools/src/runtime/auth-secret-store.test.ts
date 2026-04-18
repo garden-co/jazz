@@ -102,4 +102,50 @@ describe("BrowserAuthSecretStore", () => {
     await store.saveSecret(replacement);
     expect(await store.loadSecret()).toBe(replacement);
   });
+
+  it("isolates secrets by appId/userId when namespace hints are provided", async () => {
+    const aliceStore = new BrowserAuthSecretStore({
+      storage,
+      appId: "chat-app",
+      userId: "alice",
+    });
+    const bobStore = new BrowserAuthSecretStore({
+      storage,
+      appId: "chat-app",
+      userId: "bob",
+    });
+    const aliceAgainStore = new BrowserAuthSecretStore({
+      storage,
+      appId: "chat-app",
+      userId: "alice",
+    });
+
+    const aliceSecret = await aliceStore.getOrCreateSecret();
+    const bobSecret = await bobStore.getOrCreateSecret();
+    const aliceAgainSecret = await aliceAgainStore.getOrCreateSecret();
+
+    expect(aliceSecret).not.toBe(bobSecret);
+    expect(aliceAgainSecret).toBe(aliceSecret);
+  });
+
+  it("static helpers can isolate secrets by namespace hints", async () => {
+    const aliceSecret = await BrowserAuthSecretStore.getOrCreateSecret({
+      storage,
+      appId: "docs-chat",
+      userId: "alice",
+    });
+    const bobSecret = await BrowserAuthSecretStore.getOrCreateSecret({
+      storage,
+      appId: "docs-chat",
+      userId: "bob",
+    });
+    const aliceAgainSecret = await BrowserAuthSecretStore.getOrCreateSecret({
+      storage,
+      appId: "docs-chat",
+      userId: "alice",
+    });
+
+    expect(aliceSecret).not.toBe(bobSecret);
+    expect(aliceAgainSecret).toBe(aliceSecret);
+  });
 });

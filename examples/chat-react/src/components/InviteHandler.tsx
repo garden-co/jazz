@@ -14,6 +14,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const session = useSession();
   const handled = useRef(false);
   const [chatLoaded, setChatLoaded] = useState(false);
+  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
@@ -35,14 +36,24 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     if (!chatLoaded || handled.current || !userId || !myProfile) return;
     handled.current = true;
 
-    db.insert(app.chatMembers, {
-      chatId,
-      userId,
-      joinCode: code,
-    });
-
-    navigate(`/#/chat/${chatId}`);
-  }, [chatLoaded, db, userId, myProfile, chatId, code]);
+    void db
+      .insertDurable(
+        app.chatMembers,
+        {
+          chatId,
+          userId,
+          joinCode: code,
+        },
+        sharedWriteOptions,
+      )
+      .then(() => {
+        navigate(`/#/chat/${chatId}`);
+      })
+      .catch((error) => {
+        console.error("failed to accept invite", error);
+        handled.current = false;
+      });
+  }, [chatLoaded, db, userId, myProfile, chatId, code, sharedWriteOptions]);
 
   return (
     <div id="joining-chat" className="p-8 text-center text-muted-foreground italic">

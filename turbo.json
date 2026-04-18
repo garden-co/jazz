@@ -22,7 +22,7 @@
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock"
       ],
-      "outputs": ["jazz-napi.node", "index.js", "index.d.ts"]
+      "outputs": ["*.node", "index.js", "index.d.ts"]
     },
     "jazz-wasm#build": {
       "dependsOn": ["@jazz/rust#build:crates"],

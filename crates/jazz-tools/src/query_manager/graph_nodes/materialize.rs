@@ -194,6 +194,7 @@ impl MaterializeNode {
         } else {
             tuple.provenance().clone()
         };
+        let mut materialized_batch_provenance = tuple.batch_provenance().clone();
 
         for (elem_idx, elem) in tuple.iter().enumerate() {
             // Only materialize if this element is in our list
@@ -213,7 +214,7 @@ impl MaterializeNode {
                         let row = Row::new(
                             *id,
                             loaded.data.clone(),
-                            loaded.version_id,
+                            loaded.batch_id,
                             loaded.row_provenance.clone(),
                         );
                         self.rows.insert(*id, row);
@@ -224,10 +225,11 @@ impl MaterializeNode {
                                 materialized_provenance.insert(scoped_object);
                             }
                         }
+                        materialized_batch_provenance.insert(loaded.batch_id);
                         materialized_elements.push(TupleElement::Row {
                             id: *id,
                             content: loaded.data,
-                            version_id: loaded.version_id,
+                            batch_id: loaded.batch_id,
                             row_provenance: loaded.row_provenance,
                         });
                     } else {
@@ -238,20 +240,21 @@ impl MaterializeNode {
                 TupleElement::Row {
                     id,
                     content,
-                    version_id,
+                    batch_id,
                     row_provenance,
                 } => {
                     // Already materialized - update our cache
-                    let row = Row::new(*id, content.clone(), *version_id, row_provenance.clone());
+                    let row = Row::new(*id, content.clone(), *batch_id, row_provenance.clone());
                     self.rows.insert(*id, row);
                     materialized_elements.push(elem.clone());
                 }
             }
         }
 
-        Some(Tuple::new_with_provenance(
+        Some(Tuple::new_with_shadow_state(
             materialized_elements,
             materialized_provenance,
+            materialized_batch_provenance,
         ))
     }
 
@@ -334,12 +337,12 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
             (
                 TupleElement::Row {
                     content: c1,
-                    version_id: cid1,
+                    batch_id: cid1,
                     ..
                 },
                 TupleElement::Row {
                     content: c2,
-                    version_id: cid2,
+                    batch_id: cid2,
                     ..
                 },
             ) => c1 != c2 || cid1 != cid2,
@@ -351,9 +354,9 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::metadata::RowProvenance;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+    use crate::row_histories::BatchId;
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -362,16 +365,16 @@ mod tests {
         ])
     }
 
-    fn make_commit_id(n: u8) -> CommitId {
-        CommitId([n; 32])
+    fn make_commit_id(n: u8) -> BatchId {
+        BatchId([n; 16])
     }
 
-    fn make_loaded_row(data: Vec<u8>, version_id: CommitId) -> LoadedRow {
+    fn make_loaded_row(data: Vec<u8>, batch_id: BatchId) -> LoadedRow {
         LoadedRow::new(
             data,
-            version_id,
             RowProvenance::for_insert("jazz:test", 0),
             Default::default(),
+            batch_id,
         )
     }
 

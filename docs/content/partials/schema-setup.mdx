@@ -10,6 +10,6 @@ internal schema representation.
 When Jazz reports a difference between the old and new schema hashes after changing `schema.ts`, and your app already has data, you should create and push a migration edge as described in [Migrations](/docs/schemas/migrations):
 
 ```bash
-npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
 npx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```

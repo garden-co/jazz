@@ -90,6 +90,8 @@ pub enum ColumnType {
     Double,
     /// 16-byte UUID (ObjectId).
     Uuid,
+    /// 16-byte batch/version identity.
+    BatchId,
     /// Variable-length binary payload.
     Bytea,
     /// JSON payload stored as UTF-8 text, optionally constrained by JSON Schema.
@@ -114,9 +116,11 @@ impl ColumnType {
             ColumnType::Boolean => Some(1),
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
+            ColumnType::BatchId => Some(16),
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
+            ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
             ColumnType::Enum { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length

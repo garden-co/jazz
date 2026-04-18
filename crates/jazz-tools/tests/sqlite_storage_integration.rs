@@ -5,10 +5,23 @@ mod support;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use jazz_tools::batch_fate::{
+    BatchSettlement, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
+    VisibleBatchMember,
+};
+use jazz_tools::catalogue::CatalogueEntry;
+use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
+use jazz_tools::object::{BranchName, ObjectId};
+use jazz_tools::query_manager::encoding::encode_row;
+use jazz_tools::query_manager::types::{SchemaHash, TableName};
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, VisibleRowEntry};
+use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::server::{TestingJwksServer, TestingServer};
+use jazz_tools::storage::{SqliteStorage, Storage};
+use jazz_tools::sync_manager::DurabilityTier;
 use jazz_tools::{
-    AppContext, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
-    TableSchema, Value,
+    AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, SchemaBuilder, TableSchema,
+    Value,
 };
 use support::{TestingClient, publish_allow_all_permissions, wait_for_query};
 use tempfile::TempDir;
@@ -49,6 +62,171 @@ fn indexed_schema() -> jazz_tools::Schema {
                 .column("category", ColumnType::Text),
         )
         .build()
+}
+
+fn persist_schema<H: Storage>(storage: &mut H, schema: &jazz_tools::Schema) -> SchemaHash {
+    let schema_hash = SchemaHash::compute(schema);
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(schema),
+        })
+        .expect("persist schema catalogue entry");
+    schema_hash
+}
+
+fn encode_todo_row(schema: &jazz_tools::Schema, title: &str, completed: bool) -> Vec<u8> {
+    encode_row(
+        &schema[&TableName::new("todos")].columns,
+        &[Value::Text(title.to_string()), Value::Boolean(completed)],
+    )
+    .expect("encode todo row")
+}
+
+fn seed_sqlite_sealed_batch_acceptance(
+    storage: &mut SqliteStorage,
+    schema: &jazz_tools::Schema,
+) -> (BatchId, ObjectId) {
+    let schema_hash = persist_schema(storage, schema);
+    let batch_id = BatchId::new();
+    let row_id = ObjectId::new();
+    let staged_row = StoredRowBatch::new_with_batch_id(
+        batch_id,
+        row_id,
+        "main",
+        Vec::<BatchId>::new(),
+        encode_todo_row(schema, "recovered-transaction", false),
+        RowProvenance::for_insert("alice".to_string(), 1_000),
+        HashMap::new(),
+        RowState::StagingPending,
+        None,
+    );
+
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&jazz_tools::storage::RowLocator {
+                table: "todos".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .expect("persist row locator");
+    storage
+        .append_history_region_rows("todos", std::slice::from_ref(&staged_row))
+        .expect("persist staged row");
+    storage
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id: row_id,
+                row_digest: staged_row.content_digest(),
+            }],
+            Vec::new(),
+        ))
+        .expect("persist sealed submission");
+
+    (batch_id, row_id)
+}
+
+fn seed_sqlite_sealed_batch_frontier_conflict(
+    storage: &mut SqliteStorage,
+    schema: &jazz_tools::Schema,
+) -> (BatchId, String, ObjectId, ObjectId) {
+    let schema_hash = persist_schema(storage, schema);
+    let batch_id = BatchId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main".to_string();
+    let sibling_branch = "dev-bbbbbbbbbbbb-main".to_string();
+    let existing_row_id = ObjectId::new();
+    let conflicting_row_id = ObjectId::new();
+    let staged_row_id = ObjectId::new();
+
+    let existing_row = StoredRowBatch::new(
+        existing_row_id,
+        target_branch.as_str(),
+        Vec::<BatchId>::new(),
+        encode_todo_row(schema, "target-existing", false),
+        RowProvenance::for_insert("alice".to_string(), 900),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let conflicting_row = StoredRowBatch::new(
+        conflicting_row_id,
+        sibling_branch.as_str(),
+        Vec::<BatchId>::new(),
+        encode_todo_row(schema, "sibling-existing", false),
+        RowProvenance::for_insert("bob".to_string(), 950),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let staged_row = StoredRowBatch::new_with_batch_id(
+        batch_id,
+        staged_row_id,
+        target_branch.as_str(),
+        Vec::<BatchId>::new(),
+        encode_todo_row(schema, "staged-conflict", false),
+        RowProvenance::for_insert("alice".to_string(), 1_000),
+        HashMap::new(),
+        RowState::StagingPending,
+        None,
+    );
+
+    for row_id in [existing_row_id, conflicting_row_id, staged_row_id] {
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&jazz_tools::storage::RowLocator {
+                    table: "todos".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .expect("persist row locator");
+    }
+    storage
+        .append_history_region_rows(
+            "todos",
+            &[
+                existing_row.clone(),
+                conflicting_row.clone(),
+                staged_row.clone(),
+            ],
+        )
+        .expect("persist history rows");
+    storage
+        .upsert_visible_region_rows(
+            "todos",
+            &[
+                VisibleRowEntry::rebuild(existing_row.clone(), std::slice::from_ref(&existing_row)),
+                VisibleRowEntry::rebuild(
+                    conflicting_row.clone(),
+                    std::slice::from_ref(&conflicting_row),
+                ),
+            ],
+        )
+        .expect("persist visible frontier");
+    storage
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            BranchName::new(target_branch.clone()),
+            vec![SealedBatchMember {
+                object_id: staged_row_id,
+                row_digest: staged_row.content_digest(),
+            }],
+            vec![CapturedFrontierMember {
+                object_id: existing_row_id,
+                branch_name: BranchName::new(target_branch.clone()),
+                batch_id: existing_row.batch_id(),
+            }],
+        ))
+        .expect("persist conflicting sealed submission");
+
+    (batch_id, target_branch, staged_row_id, existing_row_id)
 }
 
 async fn make_client(
@@ -125,6 +303,8 @@ async fn sqlite_server_storage() {
     // --- restart subtests (need their own server lifecycle) ---
     restart_preserves_data().await;
     catalogue_entries_survive_restart().await;
+    sealed_batch_acceptance_recovers_after_restart().await;
+    sealed_batch_frontier_conflict_rejects_after_restart().await;
 }
 
 /// Alice creates 200 todos. Bob connects fresh and must see all 200 with
@@ -885,4 +1065,116 @@ async fn catalogue_entries_survive_restart() {
 
     bob.shutdown().await.expect("shutdown bob");
     server2.shutdown().await;
+}
+
+async fn sealed_batch_acceptance_recovers_after_restart() {
+    let data_dir = TempDir::new().expect("temp data dir");
+    let db_path = data_dir.path().join("jazz.sqlite");
+    let schema = todos_schema();
+    let (batch_id, row_id) = {
+        let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
+        let seeded = seed_sqlite_sealed_batch_acceptance(&mut storage, &schema);
+        storage.flush();
+        storage.close().expect("close seeded sqlite storage");
+        seeded
+    };
+
+    let jwks = TestingJwksServer::start().await;
+    let server = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let bob =
+        make_client_external_jwks(&server, schema.clone(), "bob-sealed-accept", "todos").await;
+
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+
+    let reopened = SqliteStorage::open(&db_path).expect("reopen sqlite storage");
+    assert_eq!(
+        reopened
+            .load_authoritative_batch_settlement(batch_id)
+            .expect("load authoritative settlement"),
+        Some(BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id,
+            }],
+        })
+    );
+    assert_eq!(
+        reopened
+            .load_sealed_batch_submission(batch_id)
+            .expect("load sealed submission after recovery"),
+        None
+    );
+    let visible = reopened
+        .load_visible_region_row("todos", "main", row_id)
+        .expect("load visible row after recovery")
+        .expect("accepted row should remain visible");
+    assert_eq!(visible.state, RowState::VisibleTransactional);
+    reopened.close().expect("close reopened sqlite storage");
+}
+
+async fn sealed_batch_frontier_conflict_rejects_after_restart() {
+    let data_dir = TempDir::new().expect("temp data dir");
+    let db_path = data_dir.path().join("jazz.sqlite");
+    let schema = todos_schema();
+    let (batch_id, target_branch, staged_row_id, _existing_row_id) = {
+        let mut storage = SqliteStorage::open(&db_path).expect("open sqlite storage");
+        let seeded = seed_sqlite_sealed_batch_frontier_conflict(&mut storage, &schema);
+        storage.flush();
+        storage.close().expect("close seeded sqlite storage");
+        seeded
+    };
+
+    let jwks = TestingJwksServer::start().await;
+    let server = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let bob = make_client_external_jwks(
+        &server,
+        schema.clone(),
+        "bob-sealed-frontier-conflict",
+        "todos",
+    )
+    .await;
+
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+
+    let reopened = SqliteStorage::open(&db_path).expect("reopen sqlite storage");
+    assert_eq!(
+        reopened
+            .load_authoritative_batch_settlement(batch_id)
+            .expect("load rejected settlement"),
+        Some(BatchSettlement::Rejected {
+            batch_id,
+            code: "transaction_conflict".to_string(),
+            reason: "family-visible frontier changed since batch was sealed".to_string(),
+        })
+    );
+    assert_eq!(
+        reopened
+            .load_sealed_batch_submission(batch_id)
+            .expect("load sealed submission after rejection"),
+        None
+    );
+    assert_eq!(
+        reopened
+            .load_visible_region_row("todos", target_branch.as_str(), staged_row_id)
+            .expect("load staged row visibility"),
+        None
+    );
+    reopened.close().expect("close reopened sqlite storage");
 }

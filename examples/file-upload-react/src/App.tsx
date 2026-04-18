@@ -281,7 +281,8 @@ type AppProps = {
 };
 
 export function App({ config, fallback }: AppProps = {}) {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const appId = config?.appId ?? readEnvAppId() ?? "019d4349-2473-7006-857e-dd676070304b";
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId }));
   const resolvedConfig = defaultConfig(secret, config);
 
   return (
