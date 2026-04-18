@@ -24,8 +24,8 @@ use crate::query_manager::types::{
 use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
-    HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
-    RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, IndexMutation, MemoryStorage, OpfsBTreeStorage, OwnedHistoryRowBytes,
+    OwnedVisibleRowBytes, RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
 };
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
@@ -678,6 +678,18 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
     out
 }
 
+fn visual_description_schema() -> Schema {
+    let mut out = Schema::new();
+    out.insert(
+        TableName::new("visual_description"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("config", ColumnType::Json { schema: None }).nullable(),
+        ])
+        .into(),
+    );
+    out
+}
+
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
 fn execute_query<H: Storage>(
@@ -856,6 +868,75 @@ fn synced_insert_log_includes_failing_index_column() {
         event.fields.get("table").map(String::as_str),
         Some("documents")
     );
+}
+
+#[test]
+fn synced_insert_many_large_json_configs_survive_opfs_splits() {
+    let collector = EventCollector::default();
+    let subscriber = Registry::default().with(collector.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let sync_manager = SyncManager::new();
+    let schema = visual_description_schema();
+    let descriptor = schema[&TableName::new("visual_description")]
+        .columns
+        .clone();
+
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema.clone(), "dev", "main");
+
+    let mut storage = OpfsBTreeStorage::memory(4 * 1024 * 1024).expect("open opfs storage");
+    persist_test_schema(&mut storage, &schema);
+
+    let branch = get_branch(&qm);
+    let table = "visual_description";
+    let max_index_value_segment_len =
+        5 * 1024 - (4 + table.len() + 1 + "config".len() + 1 + branch.len() + 1 + 32);
+    let max_inline_text_bytes = (max_index_value_segment_len / 2).saturating_sub(1);
+    let json_overhead = "{\"config\":\"\"}".len();
+    let shared_prefix = "a".repeat(max_inline_text_bytes - json_overhead - 8);
+
+    for i in 0..128 {
+        let row_id = ObjectId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        put_test_row_metadata(&mut storage, row_id, metadata);
+
+        let payload = if i % 8 == 7 {
+            format!("{{\"config\":\"b{i:08x}\"}}")
+        } else {
+            format!("{{\"config\":\"{shared_prefix}{i:08x}\"}}")
+        };
+        let row_data = encode_row(&descriptor, &[Value::Text(payload)]).unwrap();
+
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::RowBatchCreated {
+                metadata: None,
+                row: stored_row_commit(smallvec![], row_data, 1_000 + i as u64, row_id.to_string())
+                    .to_row(row_id, &branch, RowState::VisibleDirect),
+            },
+        });
+    }
+
+    qm.process(&mut storage);
+
+    let failures = collector
+        .snapshot()
+        .into_iter()
+        .filter(|event| {
+            event.level == tracing::Level::ERROR
+                && event.message.as_deref() == Some("failed to update indices for synced insert")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        failures.is_empty(),
+        "synced inserts should not hit opfs split failures: {failures:?}"
+    );
+
+    let query = qm.query(table).build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query synced rows");
+    assert_eq!(rows.len(), 128, "all synced rows should remain queryable");
 }
 
 #[test]
