@@ -8,7 +8,7 @@ export async function createLocalFirstDb() {
     appId: "my-app",
     env: "dev",
     userBranch: "main",
-    auth: { localFirstSecret: secret },
+    secret,
   });
 }
 // #endregion auth-localfirst-ts

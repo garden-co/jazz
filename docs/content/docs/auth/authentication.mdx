@@ -4,12 +4,15 @@ description: "How and when to use Jazz's auth modes, and how to manage JWT auth 
 reviewedAt: "f52c2c62"
 ---
 
-Jazz has two auth modes: `local-first` and `external`. Local-first auth derives a stable identity from a device secret — no server needed. Most multi-user apps will also use `external` authentication for production accounts.
+Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
 | Mode          | What it does                                           | When to use it                                   |
 | ------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `anonymous`   | Ephemeral read-only identity, no secret, no server     | Public/marketing surfaces, try-before-anything   |
 | `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
 | `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
+
+Anonymous sessions can subscribe to queries but are **structurally denied writes** — every insert, update, and delete path checks the session's auth mode before any policy evaluation runs, and surfaces an `AnonymousWriteDeniedError` to the client. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
 
 ## Local-first auth
 
@@ -67,7 +70,8 @@ For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config
 
 ```tsx
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
-const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+const auth = useLocalFirstAuth();
+const secret = use(auth.getOrCreateSecret());
 
 const config = jwtToken
   ? {
@@ -78,7 +82,7 @@ const config = jwtToken
   : {
       appId: "my-app",
       serverUrl: "https://sync.example.com",
-      auth: { localFirstSecret: secret },
+      secret,
     };
 
 <JazzProvider key={jwtToken ? "external" : "local"} config={config} />;
@@ -98,14 +102,45 @@ recommended path for login, logout, and any principal change.
 
 ### Reacting to expiry and unauthenticated responses
 
-Jazz exposes first-class auth state on `Db`:
+Auth state is flat:
+
+```ts
+interface AuthState {
+  authMode: "anonymous" | "local-first" | "external";
+  session: Session | null;
+  error?: "expired" | "missing" | "invalid" | "disabled";
+}
+```
+
+Presence of `error` indicates trouble; `authMode` and the last-known `session` are always available.
+
+#### React: `onJWTExpired` prop
+
+For JWT refresh, pass `onJWTExpired` to `JazzProvider`. Jazz calls it when the sync server rejects
+the current token as expired, serialized so concurrent failed writes trigger a single refresh:
+
+```tsx
+<JazzProvider
+  config={{ appId: "my-app", jwtToken }}
+  onJWTExpired={async () => await fetchFreshJwt()}
+>
+  <App />
+</JazzProvider>
+```
+
+Read auth state from any component with `useAuthState()`:
+
+```ts
+const { authMode, userId, claims, error } = useAuthState();
+```
+
+#### TypeScript: `db.onAuthChanged`
+
+Outside React, subscribe to auth-state changes on `Db`:
 
 ```ts
 const stop = db.onAuthChanged(async (state) => {
-  if (state.status !== "unauthenticated") return;
-
-  console.log(state.reason);
-  // "expired" | "missing" | "invalid" | "disabled"
+  if (state.error !== "expired") return;
 
   const freshJwt = await getFreshJwtForCurrentUser().catch(() => null);
   if (freshJwt) {
@@ -118,23 +153,20 @@ const stop = db.onAuthChanged(async (state) => {
 });
 ```
 
-You can also read the current snapshot synchronously with `db.getAuthState()`.
+Read the current snapshot synchronously with `db.getAuthState()`.
 
 When Jazz receives a structured unauthenticated response from the sync server, it:
 
-- transitions the client to `status: "unauthenticated"`
+- sets `error` on the auth state
 - preserves the last known `session`
 - pauses authenticated sync and reconnects until the app either refreshes the same user's JWT with
   `db.updateAuthToken(...)` or recreates the client with a new auth config
 
-This means app code should treat `authState.status` as the source of truth for whether Jazz is
-currently authenticated.
-
 <Callout type="info">
-  `useSession()` and `db.getAuthState().session` can still return the last known session while the
-  auth state is unauthenticated. That's intentional: it keeps user-scoped UI and local authorship
-  stable while your app refreshes or replaces the JWT. For signed-in vs signed-out UI, check
-  `db.getAuthState().status` instead of only checking whether a session exists.
+  `useSession()` and `db.getAuthState().session` can still return the last known session while
+  `error` is set. That's intentional: it keeps user-scoped UI and local authorship stable while your
+  app refreshes or replaces the JWT. For signed-in vs signed-out UI, check whether `error` is set
+  (or the `authMode` you expect) instead of only whether a session exists.
 </Callout>
 
 ### Server configuration

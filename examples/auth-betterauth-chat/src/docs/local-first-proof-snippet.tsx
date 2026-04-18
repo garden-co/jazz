@@ -69,37 +69,11 @@ function App() {
   if (isPending || !config) return null;
 
   return (
-    <JazzProvider config={config}>
-      <BetterAuthJazzSync hasBetterAuthSession={!!authSession?.session}>
-        <YourApp />
-      </BetterAuthJazzSync>
+    <JazzProvider config={config} onJWTExpired={() => getJwtFromBetterAuth()}>
+      <YourApp />
     </JazzProvider>
   );
 }
 // #endregion local-first-config-resolution
 
-// #region local-first-token-refresh
-function BetterAuthJazzSync({
-  hasBetterAuthSession,
-  children,
-}: React.PropsWithChildren<{ hasBetterAuthSession: boolean }>) {
-  const db = useDb();
-
-  useEffect(() => {
-    if (!hasBetterAuthSession) return;
-
-    return db.onAuthChanged((state) => {
-      if (state.error !== "expired") return;
-
-      // JWT expired — fetch a fresh one from BetterAuth
-      getJwtFromBetterAuth().then((jwt) => {
-        if (jwt) db.updateAuthToken(jwt);
-      });
-    });
-  }, [db, hasBetterAuthSession]);
-
-  return children;
-}
-// #endregion local-first-token-refresh
-
-export { App, SignUpButton, BetterAuthJazzSync };
+export { App, SignUpButton };
