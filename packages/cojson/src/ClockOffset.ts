@@ -41,6 +41,11 @@ export class ClockOffset {
       return;
     }
 
+    // Outlier gate: reject samples that are too far from the current estimate.
+    // This prevents a single bad ping from poisoning the median.
+    // Note: on the first sample this gate is skipped — only the magnitude cap applies.
+    // A transient delay on that first ping can seed a poor baseline, causing subsequent
+    // legitimate samples to be rejected. Worth revisiting once we have real-world data.
     if (
       this.samples.length > 0 &&
       Math.abs(impliedOffset - this.cachedOffset) > this.outlierThresholdMs
