@@ -66,7 +66,7 @@
 		const epochMs = Math.floor(date.getTime() / 60_000) * 60_000;
 		const floored = new Date(epochMs);
 
-		const results = await db.all(app.jams.where({ created_at: floored }).limit(1), 'worker');
+		const results = await db.all(app.jams.where({ created_at: floored }).limit(1), 'local');
 		if (results.length > 0) {
 			setHashJamId(results[0].id);
 			historyOpen = false;

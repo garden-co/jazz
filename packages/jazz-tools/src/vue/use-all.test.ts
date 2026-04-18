@@ -64,7 +64,7 @@ describe("vue/useAll", () => {
   it("VU-ALL-03: forwards full QueryOptions to makeQueryKey", () => {
     const query = makeQuery();
     const options = {
-      tier: "worker" as const,
+      tier: "local" as const,
       localUpdates: "deferred" as const,
       propagation: "local-only" as const,
     };
@@ -76,7 +76,7 @@ describe("vue/useAll", () => {
 
   it("VU-ALL-04: reactive options trigger re-subscription on change", async () => {
     const query = makeQuery();
-    const options = ref<any>({ tier: "worker" });
+    const options = ref<any>({ tier: "local" });
 
     mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-edge");
     mocks.getCacheEntry.mockReturnValue({
@@ -87,7 +87,7 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     scope.run(() => useAll(query, options));
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "worker" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
     expect(mocks.subscribe).toHaveBeenCalledTimes(1);
 
     options.value = { tier: "edge" };

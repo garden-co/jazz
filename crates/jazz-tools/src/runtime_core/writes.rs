@@ -27,7 +27,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager()
             .sync_manager()
             .max_local_durability_tier()
-            .unwrap_or(DurabilityTier::Worker)
+            .unwrap_or(DurabilityTier::Local)
     }
 
     fn ensure_transactional_batch_is_writable(
