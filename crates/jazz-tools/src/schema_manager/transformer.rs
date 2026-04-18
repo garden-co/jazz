@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 
-use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{SchemaHash, TableName};
+use crate::row_histories::BatchId;
 
 use super::context::SchemaContext;
 use super::lens::Direction;
@@ -18,8 +18,8 @@ use super::lens::Direction;
 pub struct TransformResult {
     /// Transformed row data.
     pub data: Vec<u8>,
-    /// Original row version ID (preserved).
-    pub version_id: CommitId,
+    /// Original row batch ID (preserved).
+    pub batch_id: BatchId,
     /// Whether the row was transformed (false if already in current schema).
     pub was_transformed: bool,
 }
@@ -82,7 +82,7 @@ impl<'a> LensTransformer<'a> {
     ///
     /// # Arguments
     /// * `data` - Raw row data encoded with source schema
-    /// * `version_id` - Version ID of the row
+    /// * `batch_id` - Batch ID of the row
     /// * `source_hash` - Schema hash of the source (where row was stored)
     ///
     /// # Returns
@@ -90,14 +90,14 @@ impl<'a> LensTransformer<'a> {
     pub fn transform(
         &self,
         data: &[u8],
-        version_id: CommitId,
+        batch_id: BatchId,
         source_hash: SchemaHash,
     ) -> Result<TransformResult, TransformError> {
         // If already in current schema, no transform needed
         if source_hash == self.context.current_hash {
             return Ok(TransformResult {
                 data: data.to_vec(),
-                version_id,
+                batch_id,
                 was_transformed: false,
             });
         }
@@ -182,7 +182,7 @@ impl<'a> LensTransformer<'a> {
 
         Ok(TransformResult {
             data: transformed_data,
-            version_id,
+            batch_id,
             was_transformed: true,
         })
     }
@@ -339,8 +339,8 @@ mod tests {
             .build()
     }
 
-    fn make_commit_id(n: u8) -> CommitId {
-        CommitId([n; 32])
+    fn make_commit_id(n: u8) -> BatchId {
+        BatchId([n; 16])
     }
 
     #[test]

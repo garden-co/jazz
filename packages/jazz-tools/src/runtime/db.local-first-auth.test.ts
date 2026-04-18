@@ -11,6 +11,19 @@ describe("DbConfig auth validation", () => {
     };
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
   });
+
+  it("rejects setting both jwtToken and cookieSession", async () => {
+    const { createDb } = await import("./db.js");
+    const config: DbConfig = {
+      appId: "test-app",
+      jwtToken: "some-jwt",
+      cookieSession: {
+        user_id: "alice",
+        claims: { role: "reader" },
+      },
+    };
+    await expect(createDb(config)).rejects.toThrow("mutually exclusive");
+  });
 });
 
 describe("getLocalFirstIdentityProof", () => {

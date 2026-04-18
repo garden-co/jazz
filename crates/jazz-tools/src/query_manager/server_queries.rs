@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
+use crate::row_histories::BatchId;
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{
@@ -29,7 +29,7 @@ enum WriteSchemaResolution {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
     pub content: Vec<u8>,
 }
 
@@ -75,7 +75,7 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (_, row) = self.load_best_visible_row_version(
+        let (_, row) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -88,8 +88,9 @@ impl QueryManager {
 
     fn payload_row_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
         match payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_provenance()),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.row_provenance())
+            }
             _ => None,
         }
     }
@@ -231,7 +232,7 @@ impl QueryManager {
         &self,
         table: &str,
         content: &[u8],
-        version_id: CommitId,
+        batch_id: BatchId,
         branch_name: BranchName,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
@@ -259,7 +260,7 @@ impl QueryManager {
 
         let transformer = LensTransformer::new(auth_context, table);
         transformer
-            .transform(content, version_id, source_hash)
+            .transform(content, batch_id, source_hash)
             .ok()
             .map(|result| result.data)
     }
@@ -273,7 +274,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, row) = self.load_best_visible_row_version(
+        let (table, row) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -285,14 +286,14 @@ impl QueryManager {
             return None;
         }
 
-        let tip_commit_id = row.version_id();
+        let tip_batch_id = row.batch_id;
         let tip_content = row.data.clone();
         let tip_provenance = row.row_provenance();
 
         let transformed = self.transform_content_to_authorization_schema(
             &table,
             &tip_content,
-            tip_commit_id,
+            tip_batch_id,
             branch_name,
             source_branch_schema_map,
             auth_context,
@@ -300,9 +301,9 @@ impl QueryManager {
 
         Some(LoadedRow::new(
             transformed,
-            tip_commit_id,
             tip_provenance,
             [(object_id, branch_name)].into_iter().collect(),
+            row.batch_id,
         ))
     }
 
@@ -331,7 +332,7 @@ impl QueryManager {
         let Some(transformed) = self.transform_content_to_authorization_schema(
             table_name.as_str(),
             content,
-            CommitId([0; 32]),
+            BatchId([0; 16]),
             branch_name,
             source_branch_schema_map,
             auth_context,
@@ -339,18 +340,13 @@ impl QueryManager {
             return false;
         };
 
-        let row = Row::new(
-            object_id,
-            transformed,
-            CommitId([0; 32]),
-            provenance.clone(),
-        );
         let evaluator = PolicyContextEvaluator::new(
             auth_schema,
             session,
             branch_name.as_str(),
             self.row_policy_mode,
         );
+        let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
             self.load_row_for_authorization_context(
@@ -387,7 +383,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) = self.load_best_visible_row_version(
+        let Some((table, row)) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
@@ -434,19 +430,19 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn authorized_rows_from_graph(
+    pub(super) fn authorized_tuples_from_graph(
         &mut self,
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
-    ) -> Vec<Row> {
+    ) -> Vec<super::types::Tuple> {
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
             if !self.authorization_schema_required {
-                return graph.current_result();
+                return graph.current_output_tuples();
             }
             return Vec::new();
         };
@@ -456,61 +452,7 @@ impl QueryManager {
                 .values()
                 .all(|table_schema| table_schema.policies.select.using.is_none())
         {
-            return graph.current_result();
-        }
-
-        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
-
-        graph
-            .current_output_rows_with_provenance()
-            .into_iter()
-            .filter_map(|(row, provenance)| {
-                provenance
-                    .iter()
-                    .copied()
-                    .all(|(object_id, branch_name)| {
-                        *authorization_cache
-                            .entry((object_id, branch_name))
-                            .or_insert_with(|| {
-                                self.provenance_row_matches_current_select_policy(
-                                    storage,
-                                    object_id,
-                                    branch_name,
-                                    session,
-                                    &auth_schema,
-                                    &auth_context,
-                                    source_branch_schema_map,
-                                )
-                            })
-                    })
-                    .then_some(row)
-            })
-            .collect()
-    }
-
-    fn authorized_scope_from_graph(
-        &mut self,
-        storage: &dyn Storage,
-        graph: &super::graph::QueryGraph,
-        schema_context: &crate::schema_manager::SchemaContext,
-        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
-        session: Option<&Session>,
-    ) -> HashSet<(ObjectId, BranchName)> {
-        let Some((auth_schema, auth_context)) =
-            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
-        else {
-            if !self.authorization_schema_required {
-                return graph.sync_scope_object_ids();
-            }
-            return HashSet::new();
-        };
-
-        if !self.row_policy_mode.denies_missing_explicit_policy()
-            && auth_schema
-                .values()
-                .all(|table_schema| table_schema.policies.select.using.is_none())
-        {
-            return graph.sync_scope_object_ids();
+            return graph.current_output_tuples();
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -538,10 +480,29 @@ impl QueryManager {
                                 )
                             })
                     })
-                    .then(|| tuple.provenance().clone())
+                    .then_some(tuple)
             })
-            .flatten()
             .collect()
+    }
+
+    fn authorized_scope_from_graph(
+        &mut self,
+        storage: &dyn Storage,
+        graph: &super::graph::QueryGraph,
+        schema_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        self.authorized_tuples_from_graph(
+            storage,
+            graph,
+            schema_context,
+            source_branch_schema_map,
+            session,
+        )
+        .into_iter()
+        .flat_map(|tuple| tuple.provenance().clone().into_iter())
+        .collect()
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -583,7 +544,7 @@ impl QueryManager {
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
-        version_id: CommitId,
+        batch_id: BatchId,
         branch_name: BranchName,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
@@ -593,11 +554,11 @@ impl QueryManager {
             && source_hash != context.schema_context.current_hash
         {
             let transformer = LensTransformer::new(context.schema_context, context.table);
-            match transformer.transform(&content, version_id, source_hash) {
+            match transformer.transform(&content, batch_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
-                        version_id,
+                        batch_id: result.batch_id,
                         content: result.data,
                     });
                 }
@@ -623,7 +584,7 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
-            version_id,
+            batch_id,
             content,
         })
     }
@@ -826,7 +787,6 @@ impl QueryManager {
             } else {
                 result_scope
             };
-
             // Set scope in SyncManager (triggers initial sync)
             self.sync_manager.set_client_query_scope_with_storage(
                 storage_ref,
@@ -839,7 +799,7 @@ impl QueryManager {
             let settled_tier = self
                 .sync_manager
                 .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Worker);
+                .unwrap_or(DurabilityTier::Local);
             settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
@@ -978,7 +938,7 @@ impl QueryManager {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
-                        .unwrap_or(DurabilityTier::Worker);
+                        .unwrap_or(DurabilityTier::Local);
                     settled_notifications.push((client_id, query_id, settled_tier));
                 }
 
@@ -1162,7 +1122,8 @@ impl QueryManager {
                         branch_name,
                         SCHEMA_RESOLUTION_TIMEOUT.as_secs()
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                     return;
                 }
 
@@ -1188,7 +1149,8 @@ impl QueryManager {
                     "{:?} denied on table {} - schema unavailable for branch {}",
                     check.operation, table_name.0, branch_name
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         };
@@ -1199,7 +1161,7 @@ impl QueryManager {
                 self.validate_json_for_content(&branch_table_schema.columns, new_content)
         {
             self.sync_manager
-                .reject_permission_check(check, err.to_string());
+                .reject_permission_check(storage, check, err.to_string());
             return;
         }
 
@@ -1223,7 +1185,8 @@ impl QueryManager {
                         branch_name,
                         SCHEMA_RESOLUTION_TIMEOUT.as_secs()
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                 } else {
                     self.sync_manager
                         .requeue_pending_permission_checks(vec![check]);
@@ -1236,7 +1199,8 @@ impl QueryManager {
                 "{:?} denied on table {} - table missing from current permission schema",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         };
 
@@ -1274,7 +1238,8 @@ impl QueryManager {
                         "{:?} denied on table {} - missing explicit policy",
                         check.operation, table_name.0
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                 } else {
                     self.sync_manager.approve_permission_check(storage, check);
                 }
@@ -1299,7 +1264,8 @@ impl QueryManager {
                     "{:?} denied on table {} - missing row content",
                     check.operation, table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
             Some(_) => {
@@ -1307,7 +1273,8 @@ impl QueryManager {
                     "{:?} denied on table {} - empty row content",
                     check.operation, table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         };
@@ -1321,7 +1288,8 @@ impl QueryManager {
                 "{:?} denied on table {} - missing row provenance",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         };
         let source_branch_schema_map = self.branch_schema_map.clone();
@@ -1346,7 +1314,8 @@ impl QueryManager {
                 "{:?} denied by policy on table {}",
                 check.operation, table_name.0
             );
-            self.sync_manager.reject_permission_check(check, reason);
+            self.sync_manager
+                .reject_permission_check(storage, check, reason);
             return;
         }
 
@@ -1380,12 +1349,13 @@ impl QueryManager {
                 self.validate_json_for_content(&branch_table_schema.columns, new_content)
         {
             self.sync_manager
-                .reject_permission_check(check, err.to_string());
+                .reject_permission_check(storage, check, err.to_string());
             return;
         }
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
             self.sync_manager.reject_permission_check(
+                storage,
                 check,
                 format!(
                     "Update denied on table {} - table missing from current permission schema",
@@ -1403,6 +1373,7 @@ impl QueryManager {
         if using_policy.is_none() && check_policy.is_none() {
             if self.row_policy_mode.denies_missing_explicit_policy() {
                 self.sync_manager.reject_permission_check(
+                    storage,
                     check,
                     format!(
                         "Update denied on table {} - missing explicit update policy",
@@ -1423,7 +1394,8 @@ impl QueryManager {
                         "Update denied by USING policy on table {} - no old content",
                         table_name.0
                     );
-                    self.sync_manager.reject_permission_check(check, reason);
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                     return;
                 }
             };
@@ -1432,7 +1404,8 @@ impl QueryManager {
                     "Update denied by USING policy on table {} - missing old provenance",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             };
 
@@ -1456,7 +1429,8 @@ impl QueryManager {
                     "Update denied by USING policy on table {} - cannot see old row",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         }
@@ -1466,6 +1440,7 @@ impl QueryManager {
                 Some(c) => c,
                 None => {
                     self.sync_manager.reject_permission_check(
+                        storage,
                         check,
                         format!(
                             "Update denied by WITH CHECK policy on table {} - missing new content",
@@ -1480,7 +1455,8 @@ impl QueryManager {
                     "Update denied by WITH CHECK policy on table {} - missing new provenance",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             };
 
@@ -1504,7 +1480,8 @@ impl QueryManager {
                     "Update denied by WITH CHECK policy on table {}",
                     table_name.0
                 );
-                self.sync_manager.reject_permission_check(check, reason);
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         }
@@ -1639,7 +1616,7 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
             let mut row_loader =
                 |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                    let (_, row) = Self::load_best_visible_row_version_with_hint_or_locator(
+                    let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
                         storage,
                         id,
                         table_hint.as_ref().map(TableName::as_str),
@@ -1651,14 +1628,14 @@ impl QueryManager {
                     if row.is_hard_deleted() {
                         return None;
                     }
-                    let version_id = row.version_id();
+                    let batch_id = row.batch_id;
                     let provenance = row.row_provenance();
                     let source_branch = BranchName::new(&row.branch);
                     Some(LoadedRow::new(
                         row.data,
-                        version_id,
                         provenance,
                         [(id, source_branch)].into_iter().collect(),
+                        batch_id,
                     ))
                 };
 
@@ -1695,7 +1672,7 @@ impl QueryManager {
         for (id, reason) in to_reject {
             if let Some(state) = self.active_policy_checks.remove(&id) {
                 self.sync_manager
-                    .reject_permission_check(state.pending_check, reason);
+                    .reject_permission_check(storage, state.pending_check, reason);
             }
         }
     }

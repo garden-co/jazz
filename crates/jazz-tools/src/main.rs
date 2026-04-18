@@ -78,6 +78,10 @@ enum Commands {
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
 
+        /// Cookie name used for browser auth on the `/ws` upgrade.
+        #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
+        auth_cookie_name: Option<String>,
+
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
         /// Required in NODE_ENV=production.
@@ -103,6 +107,10 @@ enum Commands {
         /// Admin secret used by this server when forwarding catalogue requests upstream.
         #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY_ADMIN_SECRET")]
         catalogue_authority_admin_secret: Option<String>,
+
+        /// Internal testing hook: write the resolved listen port after binding.
+        #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
+        bound_port_file: Option<String>,
     },
 }
 
@@ -135,12 +143,14 @@ async fn main() {
             data_dir,
             in_memory,
             jwks_url,
+            auth_cookie_name,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
             catalogue_authority,
             catalogue_authority_url,
             catalogue_authority_admin_secret,
+            bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let allow_local_first_auth =
@@ -148,6 +158,7 @@ async fn main() {
 
             let auth_config = AuthConfig {
                 jwks_url,
+                auth_cookie_name,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
@@ -189,6 +200,7 @@ async fn main() {
                 in_memory,
                 auth_config,
                 catalogue_authority,
+                bound_port_file,
             )
             .await
             {

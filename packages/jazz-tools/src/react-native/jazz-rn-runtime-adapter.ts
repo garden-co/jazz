@@ -70,9 +70,9 @@ export interface JazzRnRuntimeBinding {
 }
 
 function assertWorkerTier(tier: string): void {
-  if (tier !== "worker") {
+  if (tier !== "local") {
     throw new Error(
-      `jazz-rn runtime adapter currently supports only 'worker' tier for persisted mutations (received '${tier}')`,
+      `jazz-rn runtime adapter currently supports only 'local' tier for persisted mutations (received '${tier}')`,
     );
   }
 }

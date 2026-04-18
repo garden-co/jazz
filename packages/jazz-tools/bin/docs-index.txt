@@ -110,6 +110,7 @@ On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer tok
 the same principal:
 
 - `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
+- Backend-scoped wrappers from `createJazzContext().asBackend()`, `.forRequest()`, and `.forSession()` do not own shared bearer auth and ignore `updateAuthToken(...)`.
 - Do not use `db.updateAuthToken(null)` for logout or local-first fallback on a live client.
 - Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
@@ -167,6 +168,7 @@ NODE_ENV=production \
 jazz-tools server "$JAZZ_APP_ID" \
   --port 1625 \
   --data-dir ./data \
+  --allow-local-first-auth \
   --jwks-url https://auth.example.com/.well-known/jwks.json \
   --backend-secret "$JAZZ_BACKEND_SECRET" \
   --admin-secret "$JAZZ_ADMIN_SECRET"
@@ -199,7 +201,7 @@ Users on local-first auth can sign up with an external provider and keep the sam
 TITLE:Local-first auth
 DESCRIPTION:"Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
 
-Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Users can later sign up with an external provider like [BetterAuth](https://www.better-auth.com/) and keep the same identity.
+Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Without a recovery mechanism, that identity lives only on the device — if the secret is lost, it's gone. Linking to an external provider at sign-up is one way to make the identity durable and recoverable.
 
 | Mode          | Identity source         | Server needed? | Best for                                               |
 | ------------- | ----------------------- | -------------- | ------------------------------------------------------ |
@@ -400,6 +402,43 @@ You can restrict what local-first users can do until they sign up. Define an `is
 });
 ```
 
+## Signing up with other providers
+
+The BetterAuth example above uses a framework-specific middleware hook. With any other provider the pattern is the same — you need a server endpoint that:
+
+1. Accepts `proofToken` alongside the sign-up credentials
+2. Verifies it with `verifyLocalFirstIdentityProof` from `jazz-napi`
+3. Stores the proven Jazz user ID linked to the new user account
+4. Issues JWTs with either `sub: jazzId` or `jazz_principal_id: jazzId`
+
+```ts title="server.ts"
+
+// POST /signup
+app.post("/signup", async (req, res) => {
+  const { email, password, proofToken } = req.body;
+
+  const {
+    ok,
+    id: jazzUserId,
+    error,
+  } = verifyLocalFirstIdentityProof(
+    proofToken,
+    "my-app-signup", // must match the audience used on the client
+  );
+  if (!ok) return res.status(400).json({ error });
+
+  // Store jazzUserId so you can include it in future JWTs as `sub`
+  // or, for managed providers with provider-owned `sub`, as `jazz_principal_id`
+  const user = await db.users.create({ email, password, jazzId: jazzUserId });
+
+  res.json({ token: issueJwt({ sub: user.jazzId /* ... */ }) });
+});
+```
+
+The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
+
+If your provider lets you control the JWT subject, you can set `sub` directly to the Jazz ID. Many managed providers keep `sub` fixed to their own user ID. In that case, call a dedicated `/link-jazz-identity` endpoint immediately after sign-up, store the Jazz ID in provider metadata or your own database, and mint or refresh JWTs with `jazz_principal_id: <jazzId>`. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
+
 ## Under the hood
 
 Local-first auth uses Ed25519 cryptography to derive a stable identity from a secret:
@@ -429,6 +468,11 @@ TITLE:Permissions
 DESCRIPTION:Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
 
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+
+Locally, Jazz distinguishes between two runtime states:
+
+- no compiled policy bundle loaded: local session-scoped reads and writes stay permissive
+- compiled policy bundle loaded: every read, insert, update, and delete needs an explicit grant, or it is denied
 
 ## Authoring workflow
 
@@ -470,11 +514,11 @@ We can define permissions in `permissions.ts`:
 
 ```
 
-  Write your permissions policies in `permissions.ts` at the root of your project (next to `schema.ts`).
+  Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha permissions push`.
+Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha deploy`.
 
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
+Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
 
 ## Basic policies
 
@@ -639,9 +683,9 @@ Every policy is evaluated against a session. On the frontend, this is the authen
 
 See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for backend context setup details.
 
-  Policies are enforced on the sync server, not on the client. A client can write any data locally,
-  but the server will reject writes that violate policies when they sync. Reads are filtered
-  server-side before data is sent to the client.
+  Structural-only client runtimes stay permissive locally so offline reads and writes keep working.
+  Once a compiled bundle is loaded, Jazz enforces explicit grants locally too. Sync servers still
+  reject violating writes, and server-scoped reads are filtered before data is sent to the client.
 
 ## Magic columns
 
@@ -1038,13 +1082,13 @@ Jazz sync runs across three tiers:
 ```mermaid
 graph TD
     G["Global\n(global core)"] --- E1["Edge\n(sync server)"] & E2["Edge\n(sync server)"]
-    E1 --- W1["Worker"] & W2["Worker"]
-    E2 --- W3["Worker"]
+    E1 --- W1["Local"] & W2["Local"]
+    E2 --- W3["Local"]
 ```
 
-**Worker** runs on the client itself, making it the first tier to respond to queries. The worker
-keeps the locally durable copy of subscribed data so it can respond immediately while updates from
-higher tiers stream in.
+**Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
+hosts that local durable copy in OPFS so it can respond immediately while updates from higher tiers
+stream in.
 
 **Edge** is the first server hop after the client. In cloud configurations it is usually a nearby
 node. Edge servers hold the data needed to serve the queries currently flowing through them.
@@ -1057,7 +1101,7 @@ updates eventually spread to every subscribed client.
 Writes flow **upward**:
 
 ```text
-app -> worker -> edge -> global
+app -> local -> edge -> global
 ```
 
 As a write flows through the network, each tier can confirm that it has durably received it. That
@@ -1072,10 +1116,10 @@ them. As a rough guide:
 
 - waiting for the global core is only necessary if you want the strongest cross-region visibility
 - waiting for edge is useful when you want to know data has left the user's device
-- the default worker tier is right for most local-first interactions
+- the default local tier is right for most local-first interactions
 
   Sync happens whenever a node is online. Writes keep propagating upward even if your promise
-  resolves at the worker tier. Reads similarly propagate downward as each tier registers the query
+  resolves at the local tier. Reads similarly propagate downward as each tier registers the query
   with the next one up. If higher tiers have newer rows, they stream down automatically.
 
 ## Consistency model
@@ -1085,7 +1129,7 @@ replicated upward, and contributes to the current visible state for that row.
 
 Because sync is local-first, different tiers can temporarily disagree:
 
-- your worker may already have a newer row version than edge
+- your local tier may already have a newer row version than edge
 - one edge may have data another edge has not fetched yet
 - another client may have its own concurrent local write
 
@@ -1445,16 +1489,16 @@ npx jazz-tools@alpha server "$JAZZ_APP_ID" \
 
 `jazz-tools server ` currently supports:
 
-| Option                              | Purpose                                                                                                                                            | Environment variable          | Default                   |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
-| `` (positional)             | App namespace identifier (required)                                                                                                                | -                             | -                         |
-| `-p, --port `                 | Listen port                                                                                                                                        | -                             | `1625`                    |
-| `-d, --data-dir `         | Persistent storage directory                                                                                                                       | -                             | `./data`                  |
-| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                                        | -                             | off                       |
-| `--jwks-url `             | JWKS endpoint for external JWT validation                                                                                                          | `JAZZ_JWKS_URL`               | unset                     |
-| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                            | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret ` | Enable backend session impersonation                                                                                                               | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret `     | Required for `permissions push`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
+| Option                              | Purpose                                                                                                                                  | Environment variable          | Default                   |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
+| `` (positional)             | App namespace identifier (required)                                                                                                      | -                             | -                         |
+| `-p, --port `                 | Listen port                                                                                                                              | -                             | `1625`                    |
+| `-d, --data-dir `         | Persistent storage directory                                                                                                             | -                             | `./data`                  |
+| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                              | -                             | off                       |
+| `--jwks-url `             | JWKS endpoint for external JWT validation                                                                                                | `JAZZ_JWKS_URL`               | unset                     |
+| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret ` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret `     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires `--jwks-url`.
 
@@ -1689,7 +1733,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Define your schema
 
-Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
 
 ```ts
 
@@ -2149,7 +2193,7 @@ The server rejects all reads and writes unless you define [permissions](/docs/au
 Then publish the permissions bundle:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha permissions push \
+npx jazz-tools@alpha deploy \
   --server-url http://127.0.0.1:1625 \
   --admin-secret secret
 ```
@@ -2168,7 +2212,7 @@ Update your client config to use the same app ID, and add `serverUrl`:
 
 Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
 
-Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha permissions push`.
+Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha deploy`.
 
 For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
 
@@ -2209,7 +2253,7 @@ pnpm add -D typescript tsx
 
 ## Define your schema
 
-Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
 
 ```ts
 
@@ -2743,6 +2787,52 @@ pub fn composing_queries() {
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
+## Read durability
+
+Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+
+For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+
+### Choosing a tier
+
+Pass a tier when you need the first result to be authoritative at a specific level&hairsp;—&hairsp;for example, when a user has just navigated to a page and a stale local snapshot would mislead them.
+
+- `"local"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
+- `"edge"`&hairsp;—&hairsp;Wait for the nearest sync server to respond. The default on backends and servers. A good middle ground when you want confirmation that the query has fetched data from the network.
+- `"global"`&hairsp;—&hairsp;Wait for the central server. Use when you need a globally-consistent snapshot, accepting the extra round-trip latency.
+
+    ```ts
+
+  return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
+}
+```
+
+    ```rs
+pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::Result<usize> {
+    let query = QueryBuilder::new("todos").build();
+    let rows = client
+        .query(query, Some(DurabilityTier::EdgeServer))
+        .await?;
+    Ok(rows.len())
+}
+```
+
+  The read tier gates the **first** delivery of a subscription only. After the initial snapshot
+  arrives at the requested tier, subsequent updates are delivered as they reach the local node,
+  regardless of which tier they've propagated to. For example, a subscription with `tier: "global"`
+  guarantees a globally-consistent initial snapshot, but later incremental updates from other
+  clients may arrive through edge tiers before being globally available **even if the durability of
+  the write is set to `"global"`**.
+
+### Local updates and propagation
+
+Two additional options control how the subscription interacts with local writes and upstream servers:
+
+- `localUpdates` (`"immediate"` \| `"deferred"`, default `"immediate"`)&hairsp;—&hairsp;With `"immediate"`, your own local writes appear in the subscription while it's still waiting for the tier to confirm the initial snapshot (only once the subscription has settled at least once). With `"deferred"`, all delivery is held until the tier confirms.
+- `propagation` (`"full"` \| `"local-only"`, default `"full"`)&hairsp;—&hairsp;With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried and no server communication happens.
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.
+
 ## Magic columns
 
 You can select and filter on Jazz's magic columns just like other columns. They are omitted from
@@ -2840,8 +2930,8 @@ const todos = useAll(app.todos);
 ```
 
   You're unlikely to see `undefined` in practice unless you're awaiting a more [durable
-  tier](/docs/reference/durability-tiers). Local storage reads are effectively instant and resolve
-  to `[]` if no data exists yet.
+  tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
+  data exists yet.
 
 ### Conditional queries
 
@@ -2895,33 +2985,6 @@ const filtered = useAll(query);
 {/if}
 
 ```
-
-### Read durability
-
-By default, queries deliver results from local storage immediately. Pass a `tier` option to wait for
-a specific durability level before the first result arrives.
-
-    ```ts
-
-  return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
-}
-```
-
-    ```rs
-pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::Result<usize> {
-    let query = QueryBuilder::new("todos").build();
-    let rows = client
-        .query(query, Some(DurabilityTier::EdgeServer))
-        .await?;
-    Ok(rows.len())
-}
-```
-
-  For subscriptions, the durability tier applies only to the first result. After that, updates
-  stream in as they become available and are not guaranteed to have reached any particular tier.
-
-See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including
-`localUpdates`, `propagation`, and how tiers interact with subscriptions.
 
 ### React Suspense and Transitions
 
@@ -3040,7 +3103,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz derives `session.user_id` from the JWT's `sub` claim and issuer.
+4. On success, Jazz derives `session.user_id` from `jazz_principal_id` when present, otherwise from the JWT's `sub` claim.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -3187,7 +3250,7 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-The `sub` claim identifies the user. Jazz derives `session.user_id` from it (combined with the JWT issuer when present).
+By default, the `sub` claim identifies the user. If your provider supports custom claims but keeps `sub` fixed to its own user ID, include `jazz_principal_id` in the JWT instead. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
 
@@ -3564,7 +3627,7 @@ See [Defining tables](/docs/schemas/defining-tables) for the full schema DSL.
 
 ## Permissions
 
-Match `$createdBy` to the `session.user_id` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can allow all users to insert.
+Match `$createdBy` to the `session.user_id` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can declare insert explicitly with `.always()`.
 
 ```ts
 s.definePermissions(app, ({ policy, session }) => {
@@ -3659,8 +3722,8 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 Options:
 
-- `options.tier`: `"worker"` \| `"edge"` \| `"global"`
-- Browser/client default: `"worker"`
+- `options.tier`: `"local"` \| `"edge"` \| `"global"`
+- Browser/client default: `"local"`
 - Backend/server default: `"edge"`
 
 See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
@@ -3671,7 +3734,7 @@ Read durability controls when the **first result** of a query or subscription is
 
 | Option         | Values                               | Default        | What it does                                                                                                                                                                                                                                                                     |
 | -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"worker"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
+| `tier`         | `"local"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
 | `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
 | `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
@@ -3748,7 +3811,7 @@ await db.deleteClientStorage();
 - Browser worker-backed `Db` only.
 - Must be called from the leader tab; otherwise it logs an error and returns without deleting. Close other tabs first.
 - Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
-- Does not clear `localStorage` auth/synthetic-user data.
+- Does not clear `localStorage` local-first auth data.
 - Reopens a clean worker runtime, so the same `db` instance remains usable.
 
 This is useful when iterating on your schema during development.
@@ -4222,7 +4285,7 @@ Jazz separates two durability questions:
 | `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
 | Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
 
-Both use the same tier lattice (`worker` < `edge` < `global`), but they answer different
+Both use the same tier lattice (`local` < `edge` < `global`), but they answer different
 questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
 durable write promise resolves when the requested tier confirms the write.
 
@@ -4607,8 +4670,18 @@ Traditional migration systems run a linear sequence and require peers to converg
    npx jazz-tools@alpha migrations push <fromHash> <toHash>
    ```
 
+   If you also want to publish the current schema, the migration and permissions in one step, you can run:
+
+   ```bash
+   npx jazz-tools@alpha deploy
+   ```
+
+   `deploy` publishes the current schema if the server does not already know it, checks whether the
+   previous permissions schema is connected to the new one on the server, pushes the local migration
+   if needed, and then publishes the current permissions.
+
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha permissions push`. See [Permissions](/docs/auth/permissions) for details.
+`npx jazz-tools@alpha deploy`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 
@@ -5162,6 +5235,12 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
 
+For TypeScript callers that need a replayable handle instead of awaiting immediately, Jazz also exposes persisted-write helpers and explicit batch builders:
+
+- `insertPersisted`, `updatePersisted`, `deletePersisted` return `DbPersistedWrite`
+- `beginTransaction(...)` returns `DbTransaction`
+- `beginDirectBatch(...)` returns `DbDirectBatch`
+
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
 or `db.createFileFromStream(...)` and store the returned file ID on your own row.
 
@@ -5268,11 +5347,11 @@ pub async fn clear_nullable_fields(
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
-| `worker` | Persisted to local OPFS             | Browser/client |
+| `local` | Persisted to local OPFS             | Browser/client |
 | `edge`   | Acknowledged by nearest sync server | Backend/server |
 | `global` | Propagated to global core           | —              |
 
@@ -5314,3 +5393,56 @@ pub async fn write_todo_with_default_durability(
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
 Need to clear local data during development? See [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)
+
+## Persisted write handles
+
+Use the persisted variants when you want to keep a stable handle to a write after issuing it locally.
+
+```ts
+const pending = db.insertPersisted(app.todos, {
+  title: "Ship review fixes",
+  done: false,
+});
+
+console.log(pending.batchId());
+console.log(pending.localBatchRecord());
+
+try {
+  const row = await pending.wait();
+  console.log(row.id);
+} catch (error) {
+  if (error instanceof PersistedWriteRejectedError) {
+    console.error(error.code, error.reason);
+    pending.acknowledgeRejectedBatch();
+  }
+}
+```
+
+`wait()` resolves when the batch reaches the requested durability tier. If the batch is replayably rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+
+## Explicit batches
+
+Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
+
+```ts
+const tx = db.beginTransaction(app.todos);
+
+tx.insert(app.todos, { title: "Draft copy", done: false });
+tx.update(app.todos, todoId, { done: true });
+
+const batchId = tx.commit();
+console.log(batchId);
+```
+
+Use a direct batch when you want to group several ordinary writes under one batch id without sealing:
+
+```ts
+const batch = db.beginDirectBatch(app.todos);
+
+batch.insert(app.todos, { title: "Grouped direct write", done: false });
+batch.update(app.todos, todoId, { done: true });
+
+console.log(batch.batchId());
+```
+
+Both builders can also issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.

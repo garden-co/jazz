@@ -1,14 +1,16 @@
 import { createApp, h } from "vue";
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
-import { BrowserAuthSecretStore, generateAuthSecret } from "jazz-tools";
+import { generateAuthSecret } from "jazz-tools";
 import App from "./App.vue";
-import { appId, isPublicMode } from "./constants";
+import { appId } from "./constants";
+
+const secretStorageKey = `jazz-auth-secret:${encodeURIComponent(appId)}`;
 
 function getOrCreateSecretSync(): string {
-  const stored = localStorage.getItem("jazz-auth-secret");
+  const stored = localStorage.getItem(secretStorageKey);
   if (stored) return stored;
   const secret = generateAuthSecret();
-  localStorage.setItem("jazz-auth-secret", secret);
+  localStorage.setItem(secretStorageKey, secret);
   return secret;
 }
 

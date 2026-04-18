@@ -1,4 +1,4 @@
-import { defineConfig, defineDocs } from "fumadocs-mdx/config";
+import { defineCollections, defineConfig, defineDocs } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
 import { z } from "zod";
 import { rehypeCodeDefaultOptions, remarkMdxMermaid } from "fumadocs-core/mdx-plugins";
@@ -18,6 +18,26 @@ export const docs = defineDocs({
   meta: {
     schema: metaSchema,
   },
+});
+
+export const blogPosts = defineCollections({
+  type: "doc",
+  dir: "content/blog",
+  schema: pageSchema.extend({
+    author: z.string(),
+    date: z.string().date().or(z.date()),
+  }),
+});
+
+export const presentationSlides = defineCollections({
+  type: "doc",
+  dir: "content/presentations",
+  schema: pageSchema.extend({
+    deck: z.string(),
+    deckTitle: z.string(),
+    order: z.number().int().nonnegative(),
+    notes: z.string().or(z.array(z.string())).optional(),
+  }),
 });
 
 export default defineConfig({

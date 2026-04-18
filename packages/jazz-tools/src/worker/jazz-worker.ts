@@ -110,7 +110,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
 
 async function ensureWorkerWasmInitialized(
   wasmModule: any,
-  msg: Pick<InitMessage, "runtimeSources"> | undefined,
+  msg: Pick<InitMessage, "runtimeSources" | "fallbackWasmUrl"> | undefined,
 ): Promise<void> {
   if (wasmInitialized) {
     return;
@@ -142,7 +142,8 @@ async function ensureWorkerWasmInitialized(
   try {
     await runWithRootRelativeFetchSupport(() => wasmModule.default());
   } catch (error) {
-    const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
+    const absoluteWasmUrl =
+      resolveAbsoluteWasmUrlFromInitError(error) ?? msg?.fallbackWasmUrl ?? null;
     if (!absoluteWasmUrl) {
       throw error;
     }
@@ -293,14 +294,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
 
-    // Open persistent OPFS-backed runtime with Worker tier
+    // Open persistent OPFS-backed runtime with local durability tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
       schemaJson,
       msg.appId,
       msg.env,
       msg.userBranch,
       msg.dbName,
-      "worker",
+      "local",
       false,
     );
 

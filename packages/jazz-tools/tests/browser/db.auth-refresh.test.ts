@@ -161,7 +161,7 @@ describe("Db auth refresh browser integration", () => {
       (rows) => rows.some((row) => row.title === marker),
       "queued write should flush after auth refresh",
       20_000,
-      "worker",
+      "local",
     );
   });
 });

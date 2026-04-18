@@ -1,14 +1,14 @@
 use std::ops::Bound;
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::types::Value;
+use crate::row_histories::BatchId;
 
 use super::{StorageError, encode_value};
 
-const INDEX_KEY_MAX_BYTES: usize = u16::MAX as usize;
+const INDEX_KEY_MAX_BYTES: usize = 5 * 1024;
 const INDEX_ENTRY_UUID_HEX_BYTES: usize = 32;
-const COMMIT_ID_HEX_BYTES: usize = 64;
+const BATCH_ID_HEX_BYTES: usize = 32;
 const OVERFLOW_INDEX_VALUE_MARKER: char = '~';
 const OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES: usize = 16;
 const OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES: usize = blake3::OUT_LEN * 2;
@@ -46,8 +46,28 @@ fn append_uuid_hex(dst: &mut String, id: ObjectId) {
     append_hex_bytes(dst, id.uuid().as_bytes());
 }
 
-fn append_commit_id_hex(dst: &mut String, version_id: CommitId) {
-    append_hex_bytes(dst, &version_id.0);
+fn append_batch_id_hex(dst: &mut String, batch_id: BatchId) {
+    append_hex_bytes(dst, batch_id.as_bytes());
+}
+
+fn decode_hex_object_id(raw: &str, context: &str) -> Result<ObjectId, StorageError> {
+    let bytes = hex::decode(raw)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid row id hex: {err}")))?;
+    let uuid = uuid::Uuid::from_slice(&bytes)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid row id uuid: {err}")))?;
+    Ok(ObjectId::from_uuid(uuid))
+}
+
+fn decode_hex_batch_id(raw: &str, context: &str) -> Result<BatchId, StorageError> {
+    let bytes = hex::decode(raw)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid batch id hex: {err}")))?;
+    let bytes: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+        StorageError::IoError(format!(
+            "{context}: expected 16 batch id bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+    Ok(BatchId(bytes))
 }
 
 fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
@@ -209,100 +229,90 @@ pub(super) fn validate_index_entry_size(
     encode_index_value_segment(table, column, branch, value).map(|_| ())
 }
 
-#[allow(dead_code)]
-pub(super) fn visible_row_key(table: &str, branch: &str, row_id: ObjectId) -> String {
-    let mut key =
-        String::with_capacity(4 + table.len() + 3 + branch.len() + INDEX_ENTRY_UUID_HEX_BYTES);
-    key.push_str("row:");
-    key.push_str(table);
-    key.push_str(":0:");
+pub(super) fn visible_row_raw_table_key(branch: &str, row_id: ObjectId) -> String {
+    let mut key = String::with_capacity(branch.len() + 1 + INDEX_ENTRY_UUID_HEX_BYTES);
     key.push_str(branch);
     key.push(':');
     append_uuid_hex(&mut key, row_id);
     key
 }
 
-#[allow(dead_code)]
-pub(super) fn visible_row_prefix(table: &str, branch: &str) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3 + branch.len() + 1);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":0:");
+pub(super) fn visible_row_raw_table_prefix(branch: &str) -> String {
+    let mut prefix = String::with_capacity(branch.len() + 1);
     prefix.push_str(branch);
     prefix.push(':');
     prefix
 }
 
-#[allow(dead_code)]
-pub(super) fn visible_table_prefix(table: &str) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":0:");
-    prefix
+pub(super) fn decode_visible_row_raw_table_key(
+    key: &str,
+) -> Result<(String, ObjectId), StorageError> {
+    let (branch, row_hex) = key.rsplit_once(':').ok_or_else(|| {
+        StorageError::IoError(format!(
+            "invalid visible row raw table key '{key}': missing row id"
+        ))
+    })?;
+    Ok((
+        branch.to_string(),
+        decode_hex_object_id(
+            row_hex,
+            &format!("decode visible row raw table key '{key}'"),
+        )?,
+    ))
 }
 
-#[allow(dead_code)]
-pub(super) fn visible_row_versions_key(table: &str, row_id: ObjectId, branch: &str) -> String {
-    let mut key =
-        String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + branch.len());
-    key.push_str("row:");
-    key.push_str(table);
-    key.push_str(":2:");
+pub(super) fn history_row_raw_table_key(
+    row_id: ObjectId,
+    branch: &str,
+    batch_id: BatchId,
+) -> String {
+    let mut key = String::with_capacity(
+        INDEX_ENTRY_UUID_HEX_BYTES + 1 + branch.len() + 1 + BATCH_ID_HEX_BYTES,
+    );
     append_uuid_hex(&mut key, row_id);
     key.push(':');
     key.push_str(branch);
-    key
-}
-
-#[allow(dead_code)]
-pub(super) fn visible_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":2:");
-    append_uuid_hex(&mut prefix, row_id);
-    prefix.push(':');
-    prefix
-}
-
-#[allow(dead_code)]
-pub(super) fn history_row_key(table: &str, row_id: ObjectId, version_id: CommitId) -> String {
-    let mut key = String::with_capacity(
-        4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1 + COMMIT_ID_HEX_BYTES,
-    );
-    key.push_str("row:");
-    key.push_str(table);
-    key.push_str(":1:");
-    append_uuid_hex(&mut key, row_id);
     key.push(':');
-    append_commit_id_hex(&mut key, version_id);
+    append_batch_id_hex(&mut key, batch_id);
     key
 }
 
-#[allow(dead_code)]
-pub(super) fn history_row_prefix(table: &str) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":1:");
-    prefix
+pub(super) fn history_row_raw_table_prefix(row_id: Option<ObjectId>) -> String {
+    match row_id {
+        Some(row_id) => {
+            let mut prefix = String::with_capacity(INDEX_ENTRY_UUID_HEX_BYTES + 1);
+            append_uuid_hex(&mut prefix, row_id);
+            prefix.push(':');
+            prefix
+        }
+        None => String::new(),
+    }
 }
 
-#[allow(dead_code)]
-pub(super) fn history_row_versions_prefix(table: &str, row_id: ObjectId) -> String {
-    let mut prefix = String::with_capacity(4 + table.len() + 3 + INDEX_ENTRY_UUID_HEX_BYTES + 1);
-    prefix.push_str("row:");
-    prefix.push_str(table);
-    prefix.push_str(":1:");
-    append_uuid_hex(&mut prefix, row_id);
-    prefix.push(':');
-    prefix
-}
-
-#[allow(dead_code)]
-pub(super) fn history_table_prefix(table: &str) -> String {
-    history_row_prefix(table)
+pub(super) fn decode_history_row_raw_table_key(
+    key: &str,
+) -> Result<(ObjectId, String, BatchId), StorageError> {
+    let (row_hex, branch_and_batch) = key.split_once(':').ok_or_else(|| {
+        StorageError::IoError(format!(
+            "invalid history row raw table key '{key}': missing branch"
+        ))
+    })?;
+    let (branch, batch_hex) = branch_and_batch.rsplit_once(':').ok_or_else(|| {
+        StorageError::IoError(format!(
+            "invalid history row raw table key '{key}': missing batch id"
+        ))
+    })?;
+    Ok((
+        decode_hex_object_id(
+            row_hex,
+            &format!("decode history row raw table key '{key}'"),
+        )?,
+        branch.to_string(),
+        decode_hex_batch_id(
+            batch_hex,
+            &format!("decode history row raw table key '{key}'"),
+        )?,
+    ))
 }
 
 pub(super) fn catalogue_entry_key(object_id: ObjectId) -> String {
@@ -471,7 +481,7 @@ mod tests {
 
     #[test]
     fn oversized_text_index_segments_preserve_real_prefix() {
-        let value = Value::Text("x".repeat(40_000));
+        let value = Value::Text("x".repeat(3_000));
         let encoded_hex = hex::encode(encode_value(&value));
         let segment = encode_index_value_segment("todos", "title", "main", &value)
             .expect("oversized text should use overflow segment");
@@ -492,18 +502,18 @@ mod tests {
     #[test]
     fn oversized_text_segments_sort_by_prefix() {
         let a =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(40_000)))
+            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(3_000)))
                 .expect("a segment");
         let b =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(40_000)))
+            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(3_000)))
                 .expect("b segment");
         assert!(a < b, "overflow segments should preserve prefix ordering");
     }
 
     #[test]
     fn range_bounds_support_oversized_text_values() {
-        let min = Value::Text("a".repeat(40_000));
-        let max = Value::Text("b".repeat(40_000));
+        let min = Value::Text("a".repeat(3_000));
+        let max = Value::Text("b".repeat(3_000));
         let bounds = index_range_scan_bounds(
             "todos",
             "title",
@@ -514,6 +524,35 @@ mod tests {
         assert!(
             bounds.is_some(),
             "overflow text values should still produce range bounds"
+        );
+    }
+
+    #[test]
+    fn huge_text_index_entries_stay_within_5kb_budget() {
+        let key = index_entry_key(
+            "corporations",
+            "name",
+            "dev-28d7fd1c1869-main",
+            &Value::Text("x".repeat(20_000)),
+            ObjectId::new(),
+        )
+        .expect("huge indexed text should still compress into the budget");
+        let (segment, _) = key
+            .rsplit_once(':')
+            .expect("index keys should end with the row uuid");
+        assert!(
+            segment.contains(OVERFLOW_INDEX_VALUE_MARKER),
+            "large values should still use the overflow marker"
+        );
+        let key_bytes = index_entry_key_bytes(
+            "corporations",
+            "name",
+            "dev-28d7fd1c1869-main",
+            segment.len(),
+        );
+        assert!(
+            key_bytes <= INDEX_KEY_MAX_BYTES,
+            "encoded key should fit within the configured budget"
         );
     }
 }

@@ -41,8 +41,18 @@ Traditional migration systems run a linear sequence and require peers to converg
    npx jazz-tools@alpha migrations push <fromHash> <toHash>
    ```
 
+   If you also want to publish the current schema, the migration and permissions in one step, you can run:
+
+   ```bash
+   npx jazz-tools@alpha deploy
+   ```
+
+   `deploy` publishes the current schema if the server does not already know it, checks whether the
+   previous permissions schema is connected to the new one on the server, pushes the local migration
+   if needed, and then publishes the current permissions.
+
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha permissions push`. See [Permissions](/docs/auth/permissions) for details.
+`npx jazz-tools@alpha deploy`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 

@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 
-use crate::commit::CommitId;
 use crate::metadata::RowProvenance;
 use crate::object::ObjectId;
+use crate::row_histories::BatchId;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -163,13 +163,13 @@ impl<'de> Deserialize<'de> for SharedString {
     }
 }
 
-/// A row with its object ID, binary data, and version reference.
+/// A row with its object ID, binary data, and batch identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub id: ObjectId,
     /// Binary encoded row data.
     pub data: RowBytes,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
     pub provenance: RowProvenance,
 }
 
@@ -177,13 +177,13 @@ impl Row {
     pub fn new(
         id: ObjectId,
         data: impl Into<RowBytes>,
-        version_id: CommitId,
+        batch_id: BatchId,
         provenance: RowProvenance,
     ) -> Self {
         Self {
             id,
             data: data.into(),
-            version_id,
+            batch_id,
             provenance,
         }
     }
@@ -310,7 +310,7 @@ pub fn build_ordered_delta_with_post_ids(
     for (old, new) in &delta.updated {
         let old_index = pre_index_by_id.get(&old.id).copied().unwrap_or(0);
         let new_index = post_index_by_id.get(&new.id).copied().unwrap_or(0);
-        let row_changed = old.data != new.data || old.version_id != new.version_id;
+        let row_changed = old.data != new.data || old.batch_id != new.batch_id;
 
         if row_changed {
             updated.push(OrderedUpdated {

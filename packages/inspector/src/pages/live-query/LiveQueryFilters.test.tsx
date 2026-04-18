@@ -22,7 +22,7 @@ describe("LiveQueryFilters", () => {
     expect(screen.getByRole("option", { name: "projects" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "todos" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "All tiers" })).not.toBeNull();
-    expect(screen.getByRole("option", { name: "worker" })).not.toBeNull();
+    expect(screen.getByRole("option", { name: "local" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "edge" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "global" })).not.toBeNull();
   });

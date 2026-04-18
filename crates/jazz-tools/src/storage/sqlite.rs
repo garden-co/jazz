@@ -6,23 +6,24 @@
 //! Per-operation SAVEPOINTs nested inside that transaction provide rollback
 //! semantics for individual operations. Targets React Native / mobile.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use rusqlite::OptionalExtension;
+
 use super::{
-    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, RawTableMutation,
+    Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
-        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
-        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
-        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
-use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 struct SqliteInner {
@@ -31,6 +32,8 @@ struct SqliteInner {
     path: PathBuf,
     /// Whether an explicit `BEGIN` transaction is currently open.
     write_tx_open: bool,
+    ensured_raw_table_headers: HashSet<String>,
+    visible_row_table_locators: HashMap<(String, ObjectId), super::ExactRowTableLocator>,
 }
 
 impl SqliteInner {
@@ -58,10 +61,52 @@ impl SqliteInner {
 }
 
 pub struct SqliteStorage {
+    cache_namespace: usize,
     inner: Mutex<Option<SqliteInner>>,
 }
 
 impl SqliteStorage {
+    fn store_has_any_rows(conn: &rusqlite::Connection) -> Result<bool, StorageError> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM kv LIMIT 1)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|exists| exists != 0)
+        .map_err(|e| StorageError::IoError(format!("sqlite inspect store contents: {e}")))
+    }
+
+    fn ensure_store_manifest(conn: &rusqlite::Connection) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::SQLITE_STORE_KIND);
+        let existing = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::IoError(format!("sqlite read store manifest: {e}")))?;
+
+        match existing {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                if Self::store_has_any_rows(conn)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty sqlite store".to_string(),
+                    ));
+                }
+                let bytes = super::encode_store_manifest(&expected)?;
+                conn.execute(
+                    "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+                    rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+                )
+                .map_err(|e| StorageError::IoError(format!("sqlite write store manifest: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     /// Compute the lexicographic successor of `prefix` for use as an
     /// exclusive upper bound. Same logic as RocksDB's `prefix_upper_bound`.
     fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -93,12 +138,16 @@ impl SqliteStorage {
              ) WITHOUT ROWID;",
         )
         .map_err(|e| StorageError::IoError(format!("sqlite init: {e}")))?;
+        Self::ensure_store_manifest(&conn)?;
 
         Ok(Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             inner: Mutex::new(Some(SqliteInner {
                 conn,
                 path: path.to_path_buf(),
                 write_tx_open: false,
+                ensured_raw_table_headers: HashSet::new(),
+                visible_row_table_locators: HashMap::new(),
             })),
         })
     }
@@ -285,6 +334,10 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
@@ -303,6 +356,32 @@ impl Storage for SqliteStorage {
                 raw_table_delete_core(table, key, |storage_key| {
                     Self::delete(&inner.conn, storage_key)
                 })
+            })
+        })
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                for mutation in mutations {
+                    match mutation {
+                        RawTableMutation::Put { table, key, value } => {
+                            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                                Self::set(&inner.conn, storage_key, bytes)
+                            })?;
+                        }
+                        RawTableMutation::Delete { table, key } => {
+                            raw_table_delete_core(table, key, |storage_key| {
+                                Self::delete(&inner.conn, storage_key)
+                            })?;
+                        }
+                    }
+                }
+                Ok(())
             })
         })
     }
@@ -395,6 +474,237 @@ impl Storage for SqliteStorage {
         })
     }
 
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        let cache_key = (branch.to_string(), row_id);
+        let locator = self
+            .with_inner_mut(|inner| Ok(inner.visible_row_table_locators.remove(&cache_key)))?
+            .or(super::exact_visible_row_table_locator_for_delete(
+                self, table, branch, row_id,
+            )?);
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
+                if let Some(locator) = locator.as_ref() {
+                    raw_table_delete_core(locator.row_raw_table.as_str(), &key, |storage_key| {
+                        Self::delete(&inner.conn, storage_key)
+                    })?;
+                }
+                raw_table_delete_core(
+                    super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                    &super::visible_row_table_locator_key(branch, row_id),
+                    |storage_key| Self::delete(&inner.conn, storage_key),
+                )
+            })
+        })?;
+        Ok(())
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                let mut seen_row_raw_tables = std::collections::HashSet::new();
+                for row in encoded_history_rows {
+                    if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                        && inner
+                            .ensured_raw_table_headers
+                            .insert(row.row_raw_table.clone())
+                    {
+                        let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                            &row.row_raw_table_id,
+                            &row.user_descriptor,
+                        ))?;
+                        raw_table_put_core(
+                            super::RAW_TABLE_HEADER_TABLE,
+                            row.row_raw_table.as_str(),
+                            &header,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                    }
+                }
+                for row in encoded_visible_rows {
+                    if seen_row_raw_tables.insert(row.row_raw_table.clone())
+                        && inner
+                            .ensured_raw_table_headers
+                            .insert(row.row_raw_table.clone())
+                    {
+                        let header = super::encode_raw_table_header(&super::row_raw_table_header(
+                            &row.row_raw_table_id,
+                            &row.user_descriptor,
+                        ))?;
+                        raw_table_put_core(
+                            super::RAW_TABLE_HEADER_TABLE,
+                            row.row_raw_table.as_str(),
+                            &header,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                    }
+                }
+                if encoded_history_rows
+                    .iter()
+                    .any(|row| row.needs_exact_locator)
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE.to_string())
+                {
+                    let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                        super::STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
+                        1,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                        &header,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+                if encoded_visible_rows
+                    .iter()
+                    .any(|row| row.needs_exact_locator)
+                    && inner
+                        .ensured_raw_table_headers
+                        .insert(super::VISIBLE_ROW_TABLE_LOCATOR_TABLE.to_string())
+                {
+                    let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                        super::STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
+                        1,
+                    ))?;
+                    raw_table_put_core(
+                        super::RAW_TABLE_HEADER_TABLE,
+                        super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                        &header,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+
+                let borrowed_history_rows = encoded_history_rows
+                    .iter()
+                    .map(|row| HistoryRowBytes {
+                        row_raw_table: row.row_raw_table.as_str(),
+                        branch: row.branch.as_str(),
+                        row_id: row.row_id,
+                        batch_id: row.batch_id,
+                        bytes: &row.bytes,
+                    })
+                    .collect::<Vec<_>>();
+                append_history_region_row_bytes_core(
+                    table,
+                    &borrowed_history_rows,
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )?;
+                for row in encoded_history_rows {
+                    if !row.needs_exact_locator {
+                        continue;
+                    }
+                    let locator =
+                        super::encode_exact_row_table_locator(&super::ExactRowTableLocator {
+                            row_raw_table: row.row_raw_table.clone().into(),
+                            table_name: row.row_raw_table_id.table_name.clone(),
+                            schema_hash: row.row_raw_table_id.schema_hash,
+                        })?;
+                    raw_table_put_core(
+                        super::HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                        &super::history_row_batch_table_locator_key(
+                            row.row_id,
+                            row.branch.as_str(),
+                            row.batch_id,
+                        ),
+                        &locator,
+                        |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                    )?;
+                }
+
+                let borrowed_visible_rows = encoded_visible_rows
+                    .iter()
+                    .map(|row| VisibleRowBytes {
+                        row_raw_table: row.row_raw_table.as_str(),
+                        branch: row.branch.as_str(),
+                        row_id: row.row_id,
+                        bytes: &row.bytes,
+                    })
+                    .collect::<Vec<_>>();
+                upsert_visible_region_row_bytes_core(
+                    table,
+                    &borrowed_visible_rows,
+                    |key, bytes| Self::set(&inner.conn, key, bytes),
+                )?;
+                for row in encoded_visible_rows {
+                    if !row.needs_exact_locator {
+                        continue;
+                    }
+                    let locator = super::ExactRowTableLocator {
+                        row_raw_table: row.row_raw_table.clone().into(),
+                        table_name: row.row_raw_table_id.table_name.clone(),
+                        schema_hash: row.row_raw_table_id.schema_hash,
+                    };
+                    let cache_key = (row.branch.clone(), row.row_id);
+                    if inner.visible_row_table_locators.get(&cache_key) != Some(&locator) {
+                        let locator_bytes = super::encode_exact_row_table_locator(&locator)?;
+                        raw_table_put_core(
+                            super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                            &super::visible_row_table_locator_key(row.branch.as_str(), row.row_id),
+                            &locator_bytes,
+                            |storage_key, bytes| Self::set(&inner.conn, storage_key, bytes),
+                        )?;
+                        inner.visible_row_table_locators.insert(cache_key, locator);
+                    }
+                }
+
+                for mutation in index_mutations {
+                    match mutation {
+                        IndexMutation::Insert {
+                            table,
+                            column,
+                            branch,
+                            value,
+                            row_id,
+                        } => {
+                            let raw_table = key_codec::index_raw_table(table, column, branch);
+                            let key =
+                                key_codec::index_entry_key(table, column, branch, value, *row_id)?;
+                            raw_table_put_core(&raw_table, &key, &[0x01], |storage_key, bytes| {
+                                Self::set(&inner.conn, storage_key, bytes)
+                            })?;
+                        }
+                        IndexMutation::Remove {
+                            table,
+                            column,
+                            branch,
+                            value,
+                            row_id,
+                        } => {
+                            let key = match key_codec::index_entry_key(
+                                table, column, branch, value, *row_id,
+                            ) {
+                                Ok(key) => key,
+                                Err(StorageError::IndexKeyTooLarge { .. }) => continue,
+                                Err(error) => return Err(error),
+                            };
+                            let raw_table = key_codec::index_raw_table(table, column, branch);
+                            raw_table_delete_core(&raw_table, &key, |storage_key| {
+                                Self::delete(&inner.conn, storage_key)
+                            })?;
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+        })
+    }
+
     fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
@@ -417,11 +727,10 @@ impl Storage for SqliteStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            load_visible_region_row_bytes_core(table, branch, row_id, |key| {
-                Self::get(&inner.conn, key)
-            })
-        })
+        Ok(
+            super::load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+                .map(|row| row.bytes),
+        )
     }
 
     fn scan_visible_region_bytes(
@@ -429,23 +738,21 @@ impl Storage for SqliteStorage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            scan_visible_region_bytes_core(table, branch, |prefix| {
-                Self::scan_prefix(&inner.conn, prefix)
-            })
-        })
+        Ok(
+            super::scan_visible_row_bytes_with_storage(self, table, branch)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let branches = self.with_inner(|inner| {
-            scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
-                Self::scan_prefix_keys(&inner.conn, prefix)
-            })
-        })?;
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        let branches =
+            super::scan_visible_region_row_batch_branches_with_storage(self, table, row_id)?;
 
         let mut rows = Vec::new();
         for branch in branches {
@@ -457,17 +764,17 @@ impl Storage for SqliteStorage {
         Ok(rows)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            load_history_row_version_bytes_core(table, row_id, version_id, |key| {
-                Self::get(&inner.conn, key)
-            })
-        })
+        Ok(super::load_history_row_batch_row_bytes_with_storage(
+            self, table, branch, row_id, batch_id,
+        )?
+        .map(|row| row.bytes))
     }
 
     fn scan_history_region_bytes(
@@ -475,11 +782,12 @@ impl Storage for SqliteStorage {
         table: &str,
         scan: HistoryScan,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        self.with_inner(|inner| {
-            scan_history_region_bytes_core(table, scan, |prefix| {
-                Self::scan_prefix(&inner.conn, prefix)
-            })
-        })
+        Ok(
+            super::scan_history_row_bytes_with_storage(self, table, scan)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn flush_wal(&self) {
@@ -530,17 +838,32 @@ mod tests {
     #[test]
     fn flush_does_not_panic() {
         use crate::object::ObjectId;
-        use std::collections::HashMap;
+        use crate::query_manager::types::{SchemaBuilder, TableSchema};
+        use crate::storage::RowLocator;
 
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.sqlite");
         let mut storage = SqliteStorage::open(&path).unwrap();
+        let schema_hash = crate::query_manager::types::SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("users")
+                        .column("name", crate::query_manager::types::ColumnType::Text),
+                )
+                .build(),
+        );
 
         for _ in 0..10 {
             let id = ObjectId::new();
-            let mut meta = HashMap::new();
-            meta.insert("k".to_string(), "v".to_string());
-            storage.put_metadata(id, meta).unwrap();
+            storage
+                .put_row_locator(
+                    id,
+                    Some(&RowLocator {
+                        table: "users".into(),
+                        origin_schema_hash: Some(schema_hash),
+                    }),
+                )
+                .unwrap();
         }
 
         // flush() should not panic or return an error (it returns ())
@@ -558,10 +881,10 @@ mod tests {
 
         // Storage is closed but NOT yet dropped.
         // A real close() takes the inner; the next call must return Err, not succeed or panic.
-        let result = storage.load_metadata(ObjectId::new());
+        let result = storage.load_row_locator(ObjectId::new());
         assert!(
             result.is_err(),
-            "load_metadata should return Err after close, got Ok"
+            "load_row_locator should return Err after close, got Ok"
         );
     }
 
@@ -569,6 +892,65 @@ mod tests {
     fn storage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<SqliteStorage>();
+    }
+
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let storage = SqliteStorage::open(&path).unwrap();
+        storage.close().unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let bad_manifest = super::super::StoreManifest {
+            store_kind: super::super::SQLITE_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        let bytes = super::super::encode_store_manifest(&bad_manifest).unwrap();
+        conn.execute(
+            "UPDATE kv SET value = ?2 WHERE key = ?1",
+            rusqlite::params![super::super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+        )
+        .unwrap();
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                 key   BLOB PRIMARY KEY,
+                 value BLOB NOT NULL
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+            rusqlite::params![b"raw:legacy:alice".as_slice(), b"hello".as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty sqlite store"),
+            "unexpected error: {err}"
+        );
     }
 
     mod sqlite_conformance {

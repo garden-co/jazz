@@ -161,5 +161,5 @@ jobs:
           key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!jazz-rn
+      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!jazz-rn --concurrency=2
       - run: pnpm --filter jazz-tools test:browser

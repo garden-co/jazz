@@ -97,7 +97,9 @@ function JazzApp() {
   const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
   const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(false);
-  const localFirstSecret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
+  const localFirstSecret = React.use(
+    BrowserAuthSecretStore.getOrCreateSecret({ appId: DEFAULT_APP_ID }),
+  );
 
   React.useEffect(() => {
     let cancelled = false;

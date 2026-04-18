@@ -8,7 +8,7 @@
  *
  * The "edge" tier broadcasts the write to all connected clients' live
  * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
- * The default "worker" tier only updates the local OPFS database.
+ * The default "local" tier only updates the local OPFS database.
  *
  * Writes are fired immediately when game callbacks are invoked — no batching
  * interval. releasingIds guards against double-releasing the same deposit
