@@ -154,6 +154,7 @@ impl QueryManager {
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering,
+                sync_backed: false,
                 propagation,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -232,6 +233,7 @@ impl QueryManager {
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 uses_explicit_authorization_filtering: false,
+                sync_backed: false,
                 propagation: QueryPropagation::Full,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -319,6 +321,10 @@ impl QueryManager {
             strict_transactions,
             propagation,
         )?;
+
+        if let Some(subscription) = self.subscriptions.get_mut(&sub_id) {
+            subscription.sync_backed = true;
+        }
 
         let sync_query = self.sync_query_payload_for_upstream(&query);
 

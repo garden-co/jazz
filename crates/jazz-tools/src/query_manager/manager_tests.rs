@@ -10242,6 +10242,238 @@ fn e2e_permissions_prevent_new_row_sync() {
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
 }
 
+#[test]
+fn local_subscription_does_not_filter_rows_without_remote_scope() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "plain local subscriptions should ignore remote scope"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
+fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let sub_id = qm
+        .subscribe_with_sync(
+            qm.query("users").build(),
+            None,
+            Some(crate::sync_manager::DurabilityTier::Local),
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed subscriptions should keep local rows until a remote scope snapshot arrives"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
+fn synced_subscription_filters_rows_removed_from_remote_scope() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("recursive_folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("recursive_folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                PolicyExpr::and(vec![
+                    PolicyExpr::IsNotNull {
+                        column: "parent_id".into(),
+                    },
+                    PolicyExpr::inherits(Operation::Select, "parent_id"),
+                ]),
+            ])),
+        ),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let root_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let child_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let _grand_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("carol".into()),
+                Value::Text("Grand".into()),
+                Value::Uuid(child_id),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    server.process(&mut server_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("recursive_folders").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+    assert_eq!(client.get_subscription_results(sub_id).len(), 1);
+
+    server
+        .update(
+            &mut server_io,
+            child_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root_id),
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+    assert_eq!(client.get_subscription_results(sub_id).len(), 3);
+
+    server
+        .update(
+            &mut server_io,
+            child_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let remote_scope = client
+        .sync_manager()
+        .remote_query_scope(crate::sync_manager::QueryId(sub_id.0));
+    assert_eq!(
+        remote_scope,
+        [(root_id, crate::object::BranchName::new(get_branch(&client)))]
+            .into_iter()
+            .collect()
+    );
+
+    let subscription = client
+        .subscriptions
+        .get(&sub_id)
+        .expect("client subscription");
+    assert_eq!(subscription.current_ordered_ids, vec![root_id]);
+    assert_eq!(subscription.current_visible_rows.len(), 1);
+    assert_eq!(
+        decode_row(
+            &subscription.graph.combined_descriptor,
+            &subscription.current_visible_rows[&root_id].data
+        )
+        .unwrap(),
+        vec![
+            Value::Text("alice".into()),
+            Value::Text("Root".into()),
+            Value::Null
+        ]
+    );
+}
+
 /// E2E: In a 3-tier topology, upstream must sync policy-evaluation dependencies.
 ///
 /// Scenario:
