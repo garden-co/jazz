@@ -17,6 +17,7 @@ export default defineConfig({
     },
     include: ["tests/browser/**/*.test.tsx"],
     globalSetup: ["tests/browser/global-setup.ts"],
+    setupFiles: ["tests/browser/setup-react.ts"],
     testTimeout: 30000,
   },
 });

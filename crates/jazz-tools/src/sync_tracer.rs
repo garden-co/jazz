@@ -24,8 +24,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
+use crate::row_histories::BatchId;
 use crate::sync_manager::{ClientId, Destination, QueryId, Source, SyncPayload};
 
 // ============================================================================
@@ -102,7 +102,7 @@ impl SyncMessage {
     pub fn is_object_updated(&self) -> bool {
         matches!(
             self.payload,
-            SyncPayload::RowVersionCreated { .. } | SyncPayload::RowVersionNeeded { .. }
+            SyncPayload::RowBatchCreated { .. } | SyncPayload::RowBatchNeeded { .. }
         )
     }
 
@@ -110,7 +110,7 @@ impl SyncMessage {
     pub fn is_persistence_ack(&self) -> bool {
         matches!(
             self.payload,
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 confirmed_tier: Some(_),
                 ..
             }
@@ -135,9 +135,10 @@ impl SyncMessage {
     /// Extract object_id from payloads that carry one.
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
-            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.row_id)
+            }
+            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
             _ => None,
         }
     }
@@ -152,12 +153,13 @@ impl SyncMessage {
         }
     }
 
-    /// Extract commit IDs from update or durability payloads.
-    pub fn commit_ids(&self) -> Vec<CommitId> {
+    /// Extract batch ids from update or durability payloads.
+    pub fn batch_ids(&self) -> Vec<BatchId> {
         match &self.payload {
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => vec![row.version_id()],
-            SyncPayload::RowVersionStateChanged { version_id, .. } => vec![*version_id],
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                vec![row.batch_id()]
+            }
+            SyncPayload::RowBatchStateChanged { batch_id, .. } => vec![*batch_id],
             _ => vec![],
         }
     }
@@ -175,8 +177,8 @@ struct Inner {
     client_names: HashMap<ClientId, String>,
     /// ObjectId -> human name mapping.
     object_names: HashMap<ObjectId, String>,
-    /// CommitId -> human name mapping.
-    commit_names: HashMap<CommitId, String>,
+    /// BatchId -> human name mapping.
+    batch_names: HashMap<BatchId, String>,
 }
 
 /// Thread-safe sync message recorder.
@@ -198,7 +200,7 @@ impl SyncTracer {
                 start: Instant::now(),
                 client_names: HashMap::new(),
                 object_names: HashMap::new(),
-                commit_names: HashMap::new(),
+                batch_names: HashMap::new(),
             })),
         }
     }
@@ -224,15 +226,15 @@ impl SyncTracer {
         inner.object_names.insert(object_id, name.into());
     }
 
-    /// Register a CommitId -> human name mapping.
+    /// Register a BatchId -> human name mapping.
     ///
     /// ```ignore
-    /// tracer.register_commit(commit_id, "C1");
-    /// // Trace now shows "C1" instead of "e5f6a7b8"
+    /// tracer.register_batch(batch_id, "B1");
+    /// // Trace now shows "B1" instead of "e5f6a7b8"
     /// ```
-    pub fn register_commit(&self, commit_id: CommitId, name: impl Into<String>) {
+    pub fn register_batch(&self, batch_id: BatchId, name: impl Into<String>) {
         let mut inner = self.inner.lock().unwrap();
-        inner.commit_names.insert(commit_id, name.into());
+        inner.batch_names.insert(batch_id, name.into());
     }
 
     // --- Recording ---
@@ -437,7 +439,7 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            commits: &inner.commit_names,
+            batches: &inner.batch_names,
         };
         format_messages(&inner.messages, &names)
     }
@@ -447,7 +449,7 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            commits: &inner.commit_names,
+            batches: &inner.batch_names,
         };
         let filtered: Vec<_> = inner
             .messages
@@ -469,7 +471,7 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            commits: &inner.commit_names,
+            batches: &inner.batch_names,
         };
         format_trace(&inner.messages, &names)
     }
@@ -536,7 +538,7 @@ impl SyncTracer {
         let inner = self.inner.lock().unwrap();
         let names = Names {
             objects: &inner.object_names,
-            commits: &inner.commit_names,
+            batches: &inner.batch_names,
         };
         let filtered: Vec<_> = inner
             .messages
@@ -769,7 +771,7 @@ fn normalize_expectation(s: &str) -> Vec<String> {
 /// Name maps for resolving IDs to human-readable names in formatted output.
 struct Names<'a> {
     objects: &'a HashMap<ObjectId, String>,
-    commits: &'a HashMap<CommitId, String>,
+    batches: &'a HashMap<BatchId, String>,
 }
 
 impl Names<'_> {
@@ -780,11 +782,11 @@ impl Names<'_> {
             .unwrap_or_else(|| short_object_id(id))
     }
 
-    fn commit(&self, id: &CommitId) -> String {
-        self.commits
+    fn batch(&self, id: &BatchId) -> String {
+        self.batches
             .get(id)
             .cloned()
-            .unwrap_or_else(|| short_commit_id(id))
+            .unwrap_or_else(|| short_batch_id(id))
     }
 }
 
@@ -792,8 +794,8 @@ impl Names<'_> {
 /// into deterministic labels for stable snapshot testing.
 struct Normalizer<'a> {
     object_names: &'a HashMap<ObjectId, String>,
-    commit_map: HashMap<CommitId, String>,
-    next_commit: usize,
+    batch_map: HashMap<BatchId, String>,
+    next_batch: usize,
     object_map: HashMap<ObjectId, String>,
     next_object: usize,
     branch_map: HashMap<String, String>,
@@ -804,8 +806,8 @@ impl<'a> Normalizer<'a> {
     fn new(object_names: &'a HashMap<ObjectId, String>) -> Self {
         Self {
             object_names,
-            commit_map: HashMap::new(),
-            next_commit: 1,
+            batch_map: HashMap::new(),
+            next_batch: 1,
             object_map: HashMap::new(),
             next_object: 1,
             branch_map: HashMap::new(),
@@ -813,12 +815,12 @@ impl<'a> Normalizer<'a> {
         }
     }
 
-    fn commit(&mut self, id: &CommitId) -> String {
-        self.commit_map
+    fn batch(&mut self, id: &BatchId) -> String {
+        self.batch_map
             .entry(*id)
             .or_insert_with(|| {
-                let name = format!("C{}", self.next_commit);
-                self.next_commit += 1;
+                let name = format!("B{}", self.next_batch);
+                self.next_batch += 1;
                 name
             })
             .clone()
@@ -858,34 +860,52 @@ impl<'a> Normalizer<'a> {
 
     fn format_payload(&mut self, payload: &SyncPayload) -> String {
         match payload {
-            SyncPayload::RowVersionCreated { row, .. } => {
+            SyncPayload::RowBatchCreated { row, .. } => {
                 format!(
-                    "created row:{} branch:{} version:{}",
+                    "created row:{} branch:{} batch:{}",
                     self.object(&row.row_id),
                     self.branch(&BranchName::new(&row.branch)),
-                    self.commit(&row.version_id()),
+                    self.batch(&row.batch_id()),
                 )
             }
-            SyncPayload::RowVersionNeeded { row, .. } => {
+            SyncPayload::RowBatchNeeded { row, .. } => {
                 format!(
-                    "needed row:{} branch:{} version:{}",
+                    "needed row:{} branch:{} batch:{}",
                     self.object(&row.row_id),
                     self.branch(&BranchName::new(&row.branch)),
-                    self.commit(&row.version_id()),
+                    self.batch(&row.batch_id()),
                 )
             }
-            SyncPayload::RowVersionStateChanged {
+            SyncPayload::RowBatchStateChanged {
                 row_id,
                 branch_name,
-                version_id,
+                batch_id,
                 state,
                 confirmed_tier,
             } => {
                 format!(
-                    "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                    "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
                     self.object(row_id),
                     self.branch(branch_name),
-                    self.commit(version_id),
+                    self.batch(batch_id),
+                )
+            }
+            SyncPayload::BatchSettlement { settlement } => self.format_settlement(settlement),
+            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+                let batches = batch_ids
+                    .iter()
+                    .map(|batch_id| self.batch(batch_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("batch_ids:[{batches}]")
+            }
+            SyncPayload::SealBatch { submission } => {
+                format!(
+                    "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
+                    submission.batch_id,
+                    submission.target_branch_name,
+                    submission.members,
+                    submission.captured_frontier
                 )
             }
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -900,6 +920,9 @@ impl<'a> Normalizer<'a> {
             }
             SyncPayload::QueryUnsubscription { query_id } => {
                 format!("query:{}", query_id.0)
+            }
+            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+                format!("query:{} scope:{}", query_id.0, scope.len())
             }
             SyncPayload::QuerySettled {
                 query_id,
@@ -918,6 +941,64 @@ impl<'a> Normalizer<'a> {
                 format!("{:?}", e)
             }
         }
+    }
+
+    fn format_settlement(&mut self, settlement: &crate::batch_fate::BatchSettlement) -> String {
+        match settlement {
+            crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+                format!("missing batch:{}", self.batch(batch_id))
+            }
+            crate::batch_fate::BatchSettlement::Rejected {
+                batch_id,
+                code,
+                reason,
+            } => {
+                format!(
+                    "rejected batch:{} code:{code} reason:{reason}",
+                    self.batch(batch_id)
+                )
+            }
+            crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                format!(
+                    "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
+                    self.batch(batch_id),
+                    self.format_visible_members(visible_members)
+                )
+            }
+            crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                format!(
+                    "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
+                    self.batch(batch_id),
+                    self.format_visible_members(visible_members)
+                )
+            }
+        }
+    }
+
+    fn format_visible_members(
+        &mut self,
+        members: &[crate::batch_fate::VisibleBatchMember],
+    ) -> String {
+        members
+            .iter()
+            .map(|member| {
+                format!(
+                    "row:{} branch:{} batch:{}",
+                    self.object(&member.object_id),
+                    self.branch(&member.branch_name),
+                    self.batch(&member.batch_id),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -962,20 +1043,20 @@ fn format_message(msg: &SyncMessage, names: &Names<'_>) -> String {
 
 fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     match payload {
-        SyncPayload::RowVersionCreated { row, .. } => {
+        SyncPayload::RowBatchCreated { row, .. } => {
             format!(
-                "created row:{} branch:{} version:{}",
+                "created row:{} branch:{} batch:{}",
                 names.object(&row.row_id),
                 row.branch,
-                names.commit(&row.version_id()),
+                names.batch(&row.batch_id()),
             )
         }
-        SyncPayload::RowVersionNeeded { row, .. } => {
+        SyncPayload::RowBatchNeeded { row, .. } => {
             format!(
-                "needed row:{} branch:{} version:{}",
+                "needed row:{} branch:{} batch:{}",
                 names.object(&row.row_id),
                 row.branch,
-                names.commit(&row.version_id()),
+                names.batch(&row.batch_id()),
             )
         }
         SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -985,18 +1066,36 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 entry.object_type().unwrap_or("unknown"),
             )
         }
-        SyncPayload::RowVersionStateChanged {
+        SyncPayload::RowBatchStateChanged {
             row_id,
             branch_name,
-            version_id,
+            batch_id,
             state,
             confirmed_tier,
         } => {
             format!(
-                "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
                 names.object(row_id),
                 branch_name,
-                names.commit(version_id),
+                names.batch(batch_id),
+            )
+        }
+        SyncPayload::BatchSettlement { settlement } => format_settlement_details(settlement, names),
+        SyncPayload::BatchSettlementNeeded { batch_ids } => {
+            let batches = batch_ids
+                .iter()
+                .map(|batch_id| names.batch(batch_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("batch_ids:[{batches}]")
+        }
+        SyncPayload::SealBatch { submission } => {
+            format!(
+                "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
+                submission.batch_id,
+                submission.target_branch_name,
+                submission.members,
+                submission.captured_frontier
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
@@ -1004,6 +1103,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::QueryUnsubscription { query_id } => {
             format!("query:{}", query_id.0)
+        }
+        SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+            format!("query:{} scope:{}", query_id.0, scope.len())
         }
         SyncPayload::QuerySettled {
             query_id,
@@ -1024,9 +1126,70 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
     }
 }
 
-/// First 4 bytes of a CommitId as hex (8 chars).
-fn short_commit_id(id: &CommitId) -> String {
-    hex::encode(&id.0[..4])
+fn format_settlement_details(
+    settlement: &crate::batch_fate::BatchSettlement,
+    names: &Names<'_>,
+) -> String {
+    match settlement {
+        crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+            format!("missing batch:{}", names.batch(batch_id))
+        }
+        crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code,
+            reason,
+        } => {
+            format!(
+                "rejected batch:{} code:{code} reason:{reason}",
+                names.batch(batch_id)
+            )
+        }
+        crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => {
+            format!(
+                "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
+                names.batch(batch_id),
+                format_visible_members_details(visible_members, names)
+            )
+        }
+        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => {
+            format!(
+                "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
+                names.batch(batch_id),
+                format_visible_members_details(visible_members, names)
+            )
+        }
+    }
+}
+
+fn format_visible_members_details(
+    members: &[crate::batch_fate::VisibleBatchMember],
+    names: &Names<'_>,
+) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "row:{} branch:{} batch:{}",
+                names.object(&member.object_id),
+                member.branch_name,
+                names.batch(&member.batch_id),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// First 4 bytes of a BatchId as hex (8 chars).
+fn short_batch_id(id: &BatchId) -> String {
+    hex::encode(&id.as_bytes()[..4])
 }
 
 /// First 8 chars of an ObjectId UUID.
@@ -1049,12 +1212,12 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 mod tests {
     use super::*;
     use crate::metadata::RowProvenance;
-    use crate::row_histories::{RowState, StoredRowVersion};
+    use crate::row_histories::{RowState, StoredRowBatch};
     use crate::sync_manager::ServerId;
 
-    fn make_row(byte: u8) -> StoredRowVersion {
+    fn make_row(byte: u8) -> StoredRowBatch {
         let row_id = ObjectId::new();
-        StoredRowVersion::new(
+        StoredRowBatch::new(
             row_id,
             "main",
             Vec::new(),
@@ -1071,7 +1234,7 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowVersionCreated {
+        let payload = SyncPayload::RowBatchCreated {
             metadata: None,
             row: make_row(1),
         };
@@ -1086,8 +1249,8 @@ mod tests {
         assert_eq!(tracer.count(), 2);
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
-        assert_eq!(tracer.of_type("RowVersionCreated").len(), 2);
-        assert_eq!(tracer.of_type("RowVersionStateChanged").len(), 0);
+        assert_eq!(tracer.of_type("RowBatchCreated").len(), 2);
+        assert_eq!(tracer.of_type("RowBatchStateChanged").len(), 0);
     }
 
     #[test]
@@ -1096,14 +1259,14 @@ mod tests {
         let server_id = ServerId::default();
 
         let row = make_row(1);
-        let outgoing = SyncPayload::RowVersionCreated {
+        let outgoing = SyncPayload::RowBatchCreated {
             metadata: None,
             row: row.clone(),
         };
-        let incoming = SyncPayload::RowVersionStateChanged {
+        let incoming = SyncPayload::RowBatchStateChanged {
             row_id: row.row_id,
             branch_name: "main".into(),
-            version_id: row.version_id(),
+            batch_id: row.batch_id,
             state: None,
             confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
         };
@@ -1122,7 +1285,7 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::RowVersionCreated {
+        let payload = SyncPayload::RowBatchCreated {
             metadata: None,
             row: make_row(1),
         };
@@ -1132,7 +1295,7 @@ mod tests {
         let dump = tracer.dump();
         assert!(dump.contains("alice"));
         assert!(dump.contains("server"));
-        assert!(dump.contains("RowVersionCreated"));
+        assert!(dump.contains("RowBatchCreated"));
         assert!(dump.contains("branch:main"));
     }
 

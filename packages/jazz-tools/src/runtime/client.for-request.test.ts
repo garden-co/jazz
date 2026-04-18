@@ -81,7 +81,10 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -127,7 +130,10 @@ function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -421,10 +427,26 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
+  it("passes strict transaction visibility options to runtime query", async () => {
+    const { client, queryCalls } = makeClient();
+    await client.query('{"table":"todos"}', { strictTransactions: true });
+    expect(queryCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
+  });
+
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
-    client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagation: "local-only",
+    });
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("passes strict transaction visibility options to runtime createSubscription", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      strictTransactions: true,
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
   });
 
   // =========================================================================

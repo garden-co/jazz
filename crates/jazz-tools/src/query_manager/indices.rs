@@ -399,4 +399,62 @@ impl QueryManager {
             .apply_index_mutations(&mutations)
             .map_err(Self::map_index_storage_error)
     }
+
+    pub(crate) fn retract_local_pending_transaction_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+    ) {
+        self.retract_local_rejected_row(storage, table, branch, row_id, row_data, false);
+    }
+
+    pub(crate) fn retract_local_rejected_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+        was_visible: bool,
+    ) {
+        let table_name = TableName::new(table);
+        let Some(table_schema) = self.schema.get(&table_name) else {
+            if was_visible {
+                self.pending_local_row_batches.remove(&row_id);
+                self.mark_subscriptions_dirty_local(table);
+                self.mark_local_row_deleted_in_subscriptions(table, row_id);
+            } else {
+                self.clear_local_pending_row_overlay(table, row_id);
+            }
+            return;
+        };
+
+        if let Err(error) = Self::update_indices_for_hard_delete_on_branch(
+            storage,
+            table,
+            branch,
+            row_id,
+            Some(row_data),
+            &table_schema.columns,
+        ) {
+            tracing::warn!(
+                table,
+                branch,
+                object_id = %row_id,
+                %error,
+                "failed to retract local rejected row indices"
+            );
+        }
+
+        if was_visible {
+            self.pending_local_row_batches.remove(&row_id);
+            self.mark_subscriptions_dirty_local(table);
+            self.mark_local_row_deleted_in_subscriptions(table, row_id);
+        } else {
+            self.clear_local_pending_row_overlay(table, row_id);
+        }
+    }
 }

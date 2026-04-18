@@ -1,24 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-// Use web_time::Instant so this compiles on wasm32-unknown-unknown; std's
-// Instant panics in browsers. Duration has no platform dependency.
 use web_time::Instant;
 
+use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::RowVisibilityChange;
+use crate::row_histories::{BatchId, RowVisibilityChange};
 use crate::storage::Storage;
-
-/// How long an installed transport may sit in `pending_servers` before callers
-/// treat it as offline. Caps the initial-frontier hold introduced by the
-/// "Hold remote query frontier while transport connects" change — without a
-/// bound, a never-connecting transport stalls every first subscription
-/// delivery forever.
-pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 
 // Module declarations
 pub mod forwarding;
@@ -33,12 +25,13 @@ mod tests;
 // Re-export all public types
 pub use types::*;
 
+/// How long an installed transport may sit in `pending_servers` before callers
+/// treat it as offline.
+pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
+
 // ============================================================================
 // SyncManager
 // ============================================================================
-
-const HASH_MAP_ENTRY_OVERHEAD: usize = 48;
-const HASH_SET_ENTRY_OVERHEAD: usize = 32;
 
 /// Manages synchronization state atop storage-backed row and catalogue state.
 ///
@@ -52,8 +45,6 @@ pub struct SyncManager {
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
-    /// Servers whose transport handshake is still in flight. Each entry records
-    /// when the transport was installed so we can time it out.
     pub(super) pending_servers: HashMap<ServerId, Instant>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
@@ -74,16 +65,20 @@ pub struct SyncManager {
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in row-version state updates.
-    pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
+    /// Tracks which clients are interested in row batch-member state updates.
+    pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
+    /// Latest remote scope snapshots keyed by upstream server and query id.
+    pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
+    /// Pending replayable batch settlements for RuntimeCore to process.
+    pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
-    /// Row-version state acks received during inbox processing.
-    pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
+    /// Row batch-member state acks received during inbox processing.
+    pub(super) received_row_batch_acks: Vec<(RowBatchKey, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -116,10 +111,12 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("row_version_interest", &self.row_version_interest)
+            .field("row_batch_interest", &self.row_batch_interest)
             .field("query_origin", &self.query_origin)
+            .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
-            .field("received_row_version_acks", &self.received_row_version_acks)
+            .field("pending_batch_settlements", &self.pending_batch_settlements)
+            .field("received_row_batch_acks", &self.received_row_batch_acks)
             .finish()
     }
 }
@@ -193,127 +190,6 @@ pub(crate) fn log_connection_schema_diagnostics(
     }
 }
 
-fn serialized_size<T: serde::Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
-}
-
-fn estimate_string_map(map: &HashMap<String, String>) -> usize {
-    map.iter()
-        .map(|(key, value)| key.len() + value.len() + HASH_MAP_ENTRY_OVERHEAD)
-        .sum()
-}
-
-fn estimate_branch_name(branch_name: &BranchName) -> usize {
-    std::mem::size_of::<BranchName>() + branch_name.as_str().len()
-}
-
-fn estimate_session(session: &Session) -> usize {
-    std::mem::size_of::<Session>() + serialized_size(session)
-}
-
-fn estimate_query(query: &Query) -> usize {
-    std::mem::size_of::<Query>() + serialized_size(query)
-}
-
-fn estimate_sync_payload(payload: &SyncPayload) -> usize {
-    std::mem::size_of::<SyncPayload>() + serialized_size(payload)
-}
-
-fn estimate_catalogue_entry(entry: &CatalogueEntry) -> usize {
-    std::mem::size_of::<CatalogueEntry>() + serialized_size(entry)
-}
-
-fn estimate_query_scope(scope: &QueryScope) -> usize {
-    std::mem::size_of::<QueryScope>()
-        + scope
-            .scope
-            .iter()
-            .map(|(object_id, branch_name)| {
-                std::mem::size_of_val(object_id)
-                    + estimate_branch_name(branch_name)
-                    + HASH_SET_ENTRY_OVERHEAD
-            })
-            .sum::<usize>()
-        + scope.session.as_ref().map_or(0, estimate_session)
-}
-
-fn estimate_version_tracking(
-    versions: &HashMap<(ObjectId, BranchName), HashSet<crate::commit::CommitId>>,
-) -> usize {
-    versions
-        .iter()
-        .map(|((object_id, branch_name), commit_ids)| {
-            std::mem::size_of_val(object_id)
-                + estimate_branch_name(branch_name)
-                + HASH_MAP_ENTRY_OVERHEAD
-                + commit_ids
-                    .iter()
-                    .map(|commit_id| std::mem::size_of_val(commit_id) + HASH_SET_ENTRY_OVERHEAD)
-                    .sum::<usize>()
-        })
-        .sum()
-}
-
-fn estimate_server_state(state: &ServerState) -> usize {
-    std::mem::size_of::<ServerState>()
-        + estimate_version_tracking(&state.sent_row_versions)
-        + state
-            .sent_metadata
-            .iter()
-            .map(|object_id| std::mem::size_of_val(object_id) + HASH_SET_ENTRY_OVERHEAD)
-            .sum::<usize>()
-}
-
-fn estimate_client_state(state: &ClientState) -> usize {
-    std::mem::size_of::<ClientState>()
-        + state.session.as_ref().map_or(0, estimate_session)
-        + state
-            .queries
-            .iter()
-            .map(|(query_id, scope)| {
-                std::mem::size_of_val(query_id)
-                    + HASH_MAP_ENTRY_OVERHEAD
-                    + estimate_query_scope(scope)
-            })
-            .sum::<usize>()
-        + estimate_version_tracking(&state.sent_row_versions)
-        + state
-            .sent_metadata
-            .iter()
-            .map(|object_id| std::mem::size_of_val(object_id) + HASH_SET_ENTRY_OVERHEAD)
-            .sum::<usize>()
-}
-
-fn estimate_outbox_entry(entry: &OutboxEntry) -> usize {
-    std::mem::size_of::<OutboxEntry>() + estimate_sync_payload(&entry.payload)
-}
-
-fn estimate_inbox_entry(entry: &InboxEntry) -> usize {
-    std::mem::size_of::<InboxEntry>() + estimate_sync_payload(&entry.payload)
-}
-
-fn estimate_pending_query_subscription(subscription: &PendingQuerySubscription) -> usize {
-    std::mem::size_of::<PendingQuerySubscription>()
-        + estimate_query(&subscription.query)
-        + subscription.session.as_ref().map_or(0, estimate_session)
-}
-
-fn estimate_pending_permission_check(check: &PendingPermissionCheck) -> usize {
-    std::mem::size_of::<PendingPermissionCheck>()
-        + estimate_sync_payload(&check.payload)
-        + estimate_session(&check.session)
-        + estimate_string_map(&check.metadata)
-        + check.old_content.as_ref().map_or(0, Vec::len)
-        + check.new_content.as_ref().map_or(0, Vec::len)
-}
-
-fn estimate_row_visibility_change(change: &RowVisibilityChange) -> usize {
-    std::mem::size_of::<RowVisibilityChange>()
-        + serialized_size(&change.row_locator)
-        + serialized_size(&change.row)
-        + change.previous_row.as_ref().map_or(0, serialized_size)
-}
-
 impl SyncManager {
     pub fn new() -> Self {
         Self {
@@ -332,10 +208,12 @@ impl SyncManager {
             pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            row_version_interest: HashMap::new(),
+            row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
+            remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
-            received_row_version_acks: Vec::new(),
+            pending_batch_settlements: Vec::new(),
+            received_row_batch_acks: Vec::new(),
         }
     }
 
@@ -389,116 +267,92 @@ impl SyncManager {
         self.my_tiers.iter().copied().max()
     }
 
-    /// Calculate memory usage breakdown for profiling.
+    /// Approximate heap-backed memory owned by sync state, grouped for benches.
     ///
-    /// Returns a tuple: (row_objects, index_objects, subscriptions, outbox_inbox, total).
-    /// This is a rough estimate based on sync-layer container state and payload sizes.
+    /// Returns `(catalogue, connections, subscriptions, queues, total)`.
     pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
-        let row_objects = self
-            .catalogue_entries
-            .iter()
-            .map(|(object_id, entry)| {
-                std::mem::size_of_val(object_id)
-                    + HASH_MAP_ENTRY_OVERHEAD
-                    + estimate_catalogue_entry(entry)
-            })
-            .sum::<usize>()
-            + self
-                .row_version_interest
-                .iter()
-                .map(|(row_version_key, client_ids)| {
-                    std::mem::size_of_val(row_version_key)
-                        + HASH_MAP_ENTRY_OVERHEAD
-                        + client_ids
-                            .iter()
-                            .map(|client_id| {
-                                std::mem::size_of_val(client_id) + HASH_SET_ENTRY_OVERHEAD
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
-            + self
-                .received_row_version_acks
-                .iter()
-                .map(|(row_version_key, durability_tier)| {
-                    std::mem::size_of_val(row_version_key) + std::mem::size_of_val(durability_tier)
-                })
-                .sum::<usize>();
+        let mut catalogue = 0usize;
+        for (object_id, entry) in &self.catalogue_entries {
+            catalogue += std::mem::size_of_val(object_id);
+            catalogue += std::mem::size_of_val(entry);
+            catalogue += 48;
+        }
 
-        let index_objects = 0usize;
+        let mut connections = 0usize;
+        for (server_id, state) in &self.servers {
+            connections += std::mem::size_of_val(server_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        for (client_id, state) in &self.clients {
+            connections += std::mem::size_of_val(client_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            if let Some(session) = &state.session {
+                connections += session.user_id.len();
+            }
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        connections += self.my_tiers.len() * std::mem::size_of::<DurabilityTier>();
 
-        let subscriptions = self
-            .servers
-            .iter()
-            .map(|(server_id, state)| {
-                std::mem::size_of_val(server_id)
-                    + HASH_MAP_ENTRY_OVERHEAD
-                    + estimate_server_state(state)
-            })
-            .sum::<usize>()
-            + self
-                .clients
-                .iter()
-                .map(|(client_id, state)| {
-                    std::mem::size_of_val(client_id)
-                        + HASH_MAP_ENTRY_OVERHEAD
-                        + estimate_client_state(state)
-                })
-                .sum::<usize>()
-            + self
-                .my_tiers
-                .iter()
-                .map(|tier| std::mem::size_of_val(tier) + HASH_SET_ENTRY_OVERHEAD)
-                .sum::<usize>()
-            + self
-                .query_origin
-                .iter()
-                .map(|(query_id, client_ids)| {
-                    std::mem::size_of_val(query_id)
-                        + HASH_MAP_ENTRY_OVERHEAD
-                        + client_ids
-                            .iter()
-                            .map(|client_id| {
-                                std::mem::size_of_val(client_id) + HASH_SET_ENTRY_OVERHEAD
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>();
+        let mut subscriptions = 0usize;
+        for state in self.clients.values() {
+            for (query_id, scope) in &state.queries {
+                subscriptions += std::mem::size_of_val(query_id);
+                subscriptions += std::mem::size_of_val(scope);
+                subscriptions += scope.scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+                if let Some(session) = &scope.session {
+                    subscriptions += session.user_id.len();
+                }
+                subscriptions += 48;
+            }
+        }
+        for (row_batch_key, clients) in &self.row_batch_interest {
+            subscriptions += std::mem::size_of_val(row_batch_key);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (query_id, clients) in &self.query_origin {
+            subscriptions += std::mem::size_of_val(query_id);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (key, scope) in &self.remote_query_scopes {
+            subscriptions += std::mem::size_of_val(key);
+            subscriptions += scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+            subscriptions += 48;
+        }
 
-        let outbox_inbox = self.outbox.iter().map(estimate_outbox_entry).sum::<usize>()
-            + self.inbox.iter().map(estimate_inbox_entry).sum::<usize>()
-            + self
-                .pending_permission_checks
-                .iter()
-                .map(estimate_pending_permission_check)
-                .sum::<usize>()
-            + self
-                .pending_query_subscriptions
-                .iter()
-                .map(estimate_pending_query_subscription)
-                .sum::<usize>()
+        let queues = self.inbox.len() * std::mem::size_of::<InboxEntry>()
+            + self.outbox.len() * std::mem::size_of::<OutboxEntry>()
+            + self.pending_permission_checks.len() * std::mem::size_of::<PendingPermissionCheck>()
+            + self.pending_query_subscriptions.len()
+                * std::mem::size_of::<PendingQuerySubscription>()
             + self.pending_query_unsubscriptions.len()
                 * std::mem::size_of::<PendingQueryUnsubscription>()
-            + self
-                .pending_row_visibility_changes
-                .iter()
-                .map(estimate_row_visibility_change)
-                .sum::<usize>()
-            + self
-                .pending_catalogue_updates
-                .iter()
-                .map(estimate_catalogue_entry)
-                .sum::<usize>()
-            + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>();
+            + self.pending_row_visibility_changes.len()
+                * std::mem::size_of::<RowVisibilityChange>()
+            + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
+            + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
+            + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
+            + self.received_row_batch_acks.len()
+                * std::mem::size_of::<(RowBatchKey, DurabilityTier)>();
 
-        let total = row_objects + index_objects + subscriptions + outbox_inbox;
-        (
-            row_objects,
-            index_objects,
-            subscriptions,
-            outbox_inbox,
-            total,
-        )
+        let total = catalogue + connections + subscriptions + queues;
+        (catalogue, connections, subscriptions, queues, total)
     }
 
     // ========================================================================
@@ -520,7 +374,6 @@ impl SyncManager {
         }
     }
 
-    /// Mark a transport-owned server as pending while the connection handshake runs.
     pub fn add_pending_server(&mut self, server_id: ServerId) {
         if self.servers.contains_key(&server_id) {
             return;
@@ -528,17 +381,53 @@ impl SyncManager {
         self.pending_servers.insert(server_id, Instant::now());
     }
 
-    /// Drop the pending flag for a transport whose first connect/handshake
-    /// attempt has failed. Lets held initial subscriptions deliver against
-    /// local state while the transport keeps retrying in the background.
     pub fn remove_pending_server(&mut self, server_id: ServerId) {
         self.pending_servers.remove(&server_id);
+    }
+
+    pub fn has_servers_or_pending_servers(&self) -> bool {
+        if !self.servers.is_empty() {
+            return true;
+        }
+        let now = Instant::now();
+        self.pending_servers
+            .values()
+            .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
+    }
+
+    pub fn request_batch_settlements_from_server(
+        &mut self,
+        server_id: ServerId,
+        batch_ids: Vec<crate::row_histories::BatchId>,
+    ) {
+        if batch_ids.is_empty() {
+            return;
+        }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        });
+    }
+
+    pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch {
+                    submission: submission.clone(),
+                },
+            });
+        }
     }
 
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
         self.pending_servers.remove(&server_id);
+        self.remote_query_scopes
+            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
@@ -568,7 +457,7 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.row_version_interest.retain(|_, clients| {
+        self.row_batch_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });
@@ -599,16 +488,6 @@ impl SyncManager {
         !self.servers.is_empty()
     }
 
-    pub fn has_servers_or_pending_servers(&self) -> bool {
-        if !self.servers.is_empty() {
-            return true;
-        }
-        let now = Instant::now();
-        self.pending_servers
-            .values()
-            .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
-    }
-
     /// Get client state.
     pub fn get_client(&self, client_id: ClientId) -> Option<&ClientState> {
         self.clients.get(&client_id)
@@ -635,6 +514,15 @@ impl SyncManager {
     /// Take all outbox entries, clearing the outbox.
     pub fn take_outbox(&mut self) -> Vec<OutboxEntry> {
         std::mem::take(&mut self.outbox)
+    }
+
+    /// Restore previously dequeued outbox entries ahead of any newly queued ones.
+    pub(crate) fn prepend_outbox(&mut self, mut entries: Vec<OutboxEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        entries.append(&mut self.outbox);
+        self.outbox = entries;
     }
 
     /// Get a reference to the outbox (for checking if empty).
@@ -735,6 +623,14 @@ impl SyncManager {
                 true,
             );
         }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::QueryScopeSnapshot {
+                query_id,
+                scope: sorted_query_scope_snapshot(&scope),
+            },
+        });
     }
 
     /// Drop a client's query subscription state.
@@ -775,26 +671,26 @@ impl SyncManager {
             return;
         }
 
-        let mut removed_row_versions = Vec::new();
+        let mut removed_row_batches = Vec::new();
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
 
         for &(object_id, branch_name) in removed_scope {
-            if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
-                removed_row_versions.extend(
-                    version_ids
+            if let Some(batch_ids) = client.sent_batch_ids.remove(&(object_id, branch_name)) {
+                removed_row_batches.extend(
+                    batch_ids
                         .into_iter()
-                        .map(|version_id| RowVersionKey::new(object_id, branch_name, version_id)),
+                        .map(|batch_id| RowBatchKey::new(object_id, branch_name, batch_id)),
                 );
             }
         }
 
-        for key in removed_row_versions {
-            if let Some(clients) = self.row_version_interest.get_mut(&key) {
+        for key in removed_row_batches {
+            if let Some(clients) = self.row_batch_interest.get_mut(&key) {
                 clients.remove(&client_id);
                 if clients.is_empty() {
-                    self.row_version_interest.remove(&key);
+                    self.row_batch_interest.remove(&key);
                 }
             }
         }
@@ -871,10 +767,24 @@ impl SyncManager {
         self.pending_query_settled.extend(pending);
     }
 
-    /// Take received row-version persistence state since last call.
+    /// Return the union of latest upstream scope snapshots for this query.
+    pub fn remote_query_scope(&self, query_id: QueryId) -> HashSet<(ObjectId, BranchName)> {
+        self.remote_query_scopes
+            .iter()
+            .filter(|((_, remote_query_id), _)| *remote_query_id == query_id)
+            .flat_map(|(_, scope)| scope.iter().copied())
+            .collect()
+    }
+
+    /// Take pending replayable batch settlements for RuntimeCore to process.
+    pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
+        std::mem::take(&mut self.pending_batch_settlements)
+    }
+
+    /// Take received row batch-member persistence state since last call.
     /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_version_acks(&mut self) -> Vec<(RowVersionKey, DurabilityTier)> {
-        std::mem::take(&mut self.received_row_version_acks)
+    pub fn take_received_row_batch_acks(&mut self) -> Vec<(RowBatchKey, DurabilityTier)> {
+        std::mem::take(&mut self.received_row_batch_acks)
     }
 
     /// Take pending row visibility changes for QueryManager to materialize
@@ -936,4 +846,18 @@ impl SyncManager {
             }),
         });
     }
+}
+
+fn sorted_query_scope_snapshot(
+    scope: &HashSet<(ObjectId, BranchName)>,
+) -> Vec<(ObjectId, BranchName)> {
+    let mut entries: Vec<_> = scope.iter().copied().collect();
+    entries.sort_by(
+        |(left_object_id, left_branch), (right_object_id, right_branch)| {
+            left_object_id
+                .cmp(right_object_id)
+                .then_with(|| left_branch.as_str().cmp(right_branch.as_str()))
+        },
+    );
+    entries
 }

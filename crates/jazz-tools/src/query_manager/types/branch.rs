@@ -165,6 +165,10 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&[6]);
             hasher.update(v.uuid().as_bytes());
         }
+        Value::BatchId(v) => {
+            hasher.update(&[12]);
+            hasher.update(v);
+        }
         Value::Bytea(v) => {
             hasher.update(&[11]);
             hasher.update(&(v.len() as u64).to_le_bytes());
@@ -225,6 +229,9 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         }
         ColumnType::Uuid => {
             hasher.update(&[6]);
+        }
+        ColumnType::BatchId => {
+            hasher.update(&[12]);
         }
         ColumnType::Bytea => {
             hasher.update(&[10]);

@@ -4,14 +4,14 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::StoredRowVersion;
+use crate::row_histories::{BatchId, StoredRowBatch};
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -97,25 +97,25 @@ pub enum QueryPropagation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
 
-/// Stable identity for one concrete row version.
+/// Stable identity for one concrete row batch entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RowVersionKey {
+pub struct RowBatchKey {
     pub row_id: ObjectId,
     pub branch_name: BranchName,
-    pub version_id: CommitId,
+    pub batch_id: BatchId,
 }
 
-impl RowVersionKey {
-    pub fn new(row_id: ObjectId, branch_name: BranchName, version_id: CommitId) -> Self {
+impl RowBatchKey {
+    pub fn new(row_id: ObjectId, branch_name: BranchName, batch_id: BatchId) -> Self {
         Self {
             row_id,
             branch_name,
-            version_id,
+            batch_id,
         }
     }
 
-    pub fn from_row(row: &StoredRowVersion) -> Self {
-        Self::new(row.row_id, BranchName::new(&row.branch), row.version_id())
+    pub fn from_row(row: &StoredRowBatch) -> Self {
+        Self::new(row.row_id, BranchName::new(&row.branch), row.batch_id)
     }
 }
 
@@ -157,8 +157,8 @@ pub enum ClientRole {
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
     /// What we've pushed to this server for row-history sync:
-    /// (row object, branch) -> set of known row-version ids.
-    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// (row object, branch) -> set of known batch ids.
+    pub sent_batch_ids: HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
     /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
@@ -182,8 +182,8 @@ pub struct ClientState {
     /// Active queries from this client.
     pub queries: HashMap<QueryId, QueryScope>,
     /// What we've sent to this client for row-history sync:
-    /// (row object, branch) -> set of known row-version ids.
-    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// (row object, branch) -> set of known batch ids.
+    pub sent_batch_ids: HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
     /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
@@ -249,26 +249,35 @@ pub enum SyncPayload {
     /// Semantic update for one catalogue/system entry.
     CatalogueEntryUpdated { entry: CatalogueEntry },
 
-    /// Upstream replication of a newly created or newly learned row version.
-    RowVersionCreated {
+    /// Upstream replication of a newly created or newly learned row batch entry.
+    RowBatchCreated {
         metadata: Option<RowMetadata>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     },
 
-    /// Downstream delivery of a row version that is needed for a subscriber's scope.
-    RowVersionNeeded {
+    /// Downstream delivery of a row batch entry that is needed for a subscriber's scope.
+    RowBatchNeeded {
         metadata: Option<RowMetadata>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     },
 
-    /// System-column update for a previously sent row version.
-    RowVersionStateChanged {
+    /// System-column update for a previously sent row batch entry.
+    RowBatchStateChanged {
         row_id: ObjectId,
         branch_name: BranchName,
-        version_id: CommitId,
+        batch_id: BatchId,
         state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     },
+
+    /// Replayable fate for one logical batch.
+    BatchSettlement { settlement: BatchSettlement },
+
+    /// Request current replayable fate for specific batch ids.
+    BatchSettlementNeeded { batch_ids: Vec<BatchId> },
+
+    /// Explicitly seal a transactional batch so the authority can validate it.
+    SealBatch { submission: SealedBatchSubmission },
 
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
@@ -284,11 +293,17 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
+    /// Replayable scope snapshot for one query subscription.
+    QueryScopeSnapshot {
+        query_id: QueryId,
+        scope: Vec<(ObjectId, BranchName)>,
+    },
+
     /// Query frontier settlement notification.
     ///
     /// This means the upstream server has reached a complete first frontier for the
     /// subscription. Per-row durability remains encoded and replayed on the rows
-    /// themselves via `RowVersionStateChanged`.
+    /// themselves via `RowBatchStateChanged`.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -396,9 +411,26 @@ impl SyncPayload {
     pub fn object_id(&self) -> Option<ObjectId> {
         match self {
             SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
-            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.row_id)
+            }
+            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::BatchSettlement { settlement } => match settlement {
+                BatchSettlement::DurableDirect {
+                    visible_members, ..
+                }
+                | BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => visible_members.first().map(|member| member.object_id),
+                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
+            },
+            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::SealBatch { submission } => {
+                submission.members.first().map(|member| member.object_id)
+            }
+            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+                scope.first().map(|(object_id, _)| *object_id)
+            }
             _ => None,
         }
     }
@@ -406,9 +438,24 @@ impl SyncPayload {
     pub fn branch_name(&self) -> Option<BranchName> {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => None,
-            SyncPayload::RowVersionCreated { row, .. }
-            | SyncPayload::RowVersionNeeded { row, .. } => Some(BranchName::new(&row.branch)),
-            SyncPayload::RowVersionStateChanged { branch_name, .. } => Some(*branch_name),
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(BranchName::new(&row.branch))
+            }
+            SyncPayload::RowBatchStateChanged { branch_name, .. } => Some(*branch_name),
+            SyncPayload::BatchSettlement { settlement } => match settlement {
+                BatchSettlement::DurableDirect {
+                    visible_members, ..
+                }
+                | BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => visible_members.first().map(|member| member.branch_name),
+                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
+            },
+            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::SealBatch { .. } => None,
+            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+                scope.first().map(|(_, branch_name)| *branch_name)
+            }
             _ => None,
         }
     }
@@ -418,9 +465,11 @@ impl SyncPayload {
         matches!(
             self,
             SyncPayload::CatalogueEntryUpdated { .. }
-                | SyncPayload::RowVersionCreated { .. }
-                | SyncPayload::RowVersionNeeded { .. }
-                | SyncPayload::RowVersionStateChanged { .. }
+                | SyncPayload::RowBatchCreated { .. }
+                | SyncPayload::RowBatchNeeded { .. }
+                | SyncPayload::RowBatchStateChanged { .. }
+                | SyncPayload::BatchSettlement { .. }
+                | SyncPayload::SealBatch { .. }
         )
     }
 
@@ -456,11 +505,15 @@ impl SyncPayload {
     pub fn variant_name(&self) -> &'static str {
         match self {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
-            SyncPayload::RowVersionCreated { .. } => "RowVersionCreated",
-            SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
-            SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
+            SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
+            SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
+            SyncPayload::RowBatchStateChanged { .. } => "RowBatchStateChanged",
+            SyncPayload::BatchSettlement { .. } => "BatchSettlement",
+            SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
+            SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+            SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::SchemaWarning(_) => "SchemaWarning",
             SyncPayload::ConnectionSchemaDiagnostics(_) => "ConnectionSchemaDiagnostics",

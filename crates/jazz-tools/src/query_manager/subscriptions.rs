@@ -76,6 +76,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -86,6 +87,7 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
@@ -145,6 +147,7 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier,
                 local_updates,
+                strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 query_frontier_complete,
@@ -222,6 +225,7 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
+                strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 query_frontier_complete: true,
@@ -242,7 +246,7 @@ impl QueryManager {
     /// 1. Creates a local subscription (like `subscribe_with_session`)
     /// 2. Sends a QuerySubscription to all connected servers
     ///
-    /// Servers will evaluate the query against their data and send row-version
+    /// Servers will evaluate the query against their data and send row-batch
     /// messages for matching rows plus legacy object updates for non-row
     /// objects. As new objects match the query on the server, they are
     /// automatically synced.
@@ -274,6 +278,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -291,6 +296,7 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
+            false,
             propagation,
         )
     }
@@ -301,6 +307,7 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
@@ -309,6 +316,7 @@ impl QueryManager {
             session.clone(),
             durability_tier,
             local_updates,
+            strict_transactions,
             propagation,
         )?;
 

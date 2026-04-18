@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::batch_fate::BatchMode;
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::row_histories::BatchId;
 
 /// Session context for policy evaluation.
 ///
@@ -129,6 +131,12 @@ pub struct WriteContext {
     pub session: Option<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_mode: Option<BatchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<BatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch_name: Option<String>,
 }
 
 impl WriteContext {
@@ -136,11 +144,41 @@ impl WriteContext {
         Self {
             session: Some(session),
             attribution: None,
+            batch_mode: None,
+            batch_id: None,
+            target_branch_name: None,
         }
+    }
+
+    pub fn with_batch_mode(mut self, batch_mode: BatchMode) -> Self {
+        self.batch_mode = Some(batch_mode);
+        self
+    }
+
+    pub fn with_batch_id(mut self, batch_id: BatchId) -> Self {
+        self.batch_id = Some(batch_id);
+        self
+    }
+
+    pub fn with_target_branch_name(mut self, target_branch_name: impl Into<String>) -> Self {
+        self.target_branch_name = Some(target_branch_name.into());
+        self
     }
 
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
+    }
+
+    pub fn batch_mode(&self) -> BatchMode {
+        self.batch_mode.unwrap_or(BatchMode::Direct)
+    }
+
+    pub fn batch_id(&self) -> Option<BatchId> {
+        self.batch_id
+    }
+
+    pub fn target_branch_name(&self) -> Option<&str> {
+        self.target_branch_name.as_deref()
     }
 
     pub fn author_principal(&self) -> &str {
@@ -223,17 +261,48 @@ mod tests {
         let context = WriteContext {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
+            batch_mode: None,
+            batch_id: None,
+            target_branch_name: None,
         };
 
         assert_eq!(context.author_principal(), "attributed-user");
+        assert_eq!(context.batch_mode(), BatchMode::Direct);
     }
 
     #[test]
     fn test_write_context_author_principal_falls_back_to_session_then_system() {
         let session_context = WriteContext::from_session(Session::new("session-user"));
         assert_eq!(session_context.author_principal(), "session-user");
+        assert_eq!(session_context.batch_mode(), BatchMode::Direct);
 
         let system_context = WriteContext::default();
         assert_eq!(system_context.author_principal(), SYSTEM_PRINCIPAL_ID);
+        assert_eq!(system_context.batch_mode(), BatchMode::Direct);
+    }
+
+    #[test]
+    fn test_write_context_batch_mode_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_batch_mode(BatchMode::Transactional);
+
+        assert_eq!(context.batch_mode(), BatchMode::Transactional);
+    }
+
+    #[test]
+    fn test_write_context_batch_id_override() {
+        let batch_id = BatchId::new();
+        let context =
+            WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
+
+        assert_eq!(context.batch_id(), Some(batch_id));
+    }
+
+    #[test]
+    fn test_write_context_target_branch_name_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_target_branch_name("dev-111111111111-main");
+
+        assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
     }
 }

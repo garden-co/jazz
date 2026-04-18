@@ -1,6 +1,7 @@
 use super::*;
+use crate::batch_fate::BatchSettlement;
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{HistoryScan, StoredRowVersion};
+use crate::row_histories::{BatchId, HistoryScan, StoredRowBatch};
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use uuid::Uuid;
 
@@ -11,7 +12,7 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: &BranchName,
         row_locator: &RowLocator,
-    ) -> Option<StoredRowVersion> {
+    ) -> Option<StoredRowBatch> {
         let table = row_locator.table.as_str();
 
         if let Ok(Some(row)) =
@@ -29,7 +30,63 @@ impl SyncManager {
             .ok()?
             .into_iter()
             .filter(|row| row.state.is_visible())
-            .max_by_key(|row| (row.updated_at, row.version_id()))
+            .max_by_key(|row| (row.updated_at, row.batch_id()))
+    }
+
+    pub(super) fn load_current_batch_settlement_from_storage<
+        H: crate::storage::Storage + ?Sized,
+    >(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        row_locator: &RowLocator,
+    ) -> Option<BatchSettlement> {
+        let row =
+            self.load_current_row_from_storage(storage, object_id, branch_name, row_locator)?;
+        if row.branch != branch_name.as_str() {
+            return None;
+        }
+        match row.state {
+            crate::row_histories::RowState::VisibleDirect
+            | crate::row_histories::RowState::VisibleTransactional => {
+                self.load_batch_settlement_by_batch_id_from_storage(storage, row.batch_id)
+            }
+            crate::row_histories::RowState::StagingPending
+            | crate::row_histories::RowState::Superseded
+            | crate::row_histories::RowState::Rejected => None,
+        }
+    }
+
+    pub(super) fn load_batch_settlement_by_batch_id_from_storage<
+        H: crate::storage::Storage + ?Sized,
+    >(
+        &self,
+        storage: &H,
+        batch_id: BatchId,
+    ) -> Option<BatchSettlement> {
+        storage
+            .load_local_batch_record(batch_id)
+            .ok()
+            .flatten()
+            .and_then(|record| record.latest_settlement)
+            .or_else(|| {
+                storage
+                    .load_authoritative_batch_settlement(batch_id)
+                    .ok()
+                    .flatten()
+            })
+    }
+
+    pub(super) fn queue_batch_settlement_to_client(
+        &mut self,
+        client_id: ClientId,
+        settlement: BatchSettlement,
+    ) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        });
     }
 
     #[cfg(test)]
@@ -58,11 +115,11 @@ impl SyncManager {
         }
     }
 
-    pub(crate) fn forward_row_version_to_servers(
+    pub(crate) fn forward_row_batch_to_servers(
         &mut self,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-        row: StoredRowVersion,
+        row: StoredRowBatch,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         if !server_ids.is_empty() {
@@ -70,11 +127,37 @@ impl SyncManager {
                 %object_id,
                 branch = row.branch.as_str(),
                 servers = server_ids.len(),
-                "forwarding row version to servers"
+                "forwarding row batch entry to servers"
             );
         }
 
         for server_id in server_ids {
+            self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+        }
+    }
+
+    pub(crate) fn force_row_batch_to_servers(
+        &mut self,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowBatch,
+    ) {
+        let branch_name = BranchName::new(&row.branch);
+        let batch_id = row.batch_id;
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+
+        for server_id in server_ids {
+            if let Some(server) = self.servers.get_mut(&server_id) {
+                server.sent_metadata.remove(&object_id);
+                if let Some(sent_batches) = server.sent_batch_ids.get_mut(&(object_id, branch_name))
+                {
+                    sent_batches.remove(&batch_id);
+                    if sent_batches.is_empty() {
+                        server.sent_batch_ids.remove(&(object_id, branch_name));
+                    }
+                }
+            }
+
             self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
         }
     }
@@ -125,6 +208,14 @@ impl SyncManager {
                     row.clone(),
                     false,
                 );
+                if let Some(settlement) = self.load_current_batch_settlement_from_storage(
+                    storage,
+                    object_id,
+                    &branch_name,
+                    &row_locator,
+                ) {
+                    self.queue_batch_settlement_to_client(*client_id, settlement);
+                }
             }
         }
     }
