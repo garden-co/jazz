@@ -16,6 +16,7 @@ import {
   normalizeBuiltQuery,
   type BuiltCondition,
   type BuiltGather,
+  type BuiltRelation,
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
@@ -619,6 +620,75 @@ function gatherToRelExpr(
   };
 }
 
+function resolveHopsOutputTable(
+  seedTable: string,
+  hops: readonly string[],
+  relations: Map<string, Relation[]>,
+): string {
+  let currentTable = seedTable;
+  for (const hopName of hops) {
+    const tableRelations = relations.get(currentTable) ?? [];
+    const relation = tableRelations.find((candidate) => candidate.name === hopName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${hopName}" on table "${currentTable}"`);
+    }
+    currentTable = relation.toTable;
+  }
+  return currentTable;
+}
+
+function translateBuiltRelationToRelExpr(
+  relation: BuiltRelation,
+  relations: Map<string, Relation[]>,
+  schema: WasmSchema,
+): { expr: RelExpr; outputTable: string } {
+  if (relation.union) {
+    const inputs = relation.union.inputs.map((input) =>
+      translateBuiltRelationToRelExpr(input, relations, schema),
+    );
+    const first = inputs[0];
+    if (!first) {
+      throw new Error("union(...) requires at least one seed relation.");
+    }
+    if (inputs.some((input) => input.outputTable !== first.outputTable)) {
+      throw new Error("union(...) requires all seed relations to output the same table.");
+    }
+    return {
+      expr: {
+        Union: {
+          inputs: inputs.map((input) => input.expr),
+        },
+      },
+      outputTable: first.outputTable,
+    };
+  }
+
+  if (!relation.table) {
+    throw new Error("gather(...) seed relation is missing table metadata.");
+  }
+
+  let expr: RelExpr = { TableScan: { table: relation.table } };
+  expr = applyFilter(
+    expr,
+    conditionsToRelPredicate(relation.conditions ?? [], schema, relation.table, relation.table),
+  );
+
+  let outputTable = relation.table;
+  if (relation.gather) {
+    const seed = relation.gather.seed
+      ? translateBuiltRelationToRelExpr(relation.gather.seed, relations, schema)
+      : { expr, outputTable };
+    expr = gatherToRelExpr(relation.gather, seed.outputTable, seed.expr, relations, schema);
+    outputTable = seed.outputTable;
+  }
+
+  const hops = relation.hops ?? [];
+  expr = lowerHopsToRelExpr(expr, outputTable, hops, relations, schema);
+  outputTable = resolveHopsOutputTable(outputTable, hops, relations);
+
+  return { expr, outputTable };
+}
+
 /**
  * Translate QueryBuilder JSON to relation IR.
  *
@@ -638,20 +708,37 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
     throw new Error("hopTo(...) does not yet support include(...).");
   }
 
-  let relation: RelExpr = { TableScan: { table: builder.table } };
-  relation = applyFilter(
-    relation,
-    conditionsToRelPredicate(builder.conditions, schema, builder.table, builder.table),
-  );
+  let relation: RelExpr;
+  let relationTable: string;
 
-  if (builder.gather) {
-    relation = gatherToRelExpr(builder.gather, builder.table, relation, relations, schema);
+  if (builder.gather?.seed) {
+    const seed = translateBuiltRelationToRelExpr(builder.gather.seed, relations, schema);
+    relation = gatherToRelExpr(builder.gather, seed.outputTable, seed.expr, relations, schema);
+    relationTable = seed.outputTable;
+    relation = applyFilter(
+      relation,
+      conditionsToRelPredicate(builder.conditions, schema, relationTable, relationTable),
+    );
+    relation = lowerHopsToRelExpr(relation, relationTable, hops, relations, schema);
+    relationTable = resolveHopsOutputTable(relationTable, hops, relations);
+  } else {
+    const translated = translateBuiltRelationToRelExpr(
+      {
+        table: builder.table,
+        conditions: builder.conditions,
+        hops: builder.hops,
+        gather: builder.gather,
+      },
+      relations,
+      schema,
+    );
+    relation = translated.expr;
+    relationTable = translated.outputTable;
   }
-  relation = lowerHopsToRelExpr(relation, builder.table, hops, relations, schema);
 
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
     for (const [column] of builder.orderBy) {
-      const columnType = getColumnType(schema, builder.table, stripQualifier(column));
+      const columnType = getColumnType(schema, relationTable, stripQualifier(column));
       if (columnType?.type === "Bytea") {
         throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
       }

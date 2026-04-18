@@ -97,7 +97,7 @@ async function createTestContext(
     adminSecret,
     env: "test",
     userBranch: "main",
-    tier: "worker",
+    tier: "local",
   });
 
   onTestFinished(async () => {

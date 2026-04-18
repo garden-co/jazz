@@ -294,14 +294,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
 
-    // Open persistent OPFS-backed runtime with Worker tier
+    // Open persistent OPFS-backed runtime with local durability tier
     runtime = await wasmModule.WasmRuntime.openPersistent(
       schemaJson,
       msg.appId,
       msg.env,
       msg.userBranch,
       msg.dbName,
-      "worker",
+      "local",
       false,
     );
 

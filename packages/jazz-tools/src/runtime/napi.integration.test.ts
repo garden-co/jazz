@@ -268,7 +268,7 @@ async function waitForQueryRows<T>(
   query: QueryBuilder<T>,
   predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
-  queryOptions: { tier?: "worker" | "edge" | "global" } = { tier: "edge" },
+  queryOptions: { tier?: "local" | "edge" | "global" } = { tier: "edge" },
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -711,7 +711,7 @@ describe("NAPI integration", () => {
           title: "persisted-local-item",
           done: false,
         },
-        { tier: "worker" },
+        { tier: "local" },
       );
       const rowId = createdRow.id;
 
@@ -720,7 +720,7 @@ describe("NAPI integration", () => {
         allTodosQuery,
         (rows) => rows.some((row) => row.id === rowId),
         10_000,
-        { tier: "worker" },
+        { tier: "local" },
       );
 
       await writerContext.shutdown();
@@ -740,7 +740,7 @@ describe("NAPI integration", () => {
         allTodosQuery,
         (rows) => rows.some((row) => row.id === rowId),
         10_000,
-        { tier: "worker" },
+        { tier: "local" },
       );
 
       const reopenedRow = reopenedRows.find((row) => row.id === rowId);
@@ -787,7 +787,7 @@ describe("NAPI integration", () => {
             created_at: new Date(timestamp),
             updated_at: new Date(timestamp),
           },
-          { tier: "worker" },
+          { tier: "local" },
         ),
       ).resolves.toEqual({
         id: expect.any(String),
@@ -829,7 +829,7 @@ describe("NAPI integration", () => {
       expect(Array.from(created.data)).toEqual([1, 2, 3]);
 
       const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
-        tier: "worker",
+        tier: "local",
       });
 
       expect(reloaded).not.toBeNull();
@@ -891,7 +891,7 @@ describe("NAPI integration", () => {
       });
 
       const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
-        tier: "worker",
+        tier: "local",
       });
 
       expect(reloaded).not.toBeNull();
@@ -933,7 +933,7 @@ describe("NAPI integration", () => {
       );
 
       const part = await context.db().one(filePartsTable.where({ id: file.partIds[0] }), {
-        tier: "worker",
+        tier: "local",
       });
 
       expect(part).not.toBeNull();

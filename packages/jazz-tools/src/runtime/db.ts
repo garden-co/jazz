@@ -52,7 +52,7 @@ import {
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery } from "./query-builder-shape.js";
+import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -62,9 +62,29 @@ import {
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
+const STORAGE_RESET_REQUEST_RETRY_MS = 200;
+const STORAGE_RESET_REQUEST_TIMEOUT_MS = 5_000;
+const STORAGE_RESET_DISCOVERY_WINDOW_MS = 600;
+const STORAGE_RESET_ACK_QUIET_MS = 150;
 
 function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createOperationId(prefix: string): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return `${prefix}-${cryptoObj.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function toError(error: unknown, fallbackMessage: string): Error {
+  return error instanceof Error ? error : new Error(error ? String(error) : fallbackMessage);
 }
 
 /**
@@ -166,6 +186,10 @@ export interface ActiveQuerySubscriptionTrace {
   stack?: string;
 }
 
+export interface LogoutOptions {
+  wipeData?: boolean;
+}
+
 type ActiveQuerySubscriptionTraceListener = (
   traces: readonly ActiveQuerySubscriptionTrace[],
 ) => void;
@@ -178,6 +202,40 @@ type RuntimeQueryTracePayload = {
   table: string;
   branches: string[];
 };
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+};
+
+type StorageResetContext = {
+  requestId: string;
+  initiatedBySelf: boolean;
+  coordinatorTabId: string | null;
+  begun: boolean;
+  completed: boolean;
+  preparePromise: Promise<string> | null;
+  completion: Deferred<void>;
+};
+
+type StorageResetCoordinatorState = {
+  requestId: string;
+  startedAtMs: number;
+  lastAckAtMs: number;
+  ackedNamespacesByTabId: Map<string, string>;
+  runPromise: Promise<void> | null;
+};
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function trimSubscriptionTraceStack(stack: string | undefined): string | undefined {
   if (!stack) {
@@ -237,6 +295,48 @@ function resolveHopOutputTable(
     currentTable = relation.toTable;
   }
   return currentTable;
+}
+
+function resolveBuiltRelationOutputTable(schema: WasmSchema, relation: BuiltRelation): string {
+  if (relation.union) {
+    const first = relation.union.inputs[0];
+    if (!first) {
+      throw new Error("union(...) requires at least one relation.");
+    }
+    const firstTable = resolveBuiltRelationOutputTable(schema, first);
+    for (const input of relation.union.inputs.slice(1)) {
+      const inputTable = resolveBuiltRelationOutputTable(schema, input);
+      if (inputTable !== firstTable) {
+        throw new Error("union(...) requires all relations to output the same table.");
+      }
+    }
+    return firstTable;
+  }
+
+  const seedTable = relation.gather?.seed
+    ? resolveBuiltRelationOutputTable(schema, relation.gather.seed)
+    : relation.table;
+  if (!seedTable) {
+    throw new Error("gather(...) seed relation is missing table metadata.");
+  }
+  const hops = relation.hops ?? [];
+  return hops.length > 0 ? resolveHopOutputTable(schema, seedTable, hops) : seedTable;
+}
+
+function resolveBuiltQueryOutputTable(
+  schema: WasmSchema,
+  builtQuery: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  if (builtQuery.gather?.seed) {
+    const gatherTable = resolveBuiltRelationOutputTable(schema, builtQuery.gather.seed);
+    return builtQuery.hops.length > 0
+      ? resolveHopOutputTable(schema, gatherTable, builtQuery.hops)
+      : gatherTable;
+  }
+
+  return builtQuery.hops.length > 0
+    ? resolveHopOutputTable(schema, builtQuery.table, builtQuery.hops)
+    : builtQuery.table;
 }
 
 function resolveSchemaWithTable(
@@ -607,7 +707,43 @@ interface FollowerCloseMessage {
   term: number;
 }
 
-type TabSyncMessage = FollowerSyncMessage | LeaderSyncMessage | FollowerCloseMessage;
+interface StorageResetRequestMessage {
+  type: "storage-reset-request";
+  requestId: string;
+  fromTabId: string;
+  toLeaderTabId: string | null;
+  term: number;
+}
+
+interface StorageResetBeginMessage {
+  type: "storage-reset-begin";
+  requestId: string;
+  coordinatorTabId: string;
+  term: number;
+}
+
+interface StorageResetAckMessage {
+  type: "storage-reset-ack";
+  requestId: string;
+  fromTabId: string;
+  namespace: string;
+}
+
+interface StorageResetFinishedMessage {
+  type: "storage-reset-finished";
+  requestId: string;
+  success: boolean;
+  errorMessage?: string;
+}
+
+type TabSyncMessage =
+  | FollowerSyncMessage
+  | LeaderSyncMessage
+  | FollowerCloseMessage
+  | StorageResetRequestMessage
+  | StorageResetBeginMessage
+  | StorageResetAckMessage
+  | StorageResetFinishedMessage;
 
 function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelLike) | null {
   const ctor = (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel;
@@ -646,6 +782,39 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromTabId === "string" &&
       typeof message.toLeaderTabId === "string" &&
       typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-request") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.fromTabId === "string" &&
+      (typeof message.toLeaderTabId === "string" || message.toLeaderTabId === null) &&
+      typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-begin") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.coordinatorTabId === "string" &&
+      typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-ack") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.fromTabId === "string" &&
+      typeof message.namespace === "string"
+    );
+  }
+
+  if (message.type === "storage-reset-finished") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.success === "boolean" &&
+      (typeof message.errorMessage === "string" || message.errorMessage === undefined)
     );
   }
 
@@ -710,6 +879,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private activeStorageReset: StorageResetContext | null = null;
+  private storageResetCoordinator: StorageResetCoordinatorState | null = null;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -947,8 +1118,8 @@ export class Db {
           jwtToken: this.config.jwtToken,
           cookieSession: this.config.cookieSession,
           adminSecret: this.config.adminSecret,
-          tier: this.worker ? undefined : "worker",
-          // Keep worker-bridged browser clients on worker durability by default.
+          tier: this.worker ? undefined : "local",
+          // Keep worker-bridged browser clients on local durability by default.
           // For direct (non-worker) clients connected to a server, default to edge.
           defaultDurabilityTier: this.worker
             ? undefined
@@ -1006,7 +1177,7 @@ export class Db {
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
-    if (!options?.tier || options.tier === "worker") {
+    if (!options?.tier || options.tier === "local") {
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();
@@ -1103,6 +1274,326 @@ export class Db {
     this.syncChannel?.postMessage(message);
   }
 
+  private getOrCreateStorageResetContext(
+    requestId: string,
+    initiatedBySelf: boolean,
+  ): StorageResetContext {
+    if (this.activeStorageReset?.requestId === requestId) {
+      if (initiatedBySelf) {
+        this.activeStorageReset.initiatedBySelf = true;
+      }
+      return this.activeStorageReset;
+    }
+
+    const completion = createDeferred<void>();
+    // Suppress unhandled rejection warnings for remote-initiated resets that
+    // have no local caller awaiting the completion promise.
+    void completion.promise.catch(() => undefined);
+
+    const context: StorageResetContext = {
+      requestId,
+      initiatedBySelf,
+      coordinatorTabId: null,
+      begun: false,
+      completed: false,
+      preparePromise: null,
+      completion,
+    };
+    this.activeStorageReset = context;
+    return context;
+  }
+
+  private clearStorageResetContext(requestId: string): void {
+    if (this.activeStorageReset?.requestId === requestId) {
+      this.activeStorageReset = null;
+    }
+    if (this.storageResetCoordinator?.requestId === requestId) {
+      this.storageResetCoordinator = null;
+    }
+  }
+
+  private resolveStorageResetContext(context: StorageResetContext): void {
+    if (context.completed) {
+      return;
+    }
+    context.completed = true;
+    context.completion.resolve();
+    this.clearStorageResetContext(context.requestId);
+  }
+
+  private rejectStorageResetContext(context: StorageResetContext, error: unknown): void {
+    if (context.completed) {
+      return;
+    }
+    context.completed = true;
+    context.completion.reject(toError(error, "Browser storage reset failed"));
+    this.clearStorageResetContext(context.requestId);
+  }
+
+  private async prepareForStorageReset(
+    context: StorageResetContext,
+    coordinatorTabId: string,
+  ): Promise<string> {
+    if (context.preparePromise) {
+      return await context.preparePromise;
+    }
+
+    context.begun = true;
+    context.coordinatorTabId = coordinatorTabId;
+    context.preparePromise = (async () => {
+      if (this.bridgeReady) {
+        await this.bridgeReady;
+      }
+
+      const namespace = this.currentWorkerNamespace();
+      await this.shutdownWorkerAndClientsForStorageReset();
+
+      if (this.tabId && coordinatorTabId !== this.tabId) {
+        this.postSyncChannelMessage({
+          type: "storage-reset-ack",
+          requestId: context.requestId,
+          fromTabId: this.tabId,
+          namespace,
+        });
+      }
+
+      return namespace;
+    })();
+
+    return await context.preparePromise;
+  }
+
+  private async waitForStorageResetQuiescence(
+    coordinator: StorageResetCoordinatorState,
+  ): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      const elapsed = now - coordinator.startedAtMs;
+      const idleMs = now - coordinator.lastAckAtMs;
+      if (elapsed >= STORAGE_RESET_DISCOVERY_WINDOW_MS && idleMs >= STORAGE_RESET_ACK_QUIET_MS) {
+        return;
+      }
+      await sleep(25);
+    }
+  }
+
+  private async collectStorageResetNamespaces(
+    extraNamespaces: Iterable<string>,
+  ): Promise<string[]> {
+    const namespaces = new Set<string>();
+    const primaryDbName = this.primaryDbName;
+    if (primaryDbName) {
+      namespaces.add(primaryDbName);
+    }
+    for (const namespace of extraNamespaces) {
+      namespaces.add(namespace);
+    }
+
+    if (!primaryDbName) {
+      return [...namespaces];
+    }
+
+    const rootDirectory = await navigator.storage.getDirectory();
+    const rootWithEntries = rootDirectory as FileSystemDirectoryHandle & {
+      entries?: () => AsyncIterable<[string, FileSystemHandle]>;
+    };
+    if (typeof rootWithEntries.entries !== "function") {
+      return [...namespaces];
+    }
+
+    const suffix = ".opfsbtree";
+    const fallbackPrefix = `${primaryDbName}__fallback__`;
+
+    for await (const [name] of rootWithEntries.entries()) {
+      if (!name.endsWith(suffix)) continue;
+      const namespace = name.slice(0, -suffix.length);
+      if (namespace === primaryDbName || namespace.startsWith(fallbackPrefix)) {
+        namespaces.add(namespace);
+      }
+    }
+
+    return [...namespaces];
+  }
+
+  private async resumeAfterStorageReset(): Promise<void> {
+    if (this.worker || this.isShuttingDown) {
+      return;
+    }
+    this.worker = await Db.spawnWorker(this.config.runtimeSources);
+  }
+
+  private async runSingleTabStorageReset(context: StorageResetContext): Promise<void> {
+    const coordinatorTabId = this.tabId ?? "single-tab-reset";
+    let resultError: Error | null = null;
+
+    try {
+      const namespace = await this.prepareForStorageReset(context, coordinatorTabId);
+      const namespaces = await this.collectStorageResetNamespaces([namespace]);
+      for (const candidate of namespaces) {
+        await this.removeOpfsNamespaceFile(candidate);
+      }
+    } catch (error) {
+      resultError = toError(error, "Browser storage reset failed");
+    }
+
+    try {
+      await this.resumeAfterStorageReset();
+    } catch (error) {
+      if (!resultError) {
+        resultError = toError(error, "Failed to restart browser worker after storage reset");
+      }
+    }
+
+    if (resultError) {
+      throw resultError;
+    }
+  }
+
+  private async startStorageResetAsCoordinator(context: StorageResetContext): Promise<void> {
+    if (this.storageResetCoordinator?.requestId === context.requestId) {
+      return await (this.storageResetCoordinator.runPromise ?? context.completion.promise);
+    }
+
+    if (!this.tabId || this.tabRole !== "leader") {
+      throw new Error("Storage reset coordination requires the current tab to be the leader.");
+    }
+
+    const coordinator: StorageResetCoordinatorState = {
+      requestId: context.requestId,
+      startedAtMs: Date.now(),
+      lastAckAtMs: Date.now(),
+      ackedNamespacesByTabId: new Map(),
+      runPromise: null,
+    };
+    this.storageResetCoordinator = coordinator;
+
+    coordinator.runPromise = (async () => {
+      let resultError: Error | null = null;
+
+      try {
+        this.postSyncChannelMessage({
+          type: "storage-reset-begin",
+          requestId: context.requestId,
+          coordinatorTabId: this.tabId!,
+          term: this.currentLeaderTerm,
+        });
+
+        const localNamespace = await this.prepareForStorageReset(context, this.tabId!);
+        coordinator.ackedNamespacesByTabId.set(this.tabId!, localNamespace);
+        coordinator.lastAckAtMs = Date.now();
+
+        await this.waitForStorageResetQuiescence(coordinator);
+
+        const namespaces = await this.collectStorageResetNamespaces(
+          coordinator.ackedNamespacesByTabId.values(),
+        );
+        for (const namespace of namespaces) {
+          await this.removeOpfsNamespaceFile(namespace);
+        }
+      } catch (error) {
+        resultError = toError(error, "Browser storage reset failed");
+      }
+
+      try {
+        await this.resumeAfterStorageReset();
+      } catch (error) {
+        if (!resultError) {
+          resultError = toError(error, "Failed to restart browser worker after storage reset");
+        }
+      }
+
+      this.postSyncChannelMessage({
+        type: "storage-reset-finished",
+        requestId: context.requestId,
+        success: resultError === null,
+        ...(resultError ? { errorMessage: resultError.message } : {}),
+      });
+
+      if (resultError) {
+        throw resultError;
+      }
+    })()
+      .then(() => {
+        this.resolveStorageResetContext(context);
+      })
+      .catch((error) => {
+        this.rejectStorageResetContext(context, error);
+      })
+      .finally(() => {
+        if (this.storageResetCoordinator?.requestId === context.requestId) {
+          this.storageResetCoordinator = null;
+        }
+      });
+
+    await coordinator.runPromise;
+  }
+
+  private async requestCoordinatedStorageReset(): Promise<void> {
+    if (!this.syncChannel || !this.tabId) {
+      const requestId = createOperationId("storage-reset");
+      const context = this.getOrCreateStorageResetContext(requestId, true);
+      try {
+        await this.runSingleTabStorageReset(context);
+        this.resolveStorageResetContext(context);
+      } catch (error) {
+        this.rejectStorageResetContext(context, error);
+      }
+      await context.completion.promise;
+      return;
+    }
+
+    if (this.activeStorageReset) {
+      await this.activeStorageReset.completion.promise;
+      return;
+    }
+
+    const requestId = createOperationId("storage-reset");
+    const context = this.getOrCreateStorageResetContext(requestId, true);
+
+    if (this.tabRole === "leader") {
+      await this.startStorageResetAsCoordinator(context);
+      return;
+    }
+
+    const deadline = Date.now() + STORAGE_RESET_REQUEST_TIMEOUT_MS;
+    while (!context.begun) {
+      if ((this.tabRole as LeaderRole) === "leader") {
+        await this.startStorageResetAsCoordinator(context);
+        return;
+      }
+
+      this.postSyncChannelMessage({
+        type: "storage-reset-request",
+        requestId,
+        fromTabId: this.tabId,
+        toLeaderTabId: this.currentLeaderTabId,
+        term: this.currentLeaderTerm,
+      });
+
+      const settled = await Promise.race([
+        context.completion.promise.then(
+          () => true,
+          () => true,
+        ),
+        sleep(STORAGE_RESET_REQUEST_RETRY_MS).then(() => false),
+      ]);
+      if (settled) {
+        await context.completion.promise;
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        const error = new Error(
+          "Timed out waiting for the leader tab to begin browser storage reset.",
+        );
+        this.rejectStorageResetContext(context, error);
+        throw error;
+      }
+    }
+
+    await context.completion.promise;
+  }
+
   private attachLifecycleHooks(): void {
     if (this.lifecycleHooksAttached) return;
     if (typeof window === "undefined" || typeof document === "undefined") return;
@@ -1159,6 +1650,18 @@ export class Db {
     if (!isTabSyncMessage(raw)) return;
 
     switch (raw.type) {
+      case "storage-reset-request":
+        this.handleStorageResetRequest(raw);
+        return;
+      case "storage-reset-begin":
+        this.handleStorageResetBegin(raw);
+        return;
+      case "storage-reset-ack":
+        this.handleStorageResetAck(raw);
+        return;
+      case "storage-reset-finished":
+        this.handleStorageResetFinished(raw);
+        return;
       case "follower-sync":
         this.handleFollowerSync(raw);
         return;
@@ -1169,6 +1672,67 @@ export class Db {
         this.handleFollowerClose(raw);
         return;
     }
+  }
+
+  private handleStorageResetRequest(message: StorageResetRequestMessage): void {
+    if (this.tabRole !== "leader") return;
+    if (!this.tabId) return;
+    if (message.fromTabId === this.tabId) return;
+    if (message.toLeaderTabId && message.toLeaderTabId !== this.tabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+    if (this.activeStorageReset && this.activeStorageReset.requestId !== message.requestId) return;
+
+    const context = this.getOrCreateStorageResetContext(message.requestId, false);
+    void this.startStorageResetAsCoordinator(context).catch(() => undefined);
+  }
+
+  private handleStorageResetBegin(message: StorageResetBeginMessage): void {
+    if (!this.currentLeaderTabId) return;
+    if (message.coordinatorTabId !== this.currentLeaderTabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+    if (message.coordinatorTabId === this.tabId) return;
+    if (this.activeStorageReset && this.activeStorageReset.requestId !== message.requestId) return;
+
+    const context = this.getOrCreateStorageResetContext(message.requestId, false);
+    context.begun = true;
+    context.coordinatorTabId = message.coordinatorTabId;
+
+    void this.prepareForStorageReset(context, message.coordinatorTabId).catch((error) => {
+      this.rejectStorageResetContext(context, error);
+    });
+  }
+
+  private handleStorageResetAck(message: StorageResetAckMessage): void {
+    const coordinator = this.storageResetCoordinator;
+    if (!coordinator || coordinator.requestId !== message.requestId) return;
+
+    coordinator.ackedNamespacesByTabId.set(message.fromTabId, message.namespace);
+    coordinator.lastAckAtMs = Date.now();
+  }
+
+  private handleStorageResetFinished(message: StorageResetFinishedMessage): void {
+    const context = this.activeStorageReset;
+    if (!context || context.requestId !== message.requestId || context.completed) return;
+
+    void (async () => {
+      let resultError: Error | null = message.success
+        ? null
+        : new Error(message.errorMessage ?? "Browser storage reset failed");
+
+      try {
+        await this.resumeAfterStorageReset();
+      } catch (error) {
+        if (!resultError) {
+          resultError = toError(error, "Failed to restart browser worker after storage reset");
+        }
+      }
+
+      if (resultError) {
+        this.rejectStorageResetContext(context, resultError);
+      } else {
+        this.resolveStorageResetContext(context);
+      }
+    })();
   }
 
   private handleFollowerSync(message: FollowerSyncMessage): void {
@@ -1745,15 +2309,16 @@ export class Db {
   /**
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
-   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
-   * localStorage-based local-first auth state.
+   * This clears the primary namespace plus any active follower fallback namespaces for the same
+   * browser app/database. It does not touch localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
-   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Can be initiated from either leader or follower tabs
+   * - Coordinates worker shutdown over the tab sync channel before deleting OPFS files
    * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS file, respawns worker
-   * - If file deletion fails, still respawns worker and then rethrows the deletion error
+   * - Tears down worker + clients, deletes OPFS files, respawns workers
+   * - If deletion fails, all participating tabs still respawn their workers before surfacing the error
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
@@ -1768,34 +2333,7 @@ export class Db {
     }
 
     const operation = this.workerReconfigure.then(async () => {
-      if (this.tabRole !== "leader") {
-        console.error(
-          "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
-        );
-        return;
-      }
-
-      const namespace = this.currentWorkerNamespace();
-
-      // Wait for any in-flight bridge init before we tear down worker state.
-      if (this.bridgeReady) {
-        await this.bridgeReady;
-      }
-
-      await this.shutdownWorkerAndClientsForStorageReset();
-
-      let deleteError: unknown = null;
-      try {
-        await this.removeOpfsNamespaceFile(namespace);
-      } catch (error) {
-        deleteError = error;
-      }
-
-      this.worker = await Db.spawnWorker(this.config.runtimeSources);
-
-      if (deleteError) {
-        throw deleteError;
-      }
+      await this.requestCoordinatedStorageReset();
     });
 
     this.workerReconfigure = operation.then(
@@ -1804,6 +2342,21 @@ export class Db {
     );
 
     await operation;
+  }
+
+  /**
+   * Release the current Db instance for logout flows.
+   *
+   * When `wipeData` is enabled in browser persistent mode, Jazz first coordinates a cross-tab OPFS
+   * wipe and then shuts this Db down. Callers should still sign out of their external auth provider
+   * separately and recreate `JazzProvider` / `Db` after logout.
+   */
+  async logout(options: LogoutOptions = {}): Promise<void> {
+    if (options.wipeData) {
+      await this.deleteClientStorage();
+    }
+
+    await this.shutdown();
   }
 
   /**
@@ -1818,14 +2371,11 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -1928,12 +2478,9 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
@@ -2360,10 +2907,7 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
@@ -2371,7 +2915,7 @@ class ClientBackedDb extends Db {
       this.session,
       options,
     );
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -2391,12 +2935,9 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>

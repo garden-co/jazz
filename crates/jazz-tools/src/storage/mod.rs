@@ -1512,7 +1512,7 @@ fn decode_batch_mode(raw: &str) -> Result<crate::batch_fate::BatchMode, StorageE
 
 fn encode_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
-        DurabilityTier::Worker => "worker",
+        DurabilityTier::Local => "local",
         DurabilityTier::EdgeServer => "edge",
         DurabilityTier::GlobalServer => "global",
     }
@@ -1520,7 +1520,7 @@ fn encode_durability_tier(tier: DurabilityTier) -> &'static str {
 
 fn decode_durability_tier(raw: &str) -> Result<DurabilityTier, StorageError> {
     match raw {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         other => Err(StorageError::IoError(format!(
@@ -6593,7 +6593,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6637,7 +6637,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6670,7 +6670,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6719,7 +6719,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6766,7 +6766,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6811,7 +6811,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let sibling_row = make_users_row_batch(
@@ -6820,7 +6820,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("bob".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6900,7 +6900,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let second_row = make_users_row_batch(
@@ -6909,7 +6909,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("alice".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6960,7 +6960,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let second_row = make_users_row_batch(
@@ -6969,7 +6969,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("alice".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -7017,7 +7017,7 @@ mod tests {
                 updated_at: 20,
             },
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             vec![globally_confirmed.batch_id()],
         );
 
@@ -7368,7 +7368,7 @@ mod tests {
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::new(),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         storage
@@ -7496,7 +7496,7 @@ mod tests {
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::new(),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let entry = VisibleRowEntry::new(row.clone());
 
@@ -8002,7 +8002,7 @@ mod tests {
             RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let entry = VisibleRowEntry::rebuild_with_descriptor(
             &user_descriptor,
@@ -8026,7 +8026,7 @@ mod tests {
             "tasks",
             "main",
             row_id,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap()
         .expect("worker preview");

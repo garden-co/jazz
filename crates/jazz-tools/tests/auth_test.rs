@@ -381,6 +381,19 @@ mod integration_tests {
         );
     }
 
+    /// Test harness should resolve the actual bound port when the CLI listens on port 0.
+    #[tokio::test]
+    async fn test_server_start_on_port_zero_reports_actual_bound_port() {
+        let server = TestServer::start_on_port(0).await;
+
+        assert_ne!(server.port, 0, "test server should expose the bound port");
+
+        let health = reqwest::get(format!("{}/health", server.base_url()))
+            .await
+            .expect("health check request");
+        assert!(health.status().is_success());
+    }
+
     /// Admin-secret-authenticated handshakes should connect successfully.
     #[tokio::test]
     async fn test_admin_secret_ws_handshake() {

@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.31
+
+### Patch Changes
+
+- 09e16b4: Support recursive gather seeds built from composed same-table relations, including hop-based and unioned permission closures.
+
 ## 2.0.0-alpha.30
 
 ### Patch Changes

@@ -98,7 +98,7 @@ describe("react-native Db", () => {
       userBranch: "user-branch",
       jwtToken: "jwt-token",
       adminSecret: "admin-secret",
-      tier: "worker",
+      tier: "local",
       dataPath: "/tmp/rn-data",
     };
 

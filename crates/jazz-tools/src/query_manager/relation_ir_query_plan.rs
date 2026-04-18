@@ -33,6 +33,7 @@ struct RuntimeCorePlan {
     joins: Vec<JoinSpec>,
     result_element_index: Option<usize>,
     recursive: Option<RecursiveSpec>,
+    seed_relation: Option<RelExpr>,
     project_columns: Option<Vec<ProjectColumn>>,
 }
 
@@ -44,6 +45,7 @@ pub(crate) struct ExecutionQueryPlan {
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
     pub recursive: Option<RecursiveSpec>,
+    pub seed_relation: Option<RelExpr>,
     pub result_element_index: Option<usize>,
     pub order_by: Vec<(String, SortDirection)>,
     pub offset: usize,
@@ -427,10 +429,7 @@ fn builder_select_columns_to_project_columns(columns: Vec<String>) -> Vec<Projec
 }
 
 fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option<RuntimeCorePlan> {
-    let seed_info = extract_linear_join_info(seed)?;
-    if !seed_info.joins.is_empty() {
-        return None;
-    }
+    let simple_seed = extract_linear_join_info(seed).filter(|info| info.joins.is_empty());
 
     let (step_core, step_projection) = match step {
         RelExpr::Project { input, columns } => (input.as_ref(), Some(columns.as_slice())),
@@ -445,6 +444,7 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
             join_kind,
         } => (left, right, on, join_kind),
         _ => {
+            let seed_info = simple_seed.as_ref()?;
             let mut step_predicates = Vec::new();
             let mut select_columns = if let Some(columns) = step_projection {
                 Some(project_columns_to_select(columns)?)
@@ -471,10 +471,11 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
             return Some(RuntimeCorePlan {
                 table: seed_info.base_table,
                 base_scope: seed_info.scope_order[0].clone(),
-                disjuncts: seed_info.disjuncts,
+                disjuncts: seed_info.disjuncts.clone(),
                 joins: Vec::new(),
                 result_element_index: None,
                 recursive: Some(recursive),
+                seed_relation: None,
                 project_columns: None,
             });
         }
@@ -545,13 +546,30 @@ fn parse_gather_core(seed: &RelExpr, step: &RelExpr, max_depth: usize) -> Option
         }
     };
 
+    let (table, base_scope, disjuncts, seed_relation) = if let Some(seed_info) = simple_seed {
+        (
+            seed_info.base_table,
+            seed_info.scope_order[0].clone(),
+            seed_info.disjuncts,
+            None,
+        )
+    } else {
+        (
+            step_hop_table,
+            step_hop_table.as_str().to_string(),
+            dnf_true(),
+            Some(seed.clone()),
+        )
+    };
+
     Some(RuntimeCorePlan {
-        table: seed_info.base_table,
-        base_scope: seed_info.scope_order[0].clone(),
-        disjuncts: seed_info.disjuncts,
+        table,
+        base_scope,
+        disjuncts,
         joins: Vec::new(),
         result_element_index: None,
         recursive: Some(recursive),
+        seed_relation,
         project_columns: None,
     })
 }
@@ -688,6 +706,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
                 joins: linear.joins.clone(),
                 result_element_index,
                 recursive: None,
+                seed_relation: None,
                 project_columns: result_element_index.is_none().then_some(normalized_columns),
             })
         }
@@ -704,6 +723,7 @@ fn parse_runtime_core_plan(core: &RelExpr) -> Option<RuntimeCorePlan> {
                 joins: linear.joins,
                 result_element_index: None,
                 recursive: None,
+                seed_relation: None,
                 project_columns: None,
             })
         }
@@ -779,6 +799,7 @@ pub(crate) fn lower_relation_to_execution_plan(
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
         recursive: core_plan.recursive,
+        seed_relation: core_plan.seed_relation,
         result_element_index: core_plan.result_element_index,
         order_by: envelope.order_by,
         offset: envelope.offset,

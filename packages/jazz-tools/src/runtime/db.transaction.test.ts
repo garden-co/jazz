@@ -118,7 +118,7 @@ describe("Db transactions", () => {
       { tier: "global" },
     );
     const updated = tx.updatePersisted(table, "todo-1", { done: true }, { tier: "edge" });
-    const deleted = tx.deletePersisted(table, "todo-1", { tier: "worker" });
+    const deleted = tx.deletePersisted(table, "todo-1", { tier: "local" });
 
     expect(beginTransactionInternal).toHaveBeenCalledWith();
     expect(tx.batchId()).toBe("batch-tx");
@@ -150,7 +150,7 @@ describe("Db transactions", () => {
       },
       { tier: "edge" },
     );
-    expect(runtimeTransaction.deletePersisted).toHaveBeenCalledWith("todo-1", { tier: "worker" });
+    expect(runtimeTransaction.deletePersisted).toHaveBeenCalledWith("todo-1", { tier: "local" });
     expect(persisted.value()).toEqual({
       id: "todo-1",
       title: "Transactional",
@@ -359,7 +359,7 @@ describe("Db transactions", () => {
       { tier: "global" },
     );
     const updated = batch.updatePersisted(table, "todo-direct-1", { done: true }, { tier: "edge" });
-    const deleted = batch.deletePersisted(table, "todo-direct-1", { tier: "worker" });
+    const deleted = batch.deletePersisted(table, "todo-direct-1", { tier: "local" });
 
     expect(beginDirectBatchInternal).toHaveBeenCalledWith();
     expect(batch.batchId()).toBe("batch-direct");
@@ -391,7 +391,7 @@ describe("Db transactions", () => {
       },
       { tier: "edge" },
     );
-    expect(runtimeBatch.deletePersisted).toHaveBeenCalledWith("todo-direct-1", { tier: "worker" });
+    expect(runtimeBatch.deletePersisted).toHaveBeenCalledWith("todo-direct-1", { tier: "local" });
     expect(persisted.value()).toEqual({
       id: "todo-direct-1",
       title: "Direct batch",

@@ -8932,7 +8932,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     use crate::sync_manager::{Destination, DurabilityTier, ServerId, SyncPayload};
     use uuid::Uuid;
 
-    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let schema = test_schema();
     let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
 
@@ -8959,7 +8959,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     assert_eq!(
         query_subs.len(),
         0,
-        "worker-tier local-only subscription should not be sent to upstream sync server"
+        "local-tier local-only subscription should not be sent to upstream sync server"
     );
 }
 

@@ -246,7 +246,7 @@ The important design point is that this same struct is used for:
 
 - `current_row: StoredRowBatch`
 - `branch_frontier`
-- optional older or synthetic preview metadata batch ids for `worker`, `edge`, and `global`
+- optional older or synthetic preview metadata batch ids for `local`, `edge`, and `global`
 
 This is the main hot-path query shape. In durable storage, the common visible-row case now keeps
 some fields implicit to save bytes:
