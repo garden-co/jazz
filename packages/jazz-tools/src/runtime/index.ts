@@ -26,6 +26,7 @@ export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
+  type LogoutOptions,
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,

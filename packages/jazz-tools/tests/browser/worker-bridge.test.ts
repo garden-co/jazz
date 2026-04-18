@@ -815,6 +815,96 @@ describe("Worker Bridge with OPFS", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
+  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
+    const dbName = uniqueDbName("delete-storage-follower");
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await leader.insertDurable(
+      todos,
+      { title: "Leader data before follower wipe", done: false },
+      { tier: "worker" },
+    );
+    await follower.insertDurable(
+      todos,
+      { title: "Follower data before follower wipe", done: true },
+      { tier: "worker" },
+    );
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "worker" });
+        const followerRows = await follower.all(allTodos, { tier: "worker" });
+        return leaderRows.length === 2 && followerRows.length === 2;
+      },
+      8000,
+      "Leader and follower should both observe pre-wipe rows",
+    );
+
+    await follower.deleteClientStorage();
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "worker" });
+        const followerRows = await follower.all(allTodos, { tier: "worker" });
+        return leaderRows.length === 0 && followerRows.length === 0;
+      },
+      12000,
+      "Follower-initiated storage wipe should clear both leader and follower namespaces",
+    );
+
+    const marker = `fresh-after-follower-wipe-${Date.now()}`;
+    await leader.insertDurable(todos, { title: marker, done: false }, { tier: "worker" });
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "worker" });
+        const followerRows = await follower.all(allTodos, { tier: "worker" });
+        const leaderHas = leaderRows.some((row) => row.title === marker);
+        const followerHas = followerRows.some((row) => row.title === marker);
+        return leaderHas && followerHas;
+      },
+      12000,
+      "Both tabs should recover cleanly after follower-initiated storage wipe",
+    );
+  });
+
+  it("logout with wipeData clears browser storage before the next session opens", async () => {
+    const dbName = uniqueDbName("logout-wipe");
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    await db.insertDurable(
+      todos,
+      { title: "Should be wiped on logout", done: false },
+      {
+        tier: "worker",
+      },
+    );
+    expect((await db.all(allTodos, { tier: "worker" })).length).toBe(1);
+
+    await db.logout({ wipeData: true });
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    const rows = await reopened.all(allTodos, { tier: "worker" });
+    expect(rows).toEqual([]);
+  });
+
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
     const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
     const seeded = track(
