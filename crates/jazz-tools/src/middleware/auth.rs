@@ -137,6 +137,8 @@ impl From<TestClock> for AuthClock {
 pub struct AuthConfig {
     /// URL to fetch JWKS keys (production).
     pub jwks_url: Option<String>,
+    /// Cookie name used to read browser auth tokens during the WS upgrade.
+    pub auth_cookie_name: Option<String>,
     /// Whether local-first Ed25519 JWT auth is allowed (default: true for new apps).
     pub allow_local_first_auth: bool,
     /// Secret for backend session impersonation.
@@ -151,6 +153,7 @@ impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
         self.jwks_url.is_some()
+            || self.auth_cookie_name.is_some()
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
@@ -410,6 +413,26 @@ fn local_first_auth_error(message: String) -> UnauthenticatedResponse {
     } else {
         UnauthenticatedResponse::invalid(message)
     }
+}
+
+fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    cookie_header.split(';').find_map(|segment| {
+        let trimmed = segment.trim();
+        let (candidate_name, candidate_value) = trimmed.split_once('=')?;
+        if candidate_name == name && !candidate_value.is_empty() {
+            Some(candidate_value)
+        } else {
+            None
+        }
+    })
+}
+
+fn read_auth_token_from_cookie<'a>(headers: &'a HeaderMap, config: &AuthConfig) -> Option<&'a str> {
+    let cookie_name = config.auth_cookie_name.as_deref()?;
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    extract_cookie_value(cookie_header, cookie_name).map(str::trim)
 }
 
 // ============================================================================
@@ -815,7 +838,7 @@ fn is_local_first_identity_proof(token: &str) -> bool {
 ///
 /// Priority:
 /// 1. Backend impersonation (X-Jazz-Backend-Secret + X-Jazz-Session)
-/// 2. JWT auth (Authorization: Bearer)
+/// 2. JWT auth (`Authorization: Bearer`, or auth cookie when configured)
 /// 3. No session
 ///
 /// When `jwks_cache` is provided, JWT validation uses the cache with on-demand
@@ -860,7 +883,7 @@ pub async fn extract_session(
     }
 
     // Priority 2: JWT auth
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+    let token = if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let Some(token) = auth_value.strip_prefix("Bearer ") else {
             return Err(UnauthenticatedResponse::invalid(
                 "Invalid Authorization header format",
@@ -871,7 +894,12 @@ pub async fn extract_session(
         if token.is_empty() {
             return Err(UnauthenticatedResponse::invalid("Empty bearer token"));
         }
+        Some(token)
+    } else {
+        read_auth_token_from_cookie(headers, config)
+    };
 
+    if let Some(token) = token {
         // Self-signed JWT path
         if is_local_first_identity_proof(token) {
             if !config.allow_local_first_auth {
@@ -1157,6 +1185,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extract_session_jwt_cookie_fallback() {
+        let mut config = make_test_config();
+        config.auth_cookie_name = Some("jazz-auth".to_string());
+        let cache = test_jwks_cache();
+        let mut headers = HeaderMap::new();
+
+        let claims = JwtClaims {
+            sub: "cookie-user".to_string(),
+            iss: Some("https://issuer.example".to_string()),
+            jazz_principal_id: Some("principal-123".to_string()),
+            claims: serde_json::json!({ "role": "editor" }),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
+
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("other=value; jazz-auth={token}").parse().unwrap(),
+        );
+
+        let result = extract_session(&headers, test_app_id(), &config, None, Some(&cache))
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().user_id, "principal-123");
+    }
+
+    #[tokio::test]
     async fn test_extract_session_jwt_uses_external_mapping_fallback() {
         let config = make_test_config();
         let cache = test_jwks_cache();
@@ -1358,6 +1415,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn local_first_auth_expiry_uses_configured_test_clock() {
         let app_id = test_app_id();

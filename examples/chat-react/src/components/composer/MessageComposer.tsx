@@ -17,6 +17,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const myProfile = useMyProfile();
   const composerReady = !!userId && !!myProfile;
@@ -26,14 +27,22 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
       if (!userId || !myProfile) return;
       if (!html.trim()) return;
 
-      db.insert(app.messages, {
-        chatId,
-        text: html.trim(),
-        senderId: myProfile.id,
-        createdAt: new Date(),
-      });
+      void db
+        .insertDurable(
+          app.messages,
+          {
+            chatId,
+            text: html.trim(),
+            senderId: myProfile.id,
+            createdAt: new Date(),
+          },
+          sharedWriteOptions,
+        )
+        .catch((error) => {
+          console.error("failed to send message", error);
+        });
     },
-    [userId, chatId, db, myProfile],
+    [userId, chatId, db, myProfile, sharedWriteOptions],
   );
 
   const handleSendAttachment = useCallback(
@@ -42,7 +51,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
         throw new Error("Profile is still loading. Please try again.");
       }
 
-      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "worker" });
+      const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
 
       const message = await db.insertDurable(
         app.messages,
@@ -52,7 +61,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
           senderId: myProfile.id,
           createdAt: new Date(),
         },
-        { tier: "worker" },
+        sharedWriteOptions,
       );
 
       await db.insertDurable(
@@ -64,10 +73,10 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
           fileId: storedFile.id,
           size: attachment.file.size,
         },
-        { tier: "worker" },
+        sharedWriteOptions,
       );
     },
-    [userId, chatId, db, myProfile],
+    [userId, chatId, db, myProfile, sharedWriteOptions],
   );
 
   return (
