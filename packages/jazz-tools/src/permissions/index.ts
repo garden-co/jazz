@@ -1534,6 +1534,11 @@ function columnFilterToExprs(
   raw: unknown,
   options: { allowRowRefs: boolean },
 ): PolicyExpr[] {
+  if (column.includes(".")) {
+    throw new Error(
+      `Qualified where(...) column "${column}" is not supported in policy rule predicates; use policy.exists(relation) or gather(...) relation seeds instead.`,
+    );
+  }
   if (raw === null) {
     return [{ type: "IsNull", column }];
   }
