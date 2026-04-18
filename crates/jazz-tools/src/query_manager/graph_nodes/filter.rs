@@ -429,9 +429,10 @@ impl RowNode for FilterNode {
 mod tests {
     use super::*;
     use crate::commit::CommitId;
+    use crate::metadata::RowProvenance;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Row, TupleElement, Value};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -993,6 +994,34 @@ mod tests {
         RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)])
     }
 
+    fn make_user_team_edge_element(id: ObjectId, user_id: &str, team: ObjectId) -> TupleElement {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team", ColumnType::Uuid),
+        ]);
+        let data = encode_row(
+            &descriptor,
+            &[Value::Text(user_id.into()), Value::Uuid(team)],
+        )
+        .unwrap();
+        TupleElement::from_row(&Row::new(
+            id,
+            data,
+            CommitId([0; 32]),
+            RowProvenance::for_insert("jazz:test", 0),
+        ))
+    }
+
+    fn make_implicit_team_element(id: ObjectId, name: &str) -> TupleElement {
+        let data = encode_row(&implicit_team_descriptor(), &[Value::Text(name.into())]).unwrap();
+        TupleElement::from_row(&Row::new(
+            id,
+            data,
+            CommitId([0; 32]),
+            RowProvenance::for_insert("jazz:test", 0),
+        ))
+    }
+
     fn make_user_element(id: ObjectId, user_id: i32, name: &str) -> TupleElement {
         let descriptor = users_descriptor();
         let data = encode_row(
@@ -1166,25 +1195,6 @@ mod tests {
         let edge_a = ObjectId::new();
         let edge_b = ObjectId::new();
 
-        let edge_descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("user_id", ColumnType::Text),
-            ColumnDescriptor::new("team", ColumnType::Uuid),
-        ]);
-        let edge_a_data = encode_row(
-            &edge_descriptor,
-            &[Value::Text("alice".into()), Value::Uuid(alice_team)],
-        )
-        .unwrap();
-        let edge_b_data = encode_row(
-            &edge_descriptor,
-            &[Value::Text("alice".into()), Value::Uuid(ops_team)],
-        )
-        .unwrap();
-        let team_a_data =
-            encode_row(&implicit_team_descriptor(), &[Value::Text("Alice".into())]).unwrap();
-        let team_b_data =
-            encode_row(&implicit_team_descriptor(), &[Value::Text("Ops".into())]).unwrap();
-
         let predicate = Predicate::RowIdEq {
             element_index: 1,
             value: alice_team.uuid().as_bytes().to_vec(),
@@ -1194,32 +1204,12 @@ mod tests {
         let delta = TupleDelta {
             added: vec![
                 Tuple::new(vec![
-                    TupleElement::Row {
-                        id: edge_a,
-                        content: edge_a_data.into(),
-                        version_id: CommitId([0; 32]),
-                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
-                    },
-                    TupleElement::Row {
-                        id: alice_team,
-                        content: team_a_data.into(),
-                        version_id: CommitId([0; 32]),
-                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
-                    },
+                    make_user_team_edge_element(edge_a, "alice", alice_team),
+                    make_implicit_team_element(alice_team, "Alice"),
                 ]),
                 Tuple::new(vec![
-                    TupleElement::Row {
-                        id: edge_b,
-                        content: edge_b_data.into(),
-                        version_id: CommitId([0; 32]),
-                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
-                    },
-                    TupleElement::Row {
-                        id: ops_team,
-                        content: team_b_data.into(),
-                        version_id: CommitId([0; 32]),
-                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
-                    },
+                    make_user_team_edge_element(edge_b, "alice", ops_team),
+                    make_implicit_team_element(ops_team, "Ops"),
                 ]),
             ],
             removed: vec![],
