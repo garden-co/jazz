@@ -381,8 +381,7 @@ export interface TableProxy<T, Init> {
 
 function backendScopedAuthState(session?: Session | null): AuthState {
   return {
-    status: "authenticated",
-    transport: "backend",
+    authMode: session?.authMode ?? "external",
     session: session ?? null,
   };
 }
