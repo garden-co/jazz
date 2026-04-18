@@ -706,6 +706,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         for server_id in server_ids {
@@ -715,6 +716,7 @@ impl SyncManager {
                 query.clone(),
                 session.clone(),
                 propagation,
+                policy_context_tables.clone(),
             );
         }
     }
@@ -729,6 +731,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         if !self.servers.contains_key(&server_id) {
             return;
@@ -741,6 +744,7 @@ impl SyncManager {
                 query: Box::new(query),
                 session,
                 propagation,
+                policy_context_tables,
             },
         });
     }
@@ -774,6 +778,13 @@ impl SyncManager {
             .filter(|((_, remote_query_id), _)| *remote_query_id == query_id)
             .flat_map(|(_, scope)| scope.iter().copied())
             .collect()
+    }
+
+    /// Whether we have received at least one upstream scope snapshot for this query.
+    pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
+        self.remote_query_scopes
+            .keys()
+            .any(|(_, remote_query_id)| *remote_query_id == query_id)
     }
 
     /// Take pending replayable batch settlements for RuntimeCore to process.

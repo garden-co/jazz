@@ -1155,6 +1155,7 @@ impl SyncManager {
                 query,
                 session,
                 propagation,
+                policy_context_tables,
             } => {
                 // Build effective session: identity (user_id) comes from the
                 // server-established session (set during the SSE auth handshake) and
@@ -1207,6 +1208,7 @@ impl SyncManager {
                         query: query.as_ref().clone(),
                         session: effective_session,
                         propagation: *propagation,
+                        policy_context_tables: policy_context_tables.clone(),
                     });
             }
             // Handle query unsubscription

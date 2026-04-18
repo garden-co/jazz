@@ -62,13 +62,26 @@ decoded view over the flat stored bytes.
 
 A `VisibleRowEntry` is the compact current answer for one `(branch, row_id)` pair. It stores:
 
-- the current winning batch id
 - the current visible row values for that branch view
-- optional tier-specific winner ids for `local`, `edge`, and `global`
+- the current branch frontier
+- optional preview metadata batch ids for `local`, `edge`, and `global`
+- an optional winner batch-id pool plus packed ordinal vectors when a preview is synthetic
 
 Physically, the visible region is also stored as flat `row_format` rows with the same user columns
 and a slightly larger `_jazz_*` prefix. That lets ordinary reads stay fast while still allowing
 lower-tier queries to resolve older settled winners when needed.
+
+The common visible-row case is still intentionally cheap:
+
+- if the frontier is linear, the visible entry stores one ordinary winner row
+- if every durability tier sees the same preview, tier state collapses to that one shared shape
+
+Only true concurrent frontiers pay the extra merge cost. In that case the reducer stores one merged
+visible body for the default head, plus:
+
+- a compact pool of contributing winner batch ids
+- one packed ordinal vector for the default merged preview when it is synthetic
+- extra packed ordinal vectors only for tiers whose preview differs from the default head
 
 The visible-row format now also keeps the common case compact by treating some fields as implicit:
 
@@ -97,6 +110,16 @@ History rows keep that full engine shape. Visible rows intentionally do not: the
 batch id, durability/state/provenance columns, user data, and the frontier/tier winner pointers,
 while parents/metadata remain history-owned.
 
+When the visible entry is a synthetic merge preview rather than one historical row copy, row-level
+metadata stays coarse on purpose:
+
+- `created_*` comes from the original creator
+- row-level `updated_*` and `batch_id` come from the latest contributing winner
+- if the row is deleted, delete metadata comes from the winning delete batch
+
+Exact per-column provenance is carried in that visible-entry sidecar rather than expanded into the
+public row shape.
+
 For history rows, the identity now lives in the raw-table-local storage key rather than the payload
 columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and the
 current visible `batch_id` stays in the flat visible payload. Raw table headers carry the general
@@ -111,11 +134,22 @@ format. The header is part of resolving the table, not something that gets rerea
 For a normal row write, the engine treats that write as a one-member direct batch and does four things:
 
 1. Upsert the batch entry into the history region.
-2. Recompute the visible winner for that `(branch, row_id)`.
+2. Recompute the visible answer for that `(branch, row_id)`.
 3. Upsert the `VisibleRowEntry` for the branch view.
 4. Update the relevant indices and queue sync notifications.
 
-That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream systems care about.
+For linear histories, step 2 is still just the cheap whole-row fast path.
+
+For concurrent frontiers, step 2 now does an explicit MRCA-relative merge:
+
+- pick the latest common ancestor of the current frontier
+- compare each frontier tip against that ancestor
+- for each user column, choose the latest tip whose value differs from the ancestor value
+- if no frontier tip changed that column, attribute the winner to the ancestor itself
+- deletes win over updates; two soft deletes keep a soft-deleted merged body
+
+That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream
+systems care about.
 
 ## How a Transactional Write Lands
 
@@ -129,6 +163,12 @@ Transactional writes reuse the same `StoredRowBatch` shape, but they stage first
 The row shape stays the same across both paths. The distinction is lifecycle and settlement, not
 row identity.
 
+Two exclusion rules matter for merge behavior:
+
+- accepted transactional rows can participate in visible-row merges just like direct rows
+- conflicted transactional batches never participate in merging anywhere; rejected or still-staged
+  rows do not affect merge previews, merge-on-write bases, or tier-specific visible resolution
+
 ## Why Visible Entries Exist
 
 The visible entry is the reason ordinary reads can stay simple.
@@ -137,7 +177,9 @@ When a query asks for current todos:
 
 - index scans find candidate row ids
 - materialization loads visible entries for those ids
-- the runtime only falls back to full history lookup when a lower-tier winner differs from the current winner
+- the runtime usually answers lower-tier previews directly from the visible-entry sidecar
+- it only falls back to full history lookup when an older entry does not carry enough preview
+  provenance to answer directly
 
 This is why the current engine feels table-first even though it retains full row history underneath.
 

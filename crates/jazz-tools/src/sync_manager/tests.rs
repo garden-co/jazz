@@ -409,6 +409,7 @@ fn memory_size_separates_sync_state_buckets() {
             query: query.clone(),
             session: Some(session.clone()),
             propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
         });
     sm.pending_query_unsubscriptions
         .push(PendingQueryUnsubscription {
@@ -619,6 +620,7 @@ fn send_query_subscription_includes_session() {
         query.clone(),
         Some(session.clone()),
         QueryPropagation::Full,
+        vec![],
     );
 
     let outbox = sm.take_outbox();
@@ -632,6 +634,7 @@ fn send_query_subscription_includes_session() {
                     query: sent_query,
                     session: sent_session,
                     propagation,
+                    ..
                 },
         } => {
             assert_eq!(*id, server_id);
@@ -2858,6 +2861,7 @@ fn push_query_subscription(
             query: Box::new(query),
             session: payload_session,
             propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     sm.process_inbox(&mut MemoryStorage::new());
@@ -2903,6 +2907,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             query: query.clone(),
             session: None,
             propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
         });
     sm.pending_query_subscriptions
         .push(PendingQuerySubscription {
@@ -2911,6 +2916,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             query,
             session: None,
             propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
         });
 
     sm.remove_client(alice);
