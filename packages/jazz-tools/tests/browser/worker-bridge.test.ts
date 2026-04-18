@@ -965,7 +965,13 @@ describe("Worker Bridge with OPFS", () => {
 
   it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
-    const db = await createSyncedDb(ctx, "subscribe-initial-snapshot", sharedLocalAuthToken);
+    const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-initial-snapshot");
+    const db = await createSyncedDb(
+      ctx,
+      "subscribe-initial-snapshot",
+      sharedLocalAuthToken,
+      syncServer,
+    );
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
@@ -1016,14 +1022,15 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const { appId, serverUrl, adminSecret } =
+      await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
     const db = track(
       await createDb({
         appId,
         driver: { type: "persistent", dbName: uniqueDbName("subscribe-initial-jwt") },
         serverUrl,
         adminSecret,
-        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt"),
+        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt", undefined, appId),
       }),
     );
 

@@ -75,8 +75,8 @@ export default defineConfig({
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
-        testingServerJwtForUser: async (_context, userId, claims) =>
-          testingServerJwtForUser(userId, claims),
+        testingServerJwtForUser: async (_context, userId, claims, appId) =>
+          testingServerJwtForUser(userId, claims, appId),
         writeRealisticBrowserReport: async (_context, runId, report) => {
           mkdirSync(realisticBrowserBenchReportDir, { recursive: true });
           const reportFile = resolve(realisticBrowserBenchReportDir, `${runId}.json`);
