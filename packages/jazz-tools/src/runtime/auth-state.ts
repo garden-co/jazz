@@ -20,7 +20,7 @@ export function mapAuthReason(reason: string): AuthFailureReason {
 export type AuthState =
   | {
       status: "authenticated";
-      transport: "bearer" | "backend";
+      transport: "bearer" | "cookie" | "backend";
       session: Session | null;
     }
   | {
@@ -108,6 +108,36 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       const nextState = deriveAuthenticatedState({
         appId: input.appId,
         jwtToken,
+        cookieSession: input.cookieSession,
+      });
+
+      const currentUserId = authUserId(state);
+      const nextUserId = authUserId(nextState);
+
+      if (currentUserId !== nextUserId) {
+        throw new Error(
+          "Changing auth principal on a live client is not supported. Recreate the Db.",
+        );
+      }
+
+      if (authStateEquals(state, nextState)) {
+        return state;
+      }
+
+      state = nextState;
+      emit();
+      return state;
+    },
+
+    applyCookieSession(cookieSession?: Session): AuthState {
+      if (options?.lockAuthenticatedState) {
+        return state;
+      }
+
+      const nextState = deriveAuthenticatedState({
+        appId: input.appId,
+        jwtToken: input.jwtToken,
+        cookieSession,
       });
 
       const currentUserId = authUserId(state);
