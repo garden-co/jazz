@@ -66,6 +66,11 @@ interface SessionWhereCondition {
   readonly where: Record<string, unknown>;
 }
 
+interface WhereObjectCondition {
+  readonly __jazzPermissionKind: "where-object";
+  readonly where: Record<string, unknown>;
+}
+
 type SessionWhereBuilder = SessionRefValue &
   ((input: Record<string, unknown>) => SessionWhereCondition);
 
@@ -100,6 +105,7 @@ type Condition =
   | CompoundCondition
   | ExistsCondition
   | ExistsRelationCondition
+  | WhereObjectCondition
   | SessionWhereCondition;
 
 interface RelationJoinSpec {
@@ -518,18 +524,30 @@ export type PolicyContext<TApp extends AppLike> = {
 
 export type CompiledPermissions = Record<string, TablePolicies>;
 
+type PermissionWhereLeaf<T> = T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+
+type PermissionWhereObjectBase<T> = {
+  [K in keyof T]?:
+    | PermissionWhereInput<T[K]>
+    | SessionRefValue
+    | RowRefValue
+    | RecursiveCurrentValue;
+};
+
+type QualifiedPermissionWhereEntries = {
+  [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+};
+
+type PermissionWhereObject<T> =
+  | PermissionWhereObjectBase<T>
+  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries);
+
 type PermissionWhereInput<T> =
   T extends Array<infer U>
     ? Array<PermissionWhereInput<U>>
     : T extends object
-      ? {
-          [K in keyof T]?:
-            | PermissionWhereInput<T[K]>
-            | SessionRefValue
-            | RowRefValue
-            | RecursiveCurrentValue;
-        }
-      : T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+      ? PermissionWhereObject<T>
+      : PermissionWhereLeaf<T>;
 
 class UpdateRuleBuilder<WhereInput, Row> {
   private oldCondition?: Condition;
@@ -625,7 +643,7 @@ export function definePermissions<TApp extends AppLike>(
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
   factory(ctx);
-  return compileRules(rules, fkReferencesByTable);
+  return compileRules(rules, fkReferencesByTable, relationsByTable);
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
@@ -909,6 +927,36 @@ function resolveQualifiedGatherStartRelation(
 
   throw new Error(
     `gather(...) qualified start table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation seed instead.`,
+  );
+}
+
+function resolveQualifiedRuleRelation(
+  relationsByTable: Map<string, Relation[]>,
+  outputTable: string,
+  qualifiedTable: string,
+  column: string,
+): Relation {
+  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
+    (relation) => relation.toTable === qualifiedTable,
+  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `Qualified where(...) column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
+    );
+  }
+  if (candidates.length === 1) {
+    return candidates[0]!;
+  }
+
+  const disambiguated = candidates.filter((relation) =>
+    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
+  );
+  if (disambiguated.length === 1) {
+    return disambiguated[0]!;
+  }
+
+  throw new Error(
+    `Qualified where(...) table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation instead.`,
   );
 }
 
@@ -1499,23 +1547,120 @@ function resolveWhereInput(input: unknown): Condition {
     return input;
   }
   if (isPlainObject(input)) {
-    return whereObjectToCondition(input, { allowRowRefs: false });
+    return {
+      __jazzPermissionKind: "where-object",
+      where: normalizeWhereObject(input),
+    };
   }
   throw new Error("Unsupported permission condition input.");
 }
 
-function whereObjectToCondition(
-  where: Record<string, unknown>,
+function filtersToCondition(
+  filters: readonly RelationFilterEntry[],
   options: { allowRowRefs: boolean },
 ): PolicyExpr {
   const exprs: PolicyExpr[] = [];
+  for (const filter of filters) {
+    exprs.push(...columnFilterToExprs(filter.column, filter.raw, options));
+  }
+  return andExpr(exprs);
+}
+
+type QualifiedWhereAnalysis = {
+  hasQualifiedFilters: boolean;
+  joins: RelationJoinSpec[];
+  filters: RelationFilterEntry[];
+};
+
+function analyzeQualifiedWhereObject(
+  table: string,
+  where: Record<string, unknown>,
+  relationsByTable: Map<string, Relation[]>,
+): QualifiedWhereAnalysis {
+  const joins: RelationJoinSpec[] = [];
+  const filters: RelationFilterEntry[] = [];
+  const qualifiedRelationByPrefix = new Map<string, Relation>();
+  const qualifiedScopeByPrefix = new Map<string, string>();
+  let hasQualifiedFilters = false;
+
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    exprs.push(...columnFilterToExprs(column, raw, options));
+
+    const [prefix, bare] = splitQualifiedColumn(column);
+    if (!prefix || prefix === table) {
+      filters.push({ column: bare, raw, scope: table });
+      continue;
+    }
+
+    hasQualifiedFilters = true;
+    const relation = resolveQualifiedRuleRelation(relationsByTable, table, prefix, bare);
+    const existingRelation = qualifiedRelationByPrefix.get(prefix);
+    if (existingRelation && existingRelation.name !== relation.name) {
+      throw new Error(
+        `Qualified where(...) table "${prefix}" is ambiguous from "${table}"; use an explicit relation instead.`,
+      );
+    }
+    qualifiedRelationByPrefix.set(prefix, relation);
+
+    let scope = qualifiedScopeByPrefix.get(prefix);
+    if (!scope) {
+      const join = relationToJoinSpec(relation);
+      joins.push(join);
+      scope = relationJoinAlias("table", join, joins.length - 1);
+      qualifiedScopeByPrefix.set(prefix, scope);
+    }
+
+    filters.push({ column: bare, raw, scope });
   }
-  return andExpr(exprs);
+
+  return {
+    hasQualifiedFilters,
+    joins,
+    filters,
+  };
+}
+
+function compileQualifiedWhereRelation(
+  table: string,
+  where: Record<string, unknown>,
+  relationsByTable: Map<string, Relation[]>,
+  options: { anchorOuterRow: boolean },
+): RelExpr {
+  const analysis = analyzeQualifiedWhereObject(table, where, relationsByTable);
+  let relation = applyRelationTail({
+    base: {
+      TableScan: {
+        table,
+      },
+    },
+    initialScope: table,
+    joins: analysis.joins,
+    filters: analysis.filters,
+    selectMap: undefined,
+    joinAlias: (join, index) => relationJoinAlias("table", join, index),
+  });
+
+  if (!options.anchorOuterRow) {
+    return relation;
+  }
+
+  relation = applyRelFilter(relation, [
+    {
+      Cmp: {
+        left: {
+          scope: table,
+          column: "id",
+        },
+        op: "Eq",
+        right: {
+          RowId: "Outer",
+        },
+      },
+    } satisfies RelPredicateExpr,
+  ]);
+  return relation;
 }
 
 function sessionWhereObjectToCondition(where: Record<string, unknown>): PolicyExpr {
@@ -1534,11 +1679,6 @@ function columnFilterToExprs(
   raw: unknown,
   options: { allowRowRefs: boolean },
 ): PolicyExpr[] {
-  if (column.includes(".")) {
-    throw new Error(
-      `Qualified where(...) column "${column}" is not supported in policy rule predicates; use policy.exists(relation) or gather(...) relation seeds instead.`,
-    );
-  }
   if (raw === null) {
     return [{ type: "IsNull", column }];
   }
@@ -1852,6 +1992,7 @@ function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): Compou
 function compileRules(
   rules: RuleLike[],
   fkReferencesByTable: Map<string, Map<string, string>>,
+  relationsByTable: Map<string, Relation[]>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
   for (const ruleLike of rules) {
@@ -1863,23 +2004,33 @@ function compileRules(
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
       case "insert":
         tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
+          with_check: compileCondition(
+            rule.withCheck,
+            rule.table,
+            fkReferencesByTable,
+            relationsByTable,
+          ),
         });
         break;
       case "update":
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
-          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
+          with_check: compileCondition(
+            rule.withCheck,
+            rule.table,
+            fkReferencesByTable,
+            relationsByTable,
+          ),
         });
         break;
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
       default:
@@ -1937,9 +2088,26 @@ function compileCondition(
   condition: Condition | undefined,
   table: string,
   fkReferencesByTable: Map<string, Map<string, string>>,
+  relationsByTable: Map<string, Relation[]>,
 ): PolicyExpr | undefined {
   if (!condition) {
     return undefined;
+  }
+  if (isWhereObjectCondition(condition)) {
+    const analysis = analyzeQualifiedWhereObject(table, condition.where, relationsByTable);
+    if (analysis.hasQualifiedFilters) {
+      return {
+        type: "ExistsRel",
+        rel: compileQualifiedWhereRelation(table, condition.where, relationsByTable, {
+          anchorOuterRow: true,
+        }),
+      };
+    }
+    const compiledCondition = filtersToCondition(analysis.filters, {
+      allowRowRefs: false,
+    });
+    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
+    return compiledCondition;
   }
   if (isPolicyExpr(condition)) {
     resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
@@ -1955,13 +2123,23 @@ function compileCondition(
     };
   }
   if (isExistsCondition(condition)) {
-    const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
-    if (!compiledCondition) {
-      throw new Error(
-        `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
-      );
+    const analysis = analyzeQualifiedWhereObject(
+      condition.table,
+      condition.where,
+      relationsByTable,
+    );
+    if (analysis.hasQualifiedFilters) {
+      return {
+        type: "ExistsRel",
+        rel: compileQualifiedWhereRelation(condition.table, condition.where, relationsByTable, {
+          anchorOuterRow: false,
+        }),
+      };
     }
+    const compiledCondition = filtersToCondition(analysis.filters, {
+      allowRowRefs: true,
+    });
+    resolveAndAssertInheritsColumns(compiledCondition, condition.table, fkReferencesByTable);
     return {
       type: "Exists",
       table: condition.table,
@@ -1970,7 +2148,7 @@ function compileCondition(
   }
   if (isCompoundCondition(condition)) {
     const compiledChildren = condition.conditions.map((child) =>
-      compileCondition(child, table, fkReferencesByTable),
+      compileCondition(child, table, fkReferencesByTable, relationsByTable),
     );
     const exprs = compiledChildren.filter((expr): expr is PolicyExpr => Boolean(expr));
     if (exprs.length === 0) {
@@ -2114,6 +2292,14 @@ function isExistsRelationCondition(input: unknown): input is ExistsRelationCondi
     isPlainObject(input) &&
     input.__jazzPermissionKind === "exists-relation" &&
     isPlainObject(input.relation)
+  );
+}
+
+function isWhereObjectCondition(input: unknown): input is WhereObjectCondition {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "where-object" &&
+    isPlainObject(input.where)
   );
 }
 
