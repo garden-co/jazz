@@ -54,7 +54,7 @@ export async function startApp(
   const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
 
   const secret =
-    config?.auth?.localFirstSecret ?? (await BrowserAuthSecretStore.getOrCreateSecret());
+    config?.auth?.localFirstSecret ?? (await BrowserAuthSecretStore.getOrCreateSecret({ appId }));
 
   const resolvedConfig: DbConfig = {
     appId,

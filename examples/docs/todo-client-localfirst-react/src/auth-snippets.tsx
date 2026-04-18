@@ -8,7 +8,7 @@ function TodoApp() {
 
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" }));
 
   return (
     <JazzProvider
@@ -41,7 +41,7 @@ export function JwtAuthApp() {
 
 // #region auth-localfirst-react-backup
 export async function getRecoveryPhraseForBackup(): Promise<string | null> {
-  const secret = await BrowserAuthSecretStore.loadSecret();
+  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
   if (!secret) return null;
   const { RecoveryPhrase } = await import("jazz-tools/passphrase");
   return RecoveryPhrase.fromSecret(secret);
@@ -52,7 +52,7 @@ export async function getRecoveryPhraseForBackup(): Promise<string | null> {
 export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
   const { RecoveryPhrase } = await import("jazz-tools/passphrase");
   const secret = RecoveryPhrase.toSecret(userInput);
-  await BrowserAuthSecretStore.saveSecret(secret);
+  await BrowserAuthSecretStore.saveSecret(secret, { appId: "my-app" });
 }
 // #endregion auth-localfirst-react-restore
 
@@ -69,6 +69,6 @@ export async function restoreWithPasskey(): Promise<void> {
   const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
   const pb = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
   const secret = await pb.restore();
-  await BrowserAuthSecretStore.saveSecret(secret);
+  await BrowserAuthSecretStore.saveSecret(secret, { appId: "my-app" });
 }
 // #endregion auth-localfirst-react-passkey-restore

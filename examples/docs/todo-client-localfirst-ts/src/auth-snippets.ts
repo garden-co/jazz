@@ -2,7 +2,7 @@ import { createDb, BrowserAuthSecretStore } from "jazz-tools";
 
 // #region auth-localfirst-ts
 export async function createLocalFirstDb() {
-  const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+  const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
 
   return createDb({
     appId: "my-app",
