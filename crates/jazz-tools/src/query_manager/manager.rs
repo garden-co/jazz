@@ -1487,7 +1487,8 @@ impl QueryManager {
                     table = branch_table,
                     branch,
                     object_id = %update.object_id,
-                    %error,
+                    index_column = error.column.as_str(),
+                    error = %error.source,
                     "failed to update indices for synced insert"
                 );
             }
