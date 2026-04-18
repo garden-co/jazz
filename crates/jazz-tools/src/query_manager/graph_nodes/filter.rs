@@ -30,6 +30,40 @@ pub enum Predicate {
     IsNull { col_index: usize },
     /// Column is not null.
     IsNotNull { col_index: usize },
+    /// Tuple element row id equals value.
+    RowIdEq {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id not equals value.
+    RowIdNe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id less than value.
+    RowIdLt {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id less than or equal to value.
+    RowIdLe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id greater than value.
+    RowIdGt {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id greater than or equal to value.
+    RowIdGe {
+        element_index: usize,
+        value: Vec<u8>,
+    },
+    /// Tuple element row id is null.
+    RowIdIsNull { element_index: usize },
+    /// Tuple element row id is not null.
+    RowIdIsNotNull { element_index: usize },
     /// Logical AND of predicates.
     And(Vec<Predicate>),
     /// Logical OR of predicates.
@@ -54,6 +88,14 @@ impl Predicate {
             Predicate::IsNull { col_index } | Predicate::IsNotNull { col_index } => {
                 [*col_index].into_iter().collect()
             }
+            Predicate::RowIdEq { .. }
+            | Predicate::RowIdNe { .. }
+            | Predicate::RowIdLt { .. }
+            | Predicate::RowIdLe { .. }
+            | Predicate::RowIdGt { .. }
+            | Predicate::RowIdGe { .. }
+            | Predicate::RowIdIsNull { .. }
+            | Predicate::RowIdIsNotNull { .. } => HashSet::new(),
             Predicate::And(preds) | Predicate::Or(preds) => {
                 preds.iter().flat_map(|p| p.required_columns()).collect()
             }
@@ -201,6 +243,50 @@ impl FilterNode {
             Predicate::IsNotNull { col_index } => {
                 !self.is_column_null(tuple, *col_index).unwrap_or(true)
             }
+            Predicate::RowIdEq {
+                element_index,
+                value,
+            } => matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Equal)
+            ),
+            Predicate::RowIdNe {
+                element_index,
+                value,
+            } => !matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Equal)
+            ),
+            Predicate::RowIdLt {
+                element_index,
+                value,
+            } => matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Less)
+            ),
+            Predicate::RowIdLe {
+                element_index,
+                value,
+            } => matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Less) | Some(Ordering::Equal)
+            ),
+            Predicate::RowIdGt {
+                element_index,
+                value,
+            } => matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Greater)
+            ),
+            Predicate::RowIdGe {
+                element_index,
+                value,
+            } => matches!(
+                self.compare_row_id_to_value(tuple, *element_index, value),
+                Some(Ordering::Greater) | Some(Ordering::Equal)
+            ),
+            Predicate::RowIdIsNull { element_index } => tuple.get(*element_index).is_none(),
+            Predicate::RowIdIsNotNull { element_index } => tuple.get(*element_index).is_some(),
             Predicate::And(preds) => preds
                 .iter()
                 .all(|p| self.evaluate_predicate_on_tuple(p, tuple)),
@@ -254,6 +340,16 @@ impl FilterNode {
         let content = elem.content()?;
         let descriptor = &self.tuple_descriptor.element(elem_idx)?.descriptor;
         column_is_null(descriptor, content, local_col_idx).ok()
+    }
+
+    fn compare_row_id_to_value(
+        &self,
+        tuple: &Tuple,
+        element_index: usize,
+        value: &[u8],
+    ) -> Option<Ordering> {
+        let element = tuple.get(element_index)?;
+        Some(element.id().uuid().as_bytes().as_slice().cmp(value))
     }
 }
 
@@ -893,6 +989,10 @@ mod tests {
         ])
     }
 
+    fn implicit_team_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)])
+    }
+
     fn make_user_element(id: ObjectId, user_id: i32, name: &str) -> TupleElement {
         let descriptor = users_descriptor();
         let data = encode_row(
@@ -1046,5 +1146,90 @@ mod tests {
 
         assert_eq!(result.added.len(), 1);
         assert!(contains_id(&result.added, user1_oid));
+    }
+
+    #[test]
+    fn filter_on_scoped_row_id_in_join() {
+        let tuple_descriptor = TupleDescriptor::from_tables(&[
+            (
+                "user_team_edges".to_string(),
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("user_id", ColumnType::Text),
+                    ColumnDescriptor::new("team", ColumnType::Uuid),
+                ]),
+            ),
+            ("__hop_0".to_string(), implicit_team_descriptor()),
+        ]);
+
+        let alice_team = ObjectId::new();
+        let ops_team = ObjectId::new();
+        let edge_a = ObjectId::new();
+        let edge_b = ObjectId::new();
+
+        let edge_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team", ColumnType::Uuid),
+        ]);
+        let edge_a_data = encode_row(
+            &edge_descriptor,
+            &[Value::Text("alice".into()), Value::Uuid(alice_team)],
+        )
+        .unwrap();
+        let edge_b_data = encode_row(
+            &edge_descriptor,
+            &[Value::Text("alice".into()), Value::Uuid(ops_team)],
+        )
+        .unwrap();
+        let team_a_data =
+            encode_row(&implicit_team_descriptor(), &[Value::Text("Alice".into())]).unwrap();
+        let team_b_data =
+            encode_row(&implicit_team_descriptor(), &[Value::Text("Ops".into())]).unwrap();
+
+        let predicate = Predicate::RowIdEq {
+            element_index: 1,
+            value: alice_team.uuid().as_bytes().to_vec(),
+        };
+        let mut node = FilterNode::with_tuple_descriptor(tuple_descriptor, predicate);
+
+        let delta = TupleDelta {
+            added: vec![
+                Tuple::new(vec![
+                    TupleElement::Row {
+                        id: edge_a,
+                        content: edge_a_data.into(),
+                        version_id: CommitId([0; 32]),
+                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+                    },
+                    TupleElement::Row {
+                        id: alice_team,
+                        content: team_a_data.into(),
+                        version_id: CommitId([0; 32]),
+                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+                    },
+                ]),
+                Tuple::new(vec![
+                    TupleElement::Row {
+                        id: edge_b,
+                        content: edge_b_data.into(),
+                        version_id: CommitId([0; 32]),
+                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+                    },
+                    TupleElement::Row {
+                        id: ops_team,
+                        content: team_b_data.into(),
+                        version_id: CommitId([0; 32]),
+                        row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+                    },
+                ]),
+            ],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        };
+
+        let result = node.process(delta);
+        assert_eq!(result.added.len(), 1);
+        assert!(contains_id(&result.added, alice_team));
+        assert!(!contains_id(&result.added, ops_team));
     }
 }

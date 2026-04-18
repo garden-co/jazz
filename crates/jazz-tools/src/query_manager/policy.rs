@@ -1287,8 +1287,12 @@ pub fn bind_relation_refs(
                 Some(ValueRef::Literal(resolved))
             }
             ValueRef::OuterColumn(column) => {
-                let col_index = outer_descriptor.column_index(&column.column)?;
-                let resolved = decode_column(outer_descriptor, outer_content, col_index).ok()?;
+                let resolved = resolve_outer_col(
+                    &column.column,
+                    outer_content,
+                    outer_descriptor,
+                    outer_row_id,
+                )?;
                 Some(ValueRef::Literal(resolved))
             }
             ValueRef::FrontierColumn(column) => Some(ValueRef::FrontierColumn(column.clone())),
@@ -2362,6 +2366,42 @@ mod tests {
             }
             _ => panic!("expected ExistsRel complex clause"),
         }
+    }
+
+    #[test]
+    fn test_bind_relation_refs_outer_id_falls_back_to_row_object_id() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("Doc 1".into())]).unwrap();
+        let session = Session::new("user-1");
+        let row_id = ObjectId::new();
+
+        let rel = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("todo_shares"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: crate::query_manager::relation_ir::ColumnRef::unscoped("todo_id"),
+                op: crate::query_manager::relation_ir::PredicateCmpOp::Eq,
+                right: ValueRef::OuterColumn(
+                    crate::query_manager::relation_ir::ColumnRef::unscoped("id"),
+                ),
+            },
+        };
+
+        let bound = bind_relation_refs(&rel, &content, &descriptor, &session, Some(row_id))
+            .expect("bind relation refs");
+
+        let RelExpr::Filter { predicate, .. } = bound else {
+            panic!("expected bound filter relation");
+        };
+        assert!(matches!(
+            predicate,
+            PredicateExpr::Cmp {
+                left,
+                op: crate::query_manager::relation_ir::PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Uuid(bound_id)),
+            } if left.column == "todo_id" && bound_id == row_id
+        ));
     }
 
     #[test]
