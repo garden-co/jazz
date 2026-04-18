@@ -4,7 +4,7 @@ import { BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 
 function App() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" }));
 
   return (
     <JazzProvider

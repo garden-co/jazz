@@ -85,7 +85,9 @@ export function App() {
   const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
     readStoredAuthSession(DEFAULT_APP_ID),
   );
-  const localFirstSecret = React.use(BrowserAuthSecretStore.getOrCreateSecret());
+  const localFirstSecret = React.use(
+    BrowserAuthSecretStore.getOrCreateSecret({ appId: DEFAULT_APP_ID }),
+  );
 
   const config = React.useMemo((): DbConfig => {
     const sharedConfig = {
