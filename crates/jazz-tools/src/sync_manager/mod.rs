@@ -856,12 +856,14 @@ impl SyncManager {
         &mut self,
         client_id: ClientId,
         query_id: QueryId,
+        code: impl Into<String>,
         reason: impl Into<String>,
     ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::Error(SyncError::QuerySubscriptionRejected {
                 query_id,
+                code: code.into(),
                 reason: reason.into(),
             }),
         });

@@ -8860,17 +8860,23 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let error_reason = outbox
+    let (code, reason) = outbox
         .iter()
         .find_map(|entry| match (&entry.destination, &entry.payload) {
             (
                 Destination::Client(id),
-                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
-            ) if *id == client_id && *query_id == QueryId(42) => Some(reason.clone()),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(42) => {
+                Some((code.clone(), reason.clone()))
+            }
             _ => None,
-        });
-    let reason = error_reason
+        })
         .expect("Server should send an error payload when query subscription compilation fails");
+    assert_eq!(code, "query_compilation_failed");
     assert!(
         reason.contains("query_id 42"),
         "error reason should include query id context: {reason}"
@@ -8941,16 +8947,23 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     );
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let rejection_reason = outbox
+    let (rejection_code, rejection_reason) = outbox
         .iter()
         .find_map(|entry| match (&entry.destination, &entry.payload) {
             (
                 Destination::Client(id),
-                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
-            ) if *id == client_id && *query_id == QueryId(7) => Some(reason.clone()),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(7) => {
+                Some((code.clone(), reason.clone()))
+            }
             _ => None,
         })
         .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert_eq!(rejection_code, "query_recompile_failed");
     assert!(
         rejection_reason.contains("query recompilation failed for query_id 7"),
         "rejection should include query id context: {rejection_reason}"
@@ -11192,6 +11205,7 @@ fn fail_closed_server_rejects_session_query_before_permissions_head() {
     let failures = client.take_failed_subscriptions();
     assert_eq!(failures.len(), 1, "expected one subscription failure");
     assert_eq!(failures[0].subscription_id, sub_id);
+    assert_eq!(failures[0].code, "permissions_head_missing");
     assert!(
         failures[0].reason.contains("no published permissions head"),
         "unexpected rejection reason: {}",
@@ -11371,6 +11385,7 @@ fn backend_sync_subscription_without_handshake_session_is_rejected_without_permi
     let failures = client.take_failed_subscriptions();
     assert_eq!(failures.len(), 1, "expected one subscription failure");
     assert_eq!(failures[0].subscription_id, sub_id);
+    assert_eq!(failures[0].code, "permissions_head_missing");
     assert!(
         failures[0].reason.contains("no published permissions head"),
         "unexpected rejection reason: {}",

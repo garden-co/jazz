@@ -235,6 +235,7 @@ pub struct QueryUpdate {
 #[derive(Debug, Clone)]
 pub struct QuerySubscriptionFailure {
     pub subscription_id: QuerySubscriptionId,
+    pub code: String,
     pub reason: String,
 }
 
@@ -851,6 +852,7 @@ impl QueryManager {
                 .unwrap_or(QueryPropagation::Full);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
+                code: "query_recompile_failed".to_string(),
                 reason: reason.clone(),
             });
             if propagation == QueryPropagation::Full {
@@ -860,7 +862,8 @@ impl QueryManager {
             }
         }
 
-        let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
+        let mut failed_server: Vec<(ClientId, QueryId, String, String, QueryPropagation)> =
+            Vec::new();
         let missing_permissions_head =
             self.authorization_schema_required && self.authorization_schema.is_none();
 
@@ -871,6 +874,7 @@ impl QueryManager {
                     failed_server.push((
                         *client_id,
                         *query_id,
+                        "permissions_head_missing".to_string(),
                         Self::missing_permissions_head_reason().to_string(),
                         sub.propagation,
                     ));
@@ -913,13 +917,19 @@ impl QueryManager {
                             error = %reason,
                             "server subscription stale recompile failed; dropping subscription"
                         );
-                        failed_server.push((*client_id, *query_id, reason, sub.propagation));
+                        failed_server.push((
+                            *client_id,
+                            *query_id,
+                            "query_recompile_failed".to_string(),
+                            reason,
+                            sub.propagation,
+                        ));
                     }
                 }
             }
         }
 
-        for (client_id, query_id, reason, propagation) in failed_server {
+        for (client_id, query_id, code, reason, propagation) in failed_server {
             self.server_subscriptions.remove(&(client_id, query_id));
             self.sync_manager
                 .drop_client_query_subscription(client_id, query_id);
@@ -930,6 +940,7 @@ impl QueryManager {
             self.sync_manager.emit_query_subscription_rejected(
                 client_id,
                 query_id,
+                code,
                 format!(
                     "query recompilation failed for query_id {}: {}",
                     query_id.0, reason
@@ -949,6 +960,7 @@ impl QueryManager {
             if !self.subscriptions.contains_key(&sub_id) {
                 tracing::warn!(
                     sub_id = sub_id.0,
+                    code = %rejection.code,
                     error = %rejection.reason,
                     "received rejection for unknown local subscription"
                 );
@@ -958,6 +970,7 @@ impl QueryManager {
             self.unsubscribe_with_sync(sub_id);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
+                code: rejection.code,
                 reason: rejection.reason,
             });
         }

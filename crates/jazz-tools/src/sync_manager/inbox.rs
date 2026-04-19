@@ -986,15 +986,21 @@ impl SyncManager {
                 super::log_connection_schema_diagnostics(&diagnostics, Some("server"));
             }
             SyncPayload::Error(err) => match err {
-                SyncError::QuerySubscriptionRejected { query_id, reason } => {
+                SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                } => {
                     tracing::warn!(
                         ?server_id,
                         query_id = query_id.0,
+                        code = %code,
                         error = %reason,
                         "server rejected query subscription"
                     );
                     self.pending_query_rejections.push(PendingQueryRejection {
                         query_id,
+                        code: code.clone(),
                         reason: reason.clone(),
                     });
                 }

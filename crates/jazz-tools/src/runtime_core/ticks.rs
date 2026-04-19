@@ -432,8 +432,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
                     if let Some(sender) = pending.sender.take() {
                         let _ = sender.send(Err(RuntimeError::QueryError(format!(
-                            "query subscription {} failed during schema recompile: {}",
-                            failure.subscription_id.0, failure.reason
+                            "query subscription {} failed ({}): {}",
+                            failure.subscription_id.0, failure.code, failure.reason
                         ))));
                     }
                     failed_one_shots.push(handle);
@@ -442,6 +442,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     tracing::error!(
                         handle = handle.0,
                         sub_id = failure.subscription_id.0,
+                        code = %failure.code,
                         error = %failure.reason,
                         "subscription failed during schema recompile and was dropped"
                     );
@@ -449,6 +450,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             } else {
                 tracing::error!(
                     sub_id = failure.subscription_id.0,
+                    code = %failure.code,
                     error = %failure.reason,
                     "subscription failed during schema recompile and was dropped"
                 );
