@@ -20,6 +20,28 @@ app-root/
   explicit row-policy grants only.
 - `migrations/*.ts` contains reviewed migration modules.
 
+Column definitions may also carry schema-level merge metadata. The current DSL shape is:
+
+```typescript
+import { schema as s } from "jazz-tools";
+
+export const schema = s.schema({
+  counters: s.table({
+    name: s.string(),
+    value: s.int().merge("counter"),
+  }),
+});
+```
+
+Current merge-strategy rules:
+
+- merge strategy is declared per column in `schema.ts`
+- omitted means implicit `lww`
+- `counter` is currently valid only on non-nullable integer columns
+- changing a column's merge strategy is allowed across schema versions
+- the new strategy applies only to consumers of the new schema; older schema consumers keep using
+  their own version's rule when resolving conflicting history
+
 ## `jazz-tools validate`
 
 `jazz-tools validate` compiles the schema into the runtime `wasmSchema` form to
@@ -47,6 +69,10 @@ The current mental model is:
 - `jazz-tools migrations create --fromHash <fromHash> --toHash <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
 - the developer reviews and edits that file
 - `jazz-tools migrations push <fromHash> <toHash>` publishes the reviewed migration edge back to the server
+
+Merge-strategy-only schema changes count as structural schema changes for hashing and migration
+generation, but they do not require row transforms because they reinterpret future conflict
+resolution rather than rewriting stored row payloads.
 
 Generated migrations use `defineMigration(...)` and carry:
 

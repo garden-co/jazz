@@ -42,6 +42,8 @@ export type {
   Schema as SchemaAst,
   Table as SchemaAstTable,
   Column,
+  ColumnMergeStrategy,
+  ColumnMergeStrategyName,
   JsonSqlType,
   PolicyExpr,
   PolicyOperation,

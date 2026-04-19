@@ -42,6 +42,8 @@ The two modes are:
 - Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable settlements, and public handles.
 - Visible resolution only merges visible rows. Staged or rejected transactional batches never
   participate in visible merges.
+- Merge strategy is schema metadata, not batch metadata. The same stored conflicting history can
+  therefore resolve differently under different schema versions.
 
 ## Durable Storage Format
 
@@ -169,6 +171,11 @@ default head and persists compact provenance alongside it:
 
 Lower-tier reads can reconstruct merged previews from that visible-row sidecar without walking the
 entire row history.
+
+The sidecar keeps only one provenance pointer per user column:
+
+- it names the latest timestamp-ordered batch that contributed to that column's resolved value
+- it does not try to encode every contributing batch for additive strategies such as counters
 
 ### Batch bookkeeping tables
 

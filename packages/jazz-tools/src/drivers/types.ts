@@ -74,12 +74,15 @@ export type ColumnType =
   | { type: "Array"; element: ColumnType }
   | { type: "Row"; columns: ColumnDescriptor[] };
 
+export type ColumnMergeStrategy = "Counter";
+
 export interface ColumnDescriptor {
   name: string;
   column_type: ColumnType;
   nullable: boolean;
   default?: Value;
   references?: string;
+  merge_strategy?: ColumnMergeStrategy;
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

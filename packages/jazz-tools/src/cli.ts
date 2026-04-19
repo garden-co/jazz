@@ -521,6 +521,7 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.name === right.name &&
     left.nullable === right.nullable &&
     left.references === right.references &&
+    left.merge_strategy === right.merge_strategy &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }
@@ -759,7 +760,11 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
 
 function builderExpressionForColumn(column: ColumnDescriptor): string {
   const base = baseBuilderExpression(column.column_type, column.references);
-  return column.nullable ? `${base}.optional()` : base;
+  const withOptional = column.nullable ? `${base}.optional()` : base;
+  if (column.merge_strategy === "Counter") {
+    return `${withOptional}.merge("counter")`;
+  }
+  return withOptional;
 }
 
 function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
