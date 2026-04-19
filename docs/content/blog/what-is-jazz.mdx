@@ -8,7 +8,7 @@ date: "2026-04-18"
 I'm very proud to announce the public alpha of Jazz v2: the biggest re-focusing of what
 we think a database should be since we started developing Jazz six years ago.
 
-## A new database for a new world
+# A new database for a new world
 
 I often say that Jazz is obviously good for apps that need offline support or are
 very real-time in their nature, but that the truth is that almost every app now has a more general
@@ -37,7 +37,7 @@ journey of a single user edit reveals that complexity has skyrocketed from the s
 request/response model: it travels through client state, server authorization, database queries,
 cache invalidation, sync fanout, and background jobs.
 
-## Might it be time for Jazz?
+# Might it be time for Jazz?
 
 If the above resonated, Jazz might already be the shape of system you're looking for, but here are a couple
 more symptoms that we've seen in adopters that made them realize they had outgrown request/response
@@ -57,7 +57,7 @@ the following challenges:
 - As soon as users collaborate, history and traceability start mattering alongside current state.
 - As soon as the system is distributed, consistency becomes something you choose per operation instead of once for the whole product.
 
-## Well, what is Jazz then?
+# Well, what is Jazz then?
 
 The short version: Jazz is a local-first relational database. We'll explain the unusual bits in the
 next sections, but the basic shape matters first.
@@ -89,7 +89,7 @@ distinctive strengths.
 One more important thing to note: Jazz is built as an integrated whole, not layered on top of an
 existing database or ORM. That is what lets us optimize the whole stack, provide a clean developer experience around universal abstractions and reuse much more implementation code across the different environments where Jazz runs.
 
-## Fresh Idea 1: Local-First Data With Tunable Consistency
+# Fresh Idea 1: Local-First Data With Tunable Consistency
 
 Local-first goes hand-in-hand with eventual consistency. If data can be edited in many places at
 once, those copies will sometimes diverge temporarily. In eventual consistency, that is expected,
@@ -112,7 +112,7 @@ the rest of the system stays naturally local-first. Those transactional writes c
 optimistic local actions, then resolve once they are centrally approved or rejected, including after
 time spent offline.
 
-## Fresh Idea 2: Row-Level Security With Per-Query Auth
+# Fresh Idea 2: Row-Level Security With Per-Query Auth
 
 In a local-first system, permissions do not only control what a centralized backend returns. They
 also determine what is allowed to sync down and exist locally on a device in the first place. That
@@ -153,7 +153,7 @@ optimizer. That is particularly helpful when access control is more complicated 
 data itself, because multi-hop permission checks across many relations can still be evaluated in one
 go.
 
-## Fresh Idea 3: Real-Time Collaboration And Deep Histories
+# Fresh Idea 3: Real-Time Collaboration And Deep Histories
 
 Collaboration in apps can look like a UI feature from the outside. But once multiple people and
 agents are working on the same data, you need low-latency propagation, offline work, drafts,
@@ -163,7 +163,10 @@ Jazz's answer is to make history and branching first-class parts of the database
 each app to bolt on its own collaboration logic, Jazz asks: what if each row had its own branched,
 Git-like history, with sync and merge semantics built in?
 
-The motivation behind this is realizing that collaboration is actually a qualitatively new need over classic Web 2.0 apps. The hard part is not just moving more edits faster, but representing concurrent work: authorship metadata, overlapping edits, offline changes, and deciding when a merge should be automatic versus explicit.
+The motivation is that collaboration is a qualitatively new need over classic Web 2.0 apps. The
+hard part is propagating edits quickly _and_ representing concurrent work: authorship
+metadata, overlapping edits, offline changes, and deciding when a merge should be automatic versus
+explicit.
 Today, most apps implement that themselves in business logic. Similarly to permissions, a large part
 of the complexity is app-specific on the surface, but generalizable underneath.
 
@@ -179,23 +182,65 @@ That lets collaborative apps support concurrent edits with merge strategies that
 directly when you want drafts, review flows, or explicit handoffs between people and agents.
 
 Even apps with simple or no collaboration still benefit from this model, because the database will
-track writer identity and create change history as a side-effect of normal mutation. That is why metadata like `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` can fall out naturally.
+track writer identity and create change history as a side-effect of normal mutation.
+
+That is why metadata like `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` can fall out
+naturally.
 
 To summarize, we designed Jazz with the belief that data is more than just a mutable "current state".
 The actors involved in writing that data and the exact series of events that resulted in the current
-state is what really makes the data what it is. And we believe that is going to be more important than
-ever in this age of agent-supported hyper-prolific app users.
+state are part of what really makes the data what it is. We think that will matter more than ever as
+users edit data at a much higher volume with agents, whether those agents live inside or outside your app.
 
-## Fresh Idea 4: Fluid Schema Evolution
+# Fresh Idea 4: Fluid Schema Evolution
 
-## The Franken-stack Jazz replaces
+Local-first and offline first bring two challenges: we already talked about data consitency, that's the
+obvious one. The more subtle challenge is that schema evolution becomes trickier once you have truly
+distributed state because you have to assume that there might be old clients that still write data
+against a now-outdated schema locally, that then needs to be synced to a database server with a newer
+schema. But even in conventional apps, API drift and old clients are a real problem.
 
-## Why not the other hot new thing?
+Traditionally, migrations are a stop-the-world event for the database and it's the job of the API in
+front of it to maintain backwards-compatibility for old clients. If our goal is to lessen the backend's
+burden of shuffling data around, we also have to make schema compatibility a responsibility of the
+database.
 
-## A new cloud for a new database
+To solve this, we combine two ideas.
 
-## Pricing as an enabler
+First, we can make use of the native per-row branching and
+introduce "schema version" as an additional branch dimension. This means that a row with a stable
+identity can coexist having versions of itself in different schema branches. Updating the schema now
+simply creates a new isolated branch where rows have the new shape and we didn't have to stop the world
+and mutate data in-place.
 
-## Who Jazz is for right now
+Second, we take inspiration from the smart folks at Ink & Switch who thought about exactly this problem
+in their Cambria paper. Their main idea is to treat migrations not as a one-time mutation of data, but
+as a purely functional mapping between schema versions. And the key part is that the mappings are
+bi-directional. This unlocks old data being readable in the new format _and_ new data being readable
+in the old format.
 
-## What we learned from classic Jazz and how to migrate
+This is exactly how migrations work in Jazz: you define them (using our TypeScript migration DSL) as
+two-way mappings between old and new columns. Jazz then can use the mappings to read data in any target
+schema (old or new) by reading from _all_ schema branches, but mapping data from those with different
+native schemas. This idea even extends between simple (old, new) pairs of schema versions, you can build
+whole graphs of mutually compatible schema versions by chaining migration mappings accordingly. And Jazz
+automatically does this for you, your clients simply connect with the schema version they know, but can
+read and write all data that exists in other compatible schema versions.
+
+We call all of this "fluid migrations", because it removes what might be the biggest bottleneck in
+deploying new versions of your app. Particularly complex apps that many people on benefit from this,
+where features are built and shipped concurrently, even rolled out concurrently using feature flags.
+And with agents, even small teams or single developers quickly build several features at once, and
+fluid migrations give them an abstraction to ship just as quickly while staying sane.
+
+# The Franken-stack Jazz replaces
+
+# Alternatives and friends
+
+# A new cloud for a new database
+
+# Pricing that enables
+
+# Who Jazz is for right now
+
+# What we learned from classic Jazz and how to migrate
