@@ -89,10 +89,26 @@ sections are about those challenges, and why solving them gives Jazz some of its
 distinctive strengths.
 
 One more important thing to note: Jazz is built as an integrated whole, not layered on top of an
-existing database or ORM. That is what lets us optimize the whole stack and reuse much more across
-the different environments where Jazz runs.
+existing database or ORM. That is what lets us optimize the whole stack, provide a clean developer experience around universal abstractions and reuse much more implementation code across the different environments where Jazz runs.
 
 ## Fresh Idea 1: Local-First Data With Tunable Consistency
+
+The idea of local-first goes hand-in-hand with the assumption of eventual consistency. That is what
+allows distributed state to temporarily diverge, which is important for low-latency local edits and vitally necessary to enable offline writes that are more than temporary optimistic previews.
+
+Our surprising learning is that eventual consistency is actually fine for 90% of the state of most
+apps, and that very simple conflict resolution strategies capture the intent of concurrent editors well.
+
+The exceptions where you want globally consistent transactions are obvious: purchases, claims of
+limited resources, multi-row or multi-table updates that should be all-or-nothing.
+
+We've learned from our adopters that even if only a small part of an apps schema needs to be
+transactional, this is not worth introducing a second database system for. What you really want
+is a database that lets you trade off low-latency for global consistency where you need it.
+
+Jazz offers a combined model where individual tables or writes can be declared transactional,
+but are otherwise a natural part of the system and usefully become optimistic pending transactions
+until they can be centrally approved or rejected (and can stay in this pending state while offline).
 
 ## Fresh Idea 2: Row-Level Security With Per-Query Auth
 
