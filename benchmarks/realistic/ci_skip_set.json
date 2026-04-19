@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-19T06:00:20.944Z",
+  "updated_at": "2026-04-19T19:47:34.363Z",
   "entries": [
     {
       "id": "browser:b5",
@@ -91,6 +91,16 @@
       "first_observed_at": "2026-04-18T23:20:08.285Z",
       "last_observed_at": "2026-04-19T02:25:21.149Z",
       "observations": 3
+    },
+    {
+      "id": "native-criterion:rocksdb:r3_cold_load",
+      "suite": "native",
+      "label": "Criterion R3 cold-load (RocksDB)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-04-19T19:45:06.771Z",
+      "last_observed_at": "2026-04-19T19:45:06.771Z",
+      "observations": 1
     },
     {
       "id": "native-criterion:rocksdb:r4_fanout_updates",
