@@ -135,7 +135,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)] lg:items-end">
             <div className="max-w-[34rem] space-y-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Jazz Cloud
               </p>
               <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
@@ -162,7 +162,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
             <div className="max-w-[34rem] space-y-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Usage-based pricing
               </p>
               <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
@@ -186,10 +186,12 @@ export default function HomePage() {
             <div className="grid gap-x-8 gap-y-10 sm:grid-cols-3">
               {pricingMeters.map((meter) => (
                 <div key={meter.name} className="border-t pt-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+                  <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                     {meter.name}
                   </p>
-                  <p className="mt-2 text-4xl font-black tracking-[-0.06em]">{meter.price}</p>
+                  <p className="font-display mt-2 text-4xl font-black tracking-[-0.06em]">
+                    {meter.price}
+                  </p>
                   <p className="mt-1 text-sm font-medium">{meter.unit}</p>
                   <p className="mt-3 text-sm leading-relaxed text-fd-muted-foreground">
                     {meter.note}

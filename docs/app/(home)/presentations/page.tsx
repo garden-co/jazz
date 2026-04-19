@@ -15,7 +15,7 @@ export default function PresentationsIndexPage() {
       <section className="w-full pb-24 pt-18 sm:pb-28 sm:pt-22 lg:pb-32 lg:pt-26">
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="max-w-[42rem] space-y-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
               Presentations
             </p>
             <h1 className="text-[clamp(3rem,8vw,5.5rem)] font-black leading-[0.9] tracking-[-0.05em]">
@@ -33,7 +33,7 @@ export default function PresentationsIndexPage() {
                 href={`/presentations/${deck.slug}`}
                 className="group block border-t pt-4"
               >
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+                <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                   {deck.slideCount} slides
                 </p>
                 <h2 className="mt-3 text-3xl font-black leading-[0.92] tracking-[-0.04em] transition-colors group-hover:text-fd-primary">
