@@ -1,5 +1,15 @@
 # jazz-napi
 
+## 2.0.0-alpha.34
+
+## 2.0.0-alpha.33
+
+### Patch Changes
+
+- ae47629: Publish a fresh alpha after the previous alpha release partially succeeded and npm refused to republish an existing platform package version.
+
+## 2.0.0-alpha.32
+
 ## 2.0.0-alpha.31
 
 ### Patch Changes

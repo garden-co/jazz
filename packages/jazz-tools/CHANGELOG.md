@@ -1,5 +1,32 @@
 # jazz-tools
 
+## 2.0.0-alpha.34
+
+### Patch Changes
+
+- 0585935: Fix OPFS B-tree page splitting for large index keys by choosing split points based on encoded page size instead of entry count. This prevents synced inserts with many near-threshold JSON index values from failing with leaf or internal split fit errors.
+- 213288a: Bind qualified `where(...)` filters on hopped permission relations to the relation's actual joined scope so correlated `exists(...)` closures over gathered team grants evaluate correctly at runtime.
+- 66dc47a: Direct write conflicts now resolve with MRCA-based per-column LWW for visible merge previews and merge-on-write rebases, including accepted transactional rows.
+
+  Visible rows also persist compact winner provenance ordinals so tier-aware reads can reuse merged previews without re-walking row history when tiers have already converged.
+  - jazz-wasm@2.0.0-alpha.34
+  - jazz-rn@2.0.0-alpha.34
+
+## 2.0.0-alpha.33
+
+### Patch Changes
+
+- jazz-wasm@2.0.0-alpha.33
+- jazz-rn@2.0.0-alpha.33
+
+## 2.0.0-alpha.32
+
+### Patch Changes
+
+- 2d10b2e: Include the failing index column in synced insert index-update error logs so OPFS-backed index failures are easier to diagnose.
+  - jazz-wasm@2.0.0-alpha.32
+  - jazz-rn@2.0.0-alpha.32
+
 ## 2.0.0-alpha.31
 
 ### Patch Changes
