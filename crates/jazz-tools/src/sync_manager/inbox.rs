@@ -985,10 +985,23 @@ impl SyncManager {
             SyncPayload::ConnectionSchemaDiagnostics(diagnostics) => {
                 super::log_connection_schema_diagnostics(&diagnostics, Some("server"));
             }
-            SyncPayload::Error(err) => {
-                // Log or handle server error
-                eprintln!("Error from server {:?}: {:?}", server_id, err);
-            }
+            SyncPayload::Error(err) => match err {
+                SyncError::QuerySubscriptionRejected { query_id, reason } => {
+                    tracing::warn!(
+                        ?server_id,
+                        query_id = query_id.0,
+                        error = %reason,
+                        "server rejected query subscription"
+                    );
+                    self.pending_query_rejections.push(PendingQueryRejection {
+                        query_id,
+                        reason: reason.clone(),
+                    });
+                }
+                _ => {
+                    tracing::warn!(?server_id, error = ?err, "error from server");
+                }
+            },
             // Servers shouldn't send these to us
             SyncPayload::QuerySubscription { .. }
             | SyncPayload::QueryUnsubscription { .. }

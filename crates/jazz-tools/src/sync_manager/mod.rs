@@ -74,6 +74,8 @@ pub struct SyncManager {
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
+    /// Pending query rejections waiting for QueryManager to fail local subscriptions.
+    pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
     /// Pending replayable batch settlements for RuntimeCore to process.
     pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
@@ -115,6 +117,7 @@ impl std::fmt::Debug for SyncManager {
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
+            .field("pending_query_rejections", &self.pending_query_rejections)
             .field("pending_batch_settlements", &self.pending_batch_settlements)
             .field("received_row_batch_acks", &self.received_row_batch_acks)
             .finish()
@@ -212,6 +215,7 @@ impl SyncManager {
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
+            pending_query_rejections: Vec::new(),
             pending_batch_settlements: Vec::new(),
             received_row_batch_acks: Vec::new(),
         }
@@ -769,6 +773,11 @@ impl SyncManager {
     /// Re-queue QuerySettled notifications that are still blocked on stream sequencing.
     pub fn requeue_pending_query_settled(&mut self, pending: Vec<PendingQuerySettled>) {
         self.pending_query_settled.extend(pending);
+    }
+
+    /// Take pending query rejections for QueryManager to process.
+    pub fn take_pending_query_rejections(&mut self) -> Vec<PendingQueryRejection> {
+        std::mem::take(&mut self.pending_query_rejections)
     }
 
     /// Return the union of latest upstream scope snapshots for this query.

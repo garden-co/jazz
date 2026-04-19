@@ -861,10 +861,22 @@ impl QueryManager {
         }
 
         let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
+        let missing_permissions_head =
+            self.authorization_schema_required && self.authorization_schema.is_none();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
+                if missing_permissions_head && sub.session.is_some() {
+                    failed_server.push((
+                        *client_id,
+                        *query_id,
+                        Self::missing_permissions_head_reason().to_string(),
+                        sub.propagation,
+                    ));
+                    continue;
+                }
+
                 let query_for_compile =
                     Self::query_for_server_compile(&sub.query, &sub.schema_context);
                 let compile_schema: Schema = sub
@@ -929,6 +941,26 @@ impl QueryManager {
     /// Get the schema context.
     pub fn schema_context(&self) -> &SchemaContext {
         &self.schema_context
+    }
+
+    fn process_pending_query_rejections(&mut self) {
+        for rejection in self.sync_manager.take_pending_query_rejections() {
+            let sub_id = QuerySubscriptionId(rejection.query_id.0);
+            if !self.subscriptions.contains_key(&sub_id) {
+                tracing::warn!(
+                    sub_id = sub_id.0,
+                    error = %rejection.reason,
+                    "received rejection for unknown local subscription"
+                );
+                continue;
+            }
+
+            self.unsubscribe_with_sync(sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                reason: rejection.reason,
+            });
+        }
     }
 
     /// Get the current branch name for writes.
@@ -1078,6 +1110,8 @@ impl QueryManager {
                 self.sync_manager.requeue_pending_query_settled(blocked);
             }
         }
+
+        self.process_pending_query_rejections();
 
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.
