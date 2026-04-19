@@ -1,4 +1,3 @@
-import { use } from "react";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
@@ -8,8 +7,9 @@ function TodoApp() {
 
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
-  const auth = useLocalFirstAuth();
-  const secret = use(auth.getOrCreateSecret());
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return null;
 
   return (
     <JazzProvider
