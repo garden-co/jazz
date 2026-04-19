@@ -135,7 +135,11 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04: useSession returns session when present", async () => {
-    const session: Session = { user_id: "user-123", claims: { role: "writer" } };
+    const session: Session = {
+      user_id: "user-123",
+      claims: { role: "writer" },
+      authMode: "external",
+    };
     const client = makeClient({ session });
 
     render(
@@ -148,7 +152,11 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04A: useSession reacts to db auth-state changes", async () => {
-    const db = createAuthAwareDb({ user_id: "alice", claims: { role: "reader" } });
+    const db = createAuthAwareDb({
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
     const client = makeAuthAwareClient(db);
 
     render(
@@ -165,7 +173,11 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04B: provider subscribes once for multiple session consumers", async () => {
-    const db = createAuthAwareDb({ user_id: "alice", claims: { role: "reader" } });
+    const db = createAuthAwareDb({
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
     const client = makeAuthAwareClient(db);
 
     render(
@@ -186,7 +198,11 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04C: useDb consumers rerender when auth state changes", async () => {
-    const db = createAuthAwareDb({ user_id: "alice", claims: { role: "reader" } });
+    const db = createAuthAwareDb({
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
     const client = makeAuthAwareClient(db);
 
     render(
@@ -197,7 +213,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     await expectText("db-session", "alice");
 
-    db.emitAuthChange({ user_id: "bob", claims: { role: "writer" } });
+    db.emitAuthChange({ user_id: "bob", claims: { role: "writer" }, authMode: "external" });
 
     await expectText("db-session", "bob");
   });
@@ -543,9 +559,9 @@ function makeClient(opts?: TestClientOptions) {
   if (typeof db === "object" && db && !("getAuthState" in db)) {
     Object.assign(db, {
       getAuthState: (): AuthState => ({
-        status: "unauthenticated",
-        reason: "missing",
+        authMode: "external",
         session: null,
+        error: "missing",
       }),
     });
   }
@@ -586,34 +602,17 @@ function createAuthAwareDb(initialSession: Session | null) {
     };
   });
 
+  const toAuthState = (s: Session | null): AuthState =>
+    s ? { authMode: s.authMode, session: s } : { authMode: "external", session: null };
+
   return {
     getAuthState(): AuthState {
-      return session
-        ? {
-            status: "authenticated",
-            transport: "bearer",
-            session,
-          }
-        : {
-            status: "unauthenticated",
-            reason: "missing",
-            session,
-          };
+      return toAuthState(session);
     },
     onAuthChanged,
     emitAuthChange(nextSession: Session | null) {
       session = nextSession;
-      const authState: AuthState = session
-        ? {
-            status: "authenticated",
-            transport: "bearer",
-            session,
-          }
-        : {
-            status: "unauthenticated",
-            reason: "missing",
-            session,
-          };
+      const authState = toAuthState(session);
       for (const listener of listeners) {
         listener(authState);
       }

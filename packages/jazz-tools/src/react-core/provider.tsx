@@ -114,7 +114,10 @@ function releaseClient(configKey: string, holder: object): void {
   }, 0);
 }
 
-function useJwtRefreshBridge(client: CoreJazzClient, onJWTExpired: JwtRefreshFn | undefined) {
+function useAuthSubscription(
+  client: CoreJazzClient,
+  onJWTExpired: JwtRefreshFn | undefined,
+): number {
   // Latch serializes concurrent "expired" rejections into one refresh call.
   const inFlight = useRef(false);
   // Refcell keeps the callback fresh without re-subscribing when callers pass
@@ -122,8 +125,15 @@ function useJwtRefreshBridge(client: CoreJazzClient, onJWTExpired: JwtRefreshFn 
   const callbackRef = useRef(onJWTExpired);
   callbackRef.current = onJWTExpired;
 
+  // Bumping this revision flips the context value's object identity so
+  // consumers that read `client.session` or `client.db.getAuthState()`
+  // directly (e.g. useSession, useDb) re-render on auth changes.
+  const [authRev, setAuthRev] = useState(0);
+
   useEffect(() => {
-    const unsubscribe = client.db.onAuthChanged((state) => {
+    return client.db.onAuthChanged((state) => {
+      setAuthRev((n) => n + 1);
+
       if (state.error !== "expired") return;
       const fn = callbackRef.current;
       if (!fn) return;
@@ -142,8 +152,9 @@ function useJwtRefreshBridge(client: CoreJazzClient, onJWTExpired: JwtRefreshFn 
           inFlight.current = false;
         });
     });
-    return unsubscribe;
   }, [client]);
+
+  return authRev;
 }
 
 /**
@@ -157,9 +168,9 @@ export function JazzClientProvider({
 }: JazzClientProviderProps) {
   const client = "then" in clientPromise ? React.use(clientPromise) : clientPromise;
 
-  useJwtRefreshBridge(client, onJWTExpired);
+  const authRev = useAuthSubscription(client, onJWTExpired);
 
-  const value = React.useMemo(() => ({ client }), [client]);
+  const value = React.useMemo(() => ({ client }), [client, authRev]);
 
   return <JazzContext.Provider value={value}>{children}</JazzContext.Provider>;
 }
