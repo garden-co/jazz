@@ -1859,14 +1859,24 @@ export class JazzClient {
             ? await this.requireSessionWriteMethod("insertDurableWithSession")(
                 table,
                 values,
-                this.encodeWriteContext(effectiveSession, attribution, undefined, options.updatedAt),
+                this.encodeWriteContext(
+                  effectiveSession,
+                  attribution,
+                  undefined,
+                  options.updatedAt,
+                ),
                 tier,
                 options.id,
               )
             : await this.requireSessionWriteMethod("insertDurableWithSession")(
                 table,
                 values,
-                this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
+                this.encodeWriteContext(
+                  effectiveSession,
+                  attribution,
+                  undefined,
+                  options?.updatedAt,
+                ),
                 tier,
               )
           : options?.id
