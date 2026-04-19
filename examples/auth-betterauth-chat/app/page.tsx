@@ -140,9 +140,9 @@ const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
 
 export default function Page(): React.JSX.Element {
   const betterAuth = useBetterAuthJWT();
-  const localFirstAuth = useLocalFirstAuth();
+  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
 
-  const secret = !betterAuth.jwt ? React.use(localFirstAuth.getOrCreateSecret()) : undefined;
+  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
 
   const config = React.useMemo(
     (): DbConfig => ({
@@ -156,7 +156,7 @@ export default function Page(): React.JSX.Element {
     [betterAuth.jwt, secret],
   );
 
-  if (betterAuth.isLoading) {
+  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) {
     return <p className="loading-state">Loading auth credentials...</p>;
   }
 

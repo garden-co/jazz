@@ -1,8 +1,9 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
 export interface LocalFirstAuth {
-  getOrCreateSecret(): Promise<string>;
+  secret: string | null;
+  isLoading: boolean;
   login(secret: string): Promise<void>;
   signOut(): Promise<void>;
 }
@@ -16,18 +17,6 @@ export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirs
     for (const l of listeners) l();
   };
 
-  const api: LocalFirstAuth = {
-    getOrCreateSecret: () => store.getOrCreateSecret(),
-    async login(secret: string): Promise<void> {
-      await store.saveSecret(secret);
-      notify();
-    },
-    async signOut(): Promise<void> {
-      await store.clearSecret();
-      notify();
-    },
-  };
-
   const subscribe = (onChange: () => void): (() => void) => {
     listeners.add(onChange);
     return () => {
@@ -36,9 +25,43 @@ export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirs
   };
 
   const getSnapshot = (): number => version;
+  const getServerSnapshot = (): number => 0;
+
+  async function login(secret: string): Promise<void> {
+    await store.saveSecret(secret);
+    notify();
+  }
+
+  async function signOut(): Promise<void> {
+    await store.clearSecret();
+    notify();
+  }
 
   return function useLocalFirstAuth(): LocalFirstAuth {
-    useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-    return api;
+    const currentVersion = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+    const [secret, setSecret] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+
+    useEffect(() => {
+      let cancelled = false;
+      setIsLoading(true);
+      store
+        .getOrCreateSecret()
+        .then((resolved) => {
+          if (cancelled) return;
+          setSecret(resolved);
+          setIsLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setSecret(null);
+          setIsLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [currentVersion]);
+
+    return { secret, isLoading, login, signOut };
   };
 }

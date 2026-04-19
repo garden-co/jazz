@@ -51,16 +51,12 @@ function DevToolsRegistration() {
 
 // #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
-  return (
-    <React.Suspense fallback={fallback ?? <p>Loading...</p>}>
-      <AppInner config={config} fallback={fallback} />
-    </React.Suspense>
-  );
-}
+  const { secret, isLoading } = useLocalFirstAuth();
 
-function AppInner({ config, fallback }: AppProps) {
-  const auth = useLocalFirstAuth();
-  const secret: string = React.use(auth.getOrCreateSecret());
+  if (isLoading || !secret) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
+
   const resolvedConfig = defaultConfig(secret, config);
 
   return (

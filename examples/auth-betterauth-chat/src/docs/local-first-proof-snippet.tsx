@@ -1,4 +1,4 @@
-import { use, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type DbConfig } from "jazz-tools";
 import { JazzProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "../lib/auth-client";
@@ -66,10 +66,10 @@ function useBetterAuthJWT() {
 
 function App() {
   const betterAuth = useBetterAuthJWT();
-  const localFirstAuth = useLocalFirstAuth();
+  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
 
   // Only mint a local-first secret when there's no BetterAuth session.
-  const secret = !betterAuth.jwt ? use(localFirstAuth.getOrCreateSecret()) : undefined;
+  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
 
   const config = useMemo<DbConfig>(
     () => ({
@@ -81,7 +81,7 @@ function App() {
     [betterAuth.jwt, secret],
   );
 
-  if (betterAuth.isLoading) return <p>Loading auth…</p>;
+  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) return <p>Loading auth…</p>;
 
   return (
     <JazzProvider

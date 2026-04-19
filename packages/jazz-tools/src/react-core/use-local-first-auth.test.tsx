@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 import { createUseLocalFirstAuth } from "./use-local-first-auth.js";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 
@@ -37,32 +37,41 @@ describe("createUseLocalFirstAuth", () => {
     useLocalFirstAuth = createUseLocalFirstAuth(store);
   });
 
-  it("getOrCreateSecret caches and returns stable promise identity", async () => {
+  it("starts with isLoading=true and secret=null, then resolves", async () => {
     const { result } = renderHook(() => useLocalFirstAuth());
-    const p1 = result.current.getOrCreateSecret();
-    const p2 = result.current.getOrCreateSecret();
-    expect(p1).toBe(p2);
-    const s = await p1;
-    expect(typeof s).toBe("string");
+    expect(result.current.isLoading).toBe(true);
+    expect(result.current.secret).toBeNull();
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(typeof result.current.secret).toBe("string");
   });
 
-  it("login writes the store and bumps version", async () => {
+  it("login writes the store and updates secret", async () => {
     const { result } = renderHook(() => useLocalFirstAuth());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
     await act(async () => {
       await result.current.login("provided-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     });
-    const s = await result.current.getOrCreateSecret();
-    expect(s).toBe("provided-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    await waitFor(() =>
+      expect(result.current.secret).toBe("provided-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    );
   });
 
-  it("signOut clears the store; next getOrCreateSecret rotates identity", async () => {
+  it("signOut clears the store and rotates the secret on re-resolve", async () => {
     const { result } = renderHook(() => useLocalFirstAuth());
-    const before = await result.current.getOrCreateSecret();
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const before = result.current.secret;
+
     await act(async () => {
       await result.current.signOut();
     });
-    const after = await result.current.getOrCreateSecret();
-    expect(after).not.toBe(before);
+
+    await waitFor(() => {
+      expect(result.current.secret).not.toBeNull();
+      expect(result.current.secret).not.toBe(before);
+    });
   });
 
   it("two factory invocations have independent version scopes", async () => {
@@ -72,10 +81,15 @@ describe("createUseLocalFirstAuth", () => {
     const useB = createUseLocalFirstAuth(storeB);
     const { result: a } = renderHook(() => useA());
     const { result: b } = renderHook(() => useB());
+
+    await waitFor(() => expect(a.current.isLoading).toBe(false));
+    await waitFor(() => expect(b.current.isLoading).toBe(false));
+
     await act(async () => {
       await a.current.login("secret-A");
     });
-    expect(await a.current.getOrCreateSecret()).toBe("secret-A");
-    expect(await b.current.getOrCreateSecret()).not.toBe("secret-A");
+
+    await waitFor(() => expect(a.current.secret).toBe("secret-A"));
+    expect(b.current.secret).not.toBe("secret-A");
   });
 });

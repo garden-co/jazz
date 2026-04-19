@@ -70,8 +70,9 @@ For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config
 
 ```tsx
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
-const auth = useLocalFirstAuth();
-const secret = use(auth.getOrCreateSecret());
+const { secret, isLoading } = useLocalFirstAuth();
+
+if (!jwtToken && (isLoading || !secret)) return <p>Loading…</p>;
 
 const config = jwtToken
   ? {
@@ -82,7 +83,7 @@ const config = jwtToken
   : {
       appId: "my-app",
       serverUrl: "https://sync.example.com",
-      secret,
+      secret: secret!,
     };
 
 <JazzProvider key={jwtToken ? "external" : "local"} config={config} />;

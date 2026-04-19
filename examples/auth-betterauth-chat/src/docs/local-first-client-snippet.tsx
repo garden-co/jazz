@@ -1,18 +1,10 @@
 // #region local-first-client-setup
-import * as React from "react";
 import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
 function App() {
-  return (
-    <React.Suspense fallback={<p>Loading…</p>}>
-      <AppInner />
-    </React.Suspense>
-  );
-}
+  const { secret, isLoading } = useLocalFirstAuth();
 
-function AppInner() {
-  const auth = useLocalFirstAuth();
-  const secret = React.use(auth.getOrCreateSecret());
+  if (isLoading || !secret) return <p>Loading…</p>;
 
   return (
     <JazzProvider
