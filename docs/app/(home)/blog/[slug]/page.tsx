@@ -30,7 +30,7 @@ export default async function BlogPostPage(props: { params: Promise<{ slug: stri
             Blog
           </Link>
           <div className="space-y-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
               {dateFormatter.format(new Date(page.data.date))}
             </p>
             <h1 className="text-[clamp(3rem,7vw,5.5rem)] font-black leading-[0.92] tracking-[-0.05em]">
@@ -55,7 +55,7 @@ export default async function BlogPostPage(props: { params: Promise<{ slug: stri
           {page.data.toc.length > 0 ? (
             <aside className="hidden lg:sticky lg:top-20 lg:block">
               <div className="border-t pt-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+                <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                   On this page
                 </p>
                 <div className="mt-4 text-sm">

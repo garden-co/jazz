@@ -68,11 +68,20 @@ next sections, but let's first unpack the basics.
 
 The API looks like familiar modern ORMs but goes a bit further with type-checked permissions and migrations and first class support for reactive subscriptions, not just one-shot queries.
 
-"Local-first" means that Jazz offers real durable local state like an embedded database, while automatically syncing to the cloud and other users in the background. This results in an unparalleled "feels like reactive local state" developer experience *and* makes it easy to build snappy, even offline-capable apps.
+"Local-first" means that Jazz offers real durable local state like an embedded database, while automatically syncing to the cloud and other users in the background. This results in an unparalleled "feels like reactive local state" developer experience _and_ makes it easy to build snappy, even offline-capable apps.
+
+Local-first also means that in Jazz data is at home in a lot more different environments. You can
+use it from browser clients (where it feels like reactive state in React, Svelte and Vue) where it
+relies on the Origin Private File System for local/offline durability, you can use it in native
+apps (currently supporting React Native/Expo) where it acts as traditional on-device storage, you
+can use it on long-lived backend servers or ephemeral functions, where Jazz acts as an embedded
+datastore or durable cache and you can make queries directly against the Jazz server backing all of this. Sync makes sure that data is shared between all of these different places.
 
 But this approach also brings new challenges that centralized databases don't have. We'll line out solutions to these in the following sections and you'll see how tackling those has allowed us to deeive some unique strenghts and features from the same solutions.
 
-One important thing to note is that Jazz is built
+One important thing to note is that Jazz is built as an integrated whole, not based on any existing
+databases or ORMs. This is what lets us do things differently, optimize the whole stack and reuse
+a lot more code across the different environments that Jazz runs in.
 
 ## Fresh Idea 1: Local-First Data With Tunable Consistency
 
