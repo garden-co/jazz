@@ -109,6 +109,7 @@ impl QueryManager {
                 .cloned()
                 .map(Arc::new),
             select_policy: table_schema.policies.select_policy().cloned().map(Arc::new),
+            requires_transaction: table_schema.requires_transaction,
         });
         self.write_table_cache.insert(cache_key, entry.clone());
         Ok(entry)
@@ -193,6 +194,22 @@ impl QueryManager {
             Some(BatchMode::Transactional) => RowState::StagingPending,
             Some(BatchMode::Direct) | None => RowState::VisibleDirect,
         }
+    }
+
+    fn ensure_write_mode_allowed(
+        table_name: &TableName,
+        requires_transaction: bool,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), QueryError> {
+        if requires_transaction
+            && write_context
+                .map(WriteContext::batch_mode)
+                .unwrap_or(BatchMode::Direct)
+                != BatchMode::Transactional
+        {
+            return Err(QueryError::TransactionRequired { table: *table_name });
+        }
+        Ok(())
     }
 
     fn row_batch_authoring<'a>(
@@ -585,6 +602,11 @@ impl QueryManager {
         let table_name = TableName::new(table);
         let table_write =
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let descriptor = table_write.descriptor.as_ref();
         let using_policy = table_write.update_using_policy.as_deref();
         let check_policy = table_write.update_check_policy.as_deref();
@@ -882,6 +904,11 @@ impl QueryManager {
             table_name,
             write_schema.as_ref(),
         )?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let descriptor = table_write.descriptor.as_ref();
         let insert_policy = table_write.insert_policy.as_deref();
 
@@ -1077,6 +1104,11 @@ impl QueryManager {
         let write_schema = self.schema.clone();
         let table_write =
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let descriptor = table_write.descriptor.as_ref();
         let insert_policy = table_write.insert_policy.as_deref();
 
@@ -1238,6 +1270,11 @@ impl QueryManager {
         let table_name = TableName::new(table);
         let table_write =
             self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let descriptor = table_write.descriptor.as_ref();
         let insert_policy = table_write.insert_policy.as_deref();
 
@@ -1905,6 +1942,19 @@ impl QueryManager {
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table_name = TableName::new(&table);
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let current_row = self
             .transactional_staged_row_for_write(
                 storage,
@@ -2006,6 +2056,14 @@ impl QueryManager {
             old_data_for_policy: _old_data_for_policy,
             old_provenance_for_policy,
         } = write;
+        let table_name = TableName::new(table);
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
@@ -2120,8 +2178,19 @@ impl QueryManager {
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-
         let table_name = TableName::new(&table);
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
 
         // Check if already soft-deleted
         let current_branch = self.current_branch().to_string();
@@ -2328,6 +2397,13 @@ impl QueryManager {
         let staged_branch_row =
             self.transactional_staged_row_for_write(storage, id, branch, write_context);
         let table_name = TableName::new(table);
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        Self::ensure_write_mode_allowed(
+            &table_name,
+            table_write.requires_transaction,
+            write_context,
+        )?;
         // Check if already soft-deleted on this branch
         if staged_branch_row
             .as_ref()
@@ -2336,8 +2412,6 @@ impl QueryManager {
         {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
-        let table_write =
-            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
         let using_policy = table_write.delete_using_policy.as_deref();
 

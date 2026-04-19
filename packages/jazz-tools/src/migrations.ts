@@ -24,7 +24,7 @@ import type {
   Simplify,
   TableDefinition,
 } from "./typed-app.js";
-import { unwrapTableDefinition } from "./typed-app.js";
+import { resolveTableOptions, unwrapTableDefinition } from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -533,6 +533,7 @@ function tableDefinitionToAst(
       assertUserColumnNameAllowed(columnName);
       return builder._build(columnName);
     }),
+    requiresTransaction: resolveTableOptions(definition).requiresTransaction,
   };
 }
 
@@ -548,9 +549,8 @@ function normalizeSchemaDefinition(
 }
 
 function definitionToSchema(definition: SchemaDefinition): SchemaAst {
-  const normalizedDefinition = normalizeSchemaDefinition(definition);
   return {
-    tables: Object.entries(normalizedDefinition).map(([tableName, tableDefinition]) =>
+    tables: Object.entries(definition).map(([tableName, tableDefinition]) =>
       tableDefinitionToAst(tableName, tableDefinition),
     ),
   };

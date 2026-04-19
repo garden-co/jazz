@@ -134,6 +134,7 @@ export interface TablePolicies {
 export interface TableSchema {
   columns: ColumnDescriptor[];
   policies?: TablePolicies;
+  requiresTransaction?: boolean;
 }
 
 export type Schema = Record<string, TableSchema>;

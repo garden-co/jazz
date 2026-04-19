@@ -323,10 +323,21 @@ pub struct TableSchema {
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
+    /// Whether writes must use transactional batch mode.
+    #[serde(
+        default,
+        rename = "requiresTransaction",
+        skip_serializing_if = "table_requires_transaction_is_false"
+    )]
+    pub requires_transaction: bool,
 }
 
 fn table_policies_are_default(policies: &TablePolicies) -> bool {
     *policies == TablePolicies::default()
+}
+
+fn table_requires_transaction_is_false(requires_transaction: &bool) -> bool {
+    !*requires_transaction
 }
 
 impl TableSchema {
@@ -337,12 +348,17 @@ impl TableSchema {
         Self {
             columns,
             policies: TablePolicies::default(),
+            requires_transaction: false,
         }
     }
 
     /// Create a table schema with policies.
     pub fn with_policies(columns: RowDescriptor, policies: TablePolicies) -> Self {
-        Self { columns, policies }
+        Self {
+            columns,
+            policies,
+            requires_transaction: false,
+        }
     }
 
     /// Start building a new table schema.
@@ -363,6 +379,7 @@ pub struct TableSchemaBuilder {
     name: String,
     columns: Vec<ColumnDescriptor>,
     policies: TablePolicies,
+    requires_transaction: bool,
 }
 
 impl TableSchemaBuilder {
@@ -372,6 +389,7 @@ impl TableSchemaBuilder {
             name: name.to_string(),
             columns: Vec::new(),
             policies: TablePolicies::default(),
+            requires_transaction: false,
         }
     }
 
@@ -423,6 +441,12 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Require transactional batch mode for writes against this table.
+    pub fn require_transaction(mut self) -> Self {
+        self.requires_transaction = true;
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -433,6 +457,7 @@ impl TableSchemaBuilder {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
             policies: self.policies,
+            requires_transaction: self.requires_transaction,
         }
     }
 
@@ -442,6 +467,7 @@ impl TableSchemaBuilder {
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
             policies: self.policies,
+            requires_transaction: self.requires_transaction,
         };
         (name, schema)
     }

@@ -833,7 +833,12 @@ function renderSchemaWitness(schema: WasmSchema): string {
       const columnLines = tableSchema.columns.map(
         (column) => `${JSON.stringify(column.name)}: ${builderExpressionForColumn(column)},`,
       );
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n})`;
+      const tableExpression = `s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n})`;
+      return `${JSON.stringify(tableName)}: ${
+        tableSchema.requiresTransaction
+          ? `${tableExpression}.requireTransaction()`
+          : tableExpression
+      }`;
     });
 
   if (tableEntries.length === 0) {

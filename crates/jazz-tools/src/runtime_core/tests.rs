@@ -1333,6 +1333,17 @@ fn test_schema() -> Schema {
         .build()
 }
 
+fn transaction_required_users_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .require_transaction()
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build()
+}
+
 fn schema_evolution_v1() -> Schema {
     test_schema()
 }
@@ -4071,6 +4082,63 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
     )
     .expect("latest staged row should decode");
     assert_eq!(values, user_row_values(inserted_user_id, "Bob"));
+}
+
+#[test]
+fn rc_transaction_required_tables_reject_direct_writes_but_allow_transactions() {
+    let mut core =
+        create_runtime_with_schema(transaction_required_users_schema(), "tx-required-users");
+    let batch_id = BatchId::new();
+    let transactional_write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+        .with_batch_id(batch_id);
+
+    let (row_id, _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&transactional_write_context),
+        )
+        .expect("transactional insert should be allowed");
+
+    let direct_insert_err = core
+        .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
+        .unwrap_err();
+    assert!(matches!(
+        direct_insert_err,
+        RuntimeError::WriteError(message)
+            if message.contains("users") && message.contains("requires transactional writes")
+    ));
+
+    let direct_update_err = core
+        .update(
+            row_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        direct_update_err,
+        RuntimeError::WriteError(message)
+            if message.contains("users") && message.contains("requires transactional writes")
+    ));
+
+    core.update(
+        row_id,
+        vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+        Some(&transactional_write_context),
+    )
+    .expect("transactional update should be allowed");
+
+    let direct_delete_err = core.delete(row_id, None).unwrap_err();
+    assert!(matches!(
+        direct_delete_err,
+        RuntimeError::WriteError(message)
+            if message.contains("users") && message.contains("requires transactional writes")
+    ));
+
+    core.delete(row_id, Some(&transactional_write_context))
+        .expect("transactional delete should be allowed");
 }
 
 #[test]

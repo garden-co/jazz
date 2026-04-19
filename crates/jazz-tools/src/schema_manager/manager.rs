@@ -14,6 +14,7 @@ use std::{
 
 use blake3::Hasher;
 
+use crate::batch_fate::BatchMode;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
@@ -38,6 +39,7 @@ use super::encoding::{
     encode_permissions_head, encode_schema,
 };
 use super::lens::Lens;
+use super::resolve_current_table_name;
 use super::types::AppId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -399,6 +401,52 @@ impl SchemaManager {
 
         temp_context.try_activate_pending();
         Ok(temp_context)
+    }
+
+    fn row_table_name_for_target_schema(
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        target_context: &SchemaContext,
+    ) -> Option<String> {
+        let locator = storage.load_row_locator(object_id).ok().flatten()?;
+        resolve_current_table_name(
+            target_context,
+            locator.table.as_str(),
+            locator.origin_schema_hash.as_ref(),
+        )
+        .or_else(|| Some(locator.table.to_string()))
+    }
+
+    fn ensure_row_write_mode_allowed(
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        target_schema: &Schema,
+        target_context: &SchemaContext,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), QueryError> {
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            return Ok(());
+        }
+
+        let Some(table) =
+            Self::row_table_name_for_target_schema(storage, object_id, target_context)
+        else {
+            return Ok(());
+        };
+
+        let table_name = TableName::new(&table);
+        if target_schema
+            .get(&table_name)
+            .is_some_and(|table_schema| table_schema.requires_transaction)
+        {
+            return Err(QueryError::TransactionRequired { table: table_name });
+        }
+
+        Ok(())
     }
 
     fn get_insert_values_with_defaults_for_schema(
@@ -1657,7 +1705,17 @@ impl SchemaManager {
         Self::validate_external_upsert_object_id(object_id)?;
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let target_schema = self
+            .schema_for_hash(target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?;
         let target_context = self.schema_context_for_hash(target_hash)?;
+        Self::ensure_row_write_mode_allowed(
+            storage,
+            object_id,
+            target_schema,
+            &target_context,
+            write_context,
+        )?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1724,6 +1782,13 @@ impl SchemaManager {
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
+        Self::ensure_row_write_mode_allowed(
+            storage,
+            object_id,
+            &target_schema,
+            &target_context,
+            write_context,
+        )?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1826,6 +1891,13 @@ impl SchemaManager {
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
+        Self::ensure_row_write_mode_allowed(
+            storage,
+            object_id,
+            &target_schema,
+            &target_context,
+            write_context,
+        )?;
         let branches = target_context
             .all_branch_names()
             .into_iter()

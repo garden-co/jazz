@@ -241,6 +241,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     tables[table.name] = {
       columns,
       policies: table.policies ? clonePolicies(table.policies) : undefined,
+      requiresTransaction: table.requiresTransaction,
     };
   }
 

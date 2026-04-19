@@ -212,6 +212,7 @@ export interface Table {
   name: string;
   columns: Column[];
   policies?: TablePolicies;
+  requiresTransaction?: boolean;
 }
 
 export interface Schema {
