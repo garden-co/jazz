@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-19T00:14:19.832Z",
+  "updated_at": "2026-04-19T02:43:12.478Z",
   "entries": [
     {
       "id": "browser:b5",
@@ -89,8 +89,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:20:08.285Z",
-      "last_observed_at": "2026-04-19T00:01:59.284Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:25:21.149Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:rocksdb:r4_fanout_updates",
@@ -119,8 +119,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:20:08.285Z",
-      "last_observed_at": "2026-04-19T00:01:59.284Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:25:21.149Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:rocksdb:r7_hotspot_history",
@@ -159,8 +159,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r1_crud_sustained_single_hop",
@@ -169,8 +169,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r2_reads_sustained",
@@ -179,8 +179,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r2_reads_sustained_single_hop",
@@ -199,8 +199,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r3_cold_load",
@@ -209,8 +209,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r4_fanout_updates",
@@ -239,8 +239,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r7_hotspot_history",
@@ -249,8 +249,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-18T23:32:08.811Z",
-      "last_observed_at": "2026-04-19T00:13:50.791Z",
-      "observations": 2
+      "last_observed_at": "2026-04-19T02:34:14.722Z",
+      "observations": 3
     },
     {
       "id": "native-criterion:sqlite:r8_many_branches",
