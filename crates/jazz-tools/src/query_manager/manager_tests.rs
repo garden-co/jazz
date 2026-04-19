@@ -11278,6 +11278,98 @@ fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
 }
 
 #[test]
+fn backend_sync_subscription_without_handshake_session_keeps_local_rows_without_permissions_head() {
+    use crate::sync_manager::ClientRole;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("identity_key", ColumnType::Text).nullable(),
+            ]),
+            policies: TablePolicies::new().with_select(PolicyExpr::eq_session(
+                "identity_key",
+                vec!["user_id".into()],
+            )),
+        },
+    );
+
+    let mut structural_server_schema = Schema::new();
+    structural_server_schema.insert(
+        TableName::new("teams"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("identity_key", ColumnType::Text).nullable(),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, structural_server_schema);
+    server.require_authorization_schema();
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    server
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let team_row = client
+        .insert(
+            &mut client_io,
+            "teams",
+            &[Value::Text("Bob".into()), Value::Text("bob".into())],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    client.clear_local_pending_row_overlay("teams", team_row.row_id);
+    client.process(&mut client_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("bob")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    assert!(
+        !client
+            .sync_manager()
+            .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
+        "backend-authenticated clients without a handshake session should still treat missing permissions head as non-authoritative"
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "session payload queries should keep locally visible rows until an authoritative remote scope exists"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Bob".into()), Value::Text("bob".into())]
+    );
+}
+
+#[test]
 fn synced_subscription_filters_rows_removed_from_remote_scope() {
     use crate::query_manager::policy::Operation;
     use crate::sync_manager::{ClientId, ServerId};
