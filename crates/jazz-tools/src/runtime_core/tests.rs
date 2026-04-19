@@ -4776,6 +4776,117 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
 }
 
 #[test]
+fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
+    let schema = test_schema();
+    let mut alice = create_runtime_with_schema(schema.clone(), "direct-missing-permissions-head");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "direct-missing-permissions-head",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    worker.add_client(client_id, Some(alice_session.clone()));
+    alice.add_server(server_id);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::User);
+
+    alice.batched_tick();
+    worker.batched_tick();
+    alice.sync_sender().take();
+    worker.sync_sender().take();
+
+    let write_context = WriteContext::from_session(alice_session);
+    let ((row_id, _row_values), mut receiver) = alice
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Local,
+        )
+        .unwrap();
+
+    let batch_id = alice
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap()[0]
+        .batch_id;
+    let branch_name = alice.schema_manager().branch_name();
+
+    pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
+
+    let worker_outbox = worker.sync_sender().take();
+    assert!(
+        worker_outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. },
+                },
+            } if *id == client_id && *settled_batch_id == batch_id
+        )),
+        "missing permissions head should reject persisted writes as replayable batch settlements"
+    );
+
+    for entry in worker_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            alice.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    alice.batched_tick();
+
+    match receiver.try_recv() {
+        Ok(Some(Err(rejection))) => {
+            assert_eq!(rejection.batch_id, batch_id);
+            assert_eq!(rejection.code, "permission_denied");
+            assert!(
+                rejection.reason.contains("no published permissions head"),
+                "unexpected rejection reason: {}",
+                rejection.reason
+            );
+        }
+        other => panic!(
+            "missing permissions head should resolve persisted waits with a rejection, got {other:?}"
+        ),
+    }
+    assert!(matches!(
+        alice
+            .storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .and_then(|record| record.latest_settlement),
+        Some(crate::batch_fate::BatchSettlement::Rejected {
+            batch_id: settled_batch_id,
+            code,
+            reason,
+        }) if settled_batch_id == batch_id
+            && code == "permission_denied"
+            && reason.contains("no published permissions head")
+    ));
+    assert_eq!(
+        alice
+            .storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "missing permissions head should retract the optimistic visible row"
+    );
+}
+
+#[test]
 fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     // alice -> worker
     //   alice stages one transactional batch locally
@@ -6008,7 +6119,7 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
 }
 
 #[test]
-fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+fn rc_query_remote_tier_session_exists_rel_rejects_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -6110,22 +6221,21 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team"
+        Poll::Ready(Err(RuntimeError::QueryError(message))) => {
+            assert!(
+                message.contains("no published permissions head"),
+                "unexpected query error: {message}"
             );
-            assert_eq!(results[0].0, team_id);
         }
-        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Ready(other) => {
+            panic!("Query should reject when permissions head is missing, got {other:?}")
+        }
         Poll::Pending => panic!("Query should resolve after frontier completion"),
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
- {
+fn rc_query_remote_tier_backend_client_session_exists_rel_rejects_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -6224,21 +6334,21 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
+        Poll::Ready(Err(RuntimeError::QueryError(message))) => {
+            assert!(
+                message.contains("no published permissions head"),
+                "unexpected query error: {message}"
             );
-            assert_eq!(results[0].0, team_id);
         }
-        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Ready(other) => {
+            panic!("Query should reject when permissions head is missing, got {other:?}")
+        }
         Poll::Pending => panic!("Query should resolve after frontier completion"),
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+fn rc_query_remote_tier_backend_client_session_exists_rel_rejects_synced_policy_rows_without_permissions_head()
  {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
@@ -6346,15 +6456,15 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Synced policy context rows should keep the session-visible team"
+        Poll::Ready(Err(RuntimeError::QueryError(message))) => {
+            assert!(
+                message.contains("no published permissions head"),
+                "unexpected query error: {message}"
             );
-            assert_eq!(results[0].0, team_id);
         }
-        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Ready(other) => {
+            panic!("Query should reject when permissions head is missing, got {other:?}")
+        }
         Poll::Pending => panic!("Query should resolve after frontier completion"),
     }
 }

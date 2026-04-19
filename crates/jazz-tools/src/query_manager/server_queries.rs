@@ -72,6 +72,38 @@ struct UpdatePermissionRequest<'a> {
 }
 
 impl QueryManager {
+    pub(super) fn missing_permissions_head_reason() -> &'static str {
+        "backend has no published permissions head; push permissions before running session-scoped queries or writes against this backend"
+    }
+
+    pub(super) fn missing_permissions_head_for_session(&self, session: Option<&Session>) -> bool {
+        self.authorization_schema_required
+            && self.authorization_schema.is_none()
+            && session.is_some()
+    }
+
+    fn reject_query_without_permissions_head(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        session: Option<&Session>,
+    ) -> bool {
+        if !self.missing_permissions_head_for_session(session) {
+            return false;
+        }
+
+        self.sync_manager.emit_query_subscription_rejected(
+            client_id,
+            query_id,
+            format!(
+                "query rejected for query_id {}: {}",
+                query_id.0,
+                Self::missing_permissions_head_reason()
+            ),
+        );
+        true
+    }
+
     fn current_row_provenance(
         &mut self,
         storage: &dyn Storage,
@@ -160,6 +192,10 @@ impl QueryManager {
         env: &str,
         user_branch: &str,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+        if self.authorization_schema_required && self.authorization_schema.is_none() {
+            return None;
+        }
+
         let schema = self
             .authorization_schema
             .clone()
@@ -734,6 +770,14 @@ impl QueryManager {
                     .and_then(|c| c.session.clone())
             });
 
+            if self.reject_query_without_permissions_head(
+                sub.client_id,
+                sub.query_id,
+                session_for_policy.as_ref(),
+            ) {
+                continue;
+            }
+
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
@@ -1244,6 +1288,17 @@ impl QueryManager {
             None => {
                 if !self.authorization_schema_required {
                     self.sync_manager.approve_permission_check(storage, check);
+                    return;
+                }
+                if self.authorization_schema.is_none() {
+                    let reason = format!(
+                        "{:?} denied on table {} - {}",
+                        check.operation,
+                        table_name.0,
+                        Self::missing_permissions_head_reason()
+                    );
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
                     return;
                 }
                 let wait_started_at = check

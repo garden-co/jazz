@@ -128,6 +128,13 @@ pub struct PendingQuerySettled {
     pub through_seq: u64,
 }
 
+/// Deferred query rejection waiting for QueryManager to drop local state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQueryRejection {
+    pub query_id: QueryId,
+    pub reason: String,
+}
+
 // ============================================================================
 // Client Roles
 // ============================================================================
