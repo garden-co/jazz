@@ -194,46 +194,101 @@ users edit data at a much higher volume with agents, whether those agents live i
 
 # Fresh Idea 4: Fluid Schema Evolution
 
-Local-first and offline first bring two challenges: we already talked about data consitency, that's the
-obvious one. The more subtle challenge is that schema evolution becomes trickier once you have truly
-distributed state because you have to assume that there might be old clients that still write data
-against a now-outdated schema locally, that then needs to be synced to a database server with a newer
-schema. But even in conventional apps, API drift and old clients are a real problem.
+Local-first and offline first bring two challenges. We already talked about data consistency; that is
+the obvious one. The subtler challenge is schema evolution. Once you have truly distributed state, you
+have to assume that old clients may still be writing data locally against an outdated schema, and that
+data may only sync into a newer server schema later. But even in conventional apps, API drift and old
+clients are already a real problem.
 
-Traditionally, migrations are a stop-the-world event for the database and it's the job of the API in
-front of it to maintain backwards-compatibility for old clients. If our goal is to lessen the backend's
-burden of shuffling data around, we also have to make schema compatibility a responsibility of the
-database.
+Traditionally, migrations are stop-the-world events for the database, and it is the job of the API in
+front of it to maintain backward compatibility for old clients. If our goal is to lessen the backend's
+burden of shuffling data around, schema compatibility has to become a responsibility of the database
+too.
 
-To solve this, we combine two ideas.
+Jazz's promise is simple: clients should be able to keep speaking the schema they know,
+old and new versions should naturally interoperate, and rolling out schema changes should stop feeling
+like a coordinated freeze across your whole product. We call that idea "fluid migrations".
 
-First, we can make use of the native per-row branching and
-introduce "schema version" as an additional branch dimension. This means that a row with a stable
-identity can coexist having versions of itself in different schema branches. Updating the schema now
-simply creates a new isolated branch where rows have the new shape and we didn't have to stop the world
-and mutate data in-place.
+Jazz gets there by combining two ideas.
 
-Second, we take inspiration from the smart folks at Ink & Switch who thought about exactly this problem
-in their Cambria paper. Their main idea is to treat migrations not as a one-time mutation of data, but
-as a purely functional mapping between schema versions. And the key part is that the mappings are
-bi-directional. This unlocks old data being readable in the new format _and_ new data being readable
-in the old format.
+First, we make use of our native per-row branching and introduce schema version as an additional branch
+dimension. A row with a stable identity can then coexist in different schema branches at once.
+Updating the schema creates a new isolated branch where rows have the new shape, instead of forcing a
+single in-place mutation of all data.
 
-This is exactly how migrations work in Jazz: you define them (using our TypeScript migration DSL) as
-two-way mappings between old and new columns. Jazz then can use the mappings to read data in any target
-schema (old or new) by reading from _all_ schema branches, but mapping data from those with different
-native schemas. This idea even extends between simple (old, new) pairs of schema versions, you can build
-whole graphs of mutually compatible schema versions by chaining migration mappings accordingly. And Jazz
-automatically does this for you, your clients simply connect with the schema version they know, but can
-read and write all data that exists in other compatible schema versions.
+Second, we take inspiration from the smart folks at Ink & Switch, who thought deeply about exactly
+this problem in their Cambria paper. Their key idea is to treat migrations not as one-time mutations
+of data, but as purely functional mappings between schema versions. And the important part is that
+those mappings are bidirectional. That unlocks old data being readable in the new format _and_ new
+data being readable in the old format.
 
-We call all of this "fluid migrations", because it removes what might be the biggest bottleneck in
-deploying new versions of your app. Particularly complex apps that many people on benefit from this,
-where features are built and shipped concurrently, even rolled out concurrently using feature flags.
-And with agents, even small teams or single developers quickly build several features at once, and
-fluid migrations give them an abstraction to ship just as quickly while staying sane.
+This is exactly how migrations work in Jazz. You define them in our TypeScript migration DSL as
+two-way mappings between old and new columns. Jazz can then read data in any target schema by reading
+from _all_ schema branches and mapping data from those with different native schemas.
 
-# The Franken-stack Jazz replaces
+This idea also extends beyond simple old/new pairs. By chaining mappings, you can build whole graphs
+of mutually compatible schema versions. Jazz handles that automatically, so clients simply connect
+with the schema version they know, while still being able to read and write data that exists in other
+compatible schema versions.
+
+That removes what is often one of the biggest bottlenecks in shipping new versions of an app.
+Particularly complex apps built by large teams benefit from this, because many features are developed and rolled out concurrently, often behind feature flags.
+
+And with agents, even small teams or solo developers can reach that same level of parallel change. Fluid migrations provide a way to ship entire features including changes to the shape of your data quickly and often.
+
+# The Franken-stack that Jazz replaces
+
+A good way to get an overview of what Jazz provides is to look at what it replaces compared to the
+existing and planned stacks out there without Jazz. This picture becomes clear from what we
+specifically designed Jazz to do, from greenfield apps that turn out much simpler than expected, and
+from existing apps that have been able to shed significant complexity since adopting Jazz.
+
+The most obvious part that Jazz replaces is the database. Even without the extra jobs that Jazz can
+take on, it already subsumes a bunch of tooling that is typically used around the database, just to
+make maintenance, integration easier: schema definition DSLs, migration frameworks and ORMs. As you've
+seen, these are all part of a cohesive whole in Jazz.
+
+Then, there are infra components that are still close to the database and aid with performance and
+scalability. One common one for bigger apps are connection poolers like PGBouncer. These are unnecessary
+in Jazz, since it was explicitly built for large numbers of clients connecting directly to the database.
+Another key component are caches in front of the database. They often quickly alleviate stress on
+databases, but come with tricky problems like cache invalidation and accidental auth-bypasses. For this
+reason, we architected Jazz to inherently consist of caching layers (making use of it's local-first
+nature) but threading consistency and permissions as first-class concerns through the layers.
+
+Two other data-related infra components that increasingly occur in stacks are dedicated queue and
+durable stream providers. They help with distributing the system and make low-latency and
+high-throughput data exchange possible. We believe that you should get both from your database: sync should compete on latency and throughput and should offer an even easier mental model and integration
+story: the endpoints simply write data into the database and read incoming updates out of it.
+
+Casting the net wider, we have been known for our batteries-included philosophy. Part of that is a
+frontend-centric sympathy for app builders, but it's also a result of having a broader concept of what kind of data a database should house and deliver. Jazz is able to store and stream-sync large blobs just
+as well as structured data and thus lets you get rid of external blob storage. This means one less
+external system to resolve references to - and blobs automatically participate in permissions and
+caching.
+
+Thinking about where the data is consumed, Jazz eliminates the need for a whole group of data-fetching
+abstractions in the frontend. These have grown quite complex, with some essentially containing half a
+sync engine with optimistic updates over yet another mirror of the underlying data. Jazz completely
+abstract data transport, fetching and revalidation from you, only having you define the shape of the
+data each component of your app needs.
+
+The last replacement is perhaps the most surprising: Jazz also often replaces ephemeral front-end state.
+The user interfaces of modern apps can get quite complex and the proliferation of whole state handling
+frameworks hints at a need for a database-shaped solution here, too. Jazz provides a more rigorous
+relational model and slots perfectly into the now common expectation of something that looks like
+global reactive state. It internally deduplicates data queries and optimizes what gets rerendered.
+And once you just happen to have durability available, it suddenly clearly makes sense for the UX in
+many unexpected places.
+
+Just as interesting as what Jazz replaces is what remains, though: Jazz intentionally is not a
+"Backend as a Service." For many apps it provides enough functionality to act as such, but it is also
+very careful about being a good citizen in a larger ensemble of backend systems and integrations. Most
+importantly, it allows you to keep backend business logic around Jazz in arbitrary external forms of
+compute, recognizing priviledged access and the ability for handlers to attribute backend writes to
+users. Because of the similarity between sync, queues, and streams, it has also proven to act as
+excellent real-time glue between other backend components, often resulting in a more decoupled,
+type-safe and secure overall integration.
 
 # Alternatives and friends
 
