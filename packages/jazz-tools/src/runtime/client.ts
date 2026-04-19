@@ -190,6 +190,16 @@ export interface QueryExecutionOptions {
   visibility?: QueryVisibility;
 }
 
+type TransactionQueryOverlay = {
+  batchId: string;
+  branchName: string;
+  rowIds: string[];
+};
+
+type InternalQueryExecutionOptions = QueryExecutionOptions & {
+  transactionOverlay?: TransactionQueryOverlay;
+};
+
 export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
@@ -197,6 +207,10 @@ export interface ResolvedQueryExecutionOptions {
   strictTransactions: boolean;
   visibility: QueryVisibility;
 }
+
+type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
+  transactionOverlay?: TransactionQueryOverlay;
+};
 
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
@@ -529,11 +543,16 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
+function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     strict_transactions?: boolean;
+    transaction_overlay?: {
+      batch_id: string;
+      branch_name: string;
+      row_ids: string[];
+    };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
@@ -544,8 +563,20 @@ function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | u
   if (options.strictTransactions) {
     payload.strict_transactions = true;
   }
+  if (options.transactionOverlay && options.transactionOverlay.rowIds.length > 0) {
+    payload.transaction_overlay = {
+      batch_id: options.transactionOverlay.batchId,
+      branch_name: options.transactionOverlay.branchName,
+      row_ids: options.transactionOverlay.rowIds,
+    };
+  }
 
-  if (!payload.propagation && !payload.local_updates && !payload.strict_transactions) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.strict_transactions &&
+    !payload.transaction_overlay
+  ) {
     return undefined;
   }
 
@@ -782,6 +813,7 @@ export class PersistedWrite<T> {
 
 export class Transaction {
   private committed = false;
+  private readonly touchedRowIds = new Set<string>();
 
   constructor(
     private readonly client: JazzClient,
@@ -790,10 +822,26 @@ export class Transaction {
     private readonly attribution?: string,
   ) {}
 
-  private ensureWritable(): void {
+  private ensureActive(): void {
     if (this.committed) {
       throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
     }
+  }
+
+  private markTouchedRow(rowId: string): void {
+    this.touchedRowIds.add(rowId);
+  }
+
+  private queryOptions(options?: QueryExecutionOptions): InternalQueryExecutionOptions {
+    return {
+      ...options,
+      localUpdates: "deferred",
+      transactionOverlay: {
+        batchId: this.batchContext.batchId,
+        branchName: this.batchContext.targetBranchName,
+        rowIds: [...this.touchedRowIds],
+      },
+    };
   }
 
   batchId(): string {
@@ -810,8 +858,8 @@ export class Transaction {
   }
 
   create(table: string, values: InsertValues): DirectInsertResult {
-    this.ensureWritable();
-    return this.client.createInternal(
+    this.ensureActive();
+    const row = this.client.createInternal(
       table,
       values,
       this.session,
@@ -819,6 +867,8 @@ export class Transaction {
       undefined,
       this.batchContext,
     );
+    this.markTouchedRow(row.id);
+    return row;
   }
 
   createPersisted(
@@ -826,8 +876,8 @@ export class Transaction {
     values: InsertValues,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<Row> {
-    this.ensureWritable();
-    return this.client.createPersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.createPersistedInternal(
       table,
       values,
       this.session,
@@ -835,17 +885,21 @@ export class Transaction {
       options,
       this.batchContext,
     );
+    this.markTouchedRow(pendingWrite.value().id);
+    return pendingWrite;
   }
 
   update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
-    this.ensureWritable();
-    return this.client.updateInternal(
+    this.ensureActive();
+    const result = this.client.updateInternal(
       objectId,
       updates,
       this.session,
       this.attribution,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return result;
   }
 
   updatePersisted(
@@ -853,8 +907,8 @@ export class Transaction {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.updatePersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.updatePersistedInternal(
       objectId,
       updates,
       this.session,
@@ -862,22 +916,38 @@ export class Transaction {
       options,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return pendingWrite;
   }
 
   delete(objectId: string): DirectMutationResult {
-    this.ensureWritable();
-    return this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+    this.ensureActive();
+    const result = this.client.deleteInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+    this.markTouchedRow(objectId);
+    return result;
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.deletePersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.deletePersistedInternal(
       objectId,
       this.session,
       this.attribution,
       options,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return pendingWrite;
+  }
+
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    this.ensureActive();
+    return this.client.queryInternal(query, this.session, this.queryOptions(options));
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -1487,12 +1557,19 @@ export class JazzClient {
   }
 
   private normalizeQueryExecutionOptions(
-    options?: QueryExecutionOptions,
-  ): ResolvedQueryExecutionOptions {
-    return resolveEffectiveQueryExecutionOptions(
+    options?: InternalQueryExecutionOptions,
+  ): ResolvedInternalQueryExecutionOptions {
+    const resolved = resolveEffectiveQueryExecutionOptions(
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
     );
+    if (!options?.transactionOverlay) {
+      return resolved;
+    }
+    return {
+      ...resolved,
+      transactionOverlay: options.transactionOverlay,
+    };
   }
 
   private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
@@ -2022,7 +2099,7 @@ export class JazzClient {
   async queryInternal(
     query: string | QueryInput,
     session?: Session,
-    options?: QueryExecutionOptions,
+    options?: InternalQueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);

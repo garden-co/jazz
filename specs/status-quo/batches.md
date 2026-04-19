@@ -480,6 +480,12 @@ The `Db` batch handles are intentionally seeded by a table: that first table cho
 client/schema, and later writes through the same handle must stay on that client-bound schema
 surface.
 
+Transactional handles also support transaction-scoped reads before commit:
+
+- `Transaction.query(...)`
+- `DbTransaction.all(...)`
+- `DbTransaction.one(...)`
+
 `PersistedWrite` also stays batch-shaped:
 
 - `batchId()` returns the logical batch id
