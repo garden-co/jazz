@@ -625,18 +625,26 @@ impl QueryManager {
         })
     }
 
-    fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
-        self.client_bypasses_authorization_filtering(client_id)
+    fn should_sync_policy_context_rows(
+        &self,
+        client_id: ClientId,
+        session: Option<&Session>,
+    ) -> bool {
+        self.client_bypasses_authorization_filtering(client_id, session)
     }
 
-    fn client_bypasses_authorization_filtering(&self, client_id: ClientId) -> bool {
+    fn client_bypasses_authorization_filtering(
+        &self,
+        client_id: ClientId,
+        session: Option<&Session>,
+    ) -> bool {
         self.sync_manager
             .get_client(client_id)
             .map(|client| {
-                matches!(
-                    client.role,
-                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
-                )
+                matches!(client.role, ClientRole::Peer | ClientRole::Admin)
+                    || matches!(client.role, ClientRole::Backend)
+                        && client.session.is_none()
+                        && session.is_none()
             })
             .unwrap_or(false)
     }
@@ -768,7 +776,8 @@ impl QueryManager {
                 continue;
             };
 
-            let sync_policy_context_rows = self.should_sync_policy_context_rows(sub.client_id);
+            let sync_policy_context_rows =
+                self.should_sync_policy_context_rows(sub.client_id, session_for_policy.as_ref());
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
@@ -815,7 +824,9 @@ impl QueryManager {
             // locally, including any ordered prefix required by pagination.
             let policy_context_tables =
                 Self::merged_policy_context_tables(&graph, &sub.policy_context_tables);
-            let scope = if self.client_bypasses_authorization_filtering(sub.client_id) {
+            let scope = if self
+                .client_bypasses_authorization_filtering(sub.client_id, session_for_policy.as_ref())
+            {
                 let result_scope = graph.sync_scope_object_ids();
                 Some(
                     if sync_policy_context_rows || !policy_context_tables.is_empty() {
@@ -1000,10 +1011,10 @@ impl QueryManager {
                 // Check if scope changed
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
-                if self.client_bypasses_authorization_filtering(client_id) {
+                if self.client_bypasses_authorization_filtering(client_id, sub.session.as_ref()) {
                     let result_scope = sub.graph.sync_scope_object_ids();
                     Some(
-                        if self.should_sync_policy_context_rows(client_id)
+                        if self.should_sync_policy_context_rows(client_id, sub.session.as_ref())
                             || !policy_context_tables.is_empty()
                         {
                             Self::scope_with_policy_context_rows_for_tables(
