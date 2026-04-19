@@ -1,5 +1,7 @@
 # jazz-napi
 
+## 2.0.0-alpha.34
+
 ## 2.0.0-alpha.33
 
 ### Patch Changes
