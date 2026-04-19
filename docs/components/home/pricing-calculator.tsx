@@ -227,10 +227,10 @@ export function PricingCalculator() {
         <div className="space-y-8 border-t pt-8">
           <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-end">
             <div className="pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Cost per user / mo
               </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
+              <p className="font-display mt-2 text-3xl font-black tracking-[-0.05em]">
                 {formatCurrency(monthlyCostPerUser)}
               </p>
               <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
@@ -238,10 +238,10 @@ export function PricingCalculator() {
               </p>
             </div>
             <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Estimated monthly bill
               </p>
-              <p className="text-5xl font-black tracking-[-0.06em]">
+              <p className="font-display text-5xl font-black tracking-[-0.06em]">
                 {formatCurrency(estimate.totalMonthlyCost)}
               </p>
             </div>
