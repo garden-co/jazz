@@ -116,31 +116,35 @@ time spent offline.
 
 ## Fresh Idea 2: Row-Level Security With Per-Query Auth
 
-Row-level security was introduced in PostgreSQL as a way to make precise permission policies the
-database's concern, letting you define them in the database's native language of queries. We believe
-this is very powerful because it centralizes what is maybe the most important job of the backend:
-authorization of data changes. And this is not an abstract belief, but something that I've practiced
-for years before starting Jazz, where I built many apps using PostGraphile and RLS, resulting in very
-thin backends and a standardized style for schema + permission definition.
+In a local-first system, permissions do not only control what a centralized backend returns. They
+also determine what is allowed to sync down and exist locally on a device in the first place. That
+makes authorization a much deeper part of the data model.
 
-Still, RLS feels like an optional afterthought in PostgreSQL and while Postgres can support authentication with JWTs via extensions, RLS still is far removed from authentication as an obvious
-integration point for authorization. PostgreSQLs own user system is also confusing the situation.
+Row-level security is still the best prior art for thinking about this. PostgreSQL introduced it as
+a way to make precise permission policies the database's concern, expressed in the same language as
+queries themselves. That is a powerful idea because it centralizes one of the backend's most
+important jobs: deciding who can see and change which data.
 
-Jazz takes an opinionated, modern stance: users and authentication is an external system, but
-authenticating directly to the database when doing queries or mutations is the expected norm. This
-can only be bypassed by backend clients where the assumption is that the app developer handles more
-complex forms of authorization or gate-like business logic themselves.
+But in PostgreSQL, RLS still feels like an optional layer on top of a primarily centralized system.
+Authentication, querying, and authorization are adjacent concepts rather than one clearly integrated
+flow.
 
-For most other things, Jazz offers an expressive permission language that consists of queries over
-data and user JWT claims. This makes defining permissions end-to-end a breeze, whether its a small
-app that mostly cares about users, teams and invites, or it's a big enterprise app with complex role
-structures that a provider like WorkOS can provide as JWT claims that can then be matched onto
-relevant structures in the data that should be accessible or mutable.
+Jazz leans into that integration. Users and authentication come from external systems, usually expressed through JWTs, but authenticating directly to the database for queries and mutations is the expected norm. Permission policies are then written as queries over both data and user claims, so visibility and mutability are shaped by the same model that shapes the rest of the database.
 
-Our TypeScript-first approach helps here, too: permission policies are typechecked against the schema
-they are written over, and we provide helpers to unit-test permissions extensively without having to
-involve more parts of your app or infrastructure. This is particularly helpful when designing
-permissions with agents while retaining easy-to-read confidence that key permission invariants hold.
+That is what we mean by per-query auth: auth is not a wrapper around database access, it is part of
+how database access is evaluated. Backend clients can still bypass this when an app needs more
+specialized authorization or gate-like business logic, but the default path is much more direct.
+
+Our TypeScript-first approach helps here too. Permission policies are typechecked against the schema
+they are written over, and we provide helpers to unit-test them without involving more parts of
+your app or infrastructure. That matters for small apps with simple team-and-invite models, for
+larger enterprise apps mapping detailed external role claims onto complex data schemas, and especially for agentic workflows where permission rules need to stay legible and verifiable.
+
+Jazz's vertical integration becomes apparent here, too: because Jazz is RLS-first, we can combine
+a user query with the policy queries applicable to it and run it through our query optimizer as a
+whole. This is particularly beneficial for apps where access control gets more complicated than
+the governed data itself, letting you evaluate multi-hop permission checks over many relations
+in a graph-like way, all in a single round-trip.
 
 ## Fresh Idea 3: Real-Time Collaboration And Deep Histories
 
