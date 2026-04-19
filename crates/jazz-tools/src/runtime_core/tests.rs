@@ -4851,7 +4851,7 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
     match receiver.try_recv() {
         Ok(Some(Err(rejection))) => {
             assert_eq!(rejection.batch_id, batch_id);
-            assert_eq!(rejection.code, "permission_denied");
+            assert_eq!(rejection.code, "permissions_head_missing");
             assert!(
                 rejection.reason.contains("no published permissions head"),
                 "unexpected rejection reason: {}",
@@ -4873,7 +4873,7 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
             code,
             reason,
         }) if settled_batch_id == batch_id
-            && code == "permission_denied"
+            && code == "permissions_head_missing"
             && reason.contains("no published permissions head")
     ));
     assert_eq!(
@@ -6223,6 +6223,10 @@ fn rc_query_remote_tier_session_exists_rel_rejects_without_permissions_head() {
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Err(RuntimeError::QueryError(message))) => {
             assert!(
+                message.contains("permissions_head_missing"),
+                "unexpected query error: {message}"
+            );
+            assert!(
                 message.contains("no published permissions head"),
                 "unexpected query error: {message}"
             );
@@ -6335,6 +6339,10 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_rejects_without_permis
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Err(RuntimeError::QueryError(message))) => {
+            assert!(
+                message.contains("permissions_head_missing"),
+                "unexpected query error: {message}"
+            );
             assert!(
                 message.contains("no published permissions head"),
                 "unexpected query error: {message}"
@@ -6457,6 +6465,10 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_rejects_synced_policy_
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Err(RuntimeError::QueryError(message))) => {
+            assert!(
+                message.contains("permissions_head_missing"),
+                "unexpected query error: {message}"
+            );
             assert!(
                 message.contains("no published permissions head"),
                 "unexpected query error: {message}"

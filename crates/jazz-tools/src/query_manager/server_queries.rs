@@ -95,6 +95,7 @@ impl QueryManager {
         self.sync_manager.emit_query_subscription_rejected(
             client_id,
             query_id,
+            "permissions_head_missing",
             format!(
                 "query rejected for query_id {}: {}",
                 query_id.0,
@@ -815,6 +816,7 @@ impl QueryManager {
                 self.sync_manager.emit_query_subscription_rejected(
                     sub.client_id,
                     sub.query_id,
+                    "query_compilation_failed",
                     reason,
                 );
                 continue;
@@ -1297,8 +1299,12 @@ impl QueryManager {
                         table_name.0,
                         Self::missing_permissions_head_reason()
                     );
-                    self.sync_manager
-                        .reject_permission_check(storage, check, reason);
+                    self.sync_manager.reject_permission_check_with_code(
+                        storage,
+                        check,
+                        "permissions_head_missing".to_string(),
+                        reason,
+                    );
                     return;
                 }
                 let wait_started_at = check
