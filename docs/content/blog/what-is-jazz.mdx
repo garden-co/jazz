@@ -93,24 +93,54 @@ existing database or ORM. That is what lets us optimize the whole stack, provide
 
 ## Fresh Idea 1: Local-First Data With Tunable Consistency
 
-The idea of local-first goes hand-in-hand with the assumption of eventual consistency. That is what
-allows distributed state to temporarily diverge, which is important for low-latency local edits and vitally necessary to enable offline writes that are more than temporary optimistic previews.
+Local-first goes hand-in-hand with eventual consistency. If data can be edited in many places at
+once, those copies will sometimes diverge temporarily. In eventual consistency, that is expected,
+and is what makes low-latency local edits and truly offline writes possible.
 
-Our surprising learning is that eventual consistency is actually fine for 90% of the state of most
-apps, and that very simple conflict resolution strategies capture the intent of concurrent editors well.
+Our surprising learning is that eventual consistency is actually fine for 90% of the state in most
+apps, and that very simple conflict resolution strategies often capture the intent of concurrent
+editors well.
 
-The exceptions where you want globally consistent transactions are obvious: purchases, claims of
-limited resources, multi-row or multi-table updates that should be all-or-nothing.
+The cases where you want globally consistent transactions are usually obvious: purchases, claims of
+limited resources, or multi-row and multi-table updates that should be all-or-nothing.
 
-We've learned from our adopters that even if only a small part of an apps schema needs to be
-transactional, this is not worth introducing a second database system for. What you really want
-is a database that lets you trade off low-latency for global consistency where you need it.
+What we've learned from adopters is that even if only a small part of an app's schema needs strong
+consistency, that still isn't a good reason to introduce a second database system. What you
+actually want is one database that lets you trade low-latency for global consistency only where the
+semantics demand it.
 
-Jazz offers a combined model where individual tables or writes can be declared transactional,
-but are otherwise a natural part of the system and usefully become optimistic pending transactions
-until they can be centrally approved or rejected (and can stay in this pending state while offline).
+Jazz offers that combined model. Individual tables or writes can be declared transactional, while
+the rest of the system stays naturally local-first. Those transactional writes can still begin as
+optimistic local actions, then resolve once they are centrally approved or rejected, including after
+time spent offline.
 
 ## Fresh Idea 2: Row-Level Security With Per-Query Auth
+
+Row-level security was introduced in PostgreSQL as a way to make precise permission policies the
+database's concern, letting you define them in the database's native language of queries. We believe
+this is very powerful because it centralizes what is maybe the most important job of the backend:
+authorization of data changes. And this is not an abstract belief, but something that I've practiced
+for years before starting Jazz, where I built many apps using PostGraphile and RLS, resulting in very
+thin backends and a standardized style for schema + permission definition.
+
+Still, RLS feels like an optional afterthought in PostgreSQL and while Postgres can support authentication with JWTs via extensions, RLS still is far removed from authentication as an obvious
+integration point for authorization. PostgreSQLs own user system is also confusing the situation.
+
+Jazz takes an opinionated, modern stance: users and authentication is an external system, but
+authenticating directly to the database when doing queries or mutations is the expected norm. This
+can only be bypassed by backend clients where the assumption is that the app developer handles more
+complex forms of authorization or gate-like business logic themselves.
+
+For most other things, Jazz offers an expressive permission language that consists of queries over
+data and user JWT claims. This makes defining permissions end-to-end a breeze, whether its a small
+app that mostly cares about users, teams and invites, or it's a big enterprise app with complex role
+structures that a provider like WorkOS can provide as JWT claims that can then be matched onto
+relevant structures in the data that should be accessible or mutable.
+
+Our TypeScript-first approach helps here, too: permission policies are typechecked against the schema
+they are written over, and we provide helpers to unit-test permissions extensively without having to
+involve more parts of your app or infrastructure. This is particularly helpful when designing
+permissions with agents while retaining easy-to-read confidence that key permission invariants hold.
 
 ## Fresh Idea 3: Real-Time Collaboration And Deep Histories
 
