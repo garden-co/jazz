@@ -155,40 +155,36 @@ go.
 
 ## Fresh Idea 3: Real-Time Collaboration And Deep Histories
 
-Collaboration in apps might first seem like purely a UI problem. Real-time collaboration more
-clearly has infrastructure implications because it introduces a need for low-latency, high throughput
-communication that traditional centralized databases and request/response servers struggle with.
+Collaboration in apps can look like a UI feature from the outside. But once multiple people and
+agents are working on the same data, you need low-latency propagation, offline work, drafts,
+concurrent edits, and a coherent notion of how changes relate over time.
 
-What turns this into a qualitative new need over Web 2.0 apps is when the intensity of collaboration
-becomes difficult to handle on the semantic level: many humans and many agents working on the same data,
-often concurrently. Maybe even completely offline, or the functional equivalent of working on a personal
-working draft of the data. Currently, apps are forced to implement all this logic in their own business
-logic. Similarly to permissions, this makes up a bulk of the complexity of collaborative apps, but is
-also very generalizable.
+Jazz's answer is to make history and branching first-class parts of the database. Instead of asking
+each app to bolt on its own collaboration logic, Jazz asks: what if each row had its own branched,
+Git-like history, with sync and merge semantics built in?
 
-The proof that this general collaboration abstractions can cover many uses cases is the success of
-version control systems like Git. But Git is still mostly used by software developers and its filesystem
-based approach doesn't scale up to the data sizes you might want in a database, and it doesn't scale
-down to the granularity of edits that you're interested in in a database: individual column changes,
-not just whole-line based edits.
+The motivation behind this is realizing that collaboration is actually a qualitatively new need over classic Web 2.0 apps. The hard part is not just moving more edits faster, but representing concurrent work: authorship metadata, overlapping edits, offline changes, and deciding when a merge should be automatic versus explicit.
+Today, most apps implement that themselves in business logic. Similarly to permissions, a large part
+of the complexity is app-specific on the surface, but generalizable underneath.
 
-A similar idea that history matters and is generalizable can be found in append-only databases like
-Datomic, where edits are as important as the current end-result and historical queries are as
-straightforward as up-to-date ones.
+Version control systems like Git are proof that general collaboration abstractions can be useful
+across many workflows. But Git is shaped around files and line-based diffs. A database needs
+something finer-grained: individual column updates, structured merge behavior, and histories that
+scale to large relational datasets. Datomic points at another important idea: that edits and
+historical queries matter, not just the latest materialized state.
 
-Jazz takes inspiration from both systems and asks: what if we gave each row its own branched (Git-like)
-history? We've found a way to make this work efficiently (as a natural extension of MVCC ideas) and made
-branching a native feature from the storage format, to the sync protocol and the high-level user APIs.
+In Jazz, branching is native from the storage format to the sync protocol to the high-level APIs.
+That lets collaborative apps support concurrent edits with merge strategies that fit the data
+(per-column last-writer-wins, json merging, rich-text merging). It also lets you expose branching
+directly when you want drafts, review flows, or explicit handoffs between people and agents.
 
-This means that if you want to build a collaborative app, Jazz gives you very expressive tools to
-support concurrent edits with smart merge strategies that make sense for different kinds of data
-(per-column last-writer-wins, json merging, rich-text merging). You can even expose explicit branching
-to your users for personal drafts vs. published versions of entities, or complex feature-like branches
-between humans and agents.
+Even apps with simple or no collaboration still benefit from this model, because the database will
+track writer identity and create change history as a side-effect of normal mutation. That is why metadata like `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` can fall out naturally.
 
-But even when you have an app with simple or no collaboration, you automatically benefit from the notion
-that the database itself distinguishes writer identities, giving you "magic columns" like `$createdAt`,
-`$createdBy`, `$updatedAt` and `$updatedBy` for free.
+To summarize, we designed Jazz with the belief that data is more than just a mutable "current state".
+The actors involved in writing that data and the exact series of events that resulted in the current
+state is what really makes the data what it is. And we believe that is going to be more important than
+ever in this age of agent-supported hyper-prolific app users.
 
 ## Fresh Idea 4: Fluid Schema Evolution
 
