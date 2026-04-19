@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::object::ObjectId;
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
@@ -20,8 +21,6 @@ use super::session::Session;
 #[cfg(test)]
 use super::types::Value;
 use super::types::{ComposedBranchName, Schema, SchemaHash};
-#[cfg(test)]
-use crate::object::ObjectId;
 
 type ReplayableQuerySubscription = (
     QueryId,
@@ -30,6 +29,13 @@ type ReplayableQuerySubscription = (
     QueryPropagation,
     Vec<String>,
 );
+
+pub(crate) struct SubscriptionExecutionOptions {
+    pub(crate) local_updates: LocalUpdates,
+    pub(crate) strict_transactions: bool,
+    pub(crate) propagation: QueryPropagation,
+    pub(crate) local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
+}
 
 impl QueryManager {
     pub(crate) fn policy_context_tables_for_graph(graph: &super::graph::QueryGraph) -> Vec<String> {
@@ -94,9 +100,12 @@ impl QueryManager {
             query,
             session,
             durability_tier,
-            local_updates,
-            false,
-            QueryPropagation::Full,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions: false,
+                propagation: QueryPropagation::Full,
+                local_overlay_rows: HashMap::new(),
+            },
         )
     }
 
@@ -105,10 +114,14 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
-        local_updates: LocalUpdates,
-        strict_transactions: bool,
-        propagation: QueryPropagation,
+        options: SubscriptionExecutionOptions,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let SubscriptionExecutionOptions {
+            local_updates,
+            strict_transactions,
+            propagation,
+            local_overlay_rows,
+        } = options;
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
@@ -170,6 +183,7 @@ impl QueryManager {
                 strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
+                local_overlay_rows,
                 query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
@@ -251,6 +265,7 @@ impl QueryManager {
                 strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
+                local_overlay_rows: HashMap::new(),
                 query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
@@ -326,7 +341,7 @@ impl QueryManager {
         )
     }
 
-    pub fn subscribe_with_sync_and_propagation_with_local_updates(
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_updates(
         &mut self,
         query: Query,
         session: Option<Session>,
@@ -335,19 +350,41 @@ impl QueryManager {
         strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        // Create local subscription
+        self.subscribe_with_sync_and_propagation_with_local_overlay(
+            query,
+            session,
+            durability_tier,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions,
+                propagation,
+                local_overlay_rows: HashMap::new(),
+            },
+        )
+    }
+
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_overlay(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        options: SubscriptionExecutionOptions,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        let overlay_row_ids: HashSet<_> = options.local_overlay_rows.keys().copied().collect();
+        let propagation = options.propagation;
         let sub_id = self.subscribe_with_session_and_propagation(
             query.clone(),
             session.clone(),
             durability_tier,
-            local_updates,
-            strict_transactions,
-            propagation,
+            options,
         )?;
 
         if let Some(subscription) = self.subscriptions.get_mut(&sub_id) {
             subscription.sync_backed = true;
-            if subscription.local_updates == LocalUpdates::Immediate
+            if !overlay_row_ids.is_empty() {
+                subscription.pending_local_row_ids.extend(overlay_row_ids);
+                subscription.has_pending_local_updates = true;
+            } else if subscription.local_updates == LocalUpdates::Immediate
                 && !self.pending_local_row_batches.is_empty()
             {
                 subscription

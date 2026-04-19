@@ -196,6 +196,9 @@ pub(crate) struct QuerySubscription {
     /// Row ids that should use the local current version as an overlay while
     /// waiting for a stricter settled tier.
     pub(crate) pending_local_row_ids: HashSet<ObjectId>,
+    /// Optional one-shot overlay keyed by row id for a specific local batch.
+    /// When present, reads must not fall back to unrelated pending local rows.
+    pub(crate) local_overlay_rows: HashMap<ObjectId, RowBatchKey>,
     /// True once the initial upstream query frontier has been replayed.
     pub(crate) query_frontier_complete: bool,
     /// Current ordered IDs for ordered delta construction.
@@ -1178,10 +1181,13 @@ impl QueryManager {
                         } else {
                             subscription.durability_tier
                         };
-                        let local_pending_version = (subscription.local_updates
-                            == LocalUpdates::Immediate)
-                            .then(|| self.pending_local_row_batches.get(&id).copied())
-                            .flatten();
+                        let local_pending_version = if !subscription.local_overlay_rows.is_empty() {
+                            subscription.local_overlay_rows.get(&id).copied()
+                        } else {
+                            (subscription.local_updates == LocalUpdates::Immediate)
+                                .then(|| self.pending_local_row_batches.get(&id).copied())
+                                .flatten()
+                        };
                         Self::load_visible_row_for_query(
                             storage_ref,
                             id,
@@ -1189,6 +1195,7 @@ impl QueryManager {
                             &branches,
                             durability_tier,
                             local_pending_version,
+                            !subscription.local_overlay_rows.is_empty(),
                             include_deleted,
                             schema_context,
                             branch_schema_map,
@@ -2040,6 +2047,7 @@ impl QueryManager {
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         local_pending_version: Option<RowBatchKey>,
+        prefer_local_overlay: bool,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -2047,16 +2055,7 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
-            storage,
-            row_id,
-            table_hint,
-            branches,
-            durability_tier,
-            schema_context,
-            branch_schema_map,
-        )
-        .or_else(|| {
+        let exact_pending_visible_row = || {
             let pending_version = local_pending_version?;
             let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
                 storage,
@@ -2071,8 +2070,8 @@ impl QueryManager {
             (row.batch_id == pending_version.batch_id
                 && row.branch.as_str() == pending_version.branch_name.as_str())
             .then_some(resolved)
-        })
-        .or_else(|| {
+        };
+        let pending_staged_row = || {
             let pending_version = local_pending_version?;
             let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
                 storage,
@@ -2085,7 +2084,27 @@ impl QueryManager {
                 && row.branch.as_str() == pending_version.branch_name.as_str()
                 && matches!(row.state, RowState::StagingPending))
             .then_some(resolved)
-        })?;
+        };
+        let best_visible_row = || {
+            Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                branches,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
+        };
+        let resolved = if prefer_local_overlay {
+            exact_pending_visible_row()
+                .or_else(pending_staged_row)
+                .or_else(best_visible_row)
+        } else {
+            best_visible_row()
+                .or_else(exact_pending_visible_row)
+                .or_else(pending_staged_row)
+        }?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {

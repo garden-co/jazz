@@ -36,7 +36,7 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
@@ -51,6 +51,13 @@ use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowBatchKey, ServerId,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryLocalOverlay {
+    pub batch_id: BatchId,
+    pub branch_name: BranchName,
+    pub row_ids: Vec<ObjectId>,
+}
 
 // ============================================================================
 // Scheduler and SyncSender traits
