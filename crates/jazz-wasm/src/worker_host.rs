@@ -161,6 +161,8 @@ mod wasm_worker {
         peer_id_by_runtime_client: HashMap<String, String>,
         /// Last known term for each peer_id.
         peer_term_by_peer_id: HashMap<String, u32>,
+        /// Set to true when the worker should exit the dispatch loop.
+        should_exit: bool,
     }
 
     impl WorkerHost {
@@ -179,6 +181,7 @@ mod wasm_worker {
                 peer_runtime_client_by_peer_id: HashMap::new(),
                 peer_id_by_runtime_client: HashMap::new(),
                 peer_term_by_peer_id: HashMap::new(),
+                should_exit: false,
             }
         }
 
@@ -221,6 +224,29 @@ mod wasm_worker {
             if let Some(runtime_client_id) = self.peer_runtime_client_by_peer_id.remove(peer_id) {
                 self.peer_id_by_runtime_client.remove(&runtime_client_id);
                 self.peer_term_by_peer_id.remove(peer_id);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // post — send a WorkerFrame to the main thread
+        // ------------------------------------------------------------------
+
+        async fn post(&self, frame: WorkerFrame) {
+            use jazz_tools::transport_manager::StreamAdapter;
+            let bytes = encode(&frame);
+            let _ = self.stream_send.borrow_mut().send(bytes).await;
+        }
+
+        // ------------------------------------------------------------------
+        // flush_wal_best_effort — flush WAL on lifecycle hint
+        // ------------------------------------------------------------------
+
+        fn flush_wal_best_effort(&self) {
+            if !self.init_complete {
+                return;
+            }
+            if let Some(runtime_rc) = self.runtime.as_ref() {
+                runtime_rc.borrow().flush_wal();
             }
         }
 
@@ -712,16 +738,147 @@ mod wasm_worker {
                 WorkerFrame::PeerClose { peer_id } => {
                     host.close_peer(&peer_id);
                 }
-                WorkerFrame::LifecycleHint { .. } => { /* TODO 6d */ }
-                WorkerFrame::UpdateAuth { .. } => { /* TODO 6d */ }
-                WorkerFrame::DisconnectUpstream => { /* TODO 6d */ }
-                WorkerFrame::ReconnectUpstream => { /* TODO 6d */ }
-                WorkerFrame::Shutdown => { /* TODO 6d */ }
-                WorkerFrame::SimulateCrash => { /* TODO 6d */ }
-                WorkerFrame::DebugSchemaState => { /* TODO 6d */ }
-                WorkerFrame::DebugSeedLiveSchema { .. } => { /* TODO 6d */ }
+                WorkerFrame::LifecycleHint { event, .. } => {
+                    match event {
+                        jazz_tools::worker_frame::LifecycleEvent::VisibilityHidden
+                        | jazz_tools::worker_frame::LifecycleEvent::Pagehide
+                        | jazz_tools::worker_frame::LifecycleEvent::Freeze => {
+                            host.flush_wal_best_effort();
+                        }
+                        jazz_tools::worker_frame::LifecycleEvent::VisibilityVisible
+                        | jazz_tools::worker_frame::LifecycleEvent::Resume => {
+                            // Rust-owned transport handles reconnect automatically; no-op.
+                        }
+                    }
+                }
+                WorkerFrame::UpdateAuth { jwt } => {
+                    merge_auth(&mut host.current_auth, jwt.as_deref());
+                    if let Some(runtime_rc) = host.runtime.as_ref() {
+                        let auth_json =
+                            serde_json::to_string(&host.current_auth).unwrap_or_default();
+                        if let Err(e) = runtime_rc.borrow().update_auth(auth_json) {
+                            web_sys::console::warn_1(
+                                &format!("[worker] update_auth failed: {e:?}").into(),
+                            );
+                            host.post(WorkerFrame::AuthFailed {
+                                reason: jazz_tools::worker_frame::AuthFailureReason::Invalid,
+                            })
+                            .await;
+                        }
+                    }
+                }
+                WorkerFrame::DisconnectUpstream => {
+                    if let Some(runtime_rc) = host.runtime.as_ref() {
+                        runtime_rc.borrow().disconnect();
+                        host.post(WorkerFrame::UpstreamDisconnected).await;
+                    }
+                }
+                WorkerFrame::ReconnectUpstream => {
+                    if let (Some(runtime_rc), Some(ws_url)) =
+                        (host.runtime.as_ref(), host.current_ws_url.clone())
+                    {
+                        let auth_json =
+                            serde_json::to_string(&host.current_auth).unwrap_or_default();
+                        match runtime_rc.borrow().connect(ws_url, auth_json) {
+                            Ok(()) => host.post(WorkerFrame::UpstreamConnected).await,
+                            Err(_) => host.post(WorkerFrame::UpstreamDisconnected).await,
+                        }
+                    }
+                }
+                WorkerFrame::Shutdown => {
+                    host.init_complete = false;
+                    host.runtime = None;
+                    host.peer_runtime_client_by_peer_id.clear();
+                    host.peer_id_by_runtime_client.clear();
+                    host.peer_term_by_peer_id.clear();
+                    host.pending_peer_sync_messages.clear();
+                    host.post(WorkerFrame::ShutdownOk).await;
+                    host.should_exit = true;
+                }
+                WorkerFrame::SimulateCrash => {
+                    host.init_complete = false;
+                    if let Some(runtime_rc) = host.runtime.as_ref() {
+                        runtime_rc.borrow().flush_wal();
+                    }
+                    host.runtime = None;
+                    host.peer_runtime_client_by_peer_id.clear();
+                    host.peer_id_by_runtime_client.clear();
+                    host.peer_term_by_peer_id.clear();
+                    host.pending_peer_sync_messages.clear();
+                    host.post(WorkerFrame::ShutdownOk).await;
+                    host.should_exit = true;
+                }
+                WorkerFrame::DebugSchemaState => {
+                    if !host.init_complete || host.runtime.is_none() {
+                        host.post(WorkerFrame::Error {
+                            msg: "debug-schema-state requested before worker init complete".into(),
+                        })
+                        .await;
+                        continue;
+                    }
+                    let js_state = {
+                        let runtime = host.runtime.as_ref().unwrap().borrow();
+                        runtime.debug_schema_state()
+                    };
+                    match js_state {
+                        Ok(js_val) => {
+                            match serde_wasm_bindgen::from_value::<
+                                jazz_tools::worker_frame::DebugSchemaState,
+                            >(js_val)
+                            {
+                                Ok(state) => {
+                                    host.post(WorkerFrame::DebugSchemaStateOk(state)).await
+                                }
+                                Err(e) => {
+                                    host.post(WorkerFrame::Error {
+                                        msg: format!("debug-schema-state serialize failed: {e}"),
+                                    })
+                                    .await
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            host.post(WorkerFrame::Error {
+                                msg: format!("debug-schema-state failed: {e:?}"),
+                            })
+                            .await
+                        }
+                    }
+                }
+                WorkerFrame::DebugSeedLiveSchema { schema_json } => {
+                    if !host.init_complete || host.runtime.is_none() {
+                        host.post(WorkerFrame::Error {
+                            msg: "debug-seed-live-schema requested before worker init complete"
+                                .into(),
+                        })
+                        .await;
+                        continue;
+                    }
+                    let result = {
+                        let runtime = host.runtime.as_ref().unwrap().borrow();
+                        runtime.debug_seed_live_schema(&schema_json)
+                    };
+                    match result {
+                        Ok(()) => {
+                            if let Some(runtime_rc) = host.runtime.as_ref() {
+                                runtime_rc.borrow().flush_wal();
+                            }
+                            host.post(WorkerFrame::DebugSeedLiveSchemaOk).await;
+                        }
+                        Err(e) => {
+                            host.post(WorkerFrame::Error {
+                                msg: format!("debug-seed-live-schema failed: {e:?}"),
+                            })
+                            .await
+                        }
+                    }
+                }
                 // worker→main frames should never arrive inbound; ignore.
                 _ => {}
+            }
+
+            if host.should_exit {
+                break;
             }
         }
     }

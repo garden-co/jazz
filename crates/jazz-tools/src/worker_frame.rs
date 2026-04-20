@@ -39,12 +39,14 @@ pub struct InitPayload {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DebugLensEdgeState {
     pub source_hash: String,
     pub target_hash: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DebugSchemaState {
     pub current_schema_hash: String,
     pub live_schema_hashes: Vec<String>,
