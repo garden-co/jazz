@@ -6,7 +6,7 @@
 //!    Clients authenticate with a self-signed JWT containing an Ed25519 identity proof.
 //!
 //! 2. **External JWT Auth** (`Authorization: Bearer <JWT>`): Frontend/mobile clients
-//!    authenticate via JWT validated with JWKS.
+//!    authenticate via JWT validated with JWKS or a configured static key.
 //!
 //! 3. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): Backend clients
 //!    can impersonate any user by providing the backend secret and a session header.
@@ -17,7 +17,7 @@
 //!
 //! When resolving the request session:
 //! 1. Backend impersonation (if `X-Jazz-Backend-Secret` + `X-Jazz-Session` present)
-//! 2. JWT auth (if `Authorization: Bearer` present — local-first or JWKS)
+//! 2. JWT auth (if `Authorization: Bearer` present — local-first or external JWT)
 //! 3. No session
 
 use std::collections::HashMap;
@@ -137,6 +137,8 @@ impl From<TestClock> for AuthClock {
 pub struct AuthConfig {
     /// URL to fetch JWKS keys (production).
     pub jwks_url: Option<String>,
+    /// Single JWK JSON object or PEM public key used to verify external JWTs.
+    pub jwt_public_key: Option<String>,
     /// Cookie name used to read browser auth tokens during the WS upgrade.
     pub auth_cookie_name: Option<String>,
     /// Whether local-first Ed25519 JWT auth is allowed (default: true for new apps).
@@ -153,6 +155,7 @@ impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
         self.jwks_url.is_some()
+            || self.jwt_public_key.is_some()
             || self.auth_cookie_name.is_some()
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
@@ -369,6 +372,107 @@ impl JwksCache {
     }
 }
 
+pub enum JwtVerifier {
+    Jwks(JwksCache),
+    Static(StaticJwtVerifier),
+}
+
+impl JwtVerifier {
+    pub async fn validate_at(
+        &self,
+        token: &str,
+        now_seconds: u64,
+    ) -> Result<VerifiedJwt, JwtError> {
+        match self {
+            Self::Jwks(cache) => validate_jwt_with_cache_at(token, cache, now_seconds).await,
+            Self::Static(verifier) => validate_jwt_with_static_key_at(token, verifier, now_seconds),
+        }
+    }
+}
+
+pub enum StaticJwtVerifier {
+    JwkSet(JwkSet),
+    Pem(PemPublicKeyVerifier),
+}
+
+impl StaticJwtVerifier {
+    pub fn from_public_key(public_key: &str) -> Result<Self, String> {
+        let trimmed = public_key.trim();
+        if trimmed.is_empty() {
+            return Err("JWT public key is empty".to_string());
+        }
+
+        if let Ok(jwk) = serde_json::from_str::<Jwk>(trimmed) {
+            return Ok(Self::JwkSet(JwkSet { keys: vec![jwk] }));
+        }
+
+        if let Ok(decoding_key) = DecodingKey::from_rsa_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::rsa(decoding_key)));
+        }
+        if let Ok(decoding_key) = DecodingKey::from_ec_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::ec(decoding_key)));
+        }
+        if let Ok(decoding_key) = DecodingKey::from_ed_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::ed(decoding_key)));
+        }
+
+        Err(
+            "unsupported JWT public key format; expected a single JWK JSON object or a PEM public key"
+                .to_string(),
+        )
+    }
+}
+
+pub struct PemPublicKeyVerifier {
+    decoding_key: DecodingKey,
+    kind: PemPublicKeyKind,
+}
+
+impl PemPublicKeyVerifier {
+    fn rsa(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Rsa,
+        }
+    }
+
+    fn ec(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Ec,
+        }
+    }
+
+    fn ed(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Ed,
+        }
+    }
+
+    fn supports(&self, algorithm: Algorithm) -> bool {
+        match self.kind {
+            PemPublicKeyKind::Rsa => matches!(
+                algorithm,
+                Algorithm::RS256
+                    | Algorithm::RS384
+                    | Algorithm::RS512
+                    | Algorithm::PS256
+                    | Algorithm::PS384
+                    | Algorithm::PS512
+            ),
+            PemPublicKeyKind::Ec => matches!(algorithm, Algorithm::ES256 | Algorithm::ES384),
+            PemPublicKeyKind::Ed => matches!(algorithm, Algorithm::EdDSA),
+        }
+    }
+}
+
+enum PemPublicKeyKind {
+    Rsa,
+    Ec,
+    Ed,
+}
+
 async fn fetch_jwks(http_client: &reqwest::Client, endpoint: &str) -> Result<JwkSet, String> {
     let response = http_client
         .get(endpoint)
@@ -470,8 +574,10 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
             ));
         };
 
-        let jwt_result = if let Some(ref cache) = state.jwks_cache {
-            validate_jwt_with_cache(token, cache).await
+        let jwt_result = if let Some(ref verifier) = state.jwt_verifier {
+            verifier
+                .validate_at(token, state.auth_config.clock.now_seconds())
+                .await
         } else {
             Err(JwtError::NoKeyConfigured)
         };
@@ -564,7 +670,7 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
             state.app_id,
             &state.auth_config,
             Some(&external_identities),
-            state.jwks_cache.as_deref(),
+            state.jwt_verifier.as_deref(),
         )
         .await
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
@@ -745,6 +851,56 @@ pub async fn validate_jwt_with_cache_at(
     }
 }
 
+fn verify_jwt_signature_with_pem_public_key(
+    token: &str,
+    verifier: &PemPublicKeyVerifier,
+) -> Result<VerifiedJwt, JwtVerificationError> {
+    let header = decode_header(token)
+        .map_err(|e| JwtVerificationError::Fatal(format!("invalid JWT header: {e}")))?;
+
+    if !verifier.supports(header.alg) {
+        return Err(JwtVerificationError::Fatal(format!(
+            "token algorithm {:?} is not compatible with the configured JWT public key",
+            header.alg
+        )));
+    }
+
+    let validation = signature_only_validation(header.alg);
+    match decode::<JwtClaims>(token, &verifier.decoding_key, &validation) {
+        Ok(data) => Ok(VerifiedJwt {
+            subject: data.claims.sub,
+            issuer: data.claims.iss,
+            principal_id_claim: data.claims.jazz_principal_id,
+            claims: data.claims.claims,
+            exp: data.claims.exp,
+        }),
+        Err(e) => Err(JwtVerificationError::Fatal(format!(
+            "JWT signature verification failed: {e}"
+        ))),
+    }
+}
+
+pub fn validate_jwt_with_static_key_at(
+    token: &str,
+    verifier: &StaticJwtVerifier,
+    now_seconds: u64,
+) -> Result<VerifiedJwt, JwtError> {
+    let verified = match verifier {
+        StaticJwtVerifier::JwkSet(jwks) => verify_jwt_signature_with_jwks(token, jwks),
+        StaticJwtVerifier::Pem(verifier) => {
+            verify_jwt_signature_with_pem_public_key(token, verifier)
+        }
+    }
+    .map_err(|error| match error {
+        JwtVerificationError::Retryable(message) | JwtVerificationError::Fatal(message) => {
+            JwtError::Invalid(message)
+        }
+    })?;
+
+    ensure_jwt_not_expired_at(&verified, now_seconds)?;
+    Ok(verified)
+}
+
 /// Resolve a session from validated JWT identity + optional external mappings.
 pub fn resolve_verified_jwt_session(
     app_id: AppId,
@@ -842,15 +998,14 @@ fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
 /// 2. JWT auth (`Authorization: Bearer`, or auth cookie when configured)
 /// 3. No session
 ///
-/// When `jwks_cache` is provided, JWT validation uses the cache with on-demand
-/// refresh on retryable errors (unknown kid, signature mismatch). Without a
-/// cache, JWT auth returns "not configured."
+/// When `jwt_verifier` is provided, external JWT validation uses the configured
+/// verifier. Without one, JWT auth returns "not configured."
 pub async fn extract_session(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
     external_identities: Option<&ExternalIdentityMap>,
-    jwks_cache: Option<&JwksCache>,
+    jwt_verifier: Option<&JwtVerifier>,
 ) -> Result<Option<Session>, UnauthenticatedResponse> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
@@ -930,9 +1085,11 @@ pub async fn extract_session(
             }));
         }
 
-        // JWKS JWT path
-        let jwt_result = if let Some(cache) = jwks_cache {
-            validate_jwt_with_cache_at(token, cache, config.clock.now_seconds()).await
+        // External JWT path.
+        let jwt_result = if let Some(verifier) = jwt_verifier {
+            verifier
+                .validate_at(token, config.clock.now_seconds())
+                .await
         } else {
             Err(JwtError::NoKeyConfigured)
         };
@@ -1053,6 +1210,10 @@ mod tests {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
     }
 
+    fn test_jwt_verifier() -> JwtVerifier {
+        JwtVerifier::Jwks(test_jwks_cache())
+    }
+
     fn make_jwt(claims: &JwtClaims, secret: &str, kid: &str) -> String {
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
@@ -1171,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn test_extract_session_jwt_fallback() {
         let config = make_test_config();
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
 
         let claims = JwtClaims {
@@ -1197,7 +1358,7 @@ mod tests {
     async fn test_extract_session_jwt_cookie_fallback() {
         let mut config = make_test_config();
         config.auth_cookie_name = Some("jazz-auth".to_string());
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
 
         let claims = JwtClaims {
@@ -1225,7 +1386,7 @@ mod tests {
     #[tokio::test]
     async fn test_extract_session_jwt_uses_external_mapping_fallback() {
         let config = make_test_config();
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
         let mut mappings = ExternalIdentityMap::new();
         mappings.insert(
@@ -1261,7 +1422,7 @@ mod tests {
     #[tokio::test]
     async fn test_extract_session_jwt_claim_conflict_with_mapping_is_rejected() {
         let config = make_test_config();
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
         let mut mappings = ExternalIdentityMap::new();
         mappings.insert(

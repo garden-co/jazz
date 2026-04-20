@@ -1355,7 +1355,7 @@ async fn authenticate_ws_handshake(
             state.app_id,
             &state.auth_config,
             Some(&external_identities),
-            state.jwks_cache.as_deref(),
+            state.jwt_verifier.as_deref(),
         )
         .await
         .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?

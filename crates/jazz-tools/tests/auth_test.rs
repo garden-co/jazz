@@ -310,6 +310,30 @@ mod integration_tests {
         );
     }
 
+    /// A server configured with a single static JWT key should accept matching bearer tokens.
+    #[tokio::test]
+    async fn test_static_jwt_public_key_auth_ws_handshake() {
+        let server = TestServer::start_with_jwt_public_key(json!({
+            "kty": "oct",
+            "kid": "test-jwks-kid",
+            "alg": "HS256",
+            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JWT_SECRET.as_bytes()),
+        }))
+        .await;
+        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+
+        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        assert!(
+            result.is_ok(),
+            "static JWT public key auth should succeed on WS handshake; got: {result:?}"
+        );
+        assert_eq!(
+            server.jwks_hits(),
+            0,
+            "static JWT key auth should not fetch JWKS"
+        );
+    }
+
     /// Invalid JWT is rejected on WS handshake.
     #[tokio::test]
     async fn test_invalid_jwt_rejected_on_ws_handshake() {
