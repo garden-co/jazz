@@ -895,26 +895,16 @@ impl SyncManager {
                     }
                     | BatchSettlement::AcceptedTransaction {
                         visible_members, ..
-                    } => {
-                        let mut interested = HashSet::new();
-                        for member in visible_members {
-                            interested.extend(self.clients.iter().filter_map(
-                                |(client_id, client)| {
-                                    client
-                                        .is_in_scope(member.object_id, &member.branch_name)
-                                        .then_some(*client_id)
-                                },
-                            ));
-                            if let Some(clients) = self.row_batch_interest.get(&RowBatchKey::new(
-                                member.object_id,
-                                member.branch_name,
-                                member.batch_id,
-                            )) {
-                                interested.extend(clients.iter().copied());
-                            }
-                        }
-                        interested
-                    }
+                    } => visible_members
+                        .iter()
+                        .flat_map(|member| {
+                            self.clients.iter().filter_map(move |(client_id, client)| {
+                                client
+                                    .is_in_scope(member.object_id, &member.branch_name)
+                                    .then_some(*client_id)
+                            })
+                        })
+                        .collect(),
                     BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
                         HashSet::new()
                     }
@@ -1372,37 +1362,33 @@ impl SyncManager {
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
                     ) {
-                        let settlement = match applied.row.state {
-                            RowState::VisibleDirect => {
-                                applied.row.confirmed_tier.map(|confirmed_tier| {
-                                    BatchSettlement::DurableDirect {
-                                        batch_id: applied.row.batch_id,
-                                        confirmed_tier,
-                                        visible_members: vec![VisibleBatchMember {
-                                            object_id: applied.row.row_id,
-                                            branch_name: BranchName::new(&applied.row.branch),
-                                            batch_id: applied.row.batch_id,
-                                        }],
-                                    }
-                                })
-                            }
-                            RowState::VisibleTransactional => {
-                                applied.row.confirmed_tier.map(|confirmed_tier| {
-                                    BatchSettlement::AcceptedTransaction {
-                                        batch_id: applied.row.batch_id,
-                                        confirmed_tier,
-                                        visible_members: vec![VisibleBatchMember {
-                                            object_id: applied.row.row_id,
-                                            branch_name: BranchName::new(&applied.row.branch),
-                                            batch_id: applied.row.batch_id,
-                                        }],
-                                    }
-                                })
-                            }
-                            RowState::StagingPending
-                            | RowState::Superseded
-                            | RowState::Rejected => None,
-                        };
+                        let persisted_direct_settlement = self
+                            .my_tiers
+                            .iter()
+                            .copied()
+                            .max()
+                            .and_then(|confirmed_tier| {
+                                let settlement = BatchSettlement::DurableDirect {
+                                    batch_id,
+                                    confirmed_tier,
+                                    visible_members: vec![VisibleBatchMember {
+                                        object_id,
+                                        branch_name,
+                                        batch_id,
+                                    }],
+                                };
+                                self.persist_authoritative_batch_settlement(storage, &settlement)
+                                    .ok()
+                                    .map(|_| settlement)
+                            });
+                        if let Some(settlement) = persisted_direct_settlement {
+                            self.pending_batch_settlements.push(settlement.clone());
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::BatchSettlement { settlement },
+                            });
+                        }
+
                         for tier in self.my_tiers.iter().copied() {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
@@ -1413,15 +1399,6 @@ impl SyncManager {
                                     state: None,
                                     confirmed_tier: Some(tier),
                                 },
-                            });
-                        }
-                        if let Some(settlement) = settlement {
-                            let _ =
-                                self.persist_authoritative_batch_settlement(storage, &settlement);
-                            self.pending_batch_settlements.push(settlement.clone());
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::BatchSettlement { settlement },
                             });
                         }
 
