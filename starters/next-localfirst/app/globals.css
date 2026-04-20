@@ -223,3 +223,86 @@ button:disabled {
   background: none;
   color: var(--danger);
 }
+
+.auth-backup {
+  width: 100%;
+  max-width: 540px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+.auth-backup > summary {
+  cursor: pointer;
+  font-weight: 500;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.auth-backup > summary::before {
+  content: "▸";
+  font-size: 0.75rem;
+  transition: transform 0.15s;
+}
+.auth-backup[open] > summary::before {
+  transform: rotate(90deg);
+}
+.auth-backup-hint {
+  margin-top: 1rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.auth-backup-section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.auth-backup-section h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0;
+}
+.auth-backup-phrase {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font: 0.875rem/1.5 monospace;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  resize: none;
+}
+.auth-backup-restore {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.auth-backup-restore textarea {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  resize: none;
+}
+.auth-backup-restore textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px rgba(20, 106, 255, 0.15);
+}
+.auth-backup-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.auth-backup-success {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #16a34a;
+}
