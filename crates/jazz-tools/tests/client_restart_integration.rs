@@ -376,7 +376,11 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
     let publish_schema_response = Client::new()
-        .post(format!("{}/admin/schemas", server.base_url()))
+        .post(format!(
+            "{}/apps/{}/admin/schemas",
+            server.base_url(),
+            APP_ID_STR
+        ))
         .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
         .json(&json!({ "schema": test_schema(), "permissions": null }))
         .send()
