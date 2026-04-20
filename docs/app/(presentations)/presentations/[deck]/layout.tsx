@@ -1,22 +1,17 @@
 import { PresentationShell } from "@/components/presentations/presentation-shell";
-import { getPresentationDeckSlides, getPresentationNotes } from "@/lib/presentations";
+import { getPresentationDeckPage, getPresentationSlidesForPage } from "@/lib/presentations";
 import { notFound } from "next/navigation";
 
 export default async function PresentationDeckLayout(props: LayoutProps<"/presentations/[deck]">) {
   const params = await props.params;
-  const slides = getPresentationDeckSlides(params.deck);
+  const deck = getPresentationDeckPage(params.deck);
 
-  if (slides.length === 0) notFound();
+  if (!deck) notFound();
+
+  const slides = await getPresentationSlidesForPage(deck);
 
   return (
-    <PresentationShell
-      deckTitle={slides[0].data.deckTitle}
-      slides={slides.map((slide) => ({
-        href: slide.url,
-        notes: getPresentationNotes(slide),
-        title: slide.data.title,
-      }))}
-    >
+    <PresentationShell deckTitle={deck.data.title} slides={slides}>
       {props.children}
     </PresentationShell>
   );

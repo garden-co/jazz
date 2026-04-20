@@ -1,15 +1,23 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
-import { presentationSlides } from "../.source/server";
+import { presentationDecks } from "../.source/server";
+import {
+  parsePresentationSlidesFromMdx,
+  type PresentationSlideDefinition,
+} from "./presentation-deck";
 
 export const presentationsSource = loader({
   baseUrl: "/presentations",
-  source: toFumadocsSource(presentationSlides, []),
+  source: toFumadocsSource(presentationDecks, []),
   plugins: [lucideIconsPlugin()],
 });
 
-export type PresentationSlide = InferPageType<typeof presentationsSource>;
+export type PresentationDeckPage = InferPageType<typeof presentationsSource>;
+export type PresentationSlide = PresentationSlideDefinition;
 
 type PresentationDeck = {
   description: string | undefined;
@@ -19,45 +27,88 @@ type PresentationDeck = {
   title: string;
 };
 
-function sortSlides(left: PresentationSlide, right: PresentationSlide) {
-  return left.data.order - right.data.order || left.url.localeCompare(right.url);
+function sortDecks(left: PresentationDeck, right: PresentationDeck) {
+  return left.title.localeCompare(right.title);
 }
 
-export function getAllPresentationSlides() {
-  return [...presentationsSource.getPages()].sort(sortSlides);
-}
+function getDeckSlug(page: PresentationDeckPage) {
+  const deckSlug = page.slugs[0];
 
-export function getPresentationDeckSlides(deck: string) {
-  return getAllPresentationSlides().filter((slide) => slide.data.deck === deck);
-}
-
-export function getPresentationDecks(): PresentationDeck[] {
-  const decks = new Map<string, PresentationDeck>();
-
-  for (const slide of getAllPresentationSlides()) {
-    const existing = decks.get(slide.data.deck);
-
-    if (existing) {
-      existing.slideCount += 1;
-      continue;
-    }
-
-    decks.set(slide.data.deck, {
-      description: slide.data.description,
-      firstSlideUrl: slide.url,
-      slideCount: 1,
-      slug: slide.data.deck,
-      title: slide.data.deckTitle,
-    });
+  if (!deckSlug) {
+    throw new Error(`Presentation deck at "${page.url}" is missing a deck slug.`);
   }
 
-  return [...decks.values()].sort((left, right) => left.title.localeCompare(right.title));
+  return deckSlug;
 }
 
-export function getPresentationNotes(slide: PresentationSlide) {
-  const { notes } = slide.data;
+export function getPresentationDeckPage(deck: string) {
+  return presentationsSource.getPage([deck]);
+}
 
-  if (!notes) return [];
+const presentationSlideCache = new Map<string, Promise<PresentationSlide[]>>();
+const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-  return Array.isArray(notes) ? notes : [notes];
+async function getRawDeckSource(page: PresentationDeckPage) {
+  const relativePath = (
+    page.data as PresentationDeckPage["data"] & {
+      info?: {
+        fullPath?: string;
+      };
+    }
+  ).info?.fullPath;
+
+  if (typeof relativePath !== "string") {
+    throw new Error(`Presentation deck "${getDeckSlug(page)}" is missing raw source access.`);
+  }
+
+  return readFile(path.resolve(docsRoot, relativePath), "utf8");
+}
+
+export async function getPresentationSlidesForPage(
+  page: PresentationDeckPage,
+): Promise<PresentationSlide[]> {
+  const deckSlug = getDeckSlug(page);
+  const cached = presentationSlideCache.get(deckSlug);
+
+  if (cached) return cached;
+
+  const parsedSlides = getRawDeckSource(page).then((rawMdx) =>
+    parsePresentationSlidesFromMdx(deckSlug, rawMdx),
+  );
+
+  presentationSlideCache.set(deckSlug, parsedSlides);
+
+  return parsedSlides;
+}
+
+export async function getPresentationDeckSlides(deck: string) {
+  const page = getPresentationDeckPage(deck);
+
+  if (!page) return [];
+
+  return await getPresentationSlidesForPage(page);
+}
+
+export async function getPresentationDecks(): Promise<PresentationDeck[]> {
+  const decks = await Promise.all(
+    presentationsSource.getPages().map(async (page) => {
+      const slides = await getPresentationSlidesForPage(page);
+
+      return {
+        description: page.data.description,
+        firstSlideUrl: slides[0].href,
+        slideCount: slides.length,
+        slug: getDeckSlug(page),
+        title: page.data.title,
+      };
+    }),
+  );
+
+  return decks.sort(sortDecks);
+}
+
+export async function getPresentationSlide(deck: string, slideSlug: string) {
+  const slides = await getPresentationDeckSlides(deck);
+
+  return slides.find((slide) => slide.slug === slideSlug);
 }
