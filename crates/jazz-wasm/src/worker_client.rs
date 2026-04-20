@@ -327,6 +327,7 @@ mod wasm_client {
         ///
         /// Call this once after constructing both `WorkerClient` and the main-
         /// thread `WasmRuntime`.
+        #[wasm_bindgen(js_name = installOnRuntime)]
         pub fn install_on_runtime(&self, runtime: &WasmRuntime) {
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<OutboxEntry>();
             runtime

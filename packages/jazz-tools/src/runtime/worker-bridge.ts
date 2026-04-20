@@ -2,19 +2,32 @@
  * WorkerBridge — Main-thread side of the worker communication bridge.
  *
  * Wires a main-thread WasmRuntime (in-memory) to a dedicated worker
- * (OPFS-persistent) via postMessage. The worker acts as the "server"
- * for the main thread's runtime.
+ * (OPFS-persistent) via the Rust WorkerClient façade. The worker acts
+ * as the "server" for the main thread's runtime.
+ *
+ * The WorkerClient owns the postMessage/onmessage wire protocol (binary
+ * WorkerFrame encoding). This shim preserves:
+ *   - Phase state machine (idle → initializing → ready → …)
+ *   - pendingSyncPayloadsForWorker + flushPendingSyncToWorker
+ *   - upstreamServerReady deferred promise
+ *   - serverPayloadForwarder callback
  */
 
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
-import type {
-  InitMessage,
-  WorkerLifecycleEvent,
-  WorkerToMainMessage,
-} from "../worker/worker-protocol.js";
 import { createSyncOutboxRouter } from "./sync-transport.js";
+import { WorkerClient } from "jazz-wasm";
+
+/**
+ * Page-lifecycle event names forwarded to the worker.
+ */
+export type WorkerLifecycleEvent =
+  | "visibility-hidden"
+  | "visibility-visible"
+  | "pagehide"
+  | "freeze"
+  | "resume";
 
 /**
  * Options for initializing the worker bridge.
@@ -63,9 +76,6 @@ interface WorkerBridgeState {
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
-const INIT_RESPONSE_TIMEOUT_MS = 12_000;
-const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
-
 function createDeferredPromise(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((resolver) => {
@@ -83,14 +93,14 @@ function createDeferredPromise(): { promise: Promise<void>; resolve: () => void 
  * - The worker is treated as the main thread's "server" for sync purposes
  */
 export class WorkerBridge {
-  private worker: Worker;
+  private client: WorkerClient;
   private runtime: Runtime;
   private state: WorkerBridgeState;
 
   constructor(worker: Worker, runtime: Runtime) {
     const upstreamReady = createDeferredPromise();
-    this.worker = worker;
     this.runtime = runtime;
+    this.client = new WorkerClient(worker);
     this.state = {
       phase: "idle",
       workerClientId: null,
@@ -107,28 +117,34 @@ export class WorkerBridge {
     };
 
     // Wire worker → main: incoming sync messages from worker
-    this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
-      const msg = event.data;
-      if (msg.type === "sync") {
-        for (const payload of msg.payload) {
-          this.runtime.onSyncMessageReceived(payload);
-        }
-      } else if (msg.type === "upstream-connected") {
-        this.markUpstreamServerConnected();
-      } else if (msg.type === "upstream-disconnected") {
-        this.markUpstreamServerDisconnected();
-      } else if (msg.type === "auth-failed") {
-        this.state.authFailureListener?.(msg.reason);
-      } else if (msg.type === "peer-sync") {
-        this.state.peerSyncListener?.({
-          peerId: msg.peerId,
-          term: msg.term,
-          payload: msg.payload,
-        });
-      }
-    };
+    this.client.set_on_sync((bytes: Uint8Array) => {
+      this.runtime.onSyncMessageReceived(bytes);
+    });
 
-    // Wire main → worker: outgoing sync messages from runtime
+    this.client.set_on_peer_sync((peerId: string, term: number, bytes: Uint8Array) => {
+      this.state.peerSyncListener?.({
+        peerId,
+        term,
+        payload: [bytes],
+      });
+    });
+
+    this.client.set_on_upstream_status((connected: boolean) => {
+      if (connected) {
+        this.markUpstreamServerConnected();
+      } else {
+        this.markUpstreamServerDisconnected();
+      }
+    });
+
+    this.client.set_on_auth_failed((reason: string) => {
+      this.state.authFailureListener?.(reason as AuthFailureReason);
+    });
+
+    // Wire main → worker: outgoing sync messages from runtime via WorkerClient outbox.
+    // The WorkerClient.installOnRuntime installs a ClientOutboxHandle on the Rust core
+    // so server-bound payloads are encoded as WorkerFrame::Sync and sent to the worker.
+    // We still need the TS-level router for the serverPayloadForwarder path.
     this.runtime.onSyncMessageToSend?.(
       createSyncOutboxRouter({
         onServerPayload: (payload) => {
@@ -150,7 +166,7 @@ export class WorkerBridge {
   /**
    * Initialize the worker with schema and config.
    *
-   * Waits for the worker to respond with init-ok.
+   * Sends InitPayload via WorkerClient and updates the phase state machine.
    */
   init(options: WorkerBridgeOptions): Promise<string> {
     if (this.state.initPromise) {
@@ -165,23 +181,6 @@ export class WorkerBridge {
 
     this.transition({ type: "INIT_CALLED" });
 
-    const initMsg: InitMessage = {
-      type: "init",
-      schemaJson: options.schemaJson,
-      appId: options.appId,
-      env: options.env,
-      userBranch: options.userBranch,
-      dbName: options.dbName,
-      serverUrl: options.serverUrl,
-      serverPathPrefix: options.serverPathPrefix,
-      jwtToken: options.jwtToken,
-      adminSecret: options.adminSecret,
-      runtimeSources: options.runtimeSources,
-      fallbackWasmUrl: options.fallbackWasmUrl,
-      logLevel: options.logLevel,
-      clientId: "", // Worker generates its own client ID for main thread
-    };
-
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
       this.markUpstreamServerConnected();
@@ -189,39 +188,34 @@ export class WorkerBridge {
       this.markUpstreamServerDisconnected();
     }
 
-    const responsePromise = waitForMessage<WorkerToMainMessage>(
-      this.worker,
-      (msg) => msg.type === "init-ok" || msg.type === "error",
-      INIT_RESPONSE_TIMEOUT_MS,
-      "Worker init timeout",
-    );
+    const initPayload = {
+      schema_json: options.schemaJson,
+      app_id: options.appId,
+      env: options.env,
+      user_branch: options.userBranch,
+      db_name: options.dbName,
+      server_url: options.serverUrl,
+      server_path_prefix: options.serverPathPrefix,
+      jwt_token: options.jwtToken,
+      admin_secret: options.adminSecret,
+      log_level: options.logLevel,
+      fallback_wasm_url: options.fallbackWasmUrl,
+    };
 
-    this.worker.postMessage(initMsg);
-
-    const initPromise = responsePromise
-      .then((response) => {
+    const initPromise = this.client
+      .init(initPayload)
+      .then((clientId: string) => {
         if (this.isDisposedLike()) {
           throw new Error("WorkerBridge has been disposed");
         }
-
-        if (response.type === "error") {
-          this.transition({ type: "INIT_FAILED" });
-          throw new Error(`Worker init failed: ${response.message}`);
+        if (this.state.phase !== "initializing") {
+          throw new Error("Worker init response arrived after bridge left initializing state");
         }
-
-        if (response.type === "init-ok") {
-          if (this.state.phase !== "initializing") {
-            // Ignore late init-ok after a terminal transition.
-            throw new Error("Worker init response arrived after bridge left initializing state");
-          }
-          this.transition({ type: "INIT_OK", clientId: response.clientId });
-          this.flushPendingSyncToWorker();
-          return response.clientId;
-        }
-
-        throw new Error("Unexpected worker response");
+        this.transition({ type: "INIT_OK", clientId });
+        this.flushPendingSyncToWorker();
+        return clientId;
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         if (this.state.phase !== "disposed") {
           this.transition({ type: "INIT_FAILED" });
         }
@@ -237,42 +231,30 @@ export class WorkerBridge {
    */
   updateAuth(auth: { jwtToken?: string }): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({ type: "update-auth", ...auth });
+    this.client.update_auth(auth.jwtToken);
   }
 
   sendLifecycleHint(event: WorkerLifecycleEvent): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({
-      type: "lifecycle-hint",
-      event,
-      sentAtMs: Date.now(),
-    });
+    this.client.lifecycle_hint(event, Date.now());
   }
 
   /**
    * Shut down the worker and wait for OPFS handles to be released.
-   *
-   * @param worker The Worker instance (needed for listening to shutdown-ok)
    */
   async shutdown(worker: Worker): Promise<void> {
     if (this.isDisposedLike()) return;
 
     this.transition({ type: "SHUTDOWN_CALLED" });
 
-    const shutdownAckPromise = waitForMessage<WorkerToMainMessage>(
-      worker,
-      (msg) => msg.type === "shutdown-ok",
-      SHUTDOWN_ACK_TIMEOUT_MS,
-      "Worker shutdown timeout",
-    );
-    this.worker.postMessage({ type: "shutdown" });
     try {
-      await shutdownAckPromise;
+      await this.client.shutdown();
       this.transition({ type: "SHUTDOWN_FINISHED" });
     } catch {
       this.transition({ type: "SHUTDOWN_FINISHED" });
       // Timeout — worker may have already closed
     }
+    worker.terminate();
   }
 
   /**
@@ -307,12 +289,12 @@ export class WorkerBridge {
 
   disconnectUpstream(): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({ type: "disconnect-upstream" });
+    this.client.disconnect_upstream();
   }
 
   reconnectUpstream(): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({ type: "reconnect-upstream" });
+    this.client.reconnect_upstream();
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
@@ -325,25 +307,20 @@ export class WorkerBridge {
 
   openPeer(peerId: string): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({ type: "peer-open", peerId });
+    this.client.peer_open(peerId);
   }
 
   sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
     if (this.isDisposedLike()) return;
     if (payload.length === 0) return;
-    const message = {
-      type: "peer-sync" as const,
-      peerId,
-      term,
-      payload,
-    };
-    const transfer = collectPayloadTransferables(payload);
-    this.worker.postMessage(message, transfer);
+    for (const bytes of payload) {
+      this.client.send_peer_sync(peerId, term, bytes);
+    }
   }
 
   closePeer(peerId: string): void {
     if (this.isDisposedLike()) return;
-    this.worker.postMessage({ type: "peer-close", peerId });
+    this.client.peer_close(peerId);
   }
 
   private enqueueSyncMessageForWorker(payload: Uint8Array): void {
@@ -372,12 +349,9 @@ export class WorkerBridge {
     const payloads = this.state.pendingSyncPayloadsForWorker;
     this.state.pendingSyncPayloadsForWorker = [];
 
-    const message = {
-      type: "sync" as const,
-      payload: payloads,
-    };
-    const transfer = collectPayloadTransferables(payloads);
-    this.worker.postMessage(message, transfer);
+    for (const bytes of payloads) {
+      this.client.send_sync(bytes);
+    }
   }
 
   private markUpstreamServerConnected(): void {
@@ -443,39 +417,4 @@ export class WorkerBridge {
     this.state.syncBatchFlushQueued = false;
     this.runtime.onSyncMessageToSend?.(() => undefined);
   }
-}
-
-function collectPayloadTransferables(payloads: Uint8Array[]): Transferable[] {
-  return payloads.map((payload) => payload.buffer);
-}
-
-/**
- * Wait for a specific message type from a worker.
- */
-function waitForMessage<T>(
-  worker: Worker,
-  predicate: (msg: T) => boolean,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent<T>) => {
-      if (predicate(event.data)) {
-        cleanup();
-        resolve(event.data);
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-  });
 }
