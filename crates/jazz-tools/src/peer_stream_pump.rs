@@ -21,59 +21,50 @@ pub enum PumpExit {
     Shutdown,
 }
 
+/// Consumer-facing ends of a `PeerStreamPump`. Mirrors `TransportHandle` from
+/// `transport_manager::create`.
+pub struct PeerStreamPumpHandle {
+    pub outbox_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub inbox_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub control_tx: mpsc::UnboundedSender<PumpControl>,
+}
+
 pub struct PeerStreamPump<S: StreamAdapter> {
-    pub outbox_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    pub inbox_tx: mpsc::UnboundedSender<Vec<u8>>,
-    pub control_rx: mpsc::UnboundedReceiver<PumpControl>,
-    pub stream: S,
+    pub(crate) outbox_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub(crate) inbox_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub(crate) control_rx: mpsc::UnboundedReceiver<PumpControl>,
+    pub(crate) stream: S,
+}
+
+/// Create paired `(PeerStreamPumpHandle, PeerStreamPump<S>)`.
+///
+/// The handle holds the consumer-facing channel ends; the pump holds the
+/// internal ends and the stream, ready to be spawned via `.run()`.
+pub fn create<S: StreamAdapter>(stream: S) -> (PeerStreamPumpHandle, PeerStreamPump<S>) {
+    let (outbox_tx, outbox_rx) = mpsc::unbounded();
+    let (inbox_tx, inbox_rx) = mpsc::unbounded();
+    let (control_tx, control_rx) = mpsc::unbounded();
+    let handle = PeerStreamPumpHandle {
+        outbox_tx,
+        inbox_rx,
+        control_tx,
+    };
+    let pump = PeerStreamPump {
+        outbox_rx,
+        inbox_tx,
+        control_rx,
+        stream,
+    };
+    (handle, pump)
 }
 
 impl<S: StreamAdapter + 'static> PeerStreamPump<S> {
-    pub async fn run(self) -> PumpExit {
-        #[cfg(feature = "runtime-tokio")]
-        {
-            self.run_tokio().await
-        }
-        #[cfg(not(feature = "runtime-tokio"))]
-        {
-            self.run_wasm().await
-        }
-    }
-
-    #[cfg(feature = "runtime-tokio")]
-    async fn run_tokio(mut self) -> PumpExit {
-        use futures::StreamExt as _;
-        loop {
-            tokio::select! {
-                out = self.outbox_rx.next() => {
-                    let Some(bytes) = out else { return PumpExit::Shutdown; };
-                    if self.stream.send(bytes).await.is_err() {
-                        return PumpExit::NetworkError("send failed".into());
-                    }
-                }
-                incoming = self.stream.recv() => {
-                    match incoming {
-                        Ok(Some(bytes)) => {
-                            let _ = self.inbox_tx.unbounded_send(bytes);
-                        }
-                        Ok(None) => return PumpExit::NetworkError("stream closed".into()),
-                        Err(e) => return PumpExit::NetworkError(format!("{e}")),
-                    }
-                }
-                ctrl = self.control_rx.next() => {
-                    match ctrl {
-                        None | Some(PumpControl::Shutdown) => {
-                            self.stream.close().await;
-                            return PumpExit::Shutdown;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "runtime-tokio"))]
-    async fn run_wasm(mut self) -> PumpExit {
+    /// Drive the pump until shutdown or a network error.
+    ///
+    /// Uses `futures::select!` with `.fuse()` everywhere — compatible with
+    /// both tokio runtimes and wasm single-threaded runtimes. No cfg fork
+    /// required.
+    pub async fn run(mut self) -> PumpExit {
         use futures::{FutureExt as _, StreamExt as _};
         loop {
             futures::select! {
@@ -109,23 +100,21 @@ impl<S: StreamAdapter + 'static> PeerStreamPump<S> {
 mod tests {
     use super::*;
 
-    /// A stream that blocks on recv until data arrives via a channel,
-    /// so the pump does not immediately see EOF when the inbound queue is empty.
-    struct LoopbackStream {
-        sent: Vec<Vec<u8>>,
+    /// Observable stream: records every `send` call in a shared vec; drives
+    /// `recv` from a channel so the pump does not see EOF while the inbound
+    /// queue is empty.
+    struct ObservableStream {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         inbound_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     }
-    impl StreamAdapter for LoopbackStream {
+
+    impl StreamAdapter for ObservableStream {
         type Error = &'static str;
         async fn connect(_: &str) -> Result<Self, Self::Error> {
-            let (_tx, rx) = mpsc::unbounded();
-            Ok(Self {
-                sent: Vec::new(),
-                inbound_rx: rx,
-            })
+            unimplemented!()
         }
         async fn send(&mut self, data: Vec<u8>) -> Result<(), Self::Error> {
-            self.sent.push(data);
+            self.sent.lock().unwrap().push(data);
             Ok(())
         }
         async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -135,29 +124,98 @@ mod tests {
         async fn close(&mut self) {}
     }
 
+    /// Helper: construct an `ObservableStream` plus the sender side the test
+    /// can use to inject inbound frames.
+    fn make_observable_stream() -> (
+        ObservableStream,
+        std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        mpsc::UnboundedSender<Vec<u8>>,
+    ) {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (inbound_tx, inbound_rx) = mpsc::unbounded::<Vec<u8>>();
+        let stream = ObservableStream {
+            sent: sent.clone(),
+            inbound_rx,
+        };
+        (stream, sent, inbound_tx)
+    }
+
+    /// Push two frames through `outbox_tx`, yield, shut down, assert the
+    /// stream received both frames in order.
     #[tokio::test]
     #[cfg(feature = "runtime-tokio")]
-    async fn pump_drains_outbox_and_shuts_down() {
-        let (outbox_tx, outbox_rx) = mpsc::unbounded();
-        let (inbox_tx, mut inbox_rx) = mpsc::unbounded::<Vec<u8>>();
-        let (control_tx, control_rx) = mpsc::unbounded();
-        let (_inbound_tx, inbound_rx) = mpsc::unbounded::<Vec<u8>>();
-        outbox_tx.unbounded_send(b"x".to_vec()).unwrap();
-        let pump = PeerStreamPump {
-            outbox_rx,
-            inbox_tx,
-            control_rx,
-            stream: LoopbackStream {
-                sent: Vec::new(),
-                inbound_rx,
-            },
-        };
-        let handle = tokio::spawn(pump.run());
-        tokio::task::yield_now().await;
-        control_tx.unbounded_send(PumpControl::Shutdown).unwrap();
-        let exit = handle.await.unwrap();
+    async fn pump_forwards_outbox_to_stream_send() {
+        let (stream, sent, _inbound_tx) = make_observable_stream();
+        let (handle, pump) = create(stream);
+
+        handle.outbox_tx.unbounded_send(vec![1]).unwrap();
+        handle.outbox_tx.unbounded_send(vec![2]).unwrap();
+
+        let task = tokio::spawn(pump.run());
+
+        // Yield enough times for the pump to process both outbox frames.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        handle
+            .control_tx
+            .unbounded_send(PumpControl::Shutdown)
+            .unwrap();
+        let exit = task.await.unwrap();
         assert!(matches!(exit, PumpExit::Shutdown));
-        // No inbound data should have been forwarded to inbox.
-        assert!(inbox_rx.try_recv().is_err());
+        assert_eq!(*sent.lock().unwrap(), vec![vec![1u8], vec![2u8]]);
+    }
+
+    /// Push two frames via the stream's inbound side, assert `inbox_rx`
+    /// yields them in order. Then shutdown cleanly.
+    #[tokio::test]
+    #[cfg(feature = "runtime-tokio")]
+    async fn pump_forwards_stream_recv_to_inbox() {
+        let (stream, _sent, inbound_tx) = make_observable_stream();
+        let (mut handle, pump) = create(stream);
+
+        inbound_tx.unbounded_send(vec![10]).unwrap();
+        inbound_tx.unbounded_send(vec![20]).unwrap();
+
+        let task = tokio::spawn(pump.run());
+
+        // Yield so the pump processes both inbound frames.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        let first = handle.inbox_rx.try_recv().unwrap();
+        let second = handle.inbox_rx.try_recv().unwrap();
+        assert_eq!(first, vec![10u8]);
+        assert_eq!(second, vec![20u8]);
+
+        handle
+            .control_tx
+            .unbounded_send(PumpControl::Shutdown)
+            .unwrap();
+        let exit = task.await.unwrap();
+        assert!(matches!(exit, PumpExit::Shutdown));
+    }
+
+    /// Send a Shutdown control immediately; assert the pump exits with
+    /// `PumpExit::Shutdown` and no outbound frames were sent.
+    #[tokio::test]
+    #[cfg(feature = "runtime-tokio")]
+    async fn pump_exits_on_shutdown_control() {
+        let (stream, sent, _inbound_tx) = make_observable_stream();
+        let (handle, pump) = create(stream);
+
+        let task = tokio::spawn(pump.run());
+
+        tokio::task::yield_now().await;
+        handle
+            .control_tx
+            .unbounded_send(PumpControl::Shutdown)
+            .unwrap();
+
+        let exit = task.await.unwrap();
+        assert!(matches!(exit, PumpExit::Shutdown));
+        assert!(sent.lock().unwrap().is_empty());
     }
 }
