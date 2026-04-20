@@ -432,8 +432,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
                     if let Some(sender) = pending.sender.take() {
                         let _ = sender.send(Err(RuntimeError::QueryError(format!(
-                            "query subscription {} failed ({}): {}",
-                            failure.subscription_id.0, failure.code, failure.reason
+                            "query subscription {} failed during schema recompile: {}",
+                            failure.subscription_id.0, failure.reason
                         ))));
                     }
                     failed_one_shots.push(handle);
@@ -442,7 +442,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     tracing::error!(
                         handle = handle.0,
                         sub_id = failure.subscription_id.0,
-                        code = %failure.code,
                         error = %failure.reason,
                         "subscription failed during schema recompile and was dropped"
                     );
@@ -450,7 +449,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             } else {
                 tracing::error!(
                     sub_id = failure.subscription_id.0,
-                    code = %failure.code,
                     error = %failure.reason,
                     "subscription failed during schema recompile and was dropped"
                 );
@@ -578,12 +576,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
 
-        // When a transport event removes this server (disconnect / connect-failure /
-        // auth-failure), `QueryManager::settle()` gates initial delivery on
-        // `has_servers_or_pending_servers()` — so we must re-tick after the
-        // mutation, otherwise held subscriptions wait forever for a server that's
-        // already gone.
-        let mut released_server_hold = false;
         for message in inbound {
             match message {
                 crate::transport_manager::TransportInbound::Connected {
@@ -607,7 +599,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
-                    released_server_hold = true;
                 }
                 crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                     tracing::warn!(%server_id, %reason, "transport connect failed");
@@ -615,21 +606,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         .query_manager_mut()
                         .sync_manager_mut()
                         .remove_pending_server(server_id);
-                    released_server_hold = true;
                 }
                 crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                     tracing::warn!(%server_id, %reason, "transport auth failure");
                     self.remove_server(server_id);
-                    released_server_hold = true;
                     if let Some(callback) = self.auth_failure_callback.as_ref() {
                         callback(reason);
                     }
                 }
             }
-        }
-
-        if released_server_hold {
-            self.immediate_tick();
         }
     }
 
