@@ -1258,7 +1258,7 @@ describe("Worker Bridge with OPFS", () => {
     // Wait for client to fetch permissions from the server
     const db = await getNonAdminClientDb(appId, serverUrl, ctx);
     await waitForCondition(
-      async () => db.getAuthState().status === "authenticated",
+      async () => Boolean(db.getAuthState().session) && !db.getAuthState().error,
       10_000,
       "client db should authenticate before rejected insert",
     );
