@@ -576,6 +576,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
 
+        // When a transport event removes this server (disconnect / connect-failure /
+        // auth-failure), `QueryManager::settle()` gates initial delivery on
+        // `has_servers_or_pending_servers()` — so we must re-tick after the
+        // mutation, otherwise held subscriptions wait forever for a server that's
+        // already gone.
+        let mut released_server_hold = false;
         for message in inbound {
             match message {
                 crate::transport_manager::TransportInbound::Connected {
@@ -599,6 +605,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
+                    released_server_hold = true;
                 }
                 crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                     tracing::warn!(%server_id, %reason, "transport connect failed");
@@ -606,15 +613,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         .query_manager_mut()
                         .sync_manager_mut()
                         .remove_pending_server(server_id);
+                    released_server_hold = true;
                 }
                 crate::transport_manager::TransportInbound::AuthFailure { reason } => {
                     tracing::warn!(%server_id, %reason, "transport auth failure");
                     self.remove_server(server_id);
+                    released_server_hold = true;
                     if let Some(callback) = self.auth_failure_callback.as_ref() {
                         callback(reason);
                     }
                 }
             }
+        }
+
+        if released_server_hold {
+            self.immediate_tick();
         }
     }
 

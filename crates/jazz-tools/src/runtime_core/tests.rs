@@ -1739,13 +1739,13 @@ mod install_transport_tests {
         }
     }
 
-    /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
-    /// before the timeout), draining the event must release the held initial
-    /// subscription *and* deliver its first batch against local state. Flipping
-    /// the pending-server flag is not enough on its own — release also has to
-    /// re-run `process()` so `settle()` observes the state change.
-    #[test]
-    fn connect_failed_event_releases_and_delivers_held_subscription() {
+    /// Shared body for terminal-transport-event release tests. Asserts that
+    /// dispatching `event` unblocks a held initial subscription so it delivers
+    /// the local row. `event_label` is used only for the panic message.
+    fn assert_event_releases_held_subscription(
+        event: crate::transport_manager::TransportInbound,
+        event_label: &str,
+    ) {
         let mut core = create_test_runtime();
 
         let alice = core
@@ -1780,20 +1780,46 @@ mod install_transport_tests {
             "remote query must stay held while transport is pending"
         );
 
-        core.handle_transport_inbound_for_test(
-            server_id,
-            crate::transport_manager::TransportInbound::ConnectFailed {
-                reason: "dns lookup failed".into(),
-            },
-        );
+        core.handle_transport_inbound_for_test(server_id, event);
 
         match std::pin::Pin::new(&mut future).poll(&mut cx) {
             std::task::Poll::Ready(Ok(rows)) => {
                 assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
                 assert_eq!(rows[0].0, alice);
             }
-            other => panic!("expected Ready(Ok(_)) after ConnectFailed release, got {other:?}"),
+            other => panic!("expected Ready(Ok(_)) after {event_label} release, got {other:?}"),
         }
+    }
+
+    /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
+    /// before the timeout), draining the event must release the held initial
+    /// subscription *and* deliver its first batch against local state. Flipping
+    /// the pending-server flag is not enough on its own — release also has to
+    /// re-run `process()` so `settle()` observes the state change.
+    #[test]
+    fn connect_failed_event_releases_and_delivers_held_subscription() {
+        assert_event_releases_held_subscription(
+            crate::transport_manager::TransportInbound::ConnectFailed {
+                reason: "dns lookup failed".into(),
+            },
+            "ConnectFailed",
+        );
+    }
+
+    /// When the transport emits `AuthFailure` (server rejected the JWT —
+    /// e.g. expired token, wrong audience), draining the event must both
+    /// tear down the server registration *and* release any held initial
+    /// subscriptions so local rows become visible. Without this, a signed-in
+    /// user whose token is rejected at handshake time would see an empty
+    /// UI instead of their local-first data.
+    #[test]
+    fn auth_failure_event_releases_and_delivers_held_subscription() {
+        assert_event_releases_held_subscription(
+            crate::transport_manager::TransportInbound::AuthFailure {
+                reason: "jwt rejected".into(),
+            },
+            "AuthFailure",
+        );
     }
 }
 fn documents_query_by_title(title: &str) -> Query {
