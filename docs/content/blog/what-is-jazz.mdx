@@ -303,50 +303,49 @@ take on this new category.
 
 # A new cloud for a new database
 
-A lot of the unique features of Jazz are manifested in its abstractions, API shape and runtime behavior, but
-they also imply a fundamentally different infrastructure architecture compared to traditional databases.
-With explicit regional caches, inherent distribution of data, variable consistency guarantees over many
-nodes and a future design for very fine-grained geo-aware auto-sharding.
+A lot of what makes Jazz unusual shows up in its abstractions, API shape, and runtime behavior. But
+those choices also imply a different infrastructure architecture than a traditional database
+deployment. If clients hold durable local state, if sync is direct, if permissions and consistency
+need to flow through distributed caches, and if data should eventually be served from the right
+regions automatically, then generic "host a database and put some compute around it" infrastructure
+is only part of the story.
 
-We're building that infrastructure in lockstep with the client libraries for Jazz, which will let us optimize
-developer experience of the whole as a product: Jazz plus Jazz Cloud. The most important goal is a seamless
-"doesn't feel like deploying anything" experience from the first time you scaffold a small Jazz app to when
-you experience rapid growth and need to serve entire new regions.
+That is why we are building Jazz Cloud in lockstep with the database and client libraries. We want
+Jazz plus Jazz Cloud to feel like one coherent product: almost deployment-free when you start small,
+then naturally growing into low-latency multi-region infrastructure as your app expands.
 
-But especially for a small app, you can also easily self-host a single instance of the Jazz server. It's very
-important to us that that part, too, is open-source. While it's single tenant and single-node by default,
-you can create more complicated distributed arrangements using just that, too. You'll just have to configure, orchestrate and scale it yourself. But you can realistically do that.
+It is also important to us that self-hosting remains realistic. For a small app, you can run a
+single Jazz server yourself, and that part is open-source. More complex distributed arrangements are
+possible too, but then you take on the orchestration, scaling, and operations yourself.
 
-In the meantime, we'll make sure that our zero-config auto-scaling Jazz Cloud and our experience running
-its low-latency, high-scale, globally distributed infrastructure reliably and securely is a no-brainer
-proposition. And if you want a custom version of that for yourself, including multitenancy and on-premises
-deployment, we can offer flexbile enterprise agreements and support contracts.
+That is what Jazz Cloud is for: absorbing the hard parts of running globally distributed, low-latency
+infrastructure tuned for Jazz while staying as zero-config as possible. And for teams that need more
+control, we can also support custom deployments, including multitenant or on-premises setups.
 
-But because we believe some of the best stuff happens when things are possible without permission, we aim
-to make the self-serve version of Jazz Cloud scale not just in technical terms, but also across the broadest
-diversity of companies and use cases.
+Most importantly, we want the self-serve version to scale not just technically, but organizationally.
+Some of the most interesting software only exists because people can try it without asking permission
+first, and Jazz Cloud should preserve that.
 
 # Pricing that enables
 
-The natural question then is of course what Jazz Cloud should cost. Thanks to our experience hosting and
-deploying classic Jazz we're intimately familiar with the highly variable cost _and_ delivered value this new
-kind of infrastructure has.
+The natural question then is what Jazz Cloud should cost. From hosting and deploying classic Jazz, we
+already know that both the operating cost and the delivered value of this kind of infrastructure vary
+wildly between apps.
 
-We've always been big fans of usage-based pricing that abstracts complex concerns behind simple commodity-like
-billable metrics. But the choice of metrics we bill can still make a huge difference in which apps are
-feasible, where we terribly overcharge and where we barely cover costs. Especially metrics like active users,
-concurrent connected clients etc. are terrible in terms of allowing diverse apps and accurately capturing value
-or costs.
+We have long preferred usage-based pricing that hides internal complexity behind a small number of
+billable primitives. But the choice of primitives matters a lot. Metrics like active users or
+concurrent clients are easy to market and terrible for many real products: they punish some
+workloads, subsidize others, and track neither cost nor value especially well.
 
-So we've decided to stick to fundamentals and reduce everything to three nerdy metrics that represent what's
-irreducably hard or downstream-costly: disk I/O operations, storage and egress. Different apps use wildly
-different distributions of these, but everything else that you would have to worry about if you self hosted
-(like CPU usage, RAM, number and geo-distribution of instances) has proven to either scale the same as the
-basic metrics or to be invisible in cost and value. So we can safely bundle those and help you save on the
-most important currencies: your time and the complexity of your stack costs.
+So we reduced Jazz Cloud pricing to three physical bottlenecks: disk I/O operations, storage, and
+egress. Different apps stress those in very different proportions, but most of the other things you
+would otherwise manage while self-hosting, like CPU, RAM, instance count, and geographic footprint,
+either scale with those three or matter too little to bill separately.
 
-And your app gets to treat Jazz's complicated global infra as a simple socket in the wall that syncs your
-local data via a durable, reliable cloud.
+That lets us absorb the operational complexity while keeping the public model legible. The goal is
+not to make pricing seem simple by hiding the hard parts in arbitrary bundles. It is to bundle the
+right things, so you can reason predictably about cost without learning Jazz Cloud's internal
+infrastructure model.
 
 # Who Jazz is for right now
 
