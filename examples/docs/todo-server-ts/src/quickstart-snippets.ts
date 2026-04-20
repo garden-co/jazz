@@ -13,6 +13,7 @@ const context = createJazzContext({
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
   jwksUrl: process.env.JAZZ_JWKS_URL,
+  jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false",
 });
 

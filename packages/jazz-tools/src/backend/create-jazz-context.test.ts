@@ -230,6 +230,24 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
+  it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
+    expect(() =>
+      createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+        jwksUrl: "https://issuer.example/.well-known/jwks.json",
+        jwtPublicKey: {
+          kty: "oct",
+          kid: "static-kid",
+          alg: "HS256",
+          k: "c3RhdGljLXNlY3JldA",
+        },
+      }),
+    ).toThrow(/jwksUrl.*jwtPublicKey|jwtPublicKey.*jwksUrl/i);
+  });
+
   it("BC-U02: supports high-level db/backend/request/session/attribution helpers", async () => {
     const context = createJazzContext({
       appId: "server-app",
@@ -345,6 +363,41 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
       appId: "server-app",
       jwksUrl: "https://issuer.example/.well-known/jwks.json",
+      allowLocalFirstAuth: false,
+    });
+  });
+
+  it("BC-U03c: forwards jwtPublicKey into request session resolution", async () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      jwtPublicKey: {
+        kty: "oct",
+        kid: "static-kid",
+        alg: "HS256",
+        k: "c3RhdGljLXNlY3JldA",
+      },
+      allowLocalFirstAuth: false,
+    });
+
+    const req = {
+      header: (name: string) =>
+        name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
+    };
+
+    await context.forRequest(req);
+
+    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
+      appId: "server-app",
+      jwksUrl: undefined,
+      jwtPublicKey: {
+        kty: "oct",
+        kid: "static-kid",
+        alg: "HS256",
+        k: "c3RhdGljLXNlY3JldA",
+      },
       allowLocalFirstAuth: false,
     });
   });

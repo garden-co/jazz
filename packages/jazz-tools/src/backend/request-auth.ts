@@ -1,4 +1,11 @@
-import { compactVerify, decodeProtectedHeader, importJWK } from "jose";
+import {
+  compactVerify,
+  decodeProtectedHeader,
+  importJWK,
+  importSPKI,
+  importX509,
+  type JWK,
+} from "jose";
 import type { RequestLike } from "../runtime/client.js";
 import {
   LOCAL_FIRST_JWT_ISSUER,
@@ -7,10 +14,12 @@ import {
   type JwtPayload,
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
+import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
 export interface BackendRequestAuthConfig {
   appId: string;
   jwksUrl?: string;
+  jwtPublicKey?: BackendJwtPublicKey;
   allowLocalFirstAuth?: boolean;
 }
 
@@ -19,6 +28,7 @@ type LocalJwksDocument = {
 };
 
 const jwksDocuments = new Map<string, LocalJwksDocument>();
+const staticJwtKeys = new Map<string, Promise<Awaited<ReturnType<typeof importJWK>>>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -170,7 +180,7 @@ async function verifyJwtSignatureWithJwks(token: string, jwks: LocalJwksDocument
   let lastError: Error | null = null;
   for (const candidate of candidates) {
     try {
-      const key = await importJWK(candidate as JsonWebKey, algorithm);
+      const key = await importJWK(candidate as JWK, algorithm);
       await compactVerify(token, key);
       return;
     } catch (error) {
@@ -179,6 +189,93 @@ async function verifyJwtSignatureWithJwks(token: string, jwks: LocalJwksDocument
   }
 
   throw lastError ?? new Error("JWT signature verification failed");
+}
+
+function cacheKeyForStaticJwtPublicKey(
+  jwtPublicKey: BackendJwtPublicKey,
+  algorithm: string,
+): string {
+  return typeof jwtPublicKey === "string"
+    ? `${algorithm}\0${jwtPublicKey.trim()}`
+    : `${algorithm}\0${JSON.stringify(jwtPublicKey)}`;
+}
+
+async function importStaticJwtPublicKey(
+  jwtPublicKey: BackendJwtPublicKey,
+  algorithm: string,
+): Promise<Awaited<ReturnType<typeof importJWK>>> {
+  if (typeof jwtPublicKey !== "string") {
+    return await importJWK(jwtPublicKey, algorithm);
+  }
+
+  const trimmed = jwtPublicKey.trim();
+  if (!trimmed) {
+    throw new Error("Invalid JWT public key");
+  }
+
+  if (trimmed.startsWith("{")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error("Invalid JWT public key");
+    }
+
+    if (!isRecord(parsed)) {
+      throw new Error("Invalid JWT public key");
+    }
+
+    return await importJWK(parsed as JWK, algorithm);
+  }
+
+  try {
+    return await importSPKI(trimmed, algorithm);
+  } catch {
+    try {
+      return await importX509(trimmed, algorithm);
+    } catch {
+      throw new Error("Invalid JWT public key");
+    }
+  }
+}
+
+async function getStaticJwtPublicKey(
+  jwtPublicKey: BackendJwtPublicKey,
+  algorithm: string,
+): Promise<Awaited<ReturnType<typeof importJWK>>> {
+  const cacheKey = cacheKeyForStaticJwtPublicKey(jwtPublicKey, algorithm);
+  let promise = staticJwtKeys.get(cacheKey);
+  if (!promise) {
+    promise = importStaticJwtPublicKey(jwtPublicKey, algorithm);
+    staticJwtKeys.set(cacheKey, promise);
+  }
+
+  try {
+    return await promise;
+  } catch (error) {
+    staticJwtKeys.delete(cacheKey);
+    throw error;
+  }
+}
+
+async function verifyJwtSignatureWithStaticKey(
+  token: string,
+  jwtPublicKey: BackendJwtPublicKey,
+): Promise<void> {
+  let header: ReturnType<typeof decodeProtectedHeader>;
+  try {
+    header = decodeProtectedHeader(token);
+  } catch {
+    throw new Error("Invalid JWT header");
+  }
+
+  const algorithm = readString(header.alg);
+  if (!algorithm) {
+    throw new Error("Invalid JWT header");
+  }
+
+  const key = await getStaticJwtPublicKey(jwtPublicKey, algorithm);
+  await compactVerify(token, key);
 }
 
 function requireJwtPayload(token: string): JwtPayload {
@@ -221,21 +318,40 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   return result.id;
 }
 
-async function verifyExternalJwt(token: string, jwksUrl: string): Promise<void> {
-  let jwks = await getRemoteJwksDocument(jwksUrl);
-  try {
-    await verifyJwtSignatureWithJwks(token, jwks);
-  } catch {
+async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig): Promise<void> {
+  if (config.jwtPublicKey !== undefined) {
     try {
-      jwks = await getRemoteJwksDocument(jwksUrl, true);
-      await verifyJwtSignatureWithJwks(token, jwks);
-    } catch (refreshError) {
-      const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+      await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Invalid JWT: ${message}`);
     }
+
+    ensureJwtNotExpired(requireJwtPayload(token));
+    return;
   }
 
-  ensureJwtNotExpired(requireJwtPayload(token));
+  if (config.jwksUrl) {
+    let jwks = await getRemoteJwksDocument(config.jwksUrl);
+    try {
+      await verifyJwtSignatureWithJwks(token, jwks);
+    } catch {
+      try {
+        jwks = await getRemoteJwksDocument(config.jwksUrl, true);
+        await verifyJwtSignatureWithJwks(token, jwks);
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        throw new Error(`Invalid JWT: ${message}`);
+      }
+    }
+
+    ensureJwtNotExpired(requireJwtPayload(token));
+    return;
+  }
+
+  throw new Error(
+    "Received external JWT, but createJazzContext() has no jwksUrl or jwtPublicKey. Configure one of them or verify upstream and call forSession().",
+  );
 }
 
 export async function resolveRequestSession(
@@ -261,12 +377,6 @@ export async function resolveRequestSession(
     return session;
   }
 
-  if (!config.jwksUrl) {
-    throw new Error(
-      "Received external JWT, but createJazzContext() has no jwksUrl. Configure jwksUrl or verify upstream and call forSession().",
-    );
-  }
-
-  await verifyExternalJwt(token, config.jwksUrl);
+  await verifyExternalJwt(token, config);
   return session;
 }

@@ -216,7 +216,7 @@ When the server receives a request, it tries each auth method in priority order 
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both.
 
 ### Upgrading to external auth
 
@@ -1566,6 +1566,7 @@ Every backend needs an app ID, typed schema, and usually a permissions bundle. I
     backendSecret,
     adminSecret,
     jwksUrl,
+    jwtPublicKey,
     allowLocalFirstAuth,
     env: "dev",
     userBranch: "main",
@@ -1601,7 +1602,7 @@ On the client side, queries automatically run as the logged-in user. On a server
 
 In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `await context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
-`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` on `createJazzContext(...)` if those bearer tokens come from an external IdP. Without `jwksUrl`, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
+`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
 
   For embedded or local-only runtime setups where your backend is not connected to a server, use
   `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
@@ -2363,6 +2364,7 @@ const context = createJazzContext({
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
   jwksUrl: process.env.JAZZ_JWKS_URL,
+  jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false",
 });
 
@@ -2373,7 +2375,7 @@ const api = new Hono();
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
+- `jwksUrl` or `jwtPublicKey` verifies external JWTs inside `await context.forRequest(req)`. Without either one, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
 - `dataPath` controls where local server state persists.
 
 Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
@@ -2485,8 +2487,8 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
   `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
   Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
-  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
-  them via JWKS.
+  want to accept external JWTs from your auth provider, also set `jwksUrl` or `jwtPublicKey` so
+  the backend can verify them.
 
 ## Authentication
 
