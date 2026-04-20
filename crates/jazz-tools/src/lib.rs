@@ -24,6 +24,7 @@ pub mod sync_tracer;
 #[cfg(test)]
 mod test_row_history;
 pub mod wire_types;
+pub mod worker_frame;
 
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
