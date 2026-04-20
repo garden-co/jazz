@@ -699,7 +699,13 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
     )
     .await
     .expect("push v1 catalogue before publishing v1 permissions");
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &v1_schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
 
     let alice =
         JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-v1-head"))

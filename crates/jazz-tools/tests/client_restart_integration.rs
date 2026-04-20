@@ -386,7 +386,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         publish_schema_response.status(),
         reqwest::StatusCode::CREATED
     );
-    publish_allow_all_permissions(&server.base_url(), ADMIN_SECRET, &test_schema()).await;
+    publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
     let client = JazzClient::connect(make_context(
