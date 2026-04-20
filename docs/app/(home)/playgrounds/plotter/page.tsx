@@ -32,7 +32,7 @@ export default async function PlotterPlaygroundPage() {
       <section className="w-full pb-24 pt-18 sm:pb-28 sm:pt-22 lg:pb-32 lg:pt-26">
         <div className="mx-auto w-full max-w-[min(96rem,100%-2rem)] px-4">
           <div className="max-w-[46rem] space-y-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
               Playground
             </p>
             <h1 className="text-[clamp(3rem,8vw,5.8rem)] font-black leading-[0.9] tracking-[-0.05em]">
