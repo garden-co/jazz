@@ -150,7 +150,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      const todo = db.insert(schemaApp.todos, {
+      const { value: todo } = db.insert(schemaApp.todos, {
         title: body.title,
         done: false,
         owner_id: body.owner_id ?? "anonymous",
