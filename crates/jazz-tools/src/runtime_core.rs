@@ -183,6 +183,8 @@ pub(crate) fn write_error_from_query(e: QueryError) -> RuntimeError {
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.
 pub type InsertedRow = (ObjectId, Vec<Value>);
+/// Type alias for plain insert results that carry the inserted row plus its logical batch id.
+pub type DirectInsertResult = (InsertedRow, BatchId);
 
 /// Structured rejection returned by persisted writes when their batch is rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -23,6 +23,7 @@ import {
 } from "./support.js";
 import {
   blockTestingServerNetwork,
+  getIsolatedTestingServerInfo,
   getTestingServerInfo,
   getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
@@ -34,6 +35,7 @@ import {
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
+import { CompiledPermissions, schema as s } from "../../src/";
 import {
   fetchPermissionsHead,
   publishStoredPermissions,
@@ -57,47 +59,33 @@ interface DebugSchemaState {
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
 
-const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
-      {
-        name: "tags",
-        column_type: { type: "Array", element: { type: "Text" } },
-        nullable: true,
-      },
-    ],
-  },
-  projects: {
-    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-  },
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    projectId: s.ref("projects").optional(),
+    tags: s.array(s.string()).optional(),
+  }),
 };
 
-interface Todo {
-  id: string;
-  title: string;
-  done: boolean;
-  project?: string;
-  tags?: string[];
-}
+type AppSchema = s.Schema<typeof schema>;
+const app: s.App<AppSchema> = s.defineApp(schema);
+const { projects, todos } = app;
+type Todo = s.RowOf<typeof todos>;
 
-interface TodoInit {
-  title: string;
-  done: boolean;
-  project?: string;
-  tags?: string[];
-}
-
-interface Project {
-  id: string;
-  name: string;
-}
-
-interface ProjectInit {
-  name: string;
-}
+const rejectAllPermissions = s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.never(),
+  policy.projects.allowInsert.never(),
+  policy.projects.allowUpdate.never(),
+  policy.projects.allowDelete.never(),
+  policy.todos.allowRead.never(),
+  policy.todos.allowInsert.never(),
+  policy.todos.allowUpdate.never(),
+  policy.todos.allowDelete.never(),
+]);
 
 interface WorkerMessageDebugEvent {
   atMs: number;
@@ -109,20 +97,6 @@ interface WorkerMessageProbe {
   dispose(): void;
   snapshot(): WorkerMessageDebugEvent[];
 }
-
-const todos: TableProxy<Todo, TodoInit> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _initType: {} as TodoInit,
-};
-
-const projects: TableProxy<Project, ProjectInit> = {
-  _table: "projects",
-  _schema: schema,
-  _rowType: {} as Project,
-  _initType: {} as ProjectInit,
-};
 
 function summarizeWorkerMessage(
   data: { type?: string; [key: string]: unknown } | undefined,
@@ -150,7 +124,7 @@ function summarizeWorkerMessage(
 }
 
 function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
-  const worker = (db as { worker?: Worker | null }).worker;
+  const worker = (db as unknown as { worker?: Worker | null }).worker;
   const startedAt = Date.now();
   const events: WorkerMessageDebugEvent[] = [];
 
@@ -187,7 +161,7 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
 }
 
 function getDbWorkerDebugState(db: Db): Record<string, unknown> {
-  const anyDb = db as {
+  const anyDb = db as unknown as {
     tabRole?: unknown;
     tabId?: unknown;
     currentLeaderTabId?: unknown;
@@ -251,35 +225,11 @@ async function rethrowWithWorkerDiagnostics(
 }
 
 /** QueryBuilder that selects all todos. */
-const allTodos: QueryBuilder<Todo> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _build() {
-    return JSON.stringify({
-      table: "todos",
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    });
-  },
-};
+const allTodos: QueryBuilder<Todo> = app.todos;
 
 /** QueryBuilder that selects all todos by project. */
 function todosByProject(projectId: string): QueryBuilder<Todo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: {} as Todo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [{ column: "project", op: "eq", value: projectId }],
-        includes: {},
-        orderBy: [],
-      });
-    },
-  };
+  return app.todos.where({ projectId });
 }
 
 // Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
@@ -322,6 +272,49 @@ const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
     });
   },
 };
+
+/**
+ * Sets up a server with the given app schema and permissions.
+ */
+async function getServerWithPermissions(
+  app: { wasmSchema: WasmSchema },
+  permissions: CompiledPermissions,
+): Promise<{ appId: string; serverUrl: string; adminSecret: string }> {
+  const { appId, serverUrl, adminSecret } = await getIsolatedTestingServerInfo();
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    adminSecret,
+    schema: app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  await publishStoredPermissions(serverUrl, {
+    adminSecret,
+    schemaHash,
+    permissions,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
+  return { appId, serverUrl, adminSecret };
+}
+
+/**
+ * Creates a non-admin Db with the given appId and serverUrl.
+ */
+async function getNonAdminClientDb(
+  appId: string,
+  serverUrl: string,
+  ctx: TestCleanup,
+): Promise<Db> {
+  const jwtToken = await getTestingServerJwtForUser("browser-offline-rejected-wait", {
+    role: "user",
+  });
+  return ctx.track(
+    await createDb({
+      appId,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-wait-edge-rejected-offline") },
+      serverUrl,
+      jwtToken,
+    }),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -469,7 +462,9 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // Insert (sync — runs on main-thread in-memory runtime)
-    const { id } = await db.insert(todos, { title: "Buy milk", done: false });
+    const {
+      value: { id },
+    } = db.insert(todos, { title: "Buy milk", done: false });
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
 
@@ -489,9 +484,9 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Task A", done: false });
-    await db.insert(todos, { title: "Task B", done: true });
-    await db.insert(todos, { title: "Task C", done: false });
+    db.insert(todos, { title: "Task A", done: false });
+    db.insert(todos, { title: "Task B", done: true });
+    db.insert(todos, { title: "Task C", done: false });
 
     const results = await db.all(allTodos);
     expect(results.length).toBe(3);
@@ -510,7 +505,9 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // First I/O operation, bridge hasn't been initialized yet.
-    const { id } = db1.insert(todos, { title: "Test", done: false });
+    const {
+      value: { id },
+    } = db1.insert(todos, { title: "Test", done: false });
 
     await waitForCondition(
       async () => {
@@ -562,7 +559,9 @@ describe("Worker Bridge with OPFS", () => {
       return originalPostMessage(message, { transfer });
     }) as Worker["postMessage"];
 
-    const { id } = db1.insert(todos, { title: "Test", done: false });
+    const {
+      value: { id },
+    } = db1.insert(todos, { title: "Test", done: false });
     expect(id).toBeDefined();
 
     worker.postMessage = originalPostMessage;
@@ -629,9 +628,12 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = db.insert(todos, { title: "Original", done: false });
+    const { value: inserted } = db.insert(todos, { title: "Original", done: false });
+    const { id } = inserted;
     const result = db.update(todos, id, { done: true });
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const results = await db.all(allTodos);
     expect(results.length).toBe(1);
@@ -669,11 +671,14 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = db.insert(todos, { title: "Ephemeral", done: false });
+    const { value: inserted } = db.insert(todos, { title: "Ephemeral", done: false });
+    const { id } = inserted;
     expect((await db.all(allTodos)).length).toBe(1);
 
     const result = db.delete(todos, id);
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
     const results = await db.all(allTodos);
     expect(results.length).toBe(0);
   });
@@ -709,7 +714,7 @@ describe("Worker Bridge with OPFS", () => {
     const dbName = uniqueDbName("persistence");
 
     const db1 = await createDb({ appId: "test-app", driver: { type: "persistent", dbName } });
-    await db1.insert(todos, { title: "Survive reload", done: true });
+    db1.insert(todos, { title: "Survive reload", done: true });
     const before = await db1.all(allTodos);
     expect(before.length).toBe(1);
     await db1.shutdown();
@@ -808,7 +813,9 @@ describe("Worker Bridge with OPFS", () => {
     const afterDelete = await db.all(allTodos, { tier: "local" });
     expect(afterDelete).toEqual([]);
 
-    const { id } = await db.insert(todos, { title: "Fresh after delete", done: true });
+    const {
+      value: { id },
+    } = db.insert(todos, { title: "Fresh after delete", done: true });
     const afterReinsert = await db.all(allTodos, { tier: "local" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
@@ -1002,7 +1009,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Observed", done: false });
+    db.insert(todos, { title: "Observed", done: false });
 
     // Wait for subscription to fire
     await waitForCondition(
@@ -1028,16 +1035,20 @@ describe("Worker Bridge with OPFS", () => {
 
     const received: Todo[][] = [];
 
-    const { id: projectId } = await db.insert(projects, { name: "Observed Project" });
+    const {
+      value: { id: projectId },
+    } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
         received.push([...delta.all]);
       }),
     );
 
-    await db.insert(todos, { title: "Observed", done: false, project: projectId });
-    const { id: anotherProjectId } = await db.insert(projects, { name: "Ignored Project" });
-    await db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
+    db.insert(todos, { title: "Observed", done: false, projectId });
+    const {
+      value: { id: anotherProjectId },
+    } = db.insert(projects, { name: "Ignored Project" });
+    db.insert(todos, { title: "Not observed", done: false, projectId: anotherProjectId });
 
     // Wait for subscription to fire
     await waitForCondition(
@@ -1076,24 +1087,9 @@ describe("Worker Bridge with OPFS", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(
-        {
-          _table: "todos",
-          _schema: schema,
-          _rowType: {} as Todo,
-          _build() {
-            return JSON.stringify({
-              table: "todos",
-              conditions: [{ column: "id", op: "eq", value: targetId }],
-              includes: {},
-              orderBy: [],
-            });
-          },
-        },
-        (delta) => {
-          received.push([...delta.all]);
-        },
-      ),
+      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
+        received.push([...delta.all]);
+      }),
     );
 
     await waitForCondition(
@@ -1137,24 +1133,9 @@ describe("Worker Bridge with OPFS", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(
-        {
-          _table: "todos",
-          _schema: schema,
-          _rowType: {} as Todo,
-          _build() {
-            return JSON.stringify({
-              table: "todos",
-              conditions: [{ column: "id", op: "eq", value: targetId }],
-              includes: {},
-              orderBy: [],
-            });
-          },
-        },
-        (delta) => {
-          received.push([...delta.all]);
-        },
-      ),
+      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
+        received.push([...delta.all]);
+      }),
     );
 
     await waitForCondition(
@@ -1180,7 +1161,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insert(todos, { title: "Prime bridge", done: false });
+    db.insert(todos, { title: "Prime bridge", done: false });
     await (db as any).ensureBridgeReady();
 
     const bridge = (db as any).workerBridge;
@@ -1248,6 +1229,84 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
+  it.skip("resolves insert wait at edge tier through the worker bridge", async () => {
+    const sharedLocalAuthToken = generateAuthSecret();
+    const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken);
+
+    const title = `wait-edge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const inserted = db.insert(todos, { title, done: false });
+    const { value: insertedTodo } = inserted;
+
+    await withTimeout(inserted.wait({ tier: "edge" }), 10000, "insert wait(edge) did not resolve");
+
+    expect(insertedTodo.id).toBeTruthy();
+    expect(insertedTodo.title).toBe(title);
+
+    const rowsAtEdge = await waitForTodos(
+      db,
+      (rows) => rows.some((row) => row.id === insertedTodo.id && row.title === title),
+      "insert wait(edge) row becomes queryable at edge",
+      20000,
+      "edge",
+    );
+    expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
+  }, 60000);
+
+  it.skip("rejects insert immediately when published server permissions deny writes", async () => {
+    const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
+
+    // Wait for client to fetch permissions from the server
+    const db = await getNonAdminClientDb(appId, serverUrl, ctx);
+    await waitForCondition(
+      async () => Boolean(db.getAuthState().session) && !db.getAuthState().error,
+      10_000,
+      "client db should authenticate before rejected insert",
+    );
+    await withTimeout(
+      db.all(allTodos, { tier: "edge" }),
+      10_000,
+      "client db should complete an initial edge read before rejected insert",
+    );
+
+    expect(() => db.insert(todos, { title: "Rejected", done: false })).toThrow(
+      'WriteError("policy denied INSERT on table todos")',
+    );
+  });
+
+  it.skip("server permissions check rejects offline insert", async () => {
+    const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
+
+    // Block network to prevent server permissions from being fetched by the client
+    await blockTestingServerNetwork(serverUrl);
+
+    const db = await getNonAdminClientDb(appId, serverUrl, ctx);
+
+    const inserted = db.insert(todos, { title: "Rejected later", done: false });
+    const waitPromise = inserted.wait({ tier: "edge" });
+
+    const todosAfterInsert = await db.all(allTodos, { tier: "local" });
+    expect(todosAfterInsert.length).toBe(1);
+
+    await unblockTestingServerNetwork(serverUrl);
+    // Insert is reverted in the client
+    await waitForTodos(
+      db,
+      (rows) => rows.length === 0,
+      "offline insert should be reverted once rejected by the server",
+      10_000,
+      "local",
+    );
+
+    // `InsertHandle.wait` rejects
+    await expect(
+      withTimeout(waitPromise, 20_000, "offline rejected insert wait(edge) timed out"),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      batchId: inserted.batchId,
+      code: "permission_denied",
+    });
+  }, 60000);
+
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
@@ -1259,7 +1318,7 @@ describe("Worker Bridge with OPFS", () => {
       appId,
       dbName: uniqueDbName("sync-recover-b"),
       table: "todos",
-      schemaJson: JSON.stringify(schema),
+      schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
       adminSecret,
       localFirstSecret: sharedLocalAuthToken,
@@ -1408,7 +1467,7 @@ describe("Worker Bridge with OPFS", () => {
       appId,
       dbName: uniqueDbName("sync-offline-b"),
       table: "todos",
-      schemaJson: JSON.stringify(schema),
+      schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
       adminSecret,
       localFirstSecret: sharedLocalAuthToken,
@@ -1618,7 +1677,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(latestAfterRemote.some((row) => row.title === remoteTitle)).toBe(false);
 
     const localTitle = `local-only-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await dbB.insert(todos, { title: localTitle, done: true });
+    dbB.insert(todos, { title: localTitle, done: true });
 
     await waitForCondition(
       async () => {
@@ -1660,7 +1719,7 @@ describe("Worker Bridge with OPFS", () => {
       },
     );
 
-    await follower.insert(todos, { title: "Routed via leader", done: false });
+    follower.insert(todos, { title: "Routed via leader", done: false });
 
     await waitForCondition(
       async () => receivedByLeader.includes("Routed via leader"),
@@ -1702,7 +1761,9 @@ describe("Worker Bridge with OPFS", () => {
       "Follower should be promoted to leader after shutdown",
     );
 
-    const { id } = await follower.insert(todos, { title: "Post-failover", done: true });
+    const {
+      value: { id },
+    } = follower.insert(todos, { title: "Post-failover", done: true });
     await waitForCondition(
       async () => {
         const rows = await follower.all(allTodos, { tier: "local" });
@@ -1779,7 +1840,7 @@ async function publishSyncServerSchemaAndPermissions(scope: string): Promise<Tes
   const { serverUrl, adminSecret } = testingServer;
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
     adminSecret,
-    schema,
+    schema: app.wasmSchema,
   });
   const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
   await publishStoredPermissions(serverUrl, {

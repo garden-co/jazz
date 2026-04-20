@@ -80,6 +80,7 @@ export interface PublishStoredSchemaOptions {
   adminSecret: string;
   pathPrefix?: string;
   schema: WasmSchema;
+  /** @deprecated Use `publishStoredPermissions` instead. */
   permissions?: CompiledPermissionsMap;
 }
 

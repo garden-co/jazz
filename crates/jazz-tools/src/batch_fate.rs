@@ -223,7 +223,6 @@ fn merged_visible_batch_members(
 pub struct LocalBatchRecord {
     pub batch_id: BatchId,
     pub mode: BatchMode,
-    pub requested_tier: DurabilityTier,
     pub sealed: bool,
     pub members: Vec<LocalBatchMember>,
     pub sealed_submission: Option<SealedBatchSubmission>,
@@ -256,14 +255,12 @@ impl LocalBatchRecord {
     pub fn new(
         batch_id: BatchId,
         mode: BatchMode,
-        requested_tier: DurabilityTier,
         sealed: bool,
         latest_settlement: Option<BatchSettlement>,
     ) -> Self {
         Self {
             batch_id,
             mode,
-            requested_tier,
             sealed,
             members: Vec::new(),
             sealed_submission: None,
@@ -387,7 +384,6 @@ impl LocalBatchRecord {
         let values = vec![
             Value::BatchId(*self.batch_id.as_bytes()),
             Value::Text(self.mode.as_str().to_string()),
-            Value::Text(durability_tier_to_str(self.requested_tier).to_string()),
             Value::Boolean(self.sealed),
             Value::Array(
                 self.members
@@ -416,7 +412,6 @@ impl LocalBatchRecord {
         let [
             batch_id,
             mode,
-            requested_tier,
             sealed,
             members,
             sealed_submission,
@@ -430,10 +425,6 @@ impl LocalBatchRecord {
         let mode = match mode {
             Value::Text(raw) => BatchMode::parse(raw)?,
             other => return Err(format!("expected batch mode text, got {other:?}")),
-        };
-        let requested_tier = match requested_tier {
-            Value::Text(raw) => durability_tier_from_str(raw)?,
-            other => return Err(format!("expected requested tier text, got {other:?}")),
         };
         let sealed = match sealed {
             Value::Boolean(value) => *value,
@@ -554,7 +545,6 @@ impl LocalBatchRecord {
         Ok(Self {
             batch_id,
             mode,
-            requested_tier,
             sealed,
             members,
             sealed_submission,
@@ -906,16 +896,6 @@ fn storage_descriptor() -> RowDescriptor {
                 variants: vec!["direct".to_string(), "transactional".to_string()],
             },
         ),
-        ColumnDescriptor::new(
-            "requested_tier",
-            ColumnType::Enum {
-                variants: vec![
-                    "local".to_string(),
-                    "edge".to_string(),
-                    "global".to_string(),
-                ],
-            },
-        ),
         ColumnDescriptor::new("sealed", ColumnType::Boolean),
         ColumnDescriptor::new(
             "members",
@@ -1018,7 +998,6 @@ mod tests {
         let mut record = LocalBatchRecord::new(
             batch_id,
             BatchMode::Direct,
-            DurabilityTier::EdgeServer,
             true,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
@@ -1050,7 +1029,6 @@ mod tests {
         let mut record = LocalBatchRecord::new(
             batch_id,
             BatchMode::Direct,
-            DurabilityTier::GlobalServer,
             true,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
@@ -1083,7 +1061,6 @@ mod tests {
         let mut record = LocalBatchRecord::new(
             batch_id,
             BatchMode::Direct,
-            DurabilityTier::Local,
             true,
             Some(BatchSettlement::DurableDirect {
                 batch_id,
@@ -1130,13 +1107,7 @@ mod tests {
     #[test]
     fn local_batch_record_storage_row_roundtrips_with_sealed_submission() {
         let batch_id = BatchId::new();
-        let mut record = LocalBatchRecord::new(
-            batch_id,
-            BatchMode::Transactional,
-            DurabilityTier::GlobalServer,
-            false,
-            None,
-        );
+        let mut record = LocalBatchRecord::new(batch_id, BatchMode::Transactional, false, None);
         record.mark_sealed(SealedBatchSubmission::new(
             batch_id,
             BranchName::new("dev-aaaaaaaaaaaa-main"),

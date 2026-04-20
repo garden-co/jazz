@@ -59,7 +59,6 @@ function makeLocalBatchRecord(
   return {
     batchId,
     mode,
-    requestedTier: "global",
     sealed: false,
     latestSettlement: null,
   };
@@ -82,7 +81,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Transactional" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-tx",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-tx-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-tx-update", undefined);
     const persistedDelete = makePendingWrite("batch-tx-delete", undefined);
@@ -109,7 +109,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Transactional", done: false });
+    const { value: inserted } = tx.insert(table, { title: "Transactional", done: false });
     tx.update(table, "todo-1", { done: true });
     tx.delete(table, "todo-1");
     const persisted = tx.insertPersisted(
@@ -180,6 +180,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Session transaction" },
           { type: "Boolean", value: true },
         ],
+        batchId: "batch-session-tx",
       })),
       createPersisted: vi.fn(() =>
         makePendingWrite("batch-session-persisted", {
@@ -213,7 +214,7 @@ describe("Db transactions", () => {
     );
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Session transaction", done: true });
+    const { value: inserted } = tx.insert(table, { title: "Session transaction", done: true });
     const persisted = tx.insertPersisted(table, {
       title: "Session transaction",
       done: true,
@@ -240,6 +241,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Closed" },
           { type: "Boolean", value: false },
         ],
+        batchId: "batch-closed",
       })),
       createPersisted: vi.fn(),
       update: vi.fn(),
@@ -323,7 +325,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Direct batch" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-direct",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-direct-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-direct-update", undefined);
     const persistedDelete = makePendingWrite("batch-direct-delete", undefined);
@@ -351,7 +354,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const batch = db.beginDirectBatch(table);
-    const inserted = batch.insert(table, { title: "Direct batch", done: false });
+    const { value: inserted } = batch.insert(table, { title: "Direct batch", done: false });
     batch.update(table, "todo-direct-1", { done: true });
     batch.delete(table, "todo-direct-1");
     const persisted = batch.insertPersisted(

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import type { JazzClient, Row } from "./client.js";
+import type { DirectInsertResult, DirectMutationResult, JazzClient } from "./client.js";
 
 class TestDb extends Db {
   constructor(private readonly testClient: JazzClient) {
@@ -31,12 +31,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => DirectInsertResult>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-schema-order-runtime",
     }));
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
@@ -53,7 +54,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = db.insert(table, { title: "Buy milk", done: false });
+    const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Buy milk" },
@@ -130,12 +131,13 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => DirectInsertResult>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-schema-order-generated",
     }));
     const client = {
       getSchema: () => new Map(),
@@ -152,7 +154,7 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    const row = db.insert(table, { title: "Buy milk", done: false });
+    const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
     expect(create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Buy milk" },
@@ -175,13 +177,16 @@ describe("Db runtime schema order", () => {
       },
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const create = vi.fn<(...args: [string, InsertValues, { id: string }]) => Row>(() => ({
-      id: externalId,
-      values: [
-        { type: "Text", value: "Buy milk" },
-        { type: "Boolean", value: false },
-      ],
-    }));
+    const create = vi.fn<(...args: [string, InsertValues, { id: string }]) => DirectInsertResult>(
+      () => ({
+        id: externalId,
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+        batchId: "batch-1",
+      }),
+    );
     const client = {
       getSchema: () => new Map(),
       create,
@@ -207,7 +212,7 @@ describe("Db runtime schema order", () => {
       },
       { id: externalId },
     );
-    expect(row).toEqual({
+    expect(row.value).toEqual({
       id: externalId,
       title: "Buy milk",
       done: false,
@@ -224,7 +229,11 @@ describe("Db runtime schema order", () => {
       },
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => void>();
+    const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => DirectMutationResult>(
+      () => ({
+        batchId: "batch-upsert",
+      }),
+    );
     const client = {
       getSchema: () => new Map(),
       upsert,
@@ -240,9 +249,9 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    expect(
-      db.upsert(table, { title: "Buy milk", done: false }, { id: externalId }),
-    ).toBeUndefined();
+    expect(db.upsert(table, { title: "Buy milk", done: false }, { id: externalId })).toMatchObject({
+      batchId: "batch-upsert",
+    });
 
     expect(upsert).toHaveBeenCalledWith(
       "todos",
@@ -264,16 +273,26 @@ describe("Db runtime schema order", () => {
       },
     };
     const updatedAt = 1_764_000_000_000_000;
-    const create = vi.fn<(...args: [string, InsertValues, { updatedAt: number }]) => Row>(() => ({
+    const create = vi.fn<
+      (...args: [string, InsertValues, { updatedAt: number }]) => DirectInsertResult
+    >(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-1",
     }));
-    const update = vi.fn<(...args: [string, InsertValues, { updatedAt: number }]) => void>();
-    const upsert =
-      vi.fn<(...args: [string, InsertValues, { id: string; updatedAt: number }]) => void>();
+    const update = vi.fn<
+      (...args: [string, InsertValues, { updatedAt: number }]) => DirectMutationResult
+    >(() => ({
+      batchId: "batch-update",
+    }));
+    const upsert = vi.fn<
+      (...args: [string, InsertValues, { id: string; updatedAt: number }]) => DirectMutationResult
+    >(() => ({
+      batchId: "batch-upsert",
+    }));
     const client = {
       getSchema: () => new Map(),
       create,
@@ -335,9 +354,14 @@ describe("Db runtime schema order", () => {
         { type: "Text", value: "Buy milk" },
         { type: "Boolean", value: false },
       ],
+      batchId: "batch-insert",
     }));
-    const updateInternal = vi.fn();
-    const upsertInternal = vi.fn();
+    const updateInternal = vi.fn<() => DirectMutationResult>(() => ({
+      batchId: "batch-update",
+    }));
+    const upsertInternal = vi.fn<() => DirectMutationResult>(() => ({
+      batchId: "batch-upsert",
+    }));
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
       createInternal,

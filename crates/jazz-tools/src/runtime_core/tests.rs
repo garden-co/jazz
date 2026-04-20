@@ -1693,7 +1693,7 @@ mod install_transport_tests {
 
         let mut core = create_test_runtime();
 
-        let alice = core
+        let (alice, _row_values) = core
             .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap()
             .0;
@@ -1748,7 +1748,7 @@ mod install_transport_tests {
     ) {
         let mut core = create_test_runtime();
 
-        let alice = core
+        let (alice, _row_values) = core
             .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap()
             .0;
@@ -2078,10 +2078,10 @@ fn test_runtime_core_insert_query() {
 
     let user_id = ObjectId::new();
     let expected_values = user_row_values(user_id, "Alice");
-    let (object_id, row_values) = core
+    let ((object_id, row_values), _) = core
         .insert("users", user_insert_values(user_id, "Alice"), None)
         .unwrap();
-    assert!(!object_id.0.is_nil());
+    assert!(!object_id.uuid().is_nil());
     assert_eq!(row_values, expected_values);
 
     core.immediate_tick();
@@ -2098,7 +2098,7 @@ fn test_runtime_core_insert_query() {
 fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
     let user_id = ObjectId::new();
-    let (row_object_id, _) = old_runtime
+    let ((row_object_id, _), _) = old_runtime
         .insert("users", user_insert_values(user_id, "Alice"), None)
         .expect("insert should succeed before restart");
 
@@ -2130,14 +2130,14 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
 fn test_runtime_core_insert_materializes_schema_defaults() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "todos-with-defaults");
 
-    let (object_id, row_values) = core
+    let ((object_id, row_values), _) = core
         .insert(
             "todos",
             HashMap::from([("title".to_string(), Value::Text("Ship it".to_string()))]),
             None,
         )
         .unwrap();
-    assert!(!object_id.0.is_nil());
+    assert!(!object_id.uuid().is_nil());
     let descriptor = &core.current_schema()[&TableName::new("todos")].columns;
     let title_idx = descriptor.column_index("title").unwrap();
     let done_idx = descriptor.column_index("done").unwrap();
@@ -2232,7 +2232,7 @@ fn test_runtime_core_update_delete() {
     let mut core = create_test_runtime();
 
     let id = ObjectId::new();
-    let (object_id, _row_values) = core
+    let ((object_id, _row_values), _) = core
         .insert("users", user_insert_values(id, "Charlie"), None)
         .unwrap();
     core.immediate_tick();
@@ -2288,7 +2288,7 @@ fn rc_user_inserted_row_stays_hidden_from_other_sessions() {
     client.sync_sender().take();
     server.sync_sender().take();
 
-    let (document_id, row_values) = client
+    let ((document_id, row_values), _) = client
         .insert(
             "documents",
             document_insert_values("alice", title),
@@ -2455,7 +2455,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         "server should register bob's active query before the write"
     );
 
-    let (document_id, row_values) = writer
+    let ((document_id, row_values), _) = writer
         .insert(
             "documents",
             document_insert_values("alice", title),
@@ -3025,10 +3025,10 @@ fn rc_insert_returns_immediately() {
     let mut s = create_3tier_rc();
     let user_id = ObjectId::new();
     let expected_values = user_row_values(user_id, "Alice");
-    let (id, row_values) =
+    let ((id, row_values), _) =
         s.a.insert("users", user_insert_values(user_id, "Alice"), None)
             .unwrap();
-    assert!(!id.0.is_nil());
+    assert!(!id.uuid().is_nil());
     assert_eq!(row_values, expected_values);
 
     let query = Query::new("users");
@@ -3041,7 +3041,7 @@ fn rc_insert_returns_immediately() {
 #[test]
 fn rc_insert_data_syncs_to_server() {
     let mut s = create_3tier_rc();
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -3065,7 +3065,7 @@ fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
     core.batched_tick();
     core.sync_sender().take();
 
-    let (row_id, _row_values) = core
+    let ((row_id, _row_values), _) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
     core.batched_tick();
@@ -3095,7 +3095,7 @@ fn rc_row_writes_do_not_touch_legacy_commit_storage() {
         Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
     );
 
-    let (row_id, _row_values) = core
+    let ((row_id, _row_values), _) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
 
@@ -3123,7 +3123,7 @@ fn rc_local_row_writes_batch_row_and_index_mutations() {
         Box::new(RowMutationObservingStorage::new(Arc::clone(&calls))),
     );
 
-    let (row_id, _row_values) = core
+    let ((row_id, _row_values), _) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
     core.update(
@@ -3231,7 +3231,7 @@ fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
 #[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
     pump_a_to_b(&mut s);
@@ -3249,7 +3249,7 @@ fn rc_update_sync() {
 #[test]
 fn rc_delete_sync() {
     let mut s = create_3tier_rc();
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
     pump_a_to_b(&mut s);
@@ -3260,6 +3260,138 @@ fn rc_delete_sync() {
     let query = Query::new("users");
     let results = execute_query(&mut s.b, query);
     assert_eq!(results.len(), 0, "Row should be deleted on B");
+}
+
+#[test]
+fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+    let insert_batch_id =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), id)
+            .unwrap()
+            .expect("insert should create one visible row")
+            .batch_id;
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let update_batch_id =
+        s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
+            .unwrap();
+
+    let update_record =
+        s.a.storage()
+            .load_local_batch_record(update_batch_id)
+            .unwrap()
+            .expect("direct update should create a local batch record");
+    assert_eq!(
+        update_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id: update_batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: id,
+                branch_name,
+                batch_id: update_batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![update_batch_id]
+    )));
+}
+
+#[test]
+fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), _) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+    let insert_batch_id =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), id)
+            .unwrap()
+            .expect("insert should create one visible row")
+            .batch_id;
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let delete_batch_id = s.a.delete(id, None).unwrap();
+
+    let delete_record =
+        s.a.storage()
+            .load_local_batch_record(delete_batch_id)
+            .unwrap()
+            .expect("direct delete should create a local batch record");
+    assert_eq!(
+        delete_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id: delete_batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: id,
+                branch_name,
+                batch_id: delete_batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![delete_batch_id]
+    )));
 }
 
 #[test]
@@ -3464,7 +3596,6 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .expect("persisted write should create a local batch record");
     assert_eq!(initial_record.batch_id, batch_id);
     assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Local);
     assert_eq!(
         initial_record.latest_settlement, None,
         "client-side persisted direct writes should start pending until an upstream durability settlement arrives"
@@ -3501,6 +3632,193 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             }],
         })
     );
+}
+
+#[test]
+fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "the caller-facing worker wait should resolve once worker confirms"
+    );
+
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
+    )));
+}
+
+#[test]
+fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "worker confirmation should not satisfy an edge wait"
+    );
+
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "edge confirmation should resolve the caller-facing wait"
+    );
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("edge-accepted direct batch should stay retained");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
+    )));
+}
+
+#[test]
+fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("insert should create one visible row");
+    let batch_id = visible_row.batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let settled_record =
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("terminally accepted direct batch should still be inspectable");
+    assert_eq!(
+        settled_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        })
+    );
+
+    s.a.sync_sender().take();
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    s.a.batched_tick();
+
+    let outbox = s.a.sync_sender().take();
+    assert!(!outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        } if *server_id == s.b_server_for_a && batch_ids.contains(&batch_id)
+    )));
 }
 
 #[test]
@@ -3625,7 +3943,7 @@ fn rc_same_row_direct_batch_overwrites_in_place() {
     let batch_id = BatchId::new();
     let write_context = WriteContext::default().with_batch_id(batch_id);
 
-    let (row_id, _) = core
+    let ((row_id, _), _) = core
         .insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
@@ -3670,25 +3988,22 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
         .with_batch_mode(crate::batch_fate::BatchMode::Direct)
         .with_batch_id(batch_id);
 
-    let ((first_row_id, _), mut first_receiver) =
-        s.b.insert_persisted(
+    let ((first_row_id, _), first_batch_id) =
+        s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Local,
         )
         .unwrap();
-    let ((second_row_id, _), mut second_receiver) =
-        s.b.insert_persisted(
+    let ((second_row_id, _), second_batch_id) =
+        s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Local,
         )
         .unwrap();
-
-    assert_eq!(first_receiver.try_recv(), Ok(Some(Ok(()))));
-    assert_eq!(second_receiver.try_recv(), Ok(Some(Ok(()))));
+    assert_eq!(first_batch_id, batch_id);
+    assert_eq!(second_batch_id, batch_id);
 
     let branch_name = s.b.schema_manager().branch_name();
     let local_record =
@@ -3802,7 +4117,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
         target_branch_name: None,
     };
 
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
@@ -3853,7 +4168,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
 
     s.a.remove_server(s.b_server_for_a);
 
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
@@ -3919,7 +4234,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         target_branch_name: None,
     };
 
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
@@ -4060,7 +4375,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
     };
 
     let inserted_user_id = ObjectId::new();
-    let (row_id, _) = core
+    let ((row_id, _), _) = core
         .insert(
             "users",
             user_insert_values(inserted_user_id, "Alice"),
@@ -4107,7 +4422,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
     //   latest staged member should compose both changes
     //   only one live staged member should remain for that row/batch
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "tx-write-set-collapse");
-    let (row_id, _) = core
+    let ((row_id, _), _) = core
         .insert(
             "todos",
             HashMap::from([("title".to_string(), Value::Text("Draft".to_string()))]),
@@ -4327,7 +4642,6 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         initial_record.mode,
         crate::batch_fate::BatchMode::Transactional
     );
-    assert_eq!(initial_record.requested_tier, DurabilityTier::Local);
     assert!(!initial_record.sealed);
     assert_eq!(initial_record.latest_settlement, None);
 
@@ -5773,7 +6087,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
         target_branch_name: None,
     };
 
-    let (existing_row_id, _) =
+    let ((existing_row_id, _), _) =
         s.a.insert("users", user_insert_values(existing_row_id, "Seen"), None)
             .unwrap();
     let existing_history_rows =
@@ -5869,7 +6183,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
 #[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
     pump_a_to_b(&mut s);
@@ -5901,7 +6215,7 @@ fn rc_update_persisted_resolves_on_ack() {
 #[test]
 fn rc_delete_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
     pump_a_to_b(&mut s);
@@ -5967,7 +6281,7 @@ fn rc_multiple_persisted_inserts_independent() {
 fn rc_query_no_settled_tier_immediate() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -5989,7 +6303,7 @@ fn rc_query_no_settled_tier_immediate() {
 fn rc_query_settled_tier_holds() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -6028,7 +6342,7 @@ fn rc_query_settled_tier_holds() {
 fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -6070,7 +6384,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
 fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -6197,7 +6511,7 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
     //    \
     //     `-- v2 --(worker)--> current head for worker queries
     let row_id = ObjectId::new();
-    let (object_id, _) = core
+    let ((object_id, _), _) = core
         .insert("users", user_insert_values(row_id, "Alice-global"), None)
         .unwrap();
     core.immediate_tick();
@@ -6288,7 +6602,7 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
     let branch_name = core.schema_manager().branch_name().to_string();
     let descriptor = &schema[&TableName::new("todos")].columns;
 
-    let (row_id, _) = core
+    let ((row_id, _row_values), _) = core
         .insert(
             "todos",
             HashMap::from([
@@ -6460,7 +6774,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut s = create_3tier_rc();
 
     // Seed data on server B that client A has not synced yet.
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "upstream-row"),
@@ -6600,7 +6914,7 @@ fn rc_subscribe_settled_tier() {
         )
         .unwrap();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
     s.a.immediate_tick();
@@ -6648,7 +6962,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         .unwrap();
 
     // Initial delivery should still wait for the initial remote frontier.
-    let (first_id, _row_values) =
+    let ((first_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "local-first"),
@@ -6698,7 +7012,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     drop(calls);
 
     // After initial delivery, local updates should callback immediately.
-    let (second_id, _row_values) =
+    let ((second_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "local-second"),
@@ -6726,7 +7040,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
 fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -6842,7 +7156,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
         target_branch_name: None,
     };
 
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "alice-pending"),
@@ -6931,7 +7245,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
         target_branch_name: None,
     };
 
-    let (row_id, _row_values) =
+    let ((row_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "alice-pending"),
@@ -7018,14 +7332,14 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
         target_branch_name: None,
     };
 
-    let (first_id, _row_values) =
+    let ((first_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice-one"),
             Some(&write_context),
         )
         .unwrap();
-    let (second_id, _row_values) =
+    let ((second_id, _row_values), _) =
         s.a.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice-two"),
@@ -7234,7 +7548,7 @@ fn rc_query_reads_old_schema_row_after_evolving_to_new_schema() {
         ("id".to_string(), Value::Uuid(user_id)),
         ("name".to_string(), Value::Text("Alice".to_string())),
     ]);
-    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+    let ((inserted_id, _), _) = old_runtime.insert("users", inserted_values, None).unwrap();
 
     let storage = old_runtime.into_storage();
 
@@ -7279,7 +7593,7 @@ fn rc_update_old_schema_row_after_evolution_copies_row_to_current_schema() {
         ("id".to_string(), Value::Uuid(user_id)),
         ("name".to_string(), Value::Text("Alice".to_string())),
     ]);
-    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+    let ((inserted_id, _), _) = old_runtime.insert("users", inserted_values, None).unwrap();
 
     let storage = old_runtime.into_storage();
 
@@ -7344,7 +7658,7 @@ fn rc_delete_old_schema_row_after_evolution_hides_row_from_queries() {
         ("id".to_string(), Value::Uuid(user_id)),
         ("name".to_string(), Value::Text("Alice".to_string())),
     ]);
-    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+    let ((inserted_id, _), _) = old_runtime.insert("users", inserted_values, None).unwrap();
 
     let storage = old_runtime.into_storage();
 
@@ -7388,7 +7702,7 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
             Value::Text("alice@example.com".to_string()),
         ),
     ]);
-    let (inserted_id, _) = new_runtime.insert("users", inserted_values, None).unwrap();
+    let ((inserted_id, _), _) = new_runtime.insert("users", inserted_values, None).unwrap();
 
     let storage = new_runtime.into_storage();
 
@@ -7480,7 +7794,7 @@ fn runtime_bootstraps_current_schema_into_catalogue_for_flat_row_history() {
     );
 
     let row_id = ObjectId::new();
-    let (inserted_id, _) = core
+    let ((inserted_id, _), _) = core
         .insert("users", user_insert_values(row_id, "Alice"), None)
         .expect("insert should succeed");
 
@@ -7677,7 +7991,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     let schema_obj_id = core.persist_schema();
-    let (row_object_id, _) = core
+    let ((row_object_id, _), _) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
 
@@ -7770,11 +8084,11 @@ fn create_fk_runtime() -> TestCore {
 fn rc_partial_update_with_unloaded_fk_reference() {
     let mut core = create_fk_runtime();
 
-    let (project_id, _) = core
+    let ((project_id, _), _) = core
         .insert("projects", project_insert_values("Acme", "alice"), None)
         .unwrap();
 
-    let (todo_id, _) = core
+    let ((todo_id, _), _) = core
         .insert(
             "todos",
             todo_insert_values(
@@ -7819,11 +8133,11 @@ fn rc_partial_update_with_unloaded_fk_reference() {
 fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
     let mut core = create_fk_runtime();
 
-    let (project_id, _) = core
+    let ((project_id, _), _) = core
         .insert("projects", project_insert_values("Acme", "alice"), None)
         .unwrap();
 
-    let (todo_id, _) = core
+    let ((todo_id, _), _) = core
         .insert(
             "todos",
             todo_insert_values(
