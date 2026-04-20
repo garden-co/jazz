@@ -1247,10 +1247,6 @@ export class JazzClient {
             value.call(target, payload, seq);
             this.flushPendingBatchWaiters();
             this.flushUnhandledMutationErrors(batchesWithPendingWaiters);
-            queueMicrotask(() => {
-              this.flushPendingBatchWaiters();
-              this.flushUnhandledMutationErrors(batchesWithPendingWaiters);
-            });
           };
         }
         if (typeof value === "function") {
