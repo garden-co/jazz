@@ -183,6 +183,48 @@ mod wasm_worker {
         }
 
         // ------------------------------------------------------------------
+        // ensure_peer_client — port of TS ensurePeerClient (lines 408-418)
+        // ------------------------------------------------------------------
+
+        /// Ensures a runtime client exists for the given peer_id, creating one
+        /// if necessary. Returns the runtime ClientId string, or None if there
+        /// is no runtime yet.
+        fn ensure_peer_client(&mut self, peer_id: &str) -> Option<String> {
+            if self.runtime.is_none() {
+                return None;
+            }
+            if let Some(existing) = self.peer_runtime_client_by_peer_id.get(peer_id) {
+                return Some(existing.clone());
+            }
+            let runtime = self.runtime.as_ref().unwrap();
+            let client_id = runtime.borrow().add_client();
+            if let Err(e) = runtime.borrow().set_client_role(&client_id, "peer") {
+                web_sys::console::warn_1(
+                    &format!("[worker] ensure_peer_client: set_client_role failed: {e:?}").into(),
+                );
+                return None;
+            }
+            self.peer_runtime_client_by_peer_id
+                .insert(peer_id.to_string(), client_id.clone());
+            self.peer_id_by_runtime_client
+                .insert(client_id.clone(), peer_id.to_string());
+            Some(client_id)
+        }
+
+        // ------------------------------------------------------------------
+        // close_peer — port of TS closePeer (lines 420-426)
+        // ------------------------------------------------------------------
+
+        /// Removes all peer bookkeeping for the given peer_id. No runtime-side
+        /// call needed (the WASM runtime has no removeClient binding).
+        fn close_peer(&mut self, peer_id: &str) {
+            if let Some(runtime_client_id) = self.peer_runtime_client_by_peer_id.remove(peer_id) {
+                self.peer_id_by_runtime_client.remove(&runtime_client_id);
+                self.peer_term_by_peer_id.remove(peer_id);
+            }
+        }
+
+        // ------------------------------------------------------------------
         // handle_init
         // ------------------------------------------------------------------
 
@@ -423,9 +465,36 @@ mod wasm_worker {
                     }
                 }
 
-                // TODO 6c: drain pending_peer_sync_messages once ensurePeerClient is implemented.
-                // For now we drop the buffer.
-                let _ = std::mem::take(&mut self.pending_peer_sync_messages);
+                // Drain buffered PeerSync messages (accumulated before Init completed).
+                let buffered_peer_sync = std::mem::take(&mut self.pending_peer_sync_messages);
+                for (peer_id, term, payloads) in buffered_peer_sync {
+                    let Some(peer_client_id) = self.ensure_peer_client(&peer_id) else {
+                        continue;
+                    };
+                    self.peer_term_by_peer_id.insert(peer_id, term);
+                    let uuid = match uuid::Uuid::parse_str(&peer_client_id) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+                    for raw in &payloads {
+                        match SyncPayload::from_bytes(raw) {
+                            Ok(sync_payload) => {
+                                let entry = InboxEntry {
+                                    source: Source::Client(ClientId(uuid)),
+                                    payload: sync_payload,
+                                };
+                                runtime_rc
+                                    .borrow()
+                                    .inner_core()
+                                    .borrow_mut()
+                                    .park_sync_message(entry);
+                            }
+                            Err(_) => {
+                                // Malformed pre-init peer sync frame — skip.
+                            }
+                        }
+                    }
+                }
 
                 // (h) Mark init complete (already set above before draining).
 
@@ -552,10 +621,97 @@ mod wasm_worker {
                 WorkerFrame::Init(payload) => {
                     host.handle_init(payload).await;
                 }
-                WorkerFrame::Sync { .. } => { /* TODO 6c */ }
-                WorkerFrame::PeerSync { .. } => { /* TODO 6c */ }
-                WorkerFrame::PeerOpen { .. } => { /* TODO 6c */ }
-                WorkerFrame::PeerClose { .. } => { /* TODO 6c */ }
+                WorkerFrame::Sync { bytes } => {
+                    if host.init_complete {
+                        if let (Some(runtime), Some(main_client_id)) =
+                            (host.runtime.as_ref(), host.main_client_id.as_deref())
+                        {
+                            let uuid = match uuid::Uuid::parse_str(main_client_id) {
+                                Ok(u) => u,
+                                Err(_) => continue,
+                            };
+                            match SyncPayload::from_bytes(&bytes) {
+                                Ok(sync_payload) => {
+                                    let entry = InboxEntry {
+                                        source: Source::Client(ClientId(uuid)),
+                                        payload: sync_payload,
+                                    };
+                                    runtime
+                                        .borrow()
+                                        .inner_core()
+                                        .borrow_mut()
+                                        .park_sync_message(entry);
+                                }
+                                Err(_) => {
+                                    web_sys::console::warn_1(
+                                        &"[worker] Sync: malformed payload — skipped".into(),
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        host.pending_sync_messages.push(bytes);
+                    }
+                }
+                WorkerFrame::PeerSync {
+                    peer_id,
+                    term,
+                    bytes,
+                } => {
+                    if !host.init_complete
+                        || host.runtime.is_none()
+                        || host.main_client_id.is_none()
+                    {
+                        // Buffer: look up or create the entry for this peer_id.
+                        if let Some(entry) = host
+                            .pending_peer_sync_messages
+                            .iter_mut()
+                            .find(|(pid, _, _)| pid == &peer_id)
+                        {
+                            entry.2.push(bytes);
+                        } else {
+                            host.pending_peer_sync_messages
+                                .push((peer_id, term, vec![bytes]));
+                        }
+                        continue;
+                    }
+                    // Extract runtime Rc before mutably borrowing self via ensure_peer_client.
+                    let runtime_rc = host.runtime.as_ref().unwrap().clone();
+                    let Some(peer_client_id) = host.ensure_peer_client(&peer_id) else {
+                        continue;
+                    };
+                    host.peer_term_by_peer_id.insert(peer_id, term);
+                    let uuid = match uuid::Uuid::parse_str(&peer_client_id) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+                    match SyncPayload::from_bytes(&bytes) {
+                        Ok(sync_payload) => {
+                            let entry = InboxEntry {
+                                source: Source::Client(ClientId(uuid)),
+                                payload: sync_payload,
+                            };
+                            runtime_rc
+                                .borrow()
+                                .inner_core()
+                                .borrow_mut()
+                                .park_sync_message(entry);
+                        }
+                        Err(_) => {
+                            web_sys::console::warn_1(
+                                &"[worker] PeerSync: malformed payload — skipped".into(),
+                            );
+                        }
+                    }
+                }
+                WorkerFrame::PeerOpen { peer_id } => {
+                    if host.init_complete && host.runtime.is_some() {
+                        let _ = host.ensure_peer_client(&peer_id);
+                    }
+                }
+                WorkerFrame::PeerClose { peer_id } => {
+                    host.close_peer(&peer_id);
+                }
                 WorkerFrame::LifecycleHint { .. } => { /* TODO 6d */ }
                 WorkerFrame::UpdateAuth { .. } => { /* TODO 6d */ }
                 WorkerFrame::DisconnectUpstream => { /* TODO 6d */ }
