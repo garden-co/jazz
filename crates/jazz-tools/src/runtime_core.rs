@@ -168,6 +168,17 @@ impl From<QueryError> for RuntimeError {
     }
 }
 
+/// Convert a `QueryError` from a write path, preserving the
+/// `AnonymousWriteDenied` variant and mapping anything else to `WriteError`.
+pub(crate) fn write_error_from_query(e: QueryError) -> RuntimeError {
+    match e {
+        QueryError::AnonymousWriteDenied { table, operation } => {
+            RuntimeError::AnonymousWriteDenied { table, operation }
+        }
+        other => RuntimeError::WriteError(other.to_string()),
+    }
+}
+
 /// Type alias for query results.
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.

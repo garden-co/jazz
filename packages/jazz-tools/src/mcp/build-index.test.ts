@@ -418,7 +418,7 @@ describe("packaged docs index", () => {
     expect(txt).toContain(
       'DESCRIPTION:"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
     );
-    expect(txt).toContain("Jazz has two auth modes: `local-first` and `external`.");
+    expect(txt).toContain("Jazz has three auth modes: `anonymous`, `local-first`, and `external`.");
     expect(txt).toContain('jwtToken: "<provider-jwt>"');
     expect(txt).toContain("db.updateAuthToken(jwt)");
     expect(txt).toContain("recreate `JazzProvider` or `Db` with a new auth config");

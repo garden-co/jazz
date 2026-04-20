@@ -282,7 +282,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let result = self
             .schema_manager
             .insert_with_write_context(&mut self.storage, table, values, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let row_values = result.row_values;
         let batch_id = result.batch_id;
@@ -314,7 +314,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 object_id,
                 write_context,
             )
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let row_values = result.row_values;
         let batch_id = result.batch_id;
@@ -340,7 +340,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
@@ -370,7 +370,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 values,
                 write_context,
             )
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         if write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct)
@@ -395,7 +395,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_id = handle.batch_id;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
@@ -444,7 +444,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 object_id,
                 write_context,
             )
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let batch_id = result.batch_id;
         let row_values = result.row_values;
@@ -490,7 +490,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let result = self
             .schema_manager
             .insert_with_write_context(&mut self.storage, table, values, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
@@ -547,7 +547,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
@@ -606,7 +606,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 values,
                 write_context,
             )
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
@@ -645,7 +645,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
-            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+            .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);

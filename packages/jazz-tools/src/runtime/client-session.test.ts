@@ -45,21 +45,20 @@ describe("client session resolution", () => {
     });
   });
 
-  it("prefers jazz_principal_id from JWT when present", () => {
+  it("uses JWT sub as user_id", () => {
     const jwt = makeJwt({
       sub: "user-subject",
-      jazz_principal_id: "principal-123",
       iss: "https://issuer.example",
       claims: { role: "editor" },
     });
 
     const session = resolveClientSessionSync({
-      appId: "app-jwt-principal",
+      appId: "app-jwt-sub",
       jwtToken: jwt,
     });
 
     expect(session).toEqual({
-      user_id: "principal-123",
+      user_id: "user-subject",
       claims: {
         role: "editor",
         subject: "user-subject",
@@ -69,14 +68,14 @@ describe("client session resolution", () => {
     });
   });
 
-  it("falls back to JWT sub when principal claim is absent", () => {
+  it("accepts a JWT with only a sub claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       claims: { team: "eng" },
     });
 
     const session = resolveClientSessionSync({
-      appId: "app-jwt-sub",
+      appId: "app-jwt-sub-only",
       jwtToken: jwt,
     });
 
