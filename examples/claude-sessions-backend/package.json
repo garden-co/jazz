@@ -9,7 +9,9 @@
     "test": "vitest run tests"
   },
   "dependencies": {
-    "better-sqlite3": "^11.3.0"
+    "better-sqlite3": "^11.3.0",
+    "jazz-tools": "workspace:*",
+    "jazz-napi": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

@@ -533,6 +533,12 @@ importers:
       better-sqlite3:
         specifier: ^11.3.0
         version: 11.10.0
+      jazz-napi:
+        specifier: workspace:*
+        version: link:../../crates/jazz-napi
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.11
