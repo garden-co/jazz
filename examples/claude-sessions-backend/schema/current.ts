@@ -1,0 +1,57 @@
+import { table, col } from "jazz-tools";
+
+table("claude_sessions", {
+  session_id: col.string(),
+  transcript_path: col.string(),
+  cwd: col.string(),
+  project_root: col.string(),
+  repo_root: col.string().optional(),
+  git_branch: col.string().optional(),
+  entrypoint: col.string().optional(),
+  user_type: col.string().optional(),
+  cli_version: col.string().optional(),
+  first_user_message: col.string().optional(),
+  latest_user_message: col.string().optional(),
+  latest_assistant_message: col.string().optional(),
+  latest_preview: col.string().optional(),
+  status: col.string(),
+  user_turn_count: col.int(),
+  assistant_turn_count: col.int(),
+  total_entries: col.int(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  latest_activity_at: col.timestamp(),
+  last_user_at: col.timestamp().optional(),
+  last_assistant_at: col.timestamp().optional(),
+  metadata_json: col.json().optional(),
+});
+
+table("claude_turns", {
+  turn_uuid: col.string(),
+  session_id: col.string(),
+  session_row_id: col.ref("claude_sessions"),
+  sequence: col.int(),
+  parent_uuid: col.string().optional(),
+  role: col.string(),
+  text: col.string().optional(),
+  timestamp: col.timestamp().optional(),
+  updated_at: col.timestamp(),
+});
+
+table("claude_session_presence", {
+  session_id: col.string(),
+  session_row_id: col.ref("claude_sessions"),
+  project_root: col.string(),
+  repo_root: col.string().optional(),
+  cwd: col.string(),
+  state: col.string(),
+  current_turn_uuid: col.string().optional(),
+  current_turn_row_id: col.ref("claude_turns").optional(),
+  started_at: col.timestamp(),
+  latest_activity_at: col.timestamp(),
+  last_event_at: col.timestamp(),
+  last_user_at: col.timestamp().optional(),
+  last_assistant_at: col.timestamp().optional(),
+  last_synced_at: col.timestamp(),
+  runtime_pid: col.int().optional(),
+});
