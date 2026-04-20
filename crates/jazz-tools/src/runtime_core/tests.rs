@@ -1585,7 +1585,7 @@ mod install_transport_tests {
             futures::future::pending::<()>().await;
             unreachable!()
         }
-        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+        async fn send(&mut self, _data: Vec<u8>) -> Result<(), Self::Error> {
             Ok(())
         }
         async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
