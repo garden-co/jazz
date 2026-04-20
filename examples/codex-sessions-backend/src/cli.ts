@@ -326,6 +326,12 @@ async function resolvePersistentDataPath(dataPath: string): Promise<string> {
   });
 
   if (currentStat?.isDirectory()) {
+    const directoryEntries = (await readdir(normalizedPath)).filter(
+      (entry) =>
+        entry !== ".DS_Store" &&
+        entry !== ".gitkeep" &&
+        entry !== ".keep",
+    );
     const fallbackPath = legacyDirectoryFallbackPath(normalizedPath);
     const fallbackStat = await stat(fallbackPath).catch((error: unknown) => {
       const code =
@@ -342,11 +348,22 @@ async function resolvePersistentDataPath(dataPath: string): Promise<string> {
         `Jazz data path ${normalizedPath} is a directory, and fallback path ${fallbackPath} is also a directory`,
       );
     }
-    await mkdir(dirname(fallbackPath), { recursive: true });
-    console.error(
-      `warning: Jazz2 data path ${normalizedPath} is a directory; using ${fallbackPath} instead`,
-    );
-    return fallbackPath;
+
+    if (fallbackStat?.isFile() && directoryEntries.length === 0) {
+      await mkdir(dirname(fallbackPath), { recursive: true });
+      console.error(
+        `warning: Jazz2 data path ${normalizedPath} is an empty directory; using legacy fallback ${fallbackPath} instead`,
+      );
+      return fallbackPath;
+    }
+
+    if (fallbackStat?.isFile()) {
+      console.error(
+        `warning: legacy Jazz2 data file ${fallbackPath} exists, but using populated store directory ${normalizedPath}`,
+      );
+    }
+
+    return normalizedPath;
   }
 
   await mkdir(dirname(normalizedPath), { recursive: true });

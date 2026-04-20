@@ -568,7 +568,7 @@ describe("codex session lookup CLI", () => {
     ]);
   });
 
-  it("redirects legacy directory-shaped data paths to a sibling sqlite file", async () => {
+  it("redirects an empty legacy directory-shaped data path to a sibling sqlite file", async () => {
     const legacyDataPath = join(tempDir, "legacy", "codex-sessions.db");
     const fallbackPath = join(tempDir, "legacy", "codex-sessions.sqlite");
     const coldCodexHome = join(tempDir, "legacy-codex-home");
@@ -615,12 +615,95 @@ describe("codex session lookup CLI", () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain(`using ${fallbackPath} instead`);
+    expect(result.stderr).toContain(
+      `using legacy fallback ${fallbackPath} instead`,
+    );
     expect(JSON.parse(result.stdout.trim()).map((row: any) => row.id)).toEqual([
       "019dffff-feed-7000-8000-000000000299",
     ]);
     const fallbackStat = await stat(fallbackPath);
     expect(fallbackStat.isFile()).toBe(true);
+  });
+
+  it("prefers a populated Jazz store directory over a sibling legacy sqlite file", async () => {
+    const liveDataPath = join(tempDir, "live", "codex-sessions.db");
+    const fallbackPath = join(tempDir, "live", "codex-sessions.sqlite");
+    const liveStore = createCodexSessionStore({
+      appId: "codex-session-lookup-populated-directory-test",
+      dataPath: liveDataPath,
+    });
+
+    await liveStore.replaceSessionProjection(
+      {
+        sessionId: "019dffff-feed-7000-8000-000000000333",
+        rolloutPath: "/tmp/live-session.jsonl",
+        cwd: projectRoot,
+        projectRoot,
+        gitBranch: "j",
+        modelName: "gpt-5.4",
+        reasoningEffort: "high",
+        status: "completed",
+        createdAt: "2026-04-10T12:00:00.000Z",
+        updatedAt: "2026-04-10T12:01:00.000Z",
+        latestActivityAt: "2026-04-10T12:01:00.000Z",
+        latestUserMessage: "prefer the real Jazz store",
+        latestAssistantMessage: "using populated directory store",
+        turns: [
+          {
+            turnId: "turn-live-store",
+            sequence: 1,
+            status: "completed",
+            userMessage: "prefer the real Jazz store",
+            assistantMessage: "using populated directory store",
+            completedAt: "2026-04-10T12:01:00.000Z",
+            updatedAt: "2026-04-10T12:01:00.000Z",
+          },
+        ],
+      },
+      {
+        sourceId: "live-session",
+        absolutePath: "/tmp/live-session.jsonl",
+        lineCount: 8,
+        syncedAt: "2026-04-10T12:01:00.000Z",
+      },
+    );
+    await liveStore.shutdown();
+
+    await writeFile(fallbackPath, "legacy sqlite placeholder");
+
+    const result = spawnSync(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "list-sessions",
+        "--project-root",
+        projectRoot,
+        "--limit",
+        "5",
+      ],
+      {
+        cwd: packageRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_ACTIVE_SESSION_MAX_AGE_MS: "315360000000",
+          FLOW_CODEX_JAZZ_DATA_PATH: liveDataPath,
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain(
+      `using populated store directory ${liveDataPath}`,
+    );
+    expect(result.stderr).not.toContain(
+      `using legacy fallback ${fallbackPath} instead`,
+    );
+    expect(JSON.parse(result.stdout.trim()).map((row: any) => row.id)).toContain(
+      "019dffff-feed-7000-8000-000000000333",
+    );
   });
 
   function runCliJson(
