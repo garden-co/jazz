@@ -88,7 +88,8 @@ describe("svelte/createJazzClient", () => {
     const config: DbConfig = { appId: "svelte-unit-1" };
     const session: Session = {
       user_id: "local:alice",
-      claims: { auth_mode: "local-first" },
+      claims: {},
+      authMode: "local-first",
     };
     const db = createMockDb("test-app", session);
 

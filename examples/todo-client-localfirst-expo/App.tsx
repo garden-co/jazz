@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo/auth-secret-store";
+import { ExpoAuthSecretStore } from "jazz-tools/expo";
 import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
 import { TodoList } from "./src/TodoList";
 
@@ -14,7 +14,7 @@ function buildConfig(secret: string): DbConfig {
     serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
     env: "dev",
     userBranch: "main",
-    auth: { localFirstSecret: secret },
+    secret,
   };
 }
 

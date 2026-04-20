@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
-import { JazzProvider, useDb } from "jazz-tools/react";
+import { useEffect, useMemo, useState } from "react";
+import { type DbConfig } from "jazz-tools";
+import { JazzProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "../lib/auth-client";
 
 function YourApp() {
@@ -39,67 +39,60 @@ function SignUpButton() {
 // #endregion local-first-proof-signup
 
 // #region local-first-config-resolution
-function App() {
-  const { data: authSession, isPending } = authClient.useSession();
-  const [config, setConfig] = useState<DbConfig | null>(null);
+function useBetterAuthJWT() {
+  const { data, isPending } = authClient.useSession();
+  const [jwt, setJwt] = useState<string | null>(null);
+  const [isFetching, setIsFetching] = useState(false);
 
   useEffect(() => {
     if (isPending) return;
-
-    async function resolveConfig() {
-      const sharedConfig = {
-        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-      };
-
-      if (authSession?.session) {
-        // User is signed in with BetterAuth — use their JWT
-        const jwtToken = await getJwtFromBetterAuth();
-        setConfig({ ...sharedConfig, jwtToken: jwtToken! });
-      } else {
-        // No external session — use local-first auth
-        const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
-        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
-      }
+    if (!data?.session) {
+      setJwt(null);
+      return;
     }
+    setIsFetching(true);
+    void getJwtFromBetterAuth().then((token) => {
+      setJwt(token ?? null);
+      setIsFetching(false);
+    });
+  }, [isPending, data?.session?.id]);
 
-    void resolveConfig();
-  }, [isPending, authSession?.session]);
+  return {
+    isLoading: isPending || isFetching,
+    jwt,
+    getRefreshedJWT: () => getJwtFromBetterAuth(),
+  };
+}
 
-  if (isPending || !config) return null;
+function App() {
+  const betterAuth = useBetterAuthJWT();
+  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
+
+  // Only mint a local-first secret when there's no BetterAuth session.
+  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
+
+  const config = useMemo<DbConfig>(
+    () => ({
+      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+      jwtToken: betterAuth.jwt ?? undefined,
+      secret,
+    }),
+    [betterAuth.jwt, secret],
+  );
+
+  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) return <p>Loading auth…</p>;
 
   return (
-    <JazzProvider config={config}>
-      <BetterAuthJazzSync hasBetterAuthSession={!!authSession?.session}>
-        <YourApp />
-      </BetterAuthJazzSync>
+    <JazzProvider
+      config={config}
+      onJWTExpired={() => betterAuth.getRefreshedJWT()}
+      fallback={<p>Loading Jazz DB…</p>}
+    >
+      <YourApp />
     </JazzProvider>
   );
 }
 // #endregion local-first-config-resolution
 
-// #region local-first-token-refresh
-function BetterAuthJazzSync({
-  hasBetterAuthSession,
-  children,
-}: React.PropsWithChildren<{ hasBetterAuthSession: boolean }>) {
-  const db = useDb();
-
-  useEffect(() => {
-    if (!hasBetterAuthSession) return;
-
-    return db.onAuthChanged((state) => {
-      if (state.status !== "unauthenticated") return;
-
-      // JWT expired — fetch a fresh one from BetterAuth
-      getJwtFromBetterAuth().then((jwt) => {
-        if (jwt) db.updateAuthToken(jwt);
-      });
-    });
-  }, [db, hasBetterAuthSession]);
-
-  return children;
-}
-// #endregion local-first-token-refresh
-
-export { App, SignUpButton, BetterAuthJazzSync };
+export { App, SignUpButton };

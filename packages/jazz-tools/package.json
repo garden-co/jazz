@@ -73,15 +73,15 @@
       "svelte": "./dist/svelte/index.js",
       "default": "./dist/svelte/index.js"
     },
+    "./expo": {
+      "types": "./dist/expo/index.d.ts",
+      "react-native": "./dist/expo/index.js",
+      "default": "./dist/expo/index.js"
+    },
     "./expo/polyfills": {
       "types": "./dist/expo/polyfills.d.ts",
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
-    },
-    "./expo/auth-secret-store": {
-      "types": "./dist/expo/auth-secret-store.d.ts",
-      "react-native": "./dist/expo/auth-secret-store.js",
-      "default": "./dist/expo/auth-secret-store.js"
     },
     "./passphrase": {
       "types": "./dist/passphrase.d.ts",
@@ -101,7 +101,7 @@
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte",
     "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.svelte.ts",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
@@ -123,9 +123,11 @@
   "devDependencies": {
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
@@ -143,7 +145,7 @@
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
-    "react": "^18 || ^19",
+    "react": ">=19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"

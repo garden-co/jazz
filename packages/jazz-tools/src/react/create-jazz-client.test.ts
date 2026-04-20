@@ -93,7 +93,8 @@ describe("react/create-jazz-client unit", () => {
     const config: DbConfig = { appId: "react-client-unit-1" };
     const session: Session = {
       user_id: "local:test",
-      claims: { auth_mode: "local-first" },
+      claims: {},
+      authMode: "local-first",
     };
     const db = createMockDb(session);
 
@@ -137,6 +138,7 @@ describe("react/create-jazz-client unit", () => {
     const db = createMockDb({
       user_id: "alice",
       claims: { role: "reader" },
+      authMode: "external" as const,
     });
 
     mocks.createDb.mockResolvedValue(db);
@@ -146,16 +148,19 @@ describe("react/create-jazz-client unit", () => {
     expect(client.session).toEqual({
       user_id: "alice",
       claims: { role: "reader" },
+      authMode: "external",
     });
 
     db.emitAuthChange({
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external" as const,
     });
 
     expect(client.session).toEqual({
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external",
     });
   });
 

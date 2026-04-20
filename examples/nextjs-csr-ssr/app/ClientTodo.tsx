@@ -20,7 +20,7 @@ export default function ClientTodo() {
       config={{
         appId,
         serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-        auth: { localFirstSecret: secret },
+        secret,
         driver: { type: "memory" },
       }}
     >

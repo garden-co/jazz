@@ -61,8 +61,13 @@ fn local_first_context(
     let user_id = identity::derive_user_id(seed).to_string();
     let mut ctx = server.make_client_context_for_user(schema, &user_id);
     let audience = server.app_id().to_string();
-    let token = identity::mint_local_first_token(seed, &audience, TOKEN_TTL_SECS)
-        .expect("mint local-first token");
+    let token = identity::mint_jazz_self_signed_token(
+        seed,
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        TOKEN_TTL_SECS,
+    )
+    .expect("mint local-first token");
     ctx.jwt_token = Some(token);
     ctx.backend_secret = None;
     ctx.admin_secret = None;
@@ -398,8 +403,14 @@ async fn expired_token_reconnect_flushes_queued_writes() {
     // without sleeping on wall time.
     let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Persistent);
     ctx.jwt_token = Some(
-        identity::mint_local_first_token_at(&seed, &audience, 5, auth_clock.now_seconds())
-            .expect("mint short-lived token"),
+        identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &audience,
+            5,
+            auth_clock.now_seconds(),
+        )
+        .expect("mint short-lived token"),
     );
 
     let client = JazzClient::connect(ctx.clone())
@@ -436,8 +447,9 @@ async fn expired_token_reconnect_flushes_queued_writes() {
     // write replays.
     let mut fresh_ctx = ctx.clone();
     fresh_ctx.jwt_token = Some(
-        identity::mint_local_first_token_at(
+        identity::mint_jazz_self_signed_token_at(
             &seed,
+            identity::LOCAL_FIRST_ISSUER,
             &audience,
             TOKEN_TTL_SECS,
             auth_clock.now_seconds(),

@@ -113,6 +113,36 @@ struct WasmLensEdgeDebug {
     target_hash: String,
 }
 
+fn runtime_error_to_js(
+    err: jazz_tools::runtime_core::RuntimeError,
+    fallback_prefix: &str,
+) -> JsValue {
+    match err {
+        jazz_tools::runtime_core::RuntimeError::AnonymousWriteDenied { table, operation } => {
+            let message = format!("anonymous session cannot {} on table {}", operation, table);
+            let obj = js_sys::Error::new(&message);
+            let value: JsValue = obj.into();
+            let _ = js_sys::Reflect::set(
+                &value,
+                &JsValue::from_str("name"),
+                &JsValue::from_str("JazzAnonymousWriteDeniedError"),
+            );
+            let _ = js_sys::Reflect::set(
+                &value,
+                &JsValue::from_str("table"),
+                &JsValue::from_str(table.as_str()),
+            );
+            let _ = js_sys::Reflect::set(
+                &value,
+                &JsValue::from_str("operation"),
+                &JsValue::from_str(&operation.to_string().to_lowercase()),
+            );
+            value
+        }
+        other => JsValue::from(JsError::new(&format!("{fallback_prefix}: {other}"))),
+    }
+}
+
 /// Parse a persistence tier string from JS.
 fn parse_tier(tier: &str) -> Result<DurabilityTier, JsError> {
     match tier {
@@ -899,17 +929,17 @@ impl WasmRuntime {
         values: JsValue,
         tier: &str,
         object_id: Option<String>,
-    ) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    ) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
 
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
+            .map_err(|message| JsValue::from(JsError::new(&message)))?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
             core.insert_persisted_with_id(table, named_values, object_id, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
+                .map_err(|e| runtime_error_to_js(e, "Insert failed"))?
         };
 
         let row = SubscriptionRow {
@@ -936,12 +966,12 @@ impl WasmRuntime {
         write_context_json: Option<String>,
         tier: &str,
         object_id: Option<String>,
-    ) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    ) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
         let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
+            .map_err(|message| JsValue::from(JsError::new(&message)))?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
@@ -952,7 +982,7 @@ impl WasmRuntime {
                 write_context.as_ref(),
                 persistence_tier,
             )
-            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+            .map_err(|e| runtime_error_to_js(e, "Insert failed"))?
         };
 
         let row = SubscriptionRow {
@@ -1042,11 +1072,11 @@ impl WasmRuntime {
         object_id: &str,
         values: JsValue,
         tier: &str,
-    ) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    ) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+            .map_err(|e| JsValue::from(JsError::new(&format!("Invalid ObjectId: {}", e))))?;
         let oid = ObjectId::from_uuid(uuid);
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
@@ -1055,7 +1085,7 @@ impl WasmRuntime {
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Update failed: {e}")))?
+                .map_err(|e| runtime_error_to_js(e, "Update failed"))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1075,11 +1105,11 @@ impl WasmRuntime {
         values: JsValue,
         write_context_json: Option<String>,
         tier: &str,
-    ) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    ) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+            .map_err(|e| JsValue::from(JsError::new(&format!("Invalid ObjectId: {}", e))))?;
         let oid = ObjectId::from_uuid(uuid);
         let write_context = parse_write_context_json(write_context_json)?;
 
@@ -1089,7 +1119,7 @@ impl WasmRuntime {
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
-                .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_js(e, "Update failed"))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1170,17 +1200,17 @@ impl WasmRuntime {
 
     /// Delete a row and return a Promise that resolves when the tier acks.
     #[wasm_bindgen(js_name = deleteDurable)]
-    pub fn delete_durable(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    pub fn delete_durable(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+            .map_err(|e| JsValue::from(JsError::new(&format!("Invalid ObjectId: {}", e))))?;
         let oid = ObjectId::from_uuid(uuid);
 
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.delete_persisted(oid, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_js(e, "Delete failed"))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1199,18 +1229,18 @@ impl WasmRuntime {
         object_id: &str,
         write_context_json: Option<String>,
         tier: &str,
-    ) -> Result<js_sys::Promise, JsError> {
-        let persistence_tier = parse_tier(tier)?;
+    ) -> Result<js_sys::Promise, JsValue> {
+        let persistence_tier = parse_tier(tier).map_err(JsValue::from)?;
 
         let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+            .map_err(|e| JsValue::from(JsError::new(&format!("Invalid ObjectId: {}", e))))?;
         let oid = ObjectId::from_uuid(uuid);
         let write_context = parse_write_context_json(write_context_json)?;
 
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
-                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_js(e, "Delete failed"))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1748,16 +1778,29 @@ impl WasmRuntime {
         Ok(user_id.to_string())
     }
 
-    #[wasm_bindgen(js_name = "mintLocalFirstToken")]
-    pub fn mint_local_first_token_static(
+    #[wasm_bindgen(js_name = "mintJazzSelfSignedToken")]
+    pub fn mint_jazz_self_signed_token_static(
         seed_b64: &str,
+        issuer: &str,
         audience: &str,
         ttl_seconds: u64,
         now_seconds: u64,
     ) -> Result<String, JsError> {
         let seed = decode_seed(seed_b64)?;
-        identity::mint_local_first_token_at(&seed, audience, ttl_seconds, now_seconds)
-            .map_err(|e| JsError::new(&e))
+        // Resolve issuer string to a known &'static str.
+        let static_issuer: &'static str = match issuer {
+            identity::LOCAL_FIRST_ISSUER => identity::LOCAL_FIRST_ISSUER,
+            identity::ANONYMOUS_ISSUER => identity::ANONYMOUS_ISSUER,
+            other => return Err(JsError::new(&format!("unknown issuer: {other}"))),
+        };
+        identity::mint_jazz_self_signed_token_at(
+            &seed,
+            static_issuer,
+            audience,
+            ttl_seconds,
+            now_seconds,
+        )
+        .map_err(|e| JsError::new(&e))
     }
 
     #[wasm_bindgen(js_name = "getPublicKeyBase64url")]

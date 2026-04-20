@@ -2,7 +2,8 @@
 //!
 //! A Session represents the authenticated user's context, containing:
 //! - `user_id`: Required unique identifier for the user
-//! - `claims`: Optional JSON object with additional claims (roles, teams, etc.)
+//! - `claims`: JSON object with user-defined claims (roles, teams, etc.)
+//! - `auth_mode`: First-class auth-mode discriminator derived from the JWT `iss`
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -10,6 +11,18 @@ use serde_json::Value as JsonValue;
 use crate::batch_fate::BatchMode;
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::row_histories::BatchId;
+
+/// Auth mode derived from the JWT's `iss` claim.
+///
+/// Mirrors the TS `authMode` union in `packages/jazz-tools/src/runtime/context.ts`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    #[default]
+    External,
+    LocalFirst,
+    Anonymous,
+}
 
 /// Session context for policy evaluation.
 ///
@@ -19,8 +32,11 @@ use crate::row_histories::BatchId;
 pub struct Session {
     /// Required user identifier.
     pub user_id: String,
-    /// Additional claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
+    /// User-defined claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
     pub claims: JsonValue,
+    /// Auth mode (external / local-first / anonymous). Derived from JWT `iss`.
+    #[serde(default)]
+    pub auth_mode: AuthMode,
 }
 
 impl Session {
@@ -28,17 +44,28 @@ impl Session {
         matches!(path, [segment] if segment == "user_id" || segment == "userId")
     }
 
-    /// Create a new session with just a user ID.
+    fn is_auth_mode_path(path: &[String]) -> bool {
+        matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
+    }
+
+    /// Create a new session with just a user ID. Defaults to external auth mode.
     pub fn new(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),
+            auth_mode: AuthMode::External,
         }
     }
 
     /// Create a session with user ID and claims.
     pub fn with_claims(mut self, claims: JsonValue) -> Self {
         self.claims = claims;
+        self
+    }
+
+    /// Set the auth mode.
+    pub fn with_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.auth_mode = auth_mode;
         self
     }
 
@@ -56,6 +83,11 @@ impl Session {
         if Self::is_user_id_path(path) {
             // Special case: user_id is stored as a String, not JsonValue
             // Return None here; use get_user_id() instead
+            return None;
+        }
+
+        if Self::is_auth_mode_path(path) {
+            // auth_mode is enum-typed, not JsonValue — use get_string() instead
             return None;
         }
 
@@ -95,6 +127,9 @@ impl Session {
         if Self::is_user_id_path(path) {
             return true;
         }
+        if Self::is_auth_mode_path(path) {
+            return true;
+        }
         self.get_path(path).is_some()
     }
 
@@ -108,6 +143,13 @@ impl Session {
         }
         if Self::is_user_id_path(path) {
             return Some(&self.user_id);
+        }
+        if Self::is_auth_mode_path(path) {
+            return Some(match self.auth_mode {
+                AuthMode::External => "external",
+                AuthMode::LocalFirst => "local-first",
+                AuthMode::Anonymous => "anonymous",
+            });
         }
         self.get_path(path).and_then(|v| v.as_str())
     }
@@ -325,5 +367,33 @@ mod tests {
         let context = WriteContext::from_session(Session::new("session-user")).with_updated_at(42);
 
         assert_eq!(context.updated_at(), Some(42));
+    }
+
+    #[test]
+    fn session_auth_mode_defaults_to_external() {
+        let session = Session::new("user-1");
+        assert_eq!(session.auth_mode, AuthMode::External);
+    }
+
+    #[test]
+    fn session_auth_mode_roundtrips_through_serde() {
+        for mode in [
+            AuthMode::External,
+            AuthMode::LocalFirst,
+            AuthMode::Anonymous,
+        ] {
+            let session = Session::new("user-1").with_auth_mode(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            let back: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.auth_mode, mode);
+        }
+    }
+
+    #[test]
+    fn session_get_string_returns_auth_mode_as_kebab_string() {
+        let s = Session::new("u").with_auth_mode(AuthMode::LocalFirst);
+        assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
+        assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
+        assert!(s.has_path(&["authMode".into()]));
     }
 }

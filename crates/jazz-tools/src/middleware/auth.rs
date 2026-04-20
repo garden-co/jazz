@@ -794,44 +794,45 @@ pub fn resolve_verified_jwt_session(
 
     let claims = match verified.claims {
         serde_json::Value::Object(mut map) => {
-            map.insert("auth_mode".to_string(), serde_json::json!("external"));
             map.insert("subject".to_string(), serde_json::json!(subject));
             if let Some(iss) = issuer {
                 map.insert("issuer".to_string(), serde_json::json!(iss));
             }
             serde_json::Value::Object(map)
         }
-        other => serde_json::json!({
-            "auth_mode": "external",
+        _ => serde_json::json!({
             "subject": subject,
             "issuer": issuer,
-            "raw_claims": other,
         }),
     };
 
     Ok(Session {
         user_id: principal_id,
         claims,
+        auth_mode: crate::query_manager::session::AuthMode::External,
     })
 }
 
-/// Check if a JWT has iss = "urn:jazz:local-first" by decoding claims without verification.
-fn is_local_first_identity_proof(token: &str) -> bool {
+/// Check if a JWT has a Jazz self-signed `iss` (local-first or anonymous) by
+/// decoding claims without verification.
+fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
-        return false;
+        return None;
     }
-    let Ok(claims_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) else {
-        return false;
-    };
+    let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
     #[derive(serde::Deserialize)]
     struct IssOnly {
         iss: Option<String>,
     }
-    let Ok(claims) = serde_json::from_slice::<IssOnly>(&claims_bytes) else {
-        return false;
-    };
-    claims.iss.as_deref() == Some(identity::LOCAL_FIRST_ISSUER)
+    let claims = serde_json::from_slice::<IssOnly>(&claims_bytes).ok()?;
+    match claims.iss.as_deref() {
+        Some(identity::LOCAL_FIRST_ISSUER) => Some(identity::LOCAL_FIRST_ISSUER),
+        Some(identity::ANONYMOUS_ISSUER) => Some(identity::ANONYMOUS_ISSUER),
+        _ => None,
+    }
 }
 
 /// Extract session from headers with priority resolution.
@@ -900,24 +901,32 @@ pub async fn extract_session(
     };
 
     if let Some(token) = token {
-        // Self-signed JWT path
-        if is_local_first_identity_proof(token) {
-            if !config.allow_local_first_auth {
+        // Self-signed JWT path (local-first or anonymous).
+        //
+        // Anonymous is always accepted at the transport layer — apps gate
+        // anonymous reads/writes via the permissions DSL
+        // (`session.where({ authMode: "anonymous" })`) and Task 6's write-deny
+        // middleware. Local-first still requires the explicit config opt-in.
+        if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
+            if issuer == identity::LOCAL_FIRST_ISSUER && !config.allow_local_first_auth {
                 return Err(UnauthenticatedResponse::disabled(
-                    "Self-signed auth is not enabled for this app",
+                    "Local-first auth is not enabled for this app",
                 ));
             }
-            let verified = identity::verify_local_first_identity_proof_at(
+            let verified = identity::verify_jazz_self_signed_proof_at(
                 token,
                 &app_id.to_string(),
                 config.clock.now_seconds(),
             )
             .map_err(local_first_auth_error)?;
+            let auth_mode = match issuer {
+                identity::ANONYMOUS_ISSUER => crate::query_manager::session::AuthMode::Anonymous,
+                _ => crate::query_manager::session::AuthMode::LocalFirst,
+            };
             return Ok(Some(Session {
                 user_id: verified.user_id,
-                claims: serde_json::json!({
-                    "auth_mode": "local-first",
-                }),
+                claims: serde_json::Value::Object(serde_json::Map::new()),
+                auth_mode,
             }));
         }
 
@@ -1367,6 +1376,44 @@ mod tests {
         seed
     }
 
+    #[tokio::test]
+    async fn local_first_session_has_auth_mode_localfirst_and_no_claim() {
+        let app_id = AppId::from_name("test-app");
+        let seed = [7u8; 32];
+        let token = crate::identity::mint_jazz_self_signed_token(
+            &seed,
+            crate::identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let config = AuthConfig {
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+
+        let session = extract_session(&headers, app_id, &config, None, None)
+            .await
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(
+            session.auth_mode,
+            crate::query_manager::session::AuthMode::LocalFirst
+        );
+        if let serde_json::Value::Object(map) = &session.claims {
+            assert!(
+                !map.contains_key("auth_mode"),
+                "claims must not carry auth_mode anymore"
+            );
+        } else {
+            panic!("expected object claims");
+        }
+    }
+
     fn make_local_first_auth_config() -> AuthConfig {
         AuthConfig {
             jwks_url: None,
@@ -1381,7 +1428,13 @@ mod tests {
     async fn local_first_auth_jwt_authenticates() {
         let seed = alice_seed();
         let app_id = test_app_id();
-        let token = identity::mint_local_first_token(&seed, &app_id.to_string(), 3600).unwrap();
+        let token = identity::mint_jazz_self_signed_token(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
         let config = make_local_first_auth_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
@@ -1394,7 +1447,13 @@ mod tests {
 
     #[tokio::test]
     async fn local_first_auth_jwt_wrong_audience_rejected() {
-        let token = identity::mint_local_first_token(&alice_seed(), "wrong-app", 3600).unwrap();
+        let token = identity::mint_jazz_self_signed_token(
+            &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
+            "wrong-app",
+            3600,
+        )
+        .unwrap();
         let config = make_local_first_auth_config();
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
@@ -1405,8 +1464,13 @@ mod tests {
     #[tokio::test]
     async fn local_first_auth_disabled_rejects() {
         let app_id = test_app_id();
-        let token =
-            identity::mint_local_first_token(&alice_seed(), &app_id.to_string(), 3600).unwrap();
+        let token = identity::mint_jazz_self_signed_token(
+            &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
         let mut config = make_local_first_auth_config();
         config.allow_local_first_auth = false;
         let mut headers = HeaderMap::new();
@@ -1425,8 +1489,9 @@ mod tests {
             clock: clock.clone().into(),
             ..Default::default()
         };
-        let token = identity::mint_local_first_token_at(
+        let token = identity::mint_jazz_self_signed_token_at(
             &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
             &app_id.to_string(),
             5,
             clock.now_seconds(),
@@ -1469,5 +1534,39 @@ mod tests {
         // Should fail because no JWKS configured in local_first_auth_config
         let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn anonymous_session_has_auth_mode_anonymous() {
+        let app_id = AppId::from_name("test-app");
+        let seed = [9u8; 32];
+        let clock = TestClock::new(1_000_000);
+        let token = crate::identity::mint_jazz_self_signed_token_at(
+            &seed,
+            crate::identity::ANONYMOUS_ISSUER,
+            &app_id.to_string(),
+            3600,
+            clock.now_seconds(),
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        // Deliberately NOT setting allow_local_first_auth — anonymous is always
+        // accepted at the transport layer; permissions gate reads, Task 6 gates writes.
+        let config = AuthConfig {
+            clock: clock.into(),
+            ..Default::default()
+        };
+
+        let session = extract_session(&headers, app_id, &config, None, None)
+            .await
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(
+            session.auth_mode,
+            crate::query_manager::session::AuthMode::Anonymous
+        );
     }
 }

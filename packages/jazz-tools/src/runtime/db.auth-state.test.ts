@@ -56,11 +56,11 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "reader" }),
@@ -72,6 +72,7 @@ describe("Db auth state", () => {
     const session = {
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external" as const,
     };
     const runtimeClient = {
       updateAuthToken: vi.fn(),
@@ -88,8 +89,7 @@ describe("Db auth state", () => {
     );
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session,
     });
 
@@ -97,8 +97,7 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session,
     });
   });
@@ -121,7 +120,7 @@ describe("Db auth state", () => {
         jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
       },
       runtimeClient as any,
-      { user_id: "bob", claims: { role: "writer" } },
+      { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
       "bob@writer",
     );
 
@@ -129,15 +128,13 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(sharedDb.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "backend",
+      authMode: "external",
       session: {
         user_id: "bob",
       },
@@ -148,13 +145,13 @@ describe("Db auth state", () => {
     const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
 
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
   });
 
   it("updates auth for same-principal JWT refresh", () => {
@@ -171,17 +168,17 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
     expect(states.at(-1)).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
     });
+    expect(states.at(-1)?.error).toBeUndefined();
   });
 
   it("ignores redundant auth updates when the token is unchanged", () => {
@@ -199,12 +196,12 @@ describe("Db auth state", () => {
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(states).toHaveLength(1);
     expect(states[0]).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
+    expect(states[0]?.error).toBeUndefined();
   });
 
   it("rejects logout principal changes on a live db", () => {
@@ -215,12 +212,12 @@ describe("Db auth state", () => {
     );
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "bearer",
+      authMode: "external",
       session: {
         user_id: "alice",
       },
     });
+    expect(db.getAuthState().error).toBeUndefined();
   });
 
   it("updates mirrored cookie auth for the same principal", () => {
@@ -232,6 +229,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
     const refreshed: Session = {
       user_id: "alice",
@@ -241,6 +239,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     };
     const states: AuthState[] = [];
 
@@ -253,16 +252,14 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateCookieSession).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
       session: {
         user_id: "alice",
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
     expect(states.at(-1)).toMatchObject({
-      status: "authenticated",
-      transport: "cookie",
+      authMode: "external",
     });
   });
 });

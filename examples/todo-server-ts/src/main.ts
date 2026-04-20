@@ -145,6 +145,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const userDb = context.forSession({
         user_id: req.params.userId,
+        authMode: "external",
         claims: {},
       });
       const todos = await userDb.all(schemaApp.todos);
