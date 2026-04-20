@@ -304,6 +304,7 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new("_jazz_worker_winner_ordinals", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_edge_winner_ordinals", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_global_winner_ordinals", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_merge_artifacts", ColumnType::Bytea).nullable(),
     ]);
     columns
 }
@@ -337,6 +338,11 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
         optional_winner_ordinals_to_value(entry.worker_winner_ordinals.as_deref()),
         optional_winner_ordinals_to_value(entry.edge_winner_ordinals.as_deref()),
         optional_winner_ordinals_to_value(entry.global_winner_ordinals.as_deref()),
+        entry
+            .merge_artifacts
+            .as_ref()
+            .map(|bytes| Value::Bytea(bytes.clone()))
+            .unwrap_or(Value::Null),
     ]);
     values
 }
@@ -1003,6 +1009,8 @@ pub(crate) fn decode_flat_visible_row_entry_with_codecs(
             "global_winner_ordinals",
             codecs.user_descriptor.columns.len(),
         )?,
+        merge_artifacts: column_bytes_with_layout(descriptor, layout, data, 17)?
+            .map(|bytes| bytes.to_vec()),
     })
 }
 
@@ -1241,6 +1249,7 @@ pub struct VisibleRowEntry {
     pub worker_winner_ordinals: Option<Vec<u16>>,
     pub edge_winner_ordinals: Option<Vec<u16>>,
     pub global_winner_ordinals: Option<Vec<u16>>,
+    pub merge_artifacts: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1262,6 +1271,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: None,
         }
     }
 
@@ -1288,6 +1298,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: None,
         }
     }
 
@@ -1355,6 +1366,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals,
             edge_winner_ordinals,
             global_winner_ordinals,
+            merge_artifacts: None,
         }))
     }
 
@@ -2348,6 +2360,7 @@ mod tests {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: Some(vec![1, 2, 3, 4]),
         };
 
         let encoded =
@@ -2383,6 +2396,7 @@ mod tests {
         assert_eq!(decoded.worker_batch_id, entry.worker_batch_id);
         assert_eq!(decoded.edge_batch_id, entry.edge_batch_id);
         assert_eq!(decoded.global_batch_id, entry.global_batch_id);
+        assert_eq!(decoded.merge_artifacts, entry.merge_artifacts);
     }
 
     #[test]
@@ -2394,6 +2408,7 @@ mod tests {
         assert_eq!(entry.worker_batch_id, None);
         assert_eq!(entry.edge_batch_id, None);
         assert_eq!(entry.global_batch_id, None);
+        assert_eq!(entry.merge_artifacts, None);
     }
 
     #[test]
