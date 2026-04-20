@@ -21,10 +21,21 @@ function makeStream(text: string) {
 }
 
 function makeDb() {
+  const insertWait = vi.fn(async () => ({
+    id: "upload-1",
+    owner_id: "local:example-owner",
+    label: "Profile photo",
+    fileId: "file-blob-1",
+  }));
+  const insert = vi.fn((_table, data) => ({
+    value: { id: "upload-1", ...data },
+    wait: insertWait,
+  }));
   return {
     createFileFromBlob: vi.fn(async () => ({ id: "file-blob-1" })),
     createFileFromStream: vi.fn(async () => ({ id: "file-stream-1" })),
-    insertDurable: vi.fn(async (_table, data) => ({ id: "upload-1", ...data })),
+    insert,
+    insertWait,
     one: vi.fn(),
     loadFileAsBlob: vi.fn(async () => new Blob(["downloaded"], { type: "text/plain" })),
     loadFileAsStream: vi.fn(async () => makeStream("downloaded")),
@@ -40,15 +51,12 @@ describe("files and blobs docs snippets", () => {
     await createUploadFromBlob(db as unknown as Db, file);
 
     expect(db.createFileFromBlob).toHaveBeenCalledWith(app, file, { tier: "edge" });
-    expect(db.insertDurable).toHaveBeenCalledWith(
-      app.uploads,
-      {
-        owner_id: "local:example-owner",
-        label: "Profile photo",
-        fileId: "file-blob-1",
-      },
-      { tier: "edge" },
-    );
+    expect(db.insert).toHaveBeenCalledWith(app.uploads, {
+      owner_id: "local:example-owner",
+      label: "Profile photo",
+      fileId: "file-blob-1",
+    });
+    expect(db.insertWait).toHaveBeenCalledWith({ tier: "edge" });
   });
 
   it("creates an upload from a stream via the Db file helper", async () => {
@@ -62,15 +70,12 @@ describe("files and blobs docs snippets", () => {
       name: "camera.raw",
       mimeType: "application/octet-stream",
     });
-    expect(db.insertDurable).toHaveBeenCalledWith(
-      app.uploads,
-      {
-        owner_id: "local:example-owner",
-        label: "Camera import",
-        fileId: "file-stream-1",
-      },
-      { tier: "edge" },
-    );
+    expect(db.insert).toHaveBeenCalledWith(app.uploads, {
+      owner_id: "local:example-owner",
+      label: "Camera import",
+      fileId: "file-stream-1",
+    });
+    expect(db.insertWait).toHaveBeenCalledWith({ tier: "edge" });
   });
 
   it("loads an uploaded file as a Blob", async () => {

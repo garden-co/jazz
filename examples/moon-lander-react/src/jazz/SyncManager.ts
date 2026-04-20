@@ -98,9 +98,9 @@ export class SyncManager {
 
     // Sync update: preserves the row ID so the server can forward WHERE EXIT
     // to remote clients' where({collected:false}) subscriptions.
-    // Uses db.update (not updateDurable) so the write is emitted to the bridge
-    // outbox immediately — updateDurable on the main thread holds writes until
-    // an edge-tier ack that never arrives (main thread has no durability tier).
+    // Uses db.update (not db.update(...).wait({ tier: "edge" })) so the write
+    // is emitted to the bridge outbox immediately — waiting for an edge-tier
+    // ack on the main thread never resolves here (main thread has no durability tier).
     this.db.update(app.fuel_deposits, id, { collected: true, collectedBy: this.playerId });
   }
 
@@ -123,7 +123,7 @@ export class SyncManager {
 
     if (!shareId) return;
     this.collectedByThis.delete(shareId);
-    // Sync update: same reason as collectDeposit — updateDurable hangs on main thread.
+    // Sync update: same reason as collectDeposit — waiting on edge durability hangs on main thread.
     this.db.update(app.fuel_deposits, shareId, { collectedBy: receiverPlayerId });
   }
 

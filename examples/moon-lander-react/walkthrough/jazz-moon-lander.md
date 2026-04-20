@@ -284,15 +284,15 @@ export class SyncManager {
     /* db.update */
   }
   sendMessage(text: string) {
-    /* db.insertDurable with tier: "edge" */
+    /* db.insert(...).wait({ tier: "edge" }) */
   }
   updateState(state: PlayerInit) {
-    /* db.updateDurable if changed */
+    /* db.update(...).wait({ tier: "edge" }) if changed */
   }
 }
 ```
 
-The game engine calls these methods synchronously. Writes that need durability guarantees use `insertDurable`/`updateDurable` with `tier: "edge"`. Hot-path writes like `collectDeposit` use eventually consistent `db.update` for instant local-store updates.
+The game engine calls these methods synchronously. Writes that need durability guarantees use `insert(...).wait({ tier: "edge" })` or `update(...).wait({ tier: "edge" })`. Hot-path writes like `collectDeposit` use eventually consistent `db.update` for instant local-store updates.
 
 ---
 
