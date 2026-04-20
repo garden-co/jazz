@@ -844,6 +844,9 @@ impl SchemaManager {
     }
 
     pub fn ensure_current_schema_persisted<H: Storage>(&mut self, storage: &mut H) -> bool {
+        if !self.context.is_initialized() {
+            return false;
+        }
         let schema_hash = self.context.current_hash;
         let storage_key = (storage.storage_cache_namespace(), schema_hash);
         if self
@@ -1195,6 +1198,14 @@ impl SchemaManager {
         // Decode schema
         let schema = decode_schema(content)
             .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+
+        // An empty schema (zero tables) carries no structural information and
+        // can only appear from legacy bugs that persisted the uninitialized
+        // server context. Ignore it so stale entries don't surface as
+        // "unreachable" hashes in connection diagnostics.
+        if schema.is_empty() {
+            return Ok(());
+        }
 
         let hash = SchemaHash::compute(&schema);
 
@@ -2329,6 +2340,72 @@ mod tests {
         // V2 has 3 columns (id, name, email)
         let v2_desc = manager.get_table_descriptor("users", &v2_hash).unwrap();
         assert_eq!(v2_desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn server_dynamic_mode_does_not_persist_empty_placeholder_schema() {
+        // Regression: RuntimeCore::new calls ensure_current_schema_persisted on
+        // every runtime construction. On a dynamic-schema server built with
+        // SchemaManager::new_server(...), the context has an uninitialized
+        // sentinel hash ([0; 32]) and an empty Schema. Persisting that writes
+        // a bogus catalogue_schema row whose content hashes to BLAKE3("") =
+        // af1349b9f5f9..., which later appears as an "unreachable schema hash"
+        // in every connection diagnostics call.
+        let mut storage = crate::storage::MemoryStorage::new();
+        let mut manager = SchemaManager::new_server(SyncManager::new(), test_app_id(), "prod");
+        let wrote = manager.ensure_current_schema_persisted(&mut storage);
+        assert!(
+            !wrote,
+            "dynamic server with no current schema must not persist a placeholder entry"
+        );
+        let entries = storage.scan_catalogue_entries().unwrap();
+        assert!(
+            entries.is_empty(),
+            "no catalogue entries should be written for an uninitialized schema context, got: {:?}",
+            entries.iter().map(|e| &e.metadata).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn process_catalogue_schema_ignores_empty_schema_rows_from_legacy_bug() {
+        // Defensive: sqlite files written by a pre-fix server may contain a
+        // bogus catalogue_schema row whose content encodes an empty Schema
+        // (the uninitialized sentinel). On rehydrate that empty schema would
+        // hash to BLAKE3("") = af1349b9f5f9... and surface as an unreachable
+        // hash in every client's diagnostics. Ignore empty schemas.
+        let schema = make_schema_v1();
+        let real_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let empty_content = crate::schema_manager::encoding::encode_schema(&Schema::new());
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::SchemaHash.to_string(),
+            SchemaHash::from_bytes([0; 32]).to_string(),
+        );
+        let sentinel_object_id = SchemaHash::from_bytes([0; 32]).to_object_id();
+
+        manager
+            .process_catalogue_update(sentinel_object_id, &metadata, &empty_content)
+            .unwrap();
+
+        let empty_hash = SchemaHash::compute(&Schema::new());
+        let known: std::collections::HashSet<_> =
+            manager.known_schema_hashes().into_iter().collect();
+        assert!(
+            !known.contains(&empty_hash),
+            "empty-schema hash must not be registered in known_schemas"
+        );
+        assert!(known.contains(&real_hash));
     }
 
     #[test]
