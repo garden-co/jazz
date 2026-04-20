@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
@@ -28,6 +28,11 @@ function makeViteServer(
 afterEach(async () => {
   await __resetJazzSvelteKitPluginForTests();
   await tempRoots.cleanup();
+  // Shared /tmp roots accumulate .env files from managed-runtime's app-id
+  // persistence; wipe them so the plugin's env-file backfill starts clean.
+  for (const shared of ["/tmp/jazz-sveltekit-test", "/tmp/jazz-sk-noserver"]) {
+    await rm(join(shared, ".env"), { force: true }).catch(() => undefined);
+  }
   vi.restoreAllMocks();
 
   if (originalJazzAppId === undefined) {
