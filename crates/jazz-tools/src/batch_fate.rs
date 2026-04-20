@@ -12,6 +12,7 @@ use crate::sync_manager::DurabilityTier;
 pub const BATCH_FATE_STORAGE_FORMAT_V2: i32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BatchMode {
     Direct,
     Transactional,

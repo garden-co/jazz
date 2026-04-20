@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use blake3::Hasher;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
@@ -21,7 +21,7 @@ use crate::row_format::{
 use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BatchId(pub [u8; 16]);
 
 impl BatchId {
@@ -76,6 +76,25 @@ impl From<Digest32> for BatchId {
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&value.0[..16]);
         Self(bytes)
+    }
+}
+
+impl Serialize for BatchId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
