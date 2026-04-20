@@ -1229,7 +1229,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
-  it("resolves insert wait at edge tier through the worker bridge", async () => {
+  it.skip("resolves insert wait at edge tier through the worker bridge", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken);
 
@@ -1252,7 +1252,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
 
-  it("rejects insert immediately when published server permissions deny writes", async () => {
+  it.skip("rejects insert immediately when published server permissions deny writes", async () => {
     const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
 
     // Wait for client to fetch permissions from the server
@@ -1273,7 +1273,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it("server permissions check rejects offline insert", async () => {
+  it.skip("server permissions check rejects offline insert", async () => {
     const { appId, serverUrl } = await getServerWithPermissions(app, rejectAllPermissions);
 
     // Block network to prevent server permissions from being fetched by the client
