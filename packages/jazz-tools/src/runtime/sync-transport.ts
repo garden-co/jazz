@@ -128,25 +128,6 @@ function trimTrailingSlash(url: string): string {
 }
 
 /**
- * Normalize an optional route prefix into a leading-slash path with no trailing slash.
- */
-export function normalizePathPrefix(pathPrefix?: string): string {
-  if (!pathPrefix) return "";
-  const trimmed = pathPrefix.trim();
-  if (!trimmed) return "";
-  const withoutTrailing = trimmed.replace(/\/+$/, "");
-  return withoutTrailing.startsWith("/") ? withoutTrailing : `/${withoutTrailing}`;
-}
-
-/**
- * Build a server endpoint URL with optional route prefix.
- */
-export function buildEndpointUrl(serverUrl: string, endpoint: string, pathPrefix?: string): string {
-  const normalizedEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
-  return `${trimTrailingSlash(serverUrl)}${normalizePathPrefix(pathPrefix)}${normalizedEndpoint}`;
-}
-
-/**
  * Apply end-user auth headers. Sets `Authorization: Bearer <token>` when a JWT is available.
  */
 export function applyUserAuthHeaders(

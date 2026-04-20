@@ -56,7 +56,7 @@ describe("NAPI on_auth_failure", () => {
       // Connect with an intentionally invalid JWT. The server requires
       // backendSecret auth; supplying a bad JWT triggers Unauthorized.
       runtime.connect(
-        httpUrlToWs(server.url),
+        httpUrlToWs(server.url, appId),
         JSON.stringify({ jwt_token: "definitely.invalid.jwt" }),
       );
 

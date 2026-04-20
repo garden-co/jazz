@@ -21,7 +21,6 @@ export interface InitMessage {
   dbName: string;
   clientId: string;
   serverUrl?: string;
-  serverPathPrefix?: string;
   jwtToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;

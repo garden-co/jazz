@@ -24,7 +24,8 @@ use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::{
-    AppContext, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream,
+    AppContext, AppId, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle,
+    SubscriptionStream,
 };
 
 type DynStorage = Box<dyn Storage + Send>;
@@ -154,7 +155,7 @@ impl JazzClient {
         let has_server = !context.server_url.is_empty();
 
         if has_server {
-            let ws_url = http_url_to_ws(&context.server_url)?;
+            let ws_url = http_url_to_ws(&context.server_url, context.app_id)?;
             let auth = WsAuthConfig {
                 jwt_token: context.jwt_token.clone(),
                 backend_secret: context.backend_secret.clone(),
@@ -1225,29 +1226,27 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     Ok(client_id)
 }
 
-/// Convert an HTTP(S) server URL to the WebSocket `/ws` endpoint URL.
+/// Convert an HTTP(S) server URL to the app-scoped WebSocket endpoint URL.
 ///
-/// `http://host/prefix` → `ws://host/prefix/ws`
-/// `https://host` → `wss://host/ws`
-fn http_url_to_ws(server_url: &str) -> Result<String> {
+/// `http://host`, `my-app` → `ws://host/apps/my-app/ws`
+/// `https://host` → `wss://host/apps/my-app/ws`
+fn http_url_to_ws(server_url: &str, app_id: AppId) -> Result<String> {
     let trimmed = server_url.trim().trim_end_matches('/');
+    let ws_suffix = format!("/apps/{}/ws", app_id);
     let (ws_scheme, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
         ("wss", r)
     } else if let Some(r) = trimmed.strip_prefix("http://") {
         ("ws", r)
     } else if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
-        // Already a WS URL — just append /ws if not already present
-        return Ok(if trimmed.ends_with("/ws") {
-            trimmed.to_string()
-        } else {
-            format!("{trimmed}/ws")
-        });
+        // Already a WS URL — replace any bare trailing /ws with the app-scoped path.
+        let without_ws_suffix = trimmed.strip_suffix("/ws").unwrap_or(trimmed);
+        return Ok(format!("{without_ws_suffix}{ws_suffix}"));
     } else {
         return Err(JazzError::Connection(format!(
             "invalid server URL '{server_url}': expected http:// or https://"
         )));
     };
-    Ok(format!("{ws_scheme}://{rest}/ws"))
+    Ok(format!("{ws_scheme}://{rest}{ws_suffix}"))
 }
 
 async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {

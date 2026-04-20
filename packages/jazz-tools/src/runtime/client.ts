@@ -9,7 +9,6 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
-  buildEndpointUrl,
   applyUserAuthHeaders,
   type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
@@ -2401,15 +2400,14 @@ export class JazzClient {
    * passing it to the underlying Rust runtime's `connect()`.  Already-WS URLs
    * are passed through unchanged.
    *
-   * @param url        Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
-   * @param auth       Authentication credentials for the connection.
-   * @param pathPrefix Optional path prefix inserted before `/ws` (e.g. `/apps/<id>`).
+   * @param url  Server URL — http(s):// or ws(s)://. `/apps/<appId>/ws` is appended automatically.
+   * @param auth Authentication credentials for the connection.
    */
-  connectTransport(url: string, auth: AuthConfig, pathPrefix?: string): void {
+  connectTransport(url: string, auth: AuthConfig): void {
     if (!this.runtime.connect) {
       throw new Error("Underlying runtime does not support connect()");
     }
-    this.runtime.connect(httpUrlToWs(url, pathPrefix), JSON.stringify(auth));
+    this.runtime.connect(httpUrlToWs(url, this.context.appId), JSON.stringify(auth));
   }
 
   /**
@@ -2452,7 +2450,8 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("No server connection");
     }
-    return buildEndpointUrl(this.context.serverUrl, path, this.context.serverPathPrefix);
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    return `${this.context.serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(this.context.appId)}${normalizedPath}`;
   }
 
   /**

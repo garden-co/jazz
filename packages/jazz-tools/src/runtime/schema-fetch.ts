@@ -6,11 +6,10 @@ import type {
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
-import { buildEndpointUrl } from "./sync-transport.js";
 
 export interface FetchStoredWasmSchemaOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
   schemaHash: string;
 }
 
@@ -18,11 +17,7 @@ export async function fetchStoredWasmSchema(
   serverUrl: string,
   options: FetchStoredWasmSchemaOptions,
 ): Promise<{ schema: WasmSchema; publishedAt: number | null }> {
-  const schemaUrl = buildEndpointUrl(
-    serverUrl,
-    `/schema/${encodeURIComponent(options.schemaHash)}`,
-    options.pathPrefix,
-  );
+  const schemaUrl = `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/schema/${encodeURIComponent(options.schemaHash)}`;
 
   const response = await fetch(schemaUrl, {
     method: "GET",
@@ -49,20 +44,23 @@ export async function fetchStoredWasmSchema(
 }
 
 export interface FetchStoredSchemasOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
 }
 
 export async function fetchSchemaHashes(
   serverUrl: string,
   options: FetchStoredSchemasOptions,
 ): Promise<{ hashes: string[] }> {
-  const response = await fetch(buildEndpointUrl(serverUrl, "/schemas", options.pathPrefix), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+  const response = await fetch(
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/schemas`,
+    {
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": options.adminSecret,
+      },
     },
-  });
+  );
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
@@ -77,8 +75,8 @@ export async function fetchSchemaHashes(
 }
 
 export interface PublishStoredSchemaOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
   schema: WasmSchema;
   /** @deprecated Use `publishStoredPermissions` instead. */
   permissions?: CompiledPermissionsMap;
@@ -88,19 +86,22 @@ export async function publishStoredSchema(
   serverUrl: string,
   options: PublishStoredSchemaOptions,
 ): Promise<{ objectId: string; hash: string }> {
-  const response = await fetch(buildEndpointUrl(serverUrl, "/admin/schemas", options.pathPrefix), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
+  const response = await fetch(
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/schemas`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Jazz-Admin-Secret": options.adminSecret,
+      },
+      body: JSON.stringify({
+        schema: options.schema,
+        permissions: options.permissions
+          ? normalizePermissionsForWasm(options.permissions)
+          : undefined,
+      }),
     },
-    body: JSON.stringify({
-      schema: options.schema,
-      permissions: options.permissions
-        ? normalizePermissionsForWasm(options.permissions)
-        : undefined,
-    }),
-  });
+  );
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
@@ -119,8 +120,8 @@ export interface StoredPermissionsHead {
 }
 
 export interface FetchPermissionsHeadOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
 }
 
 export async function fetchPermissionsHead(
@@ -128,7 +129,7 @@ export async function fetchPermissionsHead(
   options: FetchPermissionsHeadOptions,
 ): Promise<{ head: StoredPermissionsHead | null }> {
   const response = await fetch(
-    buildEndpointUrl(serverUrl, "/admin/permissions/head", options.pathPrefix),
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/permissions/head`,
     {
       method: "GET",
       headers: {
@@ -157,8 +158,8 @@ export interface StoredPermissionsResponse {
 }
 
 export interface FetchStoredPermissionsOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
 }
 
 export async function fetchStoredPermissions(
@@ -166,7 +167,7 @@ export async function fetchStoredPermissions(
   options: FetchStoredPermissionsOptions,
 ): Promise<StoredPermissionsResponse> {
   const response = await fetch(
-    buildEndpointUrl(serverUrl, "/admin/permissions", options.pathPrefix),
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/permissions`,
     {
       method: "GET",
       headers: {
@@ -192,8 +193,8 @@ export async function fetchStoredPermissions(
 }
 
 export interface PublishStoredPermissionsOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
   schemaHash: string;
   permissions: CompiledPermissionsMap;
   expectedParentBundleObjectId?: string | null;
@@ -204,7 +205,7 @@ export async function publishStoredPermissions(
   options: PublishStoredPermissionsOptions,
 ): Promise<{ head: StoredPermissionsHead | null }> {
   const response = await fetch(
-    buildEndpointUrl(serverUrl, "/admin/permissions", options.pathPrefix),
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/permissions`,
     {
       method: "POST",
       headers: {
@@ -234,8 +235,8 @@ export async function publishStoredPermissions(
 }
 
 export interface FetchSchemaConnectivityOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
   fromHash: string;
   toHash: string;
 }
@@ -244,7 +245,7 @@ export async function fetchSchemaConnectivity(
   serverUrl: string,
   options: FetchSchemaConnectivityOptions,
 ): Promise<{ connected: boolean }> {
-  const endpoint = buildEndpointUrl(serverUrl, "/admin/schema-connectivity", options.pathPrefix);
+  const endpoint = `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/schema-connectivity`;
   const url = new URL(endpoint);
   url.searchParams.set("fromHash", options.fromHash);
   url.searchParams.set("toHash", options.toHash);
@@ -311,8 +312,8 @@ export interface PublishedTableLens {
 }
 
 export interface PublishStoredMigrationOptions {
+  appId: string;
   adminSecret: string;
-  pathPrefix?: string;
   fromHash: string;
   toHash: string;
   forward: PublishedTableLens[];
@@ -348,7 +349,7 @@ export async function publishStoredMigration(
   options: PublishStoredMigrationOptions,
 ): Promise<{ objectId: string; fromHash: string; toHash: string }> {
   const response = await fetch(
-    buildEndpointUrl(serverUrl, "/admin/migrations", options.pathPrefix),
+    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/migrations`,
     {
       method: "POST",
       headers: {
