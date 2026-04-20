@@ -54,7 +54,7 @@
       );
       return Promise.resolve(null);
     }
-    const base: Omit<DbConfig, "jwtToken" | "auth"> = { appId, serverUrl };
+    const base: Omit<DbConfig, "jwtToken" | "secret"> = { appId, serverUrl };
 
     if (auth) {
       return getToken().then((token) =>
@@ -64,7 +64,7 @@
 
     return BrowserAuthSecretStore.getOrCreateSecret().then((secret) => ({
       ...base,
-      auth: { localFirstSecret: secret },
+      secret,
     }));
   }
 </script>
