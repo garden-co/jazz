@@ -82,6 +82,7 @@ visible body for the default head, plus:
 - a compact pool of contributing winner batch ids
 - one packed ordinal vector for the default merged preview when it is synthetic
 - extra packed ordinal vectors only for tiers whose preview differs from the default head
+- a reserved opaque merge-artifacts blob for future merge diagnostics and related sidecar metadata
 
 The visible-row format now also keeps the common case compact by treating some fields as implicit:
 
@@ -119,6 +120,14 @@ metadata stays coarse on purpose:
 
 Exact per-column provenance is carried in that visible-entry sidecar rather than expanded into the
 public row shape.
+
+The visible entry also reserves one engine-owned `_jazz_merge_artifacts` slot:
+
+- it lives only on visible rows, never on history rows
+- `null` means "no merge artifacts"
+- non-`null` bytes are a versioned opaque envelope owned by the engine
+- the current release keeps this slot empty while stabilizing the storage format for future
+  conflict diagnostics
 
 For history rows, the identity now lives in the raw-table-local storage key rather than the payload
 columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and the
