@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-20T16:29:44.201Z",
+  "updated_at": "2026-04-20T17:20:18.996Z",
   "entries": [
     {
       "id": "browser:b5",
@@ -99,8 +99,8 @@
       "reason": "timed_out_over_budget",
       "timeout_seconds": 60,
       "first_observed_at": "2026-04-19T19:45:06.771Z",
-      "last_observed_at": "2026-04-19T19:45:06.771Z",
-      "observations": 1
+      "last_observed_at": "2026-04-20T17:18:00.198Z",
+      "observations": 2
     },
     {
       "id": "native-criterion:rocksdb:r4_fanout_updates",
