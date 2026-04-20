@@ -888,8 +888,13 @@ fn decode_nullable_durability_tier(value: &Value) -> Result<Option<DurabilityTie
 
 fn storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
-        ColumnDescriptor::new("batch_id", ColumnType::Bytea),
-        ColumnDescriptor::new("mode", ColumnType::Text),
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new(
+            "mode",
+            ColumnType::Enum {
+                variants: vec!["direct".to_string(), "transactional".to_string()],
+            },
+        ),
         ColumnDescriptor::new("sealed", ColumnType::Boolean),
         ColumnDescriptor::new(
             "members",

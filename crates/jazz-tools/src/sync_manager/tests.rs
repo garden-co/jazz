@@ -742,7 +742,7 @@ fn row_batch_created_emits_row_batch_state_changed_to_source() {
 
 #[test]
 fn client_row_batch_created_emits_replayable_settlement_to_source() {
-    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let row_id = ObjectId::new();
@@ -782,7 +782,7 @@ fn client_row_batch_created_emits_replayable_settlement_to_source() {
             && *branch_name == BranchName::new("main")
             && *batch_id == row.batch_id
             && *state == None
-            && *confirmed_tier == Some(DurabilityTier::Worker)
+            && *confirmed_tier == Some(DurabilityTier::Local)
     )));
     assert!(outbox.iter().any(|entry| matches!(
         entry,
@@ -791,7 +791,7 @@ fn client_row_batch_created_emits_replayable_settlement_to_source() {
             payload: SyncPayload::BatchSettlement { settlement },
         } if *id == client_id && *settlement == BatchSettlement::DurableDirect {
             batch_id: row.batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![VisibleBatchMember {
                 object_id: row_id,
                 branch_name: BranchName::new("main"),

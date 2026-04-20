@@ -1693,7 +1693,7 @@ mod install_transport_tests {
 
         let mut core = create_test_runtime();
 
-        let alice = core
+        let (alice, _row_values) = core
             .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap()
             .0;
@@ -1748,7 +1748,7 @@ mod install_transport_tests {
     fn connect_failed_event_releases_and_delivers_held_subscription() {
         let mut core = create_test_runtime();
 
-        let alice = core
+        let (alice, _row_values) = core
             .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap()
             .0;
@@ -3279,7 +3279,7 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
         update_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id: update_batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: id,
                 branch_name,
@@ -3344,7 +3344,7 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
         delete_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id: delete_batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: id,
                 branch_name,
@@ -3616,7 +3616,7 @@ fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3962,25 +3962,22 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
         .with_batch_mode(crate::batch_fate::BatchMode::Direct)
         .with_batch_id(batch_id);
 
-    let ((first_row_id, _), mut first_receiver) =
-        s.b.insert_persisted(
+    let ((first_row_id, _), first_batch_id) =
+        s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Local,
         )
         .unwrap();
-    let ((second_row_id, _), mut second_receiver) =
-        s.b.insert_persisted(
+    let ((second_row_id, _), second_batch_id) =
+        s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Local,
         )
         .unwrap();
-
-    assert_eq!(first_receiver.try_recv(), Ok(Some(Ok(()))));
-    assert_eq!(second_receiver.try_recv(), Ok(Some(Ok(()))));
+    assert_eq!(first_batch_id, batch_id);
+    assert_eq!(second_batch_id, batch_id);
 
     let branch_name = s.b.schema_manager().branch_name();
     let local_record =
@@ -6250,7 +6247,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
 fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
@@ -6350,7 +6347,7 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     client.sync_sender().take();
     server.sync_sender().take();
 
-    let (team_id, _row_values) = client
+    let ((team_id, _row_values), _) = client
         .insert(
             "teams",
             HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
@@ -6472,7 +6469,7 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     client.sync_sender().take();
     server.sync_sender().take();
 
-    let (team_id, _row_values) = client
+    let ((team_id, _row_values), _) = client
         .insert(
             "teams",
             HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
@@ -6586,7 +6583,7 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
     client.sync_sender().take();
     server.sync_sender().take();
 
-    let (team_id, _row_values) = client
+    let ((team_id, _row_values), _) = client
         .insert(
             "teams",
             HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
@@ -6820,7 +6817,7 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
     let branch_name = core.schema_manager().branch_name().to_string();
     let descriptor = &schema[&TableName::new("todos")].columns;
 
-    let (row_id, _) = core
+    let ((row_id, _row_values), _) = core
         .insert(
             "todos",
             HashMap::from([
@@ -7258,7 +7255,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
 fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
     let mut s = create_3tier_rc();
 
-    let (id, _row_values) =
+    let ((id, _row_values), _) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
 
