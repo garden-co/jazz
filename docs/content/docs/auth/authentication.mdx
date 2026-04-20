@@ -6,11 +6,11 @@ reviewedAt: "f52c2c62"
 
 Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
-| Mode          | What it does                                           | When to use it                                   |
-| ------------- | ------------------------------------------------------ | ------------------------------------------------ |
-| `anonymous`   | Ephemeral read-only identity, no secret, no server     | Public/marketing surfaces, try-before-anything   |
-| `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
-| `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
+| Mode          | What it does                                                                | When to use it                                   |
+| ------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
+| `anonymous`   | Ephemeral read-only identity, no secret, no server                          | Public/marketing surfaces, try-before-anything   |
+| `local-first` | Stable identity from a device secret, no server needed                      | Production offline-first apps, try-before-signup |
+| `external`    | Validates a JWT from your auth provider via JWKS or a configured static key | Production apps with real user accounts          |
 
 Anonymous sessions can subscribe to queries but are **structurally denied writes** — every insert, update, and delete path checks the session's auth mode before any policy evaluation runs, and surfaces an `AnonymousWriteDeniedError` to the client. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
 
@@ -20,10 +20,10 @@ Local-first auth lets users start using your app without signing up. They can la
 
 ## External auth for production
 
-Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your JWKS endpoint.
+Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your server's configured JWKS endpoint or static key.
 
 <Callout type="info" title="JWT? JWKS?">
-  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz retrieves the signing key from the JWKS endpoint you specify.
+  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz either retrieves the signing key from the JWKS endpoint you specify or uses a single configured JWK / public key directly.
 
 For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web-tokens) are a great starting point.
 
@@ -183,13 +183,13 @@ See [Server Setup](/docs/getting-started/server-setup) for the full list of serv
 When the server receives a request, it tries each auth method in priority order and uses the first match:
 
 1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
-2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
+2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the configured `--jwks-url` or `--jwt-public-key`.
 3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
 4. **No session**&hairsp;—&hairsp;none of the above matched.
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` on the backend context to verify external JWTs there too.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both.
 
 ### Upgrading to external auth
 

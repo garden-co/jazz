@@ -3,6 +3,7 @@
 | Variable | CLI flag | Default | Description |
 |----------|----------|---------|-------------|
 | `JAZZ_JWKS_URL` | `--jwks-url` | — | JWKS endpoint for JWT validation |
+| `JAZZ_JWT_PUBLIC_KEY` | `--jwt-public-key` | — | Single JWK JSON object or PEM public key for JWT validation |
 | `JAZZ_BACKEND_SECRET` | `--backend-secret` | — | Secret for backend session impersonation |
 | `JAZZ_ADMIN_SECRET` | `--admin-secret` | — | Secret for admin operations (schema/policy sync) |
 | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | `--allow-local-first-auth` | see NODE_ENV | Allow local-first bearer auth |

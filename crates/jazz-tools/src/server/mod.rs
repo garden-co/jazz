@@ -6,7 +6,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::JwksCache;
+use crate::middleware::auth::JwtVerifier;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
@@ -174,8 +174,8 @@ pub struct ServerState {
     pub catalogue_authority: CatalogueAuthorityMode,
     /// Shared HTTP client for forwarding admin requests to a remote authority.
     pub http_client: reqwest::Client,
-    /// JWKS cache with TTL and on-demand refresh for key rotation.
-    pub jwks_cache: Option<Arc<JwksCache>>,
+    /// Configured verifier for external JWTs.
+    pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Clients that lost their SSE stream, waiting to be reaped after TTL.
     pub disconnect_candidates: RwLock<HashMap<ClientId, DisconnectCandidate>>,
     /// Client state TTL. Default: 5 minutes.

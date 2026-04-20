@@ -144,7 +144,7 @@ describe("backend request auth", () => {
           appId: "app-without-jwks",
         },
       ),
-    ).rejects.toThrow(/jwksUrl/i);
+    ).rejects.toThrow(/jwksUrl|jwtPublicKey/i);
   });
 
   it("accepts local-first JWTs without jwksUrl and uses the shared session mapping", async () => {
@@ -220,6 +220,42 @@ describe("backend request auth", () => {
         {
           appId: "app-with-jwks",
           jwksUrl: jwks.url,
+        },
+      ),
+    ).resolves.toEqual({
+      user_id: "user-subject",
+      claims: {
+        role: "editor",
+        subject: "user-subject",
+        issuer: "https://issuer.example",
+      },
+      authMode: "external",
+    });
+  });
+
+  it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
+    const token = signHs256Jwt({
+      sub: "user-subject",
+      jazz_principal_id: "principal-123",
+      iss: "https://issuer.example",
+      claims: { role: "editor" },
+    });
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        },
+        {
+          appId: "app-with-static-key",
+          jwtPublicKey: {
+            kty: "oct",
+            kid: JWT_KID,
+            alg: "HS256",
+            k: base64Url(JWT_SECRET),
+          },
         },
       ),
     ).resolves.toEqual({
